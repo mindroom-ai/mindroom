@@ -59,7 +59,9 @@ rules:
       - patch
       - update
       - watch
-  {{- if .Values.workers.kubernetes.agentVaultBridge.enabled }}
+  # networking.k8s.io stays unconditional so per-worker Agent Vault bridge
+  # NetworkPolicies created while agentVaultBridge was enabled can still be
+  # cleaned up after the feature is disabled.
   - apiGroups:
       - networking.k8s.io
     resources:
@@ -70,7 +72,6 @@ rules:
       - get
       - patch
       - update
-  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

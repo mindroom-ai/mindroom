@@ -1573,7 +1573,7 @@ def test_parse_args_supports_session_token_file(tmp_path: Path) -> None:
     empty_path.write_text("\n", encoding="utf-8")
     with pytest.raises(ValueError, match="empty"):
         _session_token_from_file(str(empty_path))
-    with pytest.raises(ValueError, match="could not read"):
+    with pytest.raises(FileNotFoundError):
         _session_token_from_file(str(tmp_path / "missing"))
 
 

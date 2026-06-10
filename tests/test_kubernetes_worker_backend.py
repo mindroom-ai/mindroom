@@ -3094,3 +3094,39 @@ def test_kubernetes_backend_config_from_runtime_reads_agent_vault_bridge(tmp_pat
 
     signature = kubernetes_backend_config_signature(runtime_paths, auth_token="token")  # noqa: S106
     assert config.agent_vault_bridge.signature() in signature
+
+
+def test_kubernetes_backend_cleanup_deletes_bridges_created_before_disabling(tmp_path: Path) -> None:
+    """Bridges created while the feature was enabled are cleaned up after disabling it."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    enabled_backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        idle_timeout_seconds=60.0,
+        agent_vault_bridge=_test_bridge_config(),
+    )
+    networking_api = enabled_backend._resources.networking_api
+    assert isinstance(networking_api, _FakeNetworkingApi)
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
+
+    enabled_backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+    bridge_id = enabled_backend._resources.agent_vault_bridge_id(worker_key)
+    assert bridge_id is not None
+    assert bridge_id in apps_api.deployments
+
+    disabled_backend, _disabled_apps, _disabled_core = _backend(
+        runtime_paths=runtime_paths,
+        idle_timeout_seconds=60.0,
+    )
+    disabled_backend._resources.apps_api = apps_api
+    disabled_backend._resources.core_api = core_api
+    disabled_backend._resources.networking_api = networking_api
+
+    cleaned = disabled_backend.cleanup_idle_workers(now=10_000.0)
+
+    assert [handle.worker_key for handle in cleaned] == [worker_key]
+    assert bridge_id not in apps_api.deployments
+    assert bridge_id not in core_api.services
+    assert bridge_id not in networking_api.network_policies

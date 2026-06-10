@@ -734,11 +734,7 @@ def _session_token_from_env(env_var: str) -> str:
 
 
 def _session_token_from_file(path: str) -> str:
-    try:
-        session_token = Path(path).read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        msg = f"could not read session token file {path}: {exc}"
-        raise ValueError(msg) from exc
+    session_token = Path(path).read_text(encoding="utf-8").strip()
     if not session_token:
         msg = f"session token file {path} is empty"
         raise ValueError(msg)

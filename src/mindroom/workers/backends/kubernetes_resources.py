@@ -38,6 +38,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
 )
 from mindroom.workers.backends._lifecycle import WorkerLifecycleState
 from mindroom.workers.backends.kubernetes_config import (
+    DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX,
     credentials_encryption_key_hash,
     is_kubernetes_worker_backend_config_env_name,
 )
@@ -94,14 +95,14 @@ until wget -q -O /dev/null "$AGENT_VAULT_API_URL/health"; do
   fi
   sleep 2
 done
-cat "{bootstrap_path}/{owner_password_key}" | agent-vault auth login \\
+agent-vault auth login \\
   --address "$AGENT_VAULT_API_URL" \\
   --email "$AGENT_VAULT_OWNER_EMAIL" \\
-  --password-stdin > /dev/null
+  --password-stdin < "{bootstrap_path}/{owner_password_key}" > /dev/null
 agent-vault vault create "$AGENT_VAULT_BRIDGE_ID" > /dev/null 2>&1 || true
 if ! agent-vault agent create "$AGENT_VAULT_BRIDGE_ID" \\
   --vault "$AGENT_VAULT_BRIDGE_ID:proxy" \\
-  --token-only > "{work_path}/{token_file}" 2> /dev/null; then
+  --token-only > "{work_path}/{token_file}"; then
   agent-vault agent rotate "$AGENT_VAULT_BRIDGE_ID" --token-only > "{work_path}/{token_file}"
 fi
 test -s "{work_path}/{token_file}"
@@ -633,10 +634,21 @@ class KubernetesResourceManager:
         return bridge_id
 
     def delete_agent_vault_bridge(self, worker_key: str) -> None:
-        """Delete the per-worker bridge resources, ignoring 404s and disabled config."""
-        bridge_id = self.agent_vault_bridge_id(worker_key)
-        if bridge_id is None:
-            return
+        """Delete the per-worker bridge resources, ignoring 404s.
+
+        Deletion intentionally does not require the bridge feature to be
+        enabled: bridges created while it was enabled are still cleaned up
+        after it is disabled, using the default name prefix. Deployments with
+        a custom ``name_prefix`` must keep the feature configured (or clean up
+        by label) for deletion to find their bridges.
+        """
+        bridge_config = self.config.agent_vault_bridge
+        if bridge_config is not None:
+            bridge_id = worker_id_for_key(worker_key, prefix=bridge_config.name_prefix)
+        else:
+            bridge_id = worker_id_for_key(worker_key, prefix=DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX)
+            if self.read_deployment(bridge_id) is None:
+                return
         self._delete_object(self._apps.delete_namespaced_deployment, bridge_id)
         self._delete_object(self._core.delete_namespaced_service, bridge_id)
         self._delete_object(self._networking.delete_namespaced_network_policy, bridge_id)

@@ -37,7 +37,7 @@ _DEFAULT_MEMORY_LIMIT = "1Gi"
 _DEFAULT_CPU_REQUEST = "100m"
 _DEFAULT_CPU_LIMIT = "500m"
 
-_DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX = "agent-vault-bridge"
+DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX = "agent-vault-bridge"
 _DEFAULT_AGENT_VAULT_BRIDGE_PORT = 18080
 _DEFAULT_AGENT_VAULT_API_URL = "http://agent-vault:14321"
 _DEFAULT_AGENT_VAULT_PROXY_URL = "http://agent-vault:14322"
@@ -170,8 +170,8 @@ class KubernetesAgentVaultBridgeConfig:
             msg = f"{_AGENT_VAULT_OWNER_EMAIL_ENV} must be set when {_AGENT_VAULT_BRIDGE_ENABLED_ENV} is enabled."
             raise WorkerBackendError(msg)
         return cls(
-            name_prefix=_read_env(env, _AGENT_VAULT_BRIDGE_NAME_PREFIX_ENV, _DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX)
-            or _DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX,
+            name_prefix=_read_env(env, _AGENT_VAULT_BRIDGE_NAME_PREFIX_ENV, DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX)
+            or DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX,
             port=_read_int_env(env, _AGENT_VAULT_BRIDGE_PORT_ENV, _DEFAULT_AGENT_VAULT_BRIDGE_PORT),
             cli_image=cli_image,
             api_url=_read_env(env, _AGENT_VAULT_API_URL_ENV, _DEFAULT_AGENT_VAULT_API_URL)
