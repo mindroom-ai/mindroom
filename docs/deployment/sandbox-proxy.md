@@ -446,6 +446,24 @@ Publish the CA (from `agent-vault ca fetch`) as a ConfigMap with key `ca.pem` an
 Worker pods then mount it at `/etc/agent-vault/ca.pem`; point the broker's `ca_bundle` at that path so brokered requests export `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`SSL_CERT_FILE`.
 Because those variables replace the default trust store for the request, publish a bundle that appends the vault CA to the standard system bundle if brokered tools also reach TLS endpoints on `no_proxy` hosts.
 
+### Self-service vault access
+
+The `agent_vault_access` tool lets a user ask their own agent for a link to manage that agent's vault.
+It resolves the caller's worker target to the vault name the worker-scoped broker routes to (`worker_id_for_key(worker_key, prefix)`), grants the caller's Agent Vault account membership of that vault through the API, and returns the gated UI link.
+Configure it per deployment:
+
+```bash
+MINDROOM_AGENT_VAULT_ACCESS_API_URL=http://agent-vault:14321
+MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN=<owner or admin session/agent token>
+MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL=https://example.com/agent-vault
+MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN=example.com
+MINDROOM_AGENT_VAULT_ACCESS_BRIDGE_NAME_PREFIX=agent-vault-bridge  # must match the broker
+```
+
+The tool maps a requester's Matrix localpart to `localpart@EMAIL_DOMAIN` for the account grant.
+That mapping only decides *UI management access*; it never changes which worker reaches which bridge, so the runtime secret boundary stays worker identity plus NetworkPolicy.
+The grant is idempotent and requires the user to have already registered and verified an Agent Vault account.
+
 ### Agent Vault bridge adapter
 
 MindRoom ships a small Agent Vault bridge adapter that can run as a private sidecar/service.

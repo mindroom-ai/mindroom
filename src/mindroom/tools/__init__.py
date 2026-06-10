@@ -338,3 +338,67 @@ def _homeassistant_tools() -> type[Toolkit]:
     from mindroom.custom_tools.homeassistant import HomeAssistantTools
 
     return HomeAssistantTools
+
+
+@register_tool_with_metadata(
+    name="agent_vault_access",
+    display_name="Agent Vault Access",
+    description="Grant yourself UI access to manage this agent's Agent Vault secrets",
+    category=ToolCategory.INTEGRATIONS,
+    icon="Lock",
+    icon_color="text-amber-600",
+    dependencies=["httpx"],
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.SPECIAL,
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.WORKER_TARGET,
+    ),
+    config_fields=[
+        ConfigField(
+            name="MINDROOM_AGENT_VAULT_ACCESS_API_URL",
+            label="Agent Vault API URL",
+            type="url",
+            required=True,
+            placeholder="http://agent-vault:14321",
+            description="Base URL of the Agent Vault server API.",
+        ),
+        ConfigField(
+            name="MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN",
+            label="Agent Vault Admin Token",
+            type="password",
+            required=True,
+            description="Owner/admin session or agent token used to create vaults and grant membership.",
+        ),
+        ConfigField(
+            name="MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL",
+            label="Agent Vault UI Base URL",
+            type="url",
+            required=True,
+            placeholder="https://example.com/agent-vault",
+            description="Public base URL of the gated Agent Vault UI.",
+        ),
+        ConfigField(
+            name="MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN",
+            label="Account Email Domain",
+            type="text",
+            required=True,
+            placeholder="example.com",
+            description="Domain used to map a requester's Matrix localpart to their Agent Vault account email.",
+        ),
+        ConfigField(
+            name="MINDROOM_AGENT_VAULT_ACCESS_BRIDGE_NAME_PREFIX",
+            label="Bridge Name Prefix",
+            type="text",
+            required=False,
+            default="agent-vault-bridge",
+            description="Prefix used to derive the per-worker vault name; must match the worker-scoped broker.",
+        ),
+    ],
+    function_names=("request_vault_access",),
+)
+def _agent_vault_access_tools() -> type[Toolkit]:
+    """Return the Agent Vault self-service access tool."""
+    from mindroom.custom_tools.agent_vault_access import AgentVaultAccessTools
+
+    return AgentVaultAccessTools

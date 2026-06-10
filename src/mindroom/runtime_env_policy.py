@@ -10,6 +10,7 @@ from typing import cast
 from mindroom.sensitivity import secret_name_suffixes
 
 __all__ = [
+    "AGENT_VAULT_ACCESS_ENV_BY_KEY",
     "AWS_BEDROCK_CLAUDE_ENV_BY_KEY",
     "AZURE_OPENAI_ENV_BY_KEY",
     "CREDENTIALS_ENCRYPTION_KEY_ENV",
@@ -71,6 +72,15 @@ AZURE_OPENAI_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
         "endpoint": "AZURE_OPENAI_ENDPOINT",
         "api_version": "AZURE_OPENAI_API_VERSION",
         "deployment": "AZURE_OPENAI_DEPLOYMENT",
+    },
+)
+AGENT_VAULT_ACCESS_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+    {
+        "api_url": "MINDROOM_AGENT_VAULT_ACCESS_API_URL",
+        "admin_token": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN",
+        "ui_base_url": "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL",
+        "email_domain": "MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN",
+        "bridge_name_prefix": "MINDROOM_AGENT_VAULT_ACCESS_BRIDGE_NAME_PREFIX",
     },
 )
 
