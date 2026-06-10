@@ -343,6 +343,63 @@ workers:
       # worker pods mount it at /etc/agent-vault/ca.pem so brokered HTTPS
       # traffic can trust the vault's TLS interception.
       workerCaConfigMapName: ""
+      # Optionally run the Agent Vault server in-cluster. Leave disabled to
+      # point apiUrl/proxyUrl at an externally managed Agent Vault instance.
+      server:
+        enabled: false
+        # Service/Deployment name. Must match the host in apiUrl/proxyUrl.
+        name: agent-vault
+        # Agent Vault server image, pinned by digest. Required when enabled.
+        image: ""
+        imagePullPolicy: IfNotPresent
+        apiPort: 14321
+        mitmPort: 14322
+        # Key in bootstrapSecretName holding the master password that protects
+        # the vault's encryption key.
+        masterPasswordSecretKey: AGENT_VAULT_MASTER_PASSWORD
+        persistence:
+          enabled: true
+          size: 1Gi
+          storageClassName: ""
+          existingClaim: ""
+        # Optional SMTP for signup verification emails. When disabled, the
+        # server logs verification codes for the owner to relay manually.
+        smtp:
+          enabled: false
+          host: ""
+          port: 587
+          # starttls | implicit | none
+          tlsMode: starttls
+          fromName: Agent Vault
+          # Secret with keys AGENT_VAULT_SMTP_USERNAME, AGENT_VAULT_SMTP_PASSWORD,
+          # and AGENT_VAULT_SMTP_FROM.
+          existingSecret: ""
+        podSecurityContext:
+          fsGroup: 101
+          fsGroupChangePolicy: OnRootMismatch
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - NET_RAW
+        resources: {}
+      # Optional one-shot bootstrap Job: create/log in the instance owner, set
+      # instance policy (invite-only, allowed signup domains), and publish the
+      # root CA into workerCaConfigMapName so worker pods trust the vault's TLS
+      # interception. Re-runs are idempotent.
+      bootstrap:
+        enabled: false
+        # Agent Vault image, pinned by digest. Required when enabled.
+        image: ""
+        # Image providing kubectl, used to publish the CA ConfigMap. Required
+        # when enabled.
+        kubectlImage: ""
+        # Key in bootstrapSecretName holding the owner account password.
+        ownerPasswordSecretKey: AGENT_VAULT_OWNER_PASSWORD
+        # Comma-separated signup domain allowlist; empty means no restriction.
+        allowedDomains: ""
+        inviteOnly: true
+        resources: {}
 
 # Optional external HTTP proxy for dedicated Kubernetes workers.
 # This chart can point worker pods at an existing proxy Service and, when

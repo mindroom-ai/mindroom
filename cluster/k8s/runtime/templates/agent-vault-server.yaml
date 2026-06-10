@@ -1,0 +1,157 @@
+{{- if .Values.workers.kubernetes.agentVault.server.enabled }}
+{{- $av := .Values.workers.kubernetes.agentVault -}}
+{{- $server := $av.server -}}
+{{- $name := include "mindroom-runtime.agentVaultServerName" . -}}
+{{- if and $server.persistence.enabled (not $server.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "mindroom-runtime.agentVaultServerClaimName" . }}
+  labels:
+    {{- include "mindroom-runtime.agentVaultLabels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if $server.persistence.storageClassName }}
+  storageClassName: {{ $server.persistence.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $server.persistence.size | quote }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.agentVaultLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # Single replica backed by an RWO PVC: never surge a second pod (it would
+  # deadlock waiting for the volume). Recreate stops the old pod first.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "mindroom-runtime.agentVaultSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mindroom-runtime.agentVaultSelectorLabels" . | nindent 8 }}
+        {{- with $server.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $server.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with $server.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent-vault
+          image: {{ required "workers.kubernetes.agentVault.server.image is required when the Agent Vault server is enabled" $server.image | quote }}
+          imagePullPolicy: {{ $server.imagePullPolicy }}
+          command:
+            - agent-vault
+          args:
+            - server
+            - --host
+            - 0.0.0.0
+            - --port
+            - {{ $server.apiPort | quote }}
+            - --mitm-port
+            - {{ $server.mitmPort | quote }}
+          env:
+            - name: AGENT_VAULT_MASTER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "workers.kubernetes.agentVault.bootstrapSecretName is required when the Agent Vault server is enabled" $av.bootstrapSecretName }}
+                  key: {{ $server.masterPasswordSecretKey }}
+            {{- if $server.smtp.enabled }}
+            - name: AGENT_VAULT_SMTP_HOST
+              value: {{ $server.smtp.host | quote }}
+            - name: AGENT_VAULT_SMTP_PORT
+              value: {{ $server.smtp.port | quote }}
+            - name: AGENT_VAULT_SMTP_TLS_MODE
+              value: {{ $server.smtp.tlsMode | quote }}
+            - name: AGENT_VAULT_SMTP_FROM_NAME
+              value: {{ $server.smtp.fromName | quote }}
+            - name: AGENT_VAULT_SMTP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "workers.kubernetes.agentVault.server.smtp.existingSecret is required when smtp.enabled=true" $server.smtp.existingSecret }}
+                  key: AGENT_VAULT_SMTP_USERNAME
+            - name: AGENT_VAULT_SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $server.smtp.existingSecret }}
+                  key: AGENT_VAULT_SMTP_PASSWORD
+            - name: AGENT_VAULT_SMTP_FROM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $server.smtp.existingSecret }}
+                  key: AGENT_VAULT_SMTP_FROM
+            {{- end }}
+          ports:
+            - name: api
+              containerPort: {{ $server.apiPort }}
+              protocol: TCP
+            - name: proxy
+              containerPort: {{ $server.mitmPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: api
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: api
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml $server.resources | nindent 12 }}
+          {{- with $server.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          {{- if $server.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "mindroom-runtime.agentVaultServerClaimName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.agentVaultLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mindroom-runtime.agentVaultSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: api
+      port: {{ $server.apiPort }}
+      targetPort: api
+      protocol: TCP
+    - name: proxy
+      port: {{ $server.mitmPort }}
+      targetPort: proxy
+      protocol: TCP
+{{- end }}

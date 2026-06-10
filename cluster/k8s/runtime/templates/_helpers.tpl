@@ -419,3 +419,41 @@ cache:
   db_path: {{ .Values.eventCache.sqlite.dbPath | quote }}
 {{- end }}
 {{- end -}}
+
+{{- define "mindroom-runtime.agentVaultServerName" -}}
+{{- default "agent-vault" .Values.workers.kubernetes.agentVault.server.name -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "mindroom-runtime.agentVaultServerName" . | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
+app.kubernetes.io/component: agent-vault
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultLabels" -}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
+{{ include "mindroom-runtime.agentVaultSelectorLabels" . }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultServerClaimName" -}}
+{{- if .Values.workers.kubernetes.agentVault.server.persistence.existingClaim -}}
+{{- .Values.workers.kubernetes.agentVault.server.persistence.existingClaim -}}
+{{- else -}}
+{{- printf "%s-data" (include "mindroom-runtime.agentVaultServerName" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultBootstrapName" -}}
+{{- printf "%s-bootstrap" (include "mindroom-runtime.agentVaultServerName" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultBootstrapLabels" -}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
+app.kubernetes.io/name: {{ include "mindroom-runtime.agentVaultBootstrapName" . | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
+app.kubernetes.io/component: agent-vault-bootstrap
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+{{- end -}}
