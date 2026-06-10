@@ -2854,6 +2854,10 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert "agent-vault agent create" in mint_script
     assert "agent-vault agent rotate" in mint_script
     assert ":proxy" in mint_script
+    # The owner CLI session must not land on the shared token volume, or the
+    # agent container (which mounts it) could read the owner credential.
+    assert "export HOME=/tmp/agent-vault-mint-home" in mint_script
+    assert 'export HOME="/agent-vault"' not in mint_script
     mint_env = {e["name"]: e["value"] for e in mint["env"]}
     # The vault name is the worker's own deterministic vault, owner email is configured.
     assert mint_env["AGENT_VAULT_VAULT"] == worker_id_for_key(worker_key, prefix="agent-vault")

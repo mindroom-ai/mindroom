@@ -94,9 +94,14 @@ _AGENT_VAULT_WORKER_CA_PATH = f"{_AGENT_VAULT_WORKER_CA_MOUNT_DIR}/{_AGENT_VAULT
 _AGENT_VAULT_PROXY_URL_ENV = "MINDROOM_AGENT_VAULT_PROXY_URL"
 _AGENT_VAULT_TOKEN_FILE_ENV = "MINDROOM_AGENT_VAULT_TOKEN_FILE"  # noqa: S105
 _AGENT_VAULT_CA_FILE_ENV = "MINDROOM_AGENT_VAULT_CA_FILE"
+# HOME is kept on the init container's own ephemeral filesystem (not the shared
+# token volume) so the owner CLI session never lands on a volume the
+# agent-executing container can read. Only the minted proxy token is written to
+# the shared volume.
 _AGENT_VAULT_MINT_SCRIPT = """\
 set -eu
-export HOME="{token_dir}"
+export HOME=/tmp/agent-vault-mint-home
+mkdir -p "$HOME"
 deadline=$(($(date +%s) + 180))
 until wget -q -O /dev/null "$AGENT_VAULT_API_URL/health"; do
   if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -586,7 +591,6 @@ class KubernetesResourceManager:
             raise WorkerBackendError(msg)
         vault = worker_id_for_key(worker_key, prefix=cfg.vault_name_prefix)
         script = _AGENT_VAULT_MINT_SCRIPT.format(
-            token_dir=_AGENT_VAULT_TOKEN_MOUNT_DIR,
             bootstrap_path=_AGENT_VAULT_BOOTSTRAP_MOUNT_PATH,
             owner_password_key=_AGENT_VAULT_OWNER_PASSWORD_SECRET_KEY,
             token_path=_AGENT_VAULT_TOKEN_PATH,
