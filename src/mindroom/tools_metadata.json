@@ -6709,6 +6709,90 @@
         {
           "authored_override": true,
           "default": null,
+          "description": "Base URL of the Agent Vault server API.",
+          "label": "Agent Vault API URL",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_API_URL",
+          "options": null,
+          "placeholder": "http://agent-vault:14321",
+          "required": true,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Owner/admin session or agent token used to create vaults and grant membership.",
+          "label": "Agent Vault Admin Token",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN",
+          "options": null,
+          "placeholder": null,
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Public base URL of the gated Agent Vault UI.",
+          "label": "Agent Vault UI Base URL",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL",
+          "options": null,
+          "placeholder": "https://example.com/agent-vault",
+          "required": true,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Domain used to map a requester's Matrix localpart to their Agent Vault account email.",
+          "label": "Account Email Domain",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN",
+          "options": null,
+          "placeholder": "example.com",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": "agent-vault",
+          "description": "Prefix used to derive the per-worker vault name; must match workers.kubernetes.agentVault.vaultNamePrefix.",
+          "label": "Vault Name Prefix",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "httpx"
+      ],
+      "description": "Grant yourself UI access to manage this agent's Agent Vault secrets",
+      "display_name": "Agent Vault Access",
+      "docs_url": null,
+      "function_names": [
+        "request_vault_access"
+      ],
+      "helper_text": null,
+      "icon": "Lock",
+      "icon_color": "text-amber-600",
+      "name": "agent_vault_access",
+      "setup_type": "special",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "integrations",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": null,
           "description": "Composio API key",
           "label": "API Key",
           "name": "api_key",
