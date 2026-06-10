@@ -2,8 +2,9 @@
 {{- $av := .Values.workers.kubernetes.agentVault -}}
 {{- $bs := $av.bootstrap -}}
 {{- $name := include "mindroom-runtime.agentVaultBootstrapName" . -}}
-{{- $serverName := include "mindroom-runtime.agentVaultServerName" . -}}
-{{- $addr := printf "http://%s:%v" $serverName $av.server.apiPort -}}
+{{- /* Target the same vault API the workers use, so bootstrap also works
+     against an externally managed Agent Vault (server.enabled=false). */ -}}
+{{- $addr := required "workers.kubernetes.agentVault.apiUrl is required when bootstrap is enabled" $av.apiUrl -}}
 {{- if not $av.workerCaConfigMapName -}}
 {{- fail "workers.kubernetes.agentVault.workerCaConfigMapName is required when bootstrap is enabled (the Job publishes the root CA into it)" -}}
 {{- end -}}
