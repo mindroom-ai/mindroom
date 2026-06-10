@@ -663,7 +663,6 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
-        worker_egress_env: object | None = None,
         worker_target: object | None = None,
     ) -> MagicMock:
         del (
@@ -677,7 +676,6 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             allowed_shared_services,
             tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes,
-            worker_egress_env,
             worker_target,
         )
         if name == "browser":
@@ -723,7 +721,6 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
-        worker_egress_env: object | None = None,
         worker_target: object | None = None,
     ) -> MagicMock:
         del (
@@ -737,7 +734,6 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             allowed_shared_services,
             tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes,
-            worker_egress_env,
             worker_target,
         )
         if name == "stale_tool":
@@ -1951,7 +1947,6 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
-        worker_egress_env: object | None = None,
         worker_target: object | None = None,
     ) -> MagicMock:
         del (
@@ -1964,7 +1959,6 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
             allowed_shared_services,
             tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes,
-            worker_egress_env,
         )
         credentials = load_scoped_credentials(
             tool_name,

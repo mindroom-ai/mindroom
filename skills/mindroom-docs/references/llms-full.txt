@@ -15511,93 +15511,71 @@ That keeps PATH handling deployment-specific instead of baking host-specific dir
 
 ## Brokered worker egress
 
-For tools that should call external APIs without receiving the real upstream credential, configure a worker egress broker.
-MindRoom injects proxy and CA env into worker-routed `shell` and `python` requests; the worker process then uses the proxy for HTTP(S) traffic.
-This does not inspect command lines or match API URLs, so URLs hidden inside bash scripts, Python code, package CLIs, or subprocesses still route through the broker.
-Run the broker as a separate proxy service or sidecar.
-It holds the upstream session or credential, while MindRoom workers receive only the broker's local proxy URL.
+For tools that should call external APIs without receiving the real upstream credential, route worker-routed `shell`/`python` egress through a proxy that injects the credential in transit.
+Because this works at the network layer (proxy env), it does not inspect command lines or match API URLs — URLs hidden inside bash scripts, Python code, package CLIs, or subprocesses still route through the proxy.
 
-Example:
+There are two supported shapes:
 
-```yaml
-worker_egress_brokers:
-  agent_vault:
-    kind: static
-    proxy_url: http://agent-vault-bridge-adapter:18080
-    ca_bundle: /etc/ssl/agent-vault-ca.pem
-    no_proxy: localhost,127.0.0.1,.svc
+- **Per-worker Agent Vault egress (Kubernetes backend)** — each worker gets its own vault identity and proxy-role token; see below. This is the per-user/per-agent isolation path.
+- **A shared egress proxy** — point worker egress at a proxy you run (for example [mindroom-egress-proxy](https://github.com/mindroom-ai/mindroom-egress-proxy)) by setting the worker proxy env yourself (`MINDROOM_KUBERNETES_WORKER_ENV_JSON` / the chart's `egressProxy` integration). The proxy owns the real credential; workers receive only its local URL. Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intentionally want the worker process to receive them.
 
-defaults:
-  worker_tools: [shell, python]
-  worker_scope: user_agent
-  worker_egress_broker: agent_vault
+### Per-worker Agent Vault egress (Kubernetes backend)
 
-agents:
-  code:
-    display_name: Code
-    tools: [shell, python]
-```
-
-For each brokered worker request MindRoom adds:
-
-- `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and `https_proxy`
-- `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and `SSL_CERT_FILE` when `ca_bundle` is set
-- `NO_PROXY` and `no_proxy` when `no_proxy` is set
-
-Agent-level `worker_egress_broker` overrides `defaults.worker_egress_broker`.
-Set `worker_egress_broker: false` on an agent to disable an inherited broker.
-Unknown broker names fail config validation when the config is loaded.
-
-Broker profiles are backend-neutral: the same config works for Docker/static runners and dedicated Kubernetes workers as long as the worker can reach `proxy_url` and read the configured CA path.
-The proxy should be an adapter or broker that owns the real credential or broker session.
-Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intentionally want the worker process to receive them.
-
-For Kubernetes deployments that run one proxy service per MindRoom worker identity, use a worker-scoped broker. MindRoom derives the service name from the resolved `worker_key`, using `service_name_prefix`, and injects `HTTP_PROXY`/`HTTPS_PROXY` for that worker only:
-Worker-scoped brokers only apply to agents with a worker execution scope; config validation fails if one is bound to an agent without `worker_scope`.
-
-```yaml
-worker_egress_brokers:
-  agent_vault:
-    kind: worker_scoped_proxy
-    service_name_prefix: agent-vault-bridge
-    port: 18080
-    no_proxy: localhost,127.0.0.1,::1,.svc,.cluster.local
-```
-
-### Agent Vault bridge adapter
-
-MindRoom ships a small Agent Vault bridge adapter that can run as a private sidecar/service.
-Workers point at the adapter; the adapter points at Agent Vault and adds the Agent Vault proxy session authorization.
-That keeps the Agent Vault session token out of the worker environment.
-
-Run the adapter with the MindRoom image or local package:
+For per-user/per-agent isolation, the Kubernetes worker backend gives each dedicated worker its own Agent Vault identity against a single shared Agent Vault server — no per-worker bridge pod, Service, or NetworkPolicy.
+When enabled, each worker pod gets an init container that logs in with the instance owner credential (read from the bootstrap Secret's `AGENT_VAULT_OWNER_PASSWORD` key, mounted only on the init container), creates the worker's vault if missing (`worker_id_for_key(worker_key, prefix=vaultNamePrefix)`), then creates — or rotates — a proxy-role Agent Vault agent for that vault and writes its token to an in-pod `emptyDir`.
+The sandbox runner reads that token at execution time and composes `http://<token>:@<proxy host>` for python/shell only (Agent Vault accepts the token as the proxy basic-auth username), so credentials are injected in transit.
 
 ```bash
-python -m mindroom.egress.agent_vault_bridge \
-  --host 0.0.0.0 \
-  --port 18080 \
-  --upstream-proxy-url http://agent-vault:14322 \
-  --session-token-env AGENT_VAULT_PROXY_SESSION_TOKEN
+MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED=true
+MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE=infisical/agent-vault:<pinned>
+MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL=vault-owner@example.test
+# optional overrides and their defaults:
+MINDROOM_KUBERNETES_AGENT_VAULT_VAULT_NAME_PREFIX=agent-vault
+MINDROOM_KUBERNETES_AGENT_VAULT_API_URL=http://agent-vault:14321
+MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL=http://agent-vault:14322
+MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME=agent-vault-bootstrap
 ```
 
-The adapter reads the named environment variable itself so the session token does not appear in process arguments.
+The proxy token lives only in the worker pod (in the `emptyDir` file and the python/shell subprocess env), never as a Kubernetes Secret, never in the primary, and never in process arguments; every worker restart rotates it.
+The agent's shell can read its own proxy token, but that token is proxy-role: it cannot read or decrypt credentials through the Agent Vault API and cannot reach any other worker's vault (see the isolation smoke below), so the isolation boundary is the per-worker vault scope rather than a network hop.
 
-The adapter performs no inbound authentication: anyone who can reach its listener can egress through Agent Vault using the hidden session token.
-For that reason the CLI defaults `--host` to `127.0.0.1`, and the explicit `--host 0.0.0.0` above is required only when the adapter and workers run in separate containers or pods.
-When you bind a non-loopback interface, network isolation is load-bearing and must restrict the listener to intended workers.
+For HTTPS, Agent Vault terminates TLS at its proxy, so workers must trust the vault root CA.
+Publish the CA (from `agent-vault ca fetch`) as a ConfigMap with key `ca.pem` and set `MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME` (chart: `workers.kubernetes.agentVault.workerCaConfigMapName`).
+Worker pods mount it at `/etc/agent-vault/ca.pem` and the runner exports `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`SSL_CERT_FILE` for python/shell egress.
 
-For Docker Compose, put the adapter on both the worker network and the Agent Vault network.
-MindRoom workers only need access to `agent-vault-bridge-adapter:18080`.
-For Kubernetes, run the adapter as a `Deployment` or sidecar, expose it with a private `ClusterIP` service, and use `NetworkPolicy` so workers can reach only the adapter while the adapter can reach Agent Vault.
+If you also enable the worker egress-proxy / approved-egress NetworkPolicies, they restrict worker egress and do not open the Agent Vault ports.
+Allow the worker pods and their init container to reach the Agent Vault api (`apiUrl`) and proxy (`proxyUrl`) ports — e.g. via `egressProxy.networkPolicy.extraEgress` — or the init container's health-check loop times out and the pod never starts.
 
-To validate the real integration locally with Docker and the real `infisical/agent-vault` image, run:
+For non-Kubernetes deployments, point worker egress at a shared proxy you run yourself by setting the worker proxy env directly (see the shared egress proxy option above).
+
+### Self-service vault access
+
+The `agent_vault_access` tool lets a user ask their own agent for a link to manage that agent's vault.
+It resolves the caller's worker target to that worker's vault (`worker_id_for_key(worker_key, prefix)`, matching `agentVault.vaultNamePrefix`), grants the caller's Agent Vault account membership of that vault through the API, and returns the gated UI link.
+Configure it per deployment:
 
 ```bash
-uv run python tests/manual/agent_vault_bridge_live_smoke.py
+MINDROOM_AGENT_VAULT_ACCESS_API_URL=http://agent-vault:14321
+MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN=<owner or admin session/agent token>
+MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL=https://example.com/agent-vault
+MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN=example.com
+MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX=agent-vault  # must match workers.kubernetes.agentVault.vaultNamePrefix
 ```
 
-The smoke configures Agent Vault with a fake bearer credential, starts the MindRoom adapter, then runs a separate Docker worker that has only proxy env.
-It passes only when Agent Vault injects the fake credential and the worker receives no Agent Vault token or upstream secret env.
+The tool maps a requester's Matrix localpart to `localpart@EMAIL_DOMAIN` for the account grant.
+That mapping only decides *UI management access*; it never changes which worker reaches which vault, so the runtime secret boundary stays the per-worker vault scope plus the in-pod proxy-role token.
+The grant is idempotent and requires the user to have already registered and verified an Agent Vault account.
+
+### Validating the isolation model
+
+To validate the multi-identity isolation model end-to-end with Docker and the real `infisical/agent-vault` image, run:
+
+```bash
+uv run python tests/manual/agent_vault_isolation_live_smoke.py
+```
+
+The isolation smoke provisions one vault plus one proxy-role Agent Vault agent per worker identity, then proves each agent token injects only its own vault's credential, gets no injection for another vault's service, cannot list or decrypt another vault's credentials via the API, and cannot decrypt even its own vault's credentials.
+It also proves garbage and missing proxy session tokens are refused.
 
 Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process.

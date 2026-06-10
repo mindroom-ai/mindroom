@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import TypeGuard, cast
+from urllib.parse import quote
 
 from dotenv import dotenv_values
 
@@ -659,6 +660,54 @@ def _sandbox_shell_execution_runtime_env_values(
 
 EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 
+# Worker pod env (set by the Kubernetes backend) that lets the runner compose
+# the Agent Vault egress proxy for python/shell. The token never reaches the
+# primary; it is minted into the worker pod and read here at execution time.
+_WORKER_EGRESS_PROXY_URL_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["proxy_url"]
+_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
+_WORKER_EGRESS_PROXY_CA_FILE_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
+_WORKER_EGRESS_NO_PROXY = "localhost,127.0.0.1,::1,.svc,.cluster.local"
+
+
+def worker_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]:
+    """Return the per-worker egress proxy env overlay for python/shell, or ``{}``.
+
+    General mechanism, provider-agnostic: reads a per-worker proxy endpoint plus
+    a token file written into the worker pod and composes ``http://<token>:@<host>``
+    (the token becomes the proxy basic-auth username, which credential-injecting
+    forward proxies such as Agent Vault accept). Returns empty when no per-worker
+    egress proxy is configured for this worker or the token is not yet present.
+    """
+    proxy_url = (process_env.get(_WORKER_EGRESS_PROXY_URL_ENV) or "").strip()
+    token_file = (process_env.get(_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV) or "").strip()
+    if not proxy_url or "://" not in proxy_url or not token_file:
+        return {}
+    try:
+        token = Path(token_file).read_text(encoding="utf-8").strip()
+    except OSError:
+        return {}
+    if not token:
+        return {}
+    scheme, _, rest = proxy_url.partition("://")
+    # Percent-encode the token: it becomes proxy basic-auth userinfo, so any
+    # URL-significant character (@ : / # ? % +, whitespace) would otherwise make
+    # HTTP clients mis-parse the proxy URL and silently break auth.
+    authed = f"{scheme}://{quote(token, safe='')}:@{rest}"
+    env = {
+        "HTTP_PROXY": authed,
+        "HTTPS_PROXY": authed,
+        "http_proxy": authed,
+        "https_proxy": authed,
+        "NO_PROXY": _WORKER_EGRESS_NO_PROXY,
+        "no_proxy": _WORKER_EGRESS_NO_PROXY,
+    }
+    ca_file = (process_env.get(_WORKER_EGRESS_PROXY_CA_FILE_ENV) or "").strip()
+    if ca_file:
+        env["REQUESTS_CA_BUNDLE"] = ca_file
+        env["CURL_CA_BUNDLE"] = ca_file
+        env["SSL_CERT_FILE"] = ca_file
+    return env
+
 
 def build_execution_tool_env(
     tool_name: str,
@@ -675,13 +724,17 @@ def build_execution_tool_env(
     so it is supplied by the caller.
     """
     if tool_name == "shell":
-        return dict(
+        env = dict(
             _sandbox_shell_execution_runtime_env_values(
                 extra_env_passthrough=extra_env_passthrough,
                 process_env=shell_process_env,
             ),
         )
-    return dict(_execution_tool_runtime_env_values(runtime_paths))
+        env.update(worker_proxy_execution_env(shell_process_env or runtime_paths.process_env))
+        return env
+    env = dict(_execution_tool_runtime_env_values(runtime_paths))
+    env.update(worker_proxy_execution_env(runtime_paths.process_env))
+    return env
 
 
 def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:

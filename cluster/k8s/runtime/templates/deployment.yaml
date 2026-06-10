@@ -297,6 +297,28 @@ spec:
             - name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME
               value: {{ default $fullname .Values.workers.kubernetes.ownerDeploymentName | quote }}
             {{- end }}
+            {{- with .Values.workers.kubernetes.agentVault }}
+            {{- if .enabled }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED
+              value: "true"
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE
+              value: {{ required "workers.kubernetes.agentVault.cliImage is required when agentVault is enabled" .cliImage | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL
+              value: {{ required "workers.kubernetes.agentVault.ownerEmail is required when agentVault is enabled" .ownerEmail | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_VAULT_NAME_PREFIX
+              value: {{ .vaultNamePrefix | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_API_URL
+              value: {{ .apiUrl | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL
+              value: {{ .proxyUrl | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME
+              value: {{ .bootstrapSecretName | quote }}
+            {{- if .workerCaConfigMapName }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME
+              value: {{ .workerCaConfigMapName | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- end }}
             {{- if .Values.matrix.homeserverUrl }}
             - name: MATRIX_HOMESERVER

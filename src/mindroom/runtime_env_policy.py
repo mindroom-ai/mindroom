@@ -10,6 +10,7 @@ from typing import cast
 from mindroom.sensitivity import secret_name_suffixes
 
 __all__ = [
+    "AGENT_VAULT_ACCESS_ENV_BY_KEY",
     "AWS_BEDROCK_CLAUDE_ENV_BY_KEY",
     "AZURE_OPENAI_ENV_BY_KEY",
     "CREDENTIALS_ENCRYPTION_KEY_ENV",
@@ -22,6 +23,7 @@ __all__ = [
     "SHARED_CREDENTIALS_PATH_ENV",
     "VENDOR_TELEMETRY_ENV_VALUES",
     "VERTEXAI_CLAUDE_ENV_BY_KEY",
+    "WORKER_EGRESS_PROXY_ENV_BY_KEY",
     "credentials_encryption_key_from_env",
     "credentials_encryption_key_value",
     "execution_tool_runtime_env",
@@ -71,6 +73,27 @@ AZURE_OPENAI_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
         "endpoint": "AZURE_OPENAI_ENDPOINT",
         "api_version": "AZURE_OPENAI_API_VERSION",
         "deployment": "AZURE_OPENAI_DEPLOYMENT",
+    },
+)
+AGENT_VAULT_ACCESS_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+    {
+        "api_url": "MINDROOM_AGENT_VAULT_ACCESS_API_URL",
+        "admin_token": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN",
+        "ui_base_url": "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL",
+        "email_domain": "MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN",
+        "vault_name_prefix": "MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX",
+    },
+)
+
+# Single source of truth for the per-worker egress proxy env contract. The
+# Kubernetes backend (writer) sets these on the worker pod; the sandbox runner
+# (reader, mindroom.constants.worker_proxy_execution_env) consumes them. Both
+# import from here so a rename cannot silently desync writer and reader.
+WORKER_EGRESS_PROXY_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+    {
+        "proxy_url": "MINDROOM_WORKER_EGRESS_PROXY_URL",
+        "token_file": "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE",
+        "ca_file": "MINDROOM_WORKER_EGRESS_PROXY_CA_FILE",
     },
 )
 
@@ -125,6 +148,14 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "cpu_limit": "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
         "enable_service_links": "MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS",
         "auth_secret_name": "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME",
+        "agent_vault_enabled": "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED",
+        "agent_vault_vault_name_prefix": "MINDROOM_KUBERNETES_AGENT_VAULT_VAULT_NAME_PREFIX",
+        "agent_vault_cli_image": "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE",
+        "agent_vault_api_url": "MINDROOM_KUBERNETES_AGENT_VAULT_API_URL",
+        "agent_vault_proxy_url": "MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL",
+        "agent_vault_owner_email": "MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL",
+        "agent_vault_bootstrap_secret_name": "MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME",
+        "agent_vault_worker_ca_configmap_name": "MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME",
     },
 )
 KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES = frozenset(KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values())

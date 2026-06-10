@@ -37,6 +37,11 @@ _DEFAULT_MEMORY_LIMIT = "1Gi"
 _DEFAULT_CPU_REQUEST = "100m"
 _DEFAULT_CPU_LIMIT = "500m"
 
+_DEFAULT_AGENT_VAULT_VAULT_NAME_PREFIX = "agent-vault"
+_DEFAULT_AGENT_VAULT_API_URL = "http://agent-vault:14321"
+_DEFAULT_AGENT_VAULT_PROXY_URL = "http://agent-vault:14322"
+_DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME = "agent-vault-bootstrap"  # noqa: S105
+
 _WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
 _NAMESPACE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["namespace"]
 _IMAGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image"]
@@ -64,6 +69,18 @@ _CPU_REQUEST_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_request"]
 _CPU_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_limit"]
 _ENABLE_SERVICE_LINKS_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["enable_service_links"]
 _AUTH_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["auth_secret_name"]
+_AGENT_VAULT_ENABLED_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_enabled"]
+_AGENT_VAULT_VAULT_NAME_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_vault_name_prefix"]
+_AGENT_VAULT_CLI_IMAGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_cli_image"]
+_AGENT_VAULT_API_URL_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_api_url"]
+_AGENT_VAULT_PROXY_URL_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_proxy_url"]
+_AGENT_VAULT_OWNER_EMAIL_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_owner_email"]
+_AGENT_VAULT_BOOTSTRAP_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY[
+    "agent_vault_bootstrap_secret_name"
+]
+_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY[
+    "agent_vault_worker_ca_configmap_name"
+]
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 
 
@@ -123,6 +140,74 @@ def _read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
 
 
 @dataclass(frozen=True, slots=True)
+class KubernetesAgentVaultConfig:
+    """Per-worker Agent Vault egress settings (no separate bridge pod).
+
+    When present, each dedicated worker pod gets an init container that mints
+    (or rotates) a proxy-role Agent Vault agent token for that worker's vault
+    and writes it to a shared in-pod volume. The sandbox runner composes
+    ``http://<token>:@<proxy host>`` for python/shell egress so Agent Vault
+    injects credentials in transit. The owner password is mounted only on the
+    init container, never on the agent-executing container.
+    """
+
+    vault_name_prefix: str
+    cli_image: str
+    api_url: str
+    proxy_url: str
+    owner_email: str
+    bootstrap_secret_name: str
+    worker_ca_configmap_name: str | None = None
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> KubernetesAgentVaultConfig | None:
+        """Parse Agent Vault egress settings, returning ``None`` when disabled."""
+        if not _read_bool_env(env, _AGENT_VAULT_ENABLED_ENV, default=False):
+            return None
+        cli_image = _read_env(env, _AGENT_VAULT_CLI_IMAGE_ENV)
+        if not cli_image:
+            msg = f"{_AGENT_VAULT_CLI_IMAGE_ENV} must be set when {_AGENT_VAULT_ENABLED_ENV} is enabled."
+            raise WorkerBackendError(msg)
+        owner_email = _read_env(env, _AGENT_VAULT_OWNER_EMAIL_ENV)
+        if not owner_email:
+            msg = f"{_AGENT_VAULT_OWNER_EMAIL_ENV} must be set when {_AGENT_VAULT_ENABLED_ENV} is enabled."
+            raise WorkerBackendError(msg)
+        return cls(
+            vault_name_prefix=_read_env(env, _AGENT_VAULT_VAULT_NAME_PREFIX_ENV, _DEFAULT_AGENT_VAULT_VAULT_NAME_PREFIX)
+            or _DEFAULT_AGENT_VAULT_VAULT_NAME_PREFIX,
+            cli_image=cli_image,
+            api_url=_read_env(env, _AGENT_VAULT_API_URL_ENV, _DEFAULT_AGENT_VAULT_API_URL)
+            or _DEFAULT_AGENT_VAULT_API_URL,
+            proxy_url=_read_env(env, _AGENT_VAULT_PROXY_URL_ENV, _DEFAULT_AGENT_VAULT_PROXY_URL)
+            or _DEFAULT_AGENT_VAULT_PROXY_URL,
+            owner_email=owner_email,
+            bootstrap_secret_name=_read_env(
+                env,
+                _AGENT_VAULT_BOOTSTRAP_SECRET_NAME_ENV,
+                _DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME,
+            )
+            or _DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME,
+            worker_ca_configmap_name=_read_env(env, _AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME_ENV) or None,
+        )
+
+    def signature(self) -> str:
+        """Return a stable signature fragment for backend cache keys."""
+        return json.dumps(
+            {
+                "vault_name_prefix": self.vault_name_prefix,
+                "cli_image": self.cli_image,
+                "api_url": self.api_url,
+                "proxy_url": self.proxy_url,
+                "owner_email": self.owner_email,
+                "bootstrap_secret_name": self.bootstrap_secret_name,
+                "worker_ca_configmap_name": self.worker_ca_configmap_name,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class KubernetesWorkerBackendConfig:
     """Resolved environment-backed configuration for the Kubernetes provider."""
 
@@ -150,6 +235,7 @@ class KubernetesWorkerBackendConfig:
     resource_limits: dict[str, str]
     enable_service_links: bool
     auth_secret_name: str | None
+    agent_vault: KubernetesAgentVaultConfig | None = None
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> KubernetesWorkerBackendConfig:
@@ -204,6 +290,7 @@ class KubernetesWorkerBackendConfig:
             resource_limits=resource_limits,
             enable_service_links=_read_bool_env(env, _ENABLE_SERVICE_LINKS_ENV, default=False),
             auth_secret_name=_read_env(env, _AUTH_SECRET_NAME_ENV) or None,
+            agent_vault=KubernetesAgentVaultConfig.from_env(env),
         )
 
 
@@ -248,6 +335,7 @@ def kubernetes_backend_config_signature(
         resource_limits_json,
         str(config.enable_service_links),
         config.auth_secret_name or "",
+        config.agent_vault.signature() if config.agent_vault is not None else "",
         credentials_encryption_key_marker,
         auth_token or "",
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",

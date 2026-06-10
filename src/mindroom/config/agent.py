@@ -274,13 +274,6 @@ class AgentConfig(BaseModel):
         default=None,
         description="Worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
     )
-    worker_egress_broker: str | Literal[False] | None = Field(
-        default=None,
-        description=(
-            "Worker egress broker profile name for worker-routed execution tools "
-            "(None = inherit defaults.worker_egress_broker; false = disable inherited broker)"
-        ),
-    )
     allow_self_config: bool | None = Field(
         default=None,
         description="Allow this agent to modify its own configuration via a tool",

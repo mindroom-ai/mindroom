@@ -154,9 +154,15 @@ def request_execution_env(
     """Return the effective runtime-scoped execution env for one request."""
     if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return {}
+    # Agent Vault egress is composed from the worker pod's own token + endpoint,
+    # so it is always overlaid here at the worker (never shipped from the
+    # primary, which has neither the token nor the endpoint env).
+    agent_vault_env = constants.worker_proxy_execution_env({**os.environ, **runtime_paths.process_env})
     if execution_env:
         protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
-        return {key: value for key, value in execution_env.items() if key not in protected_env_names}
+        env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
+        env.update(agent_vault_env)
+        return env
     shell_process_env = (
         runtime_paths.process_env
         if runner_uses_dedicated_worker(runtime_paths)

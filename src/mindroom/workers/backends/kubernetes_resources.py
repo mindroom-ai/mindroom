@@ -26,9 +26,11 @@ from mindroom.runtime_env_policy import (
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
     VENDOR_TELEMETRY_ENV_VALUES,
+    WORKER_EGRESS_PROXY_ENV_BY_KEY,
     credentials_encryption_key_value,
     worker_extra_env,
 )
+from mindroom.tool_system.worker_routing import worker_id_for_key
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_visible_state_roots,
@@ -47,7 +49,7 @@ if TYPE_CHECKING:
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.workers.models import WorkerStatus
 
-    from .kubernetes_config import KubernetesWorkerBackendConfig
+    from .kubernetes_config import KubernetesAgentVaultConfig, KubernetesWorkerBackendConfig
 
 _READY_POLL_INTERVAL_SECONDS = 1.0
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
@@ -74,6 +76,53 @@ _LABEL_MANAGED_BY_VALUE = "mindroom"
 _LABEL_NAME = "app.kubernetes.io/name"
 _LABEL_NAME_VALUE = "mindroom-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
+# Agent Vault per-worker egress: an init container in the worker pod mints the
+# worker's proxy-role token into a shared in-pod volume; the sandbox runner
+# composes http://<token>:@<proxy host> for python/shell. No separate bridge pod.
+_AGENT_VAULT_MINT_CONTAINER_NAME = "agent-vault-mint-token"
+_AGENT_VAULT_TOKEN_MOUNT_DIR = "/agent-vault"  # noqa: S105
+_AGENT_VAULT_TOKEN_FILE = "token"  # noqa: S105
+_AGENT_VAULT_TOKEN_PATH = f"{_AGENT_VAULT_TOKEN_MOUNT_DIR}/{_AGENT_VAULT_TOKEN_FILE}"
+_AGENT_VAULT_BOOTSTRAP_MOUNT_PATH = "/agent-vault-bootstrap"
+_AGENT_VAULT_OWNER_PASSWORD_SECRET_KEY = "AGENT_VAULT_OWNER_PASSWORD"  # noqa: S105
+_AGENT_VAULT_TOKEN_VOLUME = "agent-vault-token"  # noqa: S105
+_AGENT_VAULT_BOOTSTRAP_VOLUME = "agent-vault-bootstrap"
+_AGENT_VAULT_CA_VOLUME = "agent-vault-ca"
+_AGENT_VAULT_WORKER_CA_MOUNT_DIR = "/etc/agent-vault"
+_AGENT_VAULT_WORKER_CA_FILE = "ca.pem"
+_AGENT_VAULT_WORKER_CA_PATH = f"{_AGENT_VAULT_WORKER_CA_MOUNT_DIR}/{_AGENT_VAULT_WORKER_CA_FILE}"
+# Worker pod env consumed by the sandbox runner to compose python/shell proxy env.
+_WORKER_EGRESS_PROXY_URL_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["proxy_url"]
+_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
+_WORKER_EGRESS_PROXY_CA_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
+# HOME is kept on the init container's own ephemeral filesystem (not the shared
+# token volume) so the owner CLI session never lands on a volume the
+# agent-executing container can read. Only the minted proxy token is written to
+# the shared volume.
+_AGENT_VAULT_MINT_SCRIPT = """\
+set -eu
+export HOME=/tmp/agent-vault-mint-home
+mkdir -p "$HOME"
+deadline=$(($(date +%s) + 180))
+until wget -q -O /dev/null "$AGENT_VAULT_API_URL/health"; do
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "Agent Vault did not become ready at $AGENT_VAULT_API_URL" >&2
+    exit 1
+  fi
+  sleep 2
+done
+agent-vault auth login \\
+  --address "$AGENT_VAULT_API_URL" \\
+  --email "$AGENT_VAULT_OWNER_EMAIL" \\
+  --password-stdin < "{bootstrap_path}/{owner_password_key}" > /dev/null
+agent-vault vault create "$AGENT_VAULT_VAULT" > /dev/null 2>&1 || true
+if ! agent-vault agent create "$AGENT_VAULT_VAULT" \\
+  --vault "$AGENT_VAULT_VAULT:proxy" \\
+  --token-only > "{token_path}"; then
+  agent-vault agent rotate "$AGENT_VAULT_VAULT" --token-only > "{token_path}"
+fi
+test -s "{token_path}"
+"""
 
 _CONTAINER_NAME = "sandbox-runner"
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
@@ -529,6 +578,66 @@ class KubernetesResourceManager:
             return
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
+    def agent_vault_vault_name(self, worker_key: str) -> str | None:
+        """Return the Agent Vault vault name backing one worker, or None when disabled."""
+        cfg = self.config.agent_vault
+        if cfg is None:
+            return None
+        return worker_id_for_key(worker_key, prefix=cfg.vault_name_prefix)
+
+    def _agent_vault_init_container(self, *, worker_key: str) -> dict[str, object]:
+        cfg: KubernetesAgentVaultConfig | None = self.config.agent_vault
+        vault = self.agent_vault_vault_name(worker_key)
+        if cfg is None or vault is None:
+            msg = "Agent Vault init container requested without Agent Vault config."
+            raise WorkerBackendError(msg)
+        script = _AGENT_VAULT_MINT_SCRIPT.format(
+            bootstrap_path=_AGENT_VAULT_BOOTSTRAP_MOUNT_PATH,
+            owner_password_key=_AGENT_VAULT_OWNER_PASSWORD_SECRET_KEY,
+            token_path=_AGENT_VAULT_TOKEN_PATH,
+        )
+        return {
+            "name": _AGENT_VAULT_MINT_CONTAINER_NAME,
+            "image": cfg.cli_image,
+            "imagePullPolicy": self.config.image_pull_policy,
+            "command": ["sh", "-ec", script],
+            "env": [
+                {"name": "AGENT_VAULT_API_URL", "value": cfg.api_url},
+                {"name": "AGENT_VAULT_OWNER_EMAIL", "value": cfg.owner_email},
+                {"name": "AGENT_VAULT_VAULT", "value": vault},
+            ],
+            "volumeMounts": [
+                {"name": _AGENT_VAULT_TOKEN_VOLUME, "mountPath": _AGENT_VAULT_TOKEN_MOUNT_DIR},
+                {
+                    "name": _AGENT_VAULT_BOOTSTRAP_VOLUME,
+                    "mountPath": _AGENT_VAULT_BOOTSTRAP_MOUNT_PATH,
+                    "readOnly": True,
+                },
+            ],
+            "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
+        }
+
+    def _agent_vault_main_env(self) -> list[dict[str, object]]:
+        cfg = self.config.agent_vault
+        if cfg is None:
+            return []
+        env: list[dict[str, object]] = [
+            {"name": _WORKER_EGRESS_PROXY_URL_ENV, "value": cfg.proxy_url},
+            {"name": _WORKER_EGRESS_PROXY_TOKEN_FILE_ENV, "value": _AGENT_VAULT_TOKEN_PATH},
+        ]
+        if cfg.worker_ca_configmap_name is not None:
+            env.append({"name": _WORKER_EGRESS_PROXY_CA_FILE_ENV, "value": _AGENT_VAULT_WORKER_CA_PATH})
+        return env
+
+    def _agent_vault_volumes(self) -> list[dict[str, object]]:
+        cfg = self.config.agent_vault
+        if cfg is None:
+            return []
+        return [
+            {"name": _AGENT_VAULT_TOKEN_VOLUME, "emptyDir": {}},
+            {"name": _AGENT_VAULT_BOOTSTRAP_VOLUME, "secret": {"secretName": cfg.bootstrap_secret_name}},
+        ]
+
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
         api_client = self._core.api_client
         api_client.call_api(
@@ -849,6 +958,8 @@ class KubernetesResourceManager:
             ],
             "volumes": self._volumes(),
         }
+        if self.config.agent_vault is not None:
+            template_spec["initContainers"] = [self._agent_vault_init_container(worker_key=worker_key)]
         template: dict[str, object] = {
             "metadata": template_metadata,
             "spec": template_spec,
@@ -913,6 +1024,8 @@ class KubernetesResourceManager:
         credentials_encryption_key_env = self._worker_credentials_encryption_key_env(worker_id=worker_id)
         if credentials_encryption_key_env is not None:
             env.append(credentials_encryption_key_env)
+
+        env.extend(self._agent_vault_main_env())
 
         for name, value in sorted(worker_extra_env(self.config.extra_env).items()):
             env.append({"name": name, "value": value})
@@ -1057,7 +1170,29 @@ class KubernetesResourceManager:
                     "readOnly": True,
                 },
             )
+        if self.config.agent_vault is not None:
+            mounts.append(
+                {
+                    "name": _AGENT_VAULT_TOKEN_VOLUME,
+                    "mountPath": _AGENT_VAULT_TOKEN_MOUNT_DIR,
+                    "readOnly": True,
+                },
+            )
+        if self._agent_vault_worker_ca_configmap_name() is not None:
+            mounts.append(
+                {
+                    "name": _AGENT_VAULT_CA_VOLUME,
+                    "mountPath": _AGENT_VAULT_WORKER_CA_MOUNT_DIR,
+                    "readOnly": True,
+                },
+            )
         return mounts
+
+    def _agent_vault_worker_ca_configmap_name(self) -> str | None:
+        cfg = self.config.agent_vault
+        if cfg is None:
+            return None
+        return cfg.worker_ca_configmap_name
 
     def _file_config_storage_mounts(self) -> list[dict[str, object]]:
         storage_root = PurePosixPath(posixpath.normpath(self.config.storage_mount_path))
@@ -1091,6 +1226,23 @@ class KubernetesResourceManager:
                 {
                     "name": "worker-config",
                     "configMap": {"name": self.config.config_map_name},
+                },
+            )
+        volumes.extend(self._agent_vault_volumes())
+        ca_configmap_name = self._agent_vault_worker_ca_configmap_name()
+        if ca_configmap_name is not None:
+            volumes.append(
+                {
+                    "name": _AGENT_VAULT_CA_VOLUME,
+                    "configMap": {
+                        "name": ca_configmap_name,
+                        "items": [
+                            {
+                                "key": _AGENT_VAULT_WORKER_CA_FILE,
+                                "path": _AGENT_VAULT_WORKER_CA_FILE,
+                            },
+                        ],
+                    },
                 },
             )
         return volumes

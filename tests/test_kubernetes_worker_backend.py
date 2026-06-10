@@ -30,6 +30,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
+    worker_id_for_key,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
@@ -39,6 +40,7 @@ from mindroom.workers.backends.kubernetes import (
     KubernetesWorkerBackendConfig,
     kubernetes_backend_config_signature,
 )
+from mindroom.workers.backends.kubernetes_config import KubernetesAgentVaultConfig
 from mindroom.workers.backends.kubernetes_resources import (
     _ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH,
     _ANNOTATION_RUNNER_TOKEN_HASH,
@@ -382,6 +384,7 @@ def _backend(
     extra_annotations: dict[str, str] | None = None,
     enable_service_links: bool = False,
     auth_secret_name: str | None = None,
+    agent_vault: KubernetesAgentVaultConfig | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = KubernetesWorkerBackendConfig(
         namespace="chat",
@@ -408,6 +411,7 @@ def _backend(
         resource_limits=resource_limits if resource_limits is not None else {"memory": "1Gi", "cpu": "500m"},
         enable_service_links=enable_service_links,
         auth_secret_name=auth_secret_name,
+        agent_vault=agent_vault,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -2809,3 +2813,144 @@ def test_kubernetes_backend_keeps_digest_when_worker_name_prefix_is_long() -> No
     assert first.worker_id != second.worker_id
     assert len(first.worker_id) <= 63
     assert len(second.worker_id) <= 63
+
+
+def _test_agent_vault_config(**overrides: object) -> KubernetesAgentVaultConfig:
+    values: dict[str, object] = {
+        "vault_name_prefix": "agent-vault",
+        "cli_image": "example.test/agent-vault:1",
+        "api_url": "http://agent-vault:14321",
+        "proxy_url": "http://agent-vault:14322",
+        "owner_email": "vault-owner@example.test",
+        "bootstrap_secret_name": "agent-vault-bootstrap",
+    }
+    values.update(overrides)
+    return KubernetesAgentVaultConfig(**values)  # type: ignore[arg-type]
+
+
+def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path) -> None:
+    """An enabled worker pod gets a mint init container, token volume, and proxy env."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        agent_vault=_test_agent_vault_config(worker_ca_configmap_name="agent-vault-ca"),
+    )
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
+
+    handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    deployment = next(b for b in apps_api.created_bodies if b["metadata"]["name"] == handle.worker_id)
+    template_spec = deployment["spec"]["template"]["spec"]
+
+    init = template_spec["initContainers"]
+    assert len(init) == 1
+    mint = init[0]
+    assert mint["name"] == "agent-vault-mint-token"
+    assert mint["image"] == "example.test/agent-vault:1"
+    mint_script = mint["command"][2]
+    assert "agent-vault agent create" in mint_script
+    assert "agent-vault agent rotate" in mint_script
+    assert ":proxy" in mint_script
+    # The owner CLI session must not land on the shared token volume, or the
+    # agent container (which mounts it) could read the owner credential.
+    assert "export HOME=/tmp/agent-vault-mint-home" in mint_script
+    assert 'export HOME="/agent-vault"' not in mint_script
+    mint_env = {e["name"]: e["value"] for e in mint["env"]}
+    # The vault name is the worker's own deterministic vault, owner email is configured.
+    assert mint_env["AGENT_VAULT_VAULT"] == worker_id_for_key(worker_key, prefix="agent-vault")
+    assert mint_env["AGENT_VAULT_OWNER_EMAIL"] == "vault-owner@example.test"
+    # The owner password (bootstrap secret) is mounted only on the init container.
+    assert any(m["name"] == "agent-vault-bootstrap" for m in mint["volumeMounts"])
+
+    main = template_spec["containers"][0]
+    assert all(m["name"] != "agent-vault-bootstrap" for m in main["volumeMounts"])
+    assert any(m["name"] == "agent-vault-token" and m.get("readOnly") for m in main["volumeMounts"])
+    main_env = {e["name"]: e.get("value") for e in main["env"]}
+    assert main_env["MINDROOM_WORKER_EGRESS_PROXY_URL"] == "http://agent-vault:14322"
+    assert main_env["MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE"] == "/agent-vault/token"  # noqa: S105
+    assert main_env["MINDROOM_WORKER_EGRESS_PROXY_CA_FILE"] == "/etc/agent-vault/ca.pem"
+
+    volume_names = {v["name"] for v in template_spec["volumes"]}
+    assert {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} <= volume_names
+
+    # No bridge/NetworkPolicy resources exist in this model.
+    assert backend._resources.agent_vault_vault_name(worker_key) == worker_id_for_key(worker_key, prefix="agent-vault")
+
+
+def test_kubernetes_backend_omits_agent_vault_when_disabled(tmp_path: Path) -> None:
+    """Without Agent Vault config, no init container, token volume, or proxy env."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = next(b for b in apps_api.created_bodies if b["metadata"]["name"] == handle.worker_id)
+    template_spec = deployment["spec"]["template"]["spec"]
+    assert "initContainers" not in template_spec
+    assert all(v["name"] != "agent-vault-token" for v in template_spec["volumes"])
+    main_env = {e["name"] for e in template_spec["containers"][0]["env"]}
+    assert "MINDROOM_WORKER_EGRESS_PROXY_URL" not in main_env
+    assert backend._resources.agent_vault_vault_name(_TEST_SCOPED_WORKER_KEY_A) is None
+
+
+def test_agent_vault_config_from_env_defaults_and_requirements() -> None:
+    """Agent Vault env parsing applies defaults and enforces required fields."""
+    assert KubernetesAgentVaultConfig.from_env({}) is None
+    with pytest.raises(WorkerBackendError, match="CLI_IMAGE"):
+        KubernetesAgentVaultConfig.from_env({"MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED": "true"})
+    with pytest.raises(WorkerBackendError, match="OWNER_EMAIL"):
+        KubernetesAgentVaultConfig.from_env(
+            {
+                "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED": "true",
+                "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE": "example.test/agent-vault:1",
+            },
+        )
+    config = KubernetesAgentVaultConfig.from_env(
+        {
+            "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED": "true",
+            "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE": "example.test/agent-vault:1",
+            "MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL": "vault-owner@example.test",
+        },
+    )
+    assert config is not None
+    assert config.vault_name_prefix == "agent-vault"
+    assert config.api_url == "http://agent-vault:14321"
+    assert config.proxy_url == "http://agent-vault:14322"
+    assert config.bootstrap_secret_name == "agent-vault-bootstrap"  # noqa: S105
+
+
+def test_kubernetes_backend_config_from_runtime_reads_agent_vault(tmp_path: Path) -> None:
+    """Backend config picks Agent Vault settings up from runtime env files."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".env").write_text(
+        (
+            "MINDROOM_WORKER_BACKEND=kubernetes\n"
+            "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
+            "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED=true\n"
+            "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE=example.test/agent-vault:1\n"
+            "MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL=vault-owner@example.test\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert config.agent_vault is not None
+    assert config.agent_vault.cli_image == "example.test/agent-vault:1"
+    assert config.agent_vault.owner_email == "vault-owner@example.test"
+    signature = kubernetes_backend_config_signature(runtime_paths, auth_token="token")  # noqa: S106
+    assert config.agent_vault.signature() in signature

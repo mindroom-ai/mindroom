@@ -52,7 +52,6 @@ from mindroom.config.models import (
 )
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
-from mindroom.config.worker_egress import WorkerEgressBrokerConfig  # noqa: TC001
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ROUTER_AGENT_NAME,
@@ -136,7 +135,6 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_room_access",
     "matrix_space",
     "matrix_delivery",
-    "worker_egress_brokers",
 )
 _OPTIONAL_MODEL_SECTION_NAMES = ("debug", "tool_approval")
 
@@ -415,10 +413,6 @@ class Config(BaseModel):
         default_factory=dict,
         description="MCP server configurations keyed by server id",
     )
-    worker_egress_brokers: dict[str, WorkerEgressBrokerConfig] = Field(
-        default_factory=dict,
-        description="Worker execution egress broker profiles keyed by broker name",
-    )
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     tool_approval: ToolApprovalConfig = Field(
         default_factory=ToolApprovalConfig,
@@ -591,46 +585,6 @@ class Config(BaseModel):
         for server_id in self.mcp_servers:
             normalize_mcp_server_id(server_id)
         return self
-
-    @model_validator(mode="after")
-    def validate_worker_egress_broker_references(self) -> Config:
-        """Ensure authored worker egress broker references point at configured profiles."""
-        self._validate_worker_egress_broker_reference(
-            self.defaults.worker_egress_broker,
-            config_path="defaults.worker_egress_broker",
-        )
-        for agent_name, agent_config in self.agents.items():
-            self._validate_worker_egress_broker_reference(
-                agent_config.worker_egress_broker,
-                config_path=f"agents.{agent_name}.worker_egress_broker",
-            )
-        for agent_name in self.agents:
-            broker_reference = self._agent_worker_egress_broker_reference(agent_name)
-            if broker_reference is None:
-                continue
-            broker = self.worker_egress_brokers[broker_reference]
-            if broker.kind == "worker_scoped_proxy" and self.get_agent_execution_scope(agent_name) is None:
-                msg = (
-                    f"Agent '{agent_name}' uses worker-scoped egress broker '{broker_reference}' but has no "
-                    "worker execution scope. Set worker_scope on the agent or defaults, use a static broker, "
-                    f"or disable the broker with agents.{agent_name}.worker_egress_broker: false"
-                )
-                raise ValueError(msg)
-        return self
-
-    def _validate_worker_egress_broker_reference(
-        self,
-        broker_reference: str | Literal[False] | None,
-        *,
-        config_path: str,
-    ) -> None:
-        if broker_reference is False or broker_reference is None:
-            return
-        if broker_reference in self.worker_egress_brokers:
-            return
-        available = ", ".join(sorted(self.worker_egress_brokers)) or "(none)"
-        msg = f"{config_path} references unknown worker egress broker '{broker_reference}'. Available: {available}"
-        raise ValueError(msg)
 
     @model_validator(mode="after")
     def validate_agent_reply_permissions(self) -> Config:
@@ -1270,29 +1224,6 @@ class Config(BaseModel):
         if configured is None:
             return DEFAULT_WORKER_GRANTABLE_CREDENTIALS
         return frozenset(configured)
-
-    def get_agent_worker_egress_broker(self, agent_name: str) -> WorkerEgressBrokerConfig | None:
-        """Return the effective worker egress broker for one agent, if configured."""
-        broker_reference = self._agent_worker_egress_broker_reference(agent_name)
-        if broker_reference is None:
-            return None
-
-        broker = self.worker_egress_brokers.get(broker_reference)
-        if broker is None:
-            available = ", ".join(sorted(self.worker_egress_brokers)) or "(none)"
-            msg = f"Unknown worker_egress_broker '{broker_reference}'. Available worker_egress_brokers: {available}"
-            raise ConfigRuntimeValidationError(msg)
-        return broker
-
-    def _agent_worker_egress_broker_reference(self, agent_name: str) -> str | None:
-        """Return the effective worker egress broker name for one agent."""
-        agent_config = self.get_agent(agent_name)
-        broker_reference = agent_config.worker_egress_broker
-        if broker_reference is None:
-            broker_reference = self.defaults.worker_egress_broker
-        if broker_reference is False:
-            return None
-        return broker_reference
 
     def get_agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
         """Return the internal derived execution scope for one agent.

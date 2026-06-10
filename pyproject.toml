@@ -57,6 +57,9 @@ dependencies = [
 [[project.authors]]
 name = "mindroom team"
 [project.optional-dependencies]
+agent_vault_access = [
+  "httpx>=0.27",
+]
 agentql = [
   "agentql",
   "playwright",
