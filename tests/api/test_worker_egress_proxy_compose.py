@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom import constants
 from mindroom.api import sandbox_exec
 from mindroom.constants import resolve_runtime_paths, worker_proxy_execution_env
+from mindroom.runtime_env_policy import WORKER_EGRESS_PROXY_ENV_BY_KEY
+from mindroom.workers.backends import kubernetes_resources as resources
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -95,3 +98,26 @@ def test_worker_proxy_execution_env_fail_closed_guards(tmp_path: Path) -> None:
     empty = tmp_path / "empty"
     empty.write_text("   \n", encoding="utf-8")
     assert worker_proxy_execution_env({**base, "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(empty)}) == {}
+
+
+def test_worker_egress_proxy_env_names_have_single_source() -> None:
+    """Writer (k8s backend) and reader (constants) must use the same env names.
+
+    Both derive from runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY, so a
+    rename cannot silently desync the pod env writer from the runner reader.
+    """
+    assert (
+        resources._WORKER_EGRESS_PROXY_URL_ENV
+        == constants._WORKER_EGRESS_PROXY_URL_ENV
+        == WORKER_EGRESS_PROXY_ENV_BY_KEY["proxy_url"]
+    )
+    assert (
+        resources._WORKER_EGRESS_PROXY_TOKEN_FILE_ENV
+        == constants._WORKER_EGRESS_PROXY_TOKEN_FILE_ENV
+        == WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
+    )
+    assert (
+        resources._WORKER_EGRESS_PROXY_CA_FILE_ENV
+        == constants._WORKER_EGRESS_PROXY_CA_FILE_ENV
+        == WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
+    )

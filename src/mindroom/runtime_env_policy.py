@@ -23,6 +23,7 @@ __all__ = [
     "SHARED_CREDENTIALS_PATH_ENV",
     "VENDOR_TELEMETRY_ENV_VALUES",
     "VERTEXAI_CLAUDE_ENV_BY_KEY",
+    "WORKER_EGRESS_PROXY_ENV_BY_KEY",
     "credentials_encryption_key_from_env",
     "credentials_encryption_key_value",
     "execution_tool_runtime_env",
@@ -81,6 +82,18 @@ AGENT_VAULT_ACCESS_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
         "ui_base_url": "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL",
         "email_domain": "MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN",
         "vault_name_prefix": "MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX",
+    },
+)
+
+# Single source of truth for the per-worker egress proxy env contract. The
+# Kubernetes backend (writer) sets these on the worker pod; the sandbox runner
+# (reader, mindroom.constants.worker_proxy_execution_env) consumes them. Both
+# import from here so a rename cannot silently desync writer and reader.
+WORKER_EGRESS_PROXY_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+    {
+        "proxy_url": "MINDROOM_WORKER_EGRESS_PROXY_URL",
+        "token_file": "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE",
+        "ca_file": "MINDROOM_WORKER_EGRESS_PROXY_CA_FILE",
     },
 )
 

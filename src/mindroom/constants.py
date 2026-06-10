@@ -663,9 +663,9 @@ EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 # Worker pod env (set by the Kubernetes backend) that lets the runner compose
 # the Agent Vault egress proxy for python/shell. The token never reaches the
 # primary; it is minted into the worker pod and read here at execution time.
-_WORKER_EGRESS_PROXY_URL_ENV = "MINDROOM_WORKER_EGRESS_PROXY_URL"
-_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE"  # noqa: S105
-_WORKER_EGRESS_PROXY_CA_FILE_ENV = "MINDROOM_WORKER_EGRESS_PROXY_CA_FILE"
+_WORKER_EGRESS_PROXY_URL_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["proxy_url"]
+_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
+_WORKER_EGRESS_PROXY_CA_FILE_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
 _WORKER_EGRESS_NO_PROXY = "localhost,127.0.0.1,::1,.svc,.cluster.local"
 
 

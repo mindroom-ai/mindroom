@@ -26,6 +26,7 @@ from mindroom.runtime_env_policy import (
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
     VENDOR_TELEMETRY_ENV_VALUES,
+    WORKER_EGRESS_PROXY_ENV_BY_KEY,
     credentials_encryption_key_value,
     worker_extra_env,
 )
@@ -91,9 +92,9 @@ _AGENT_VAULT_WORKER_CA_MOUNT_DIR = "/etc/agent-vault"
 _AGENT_VAULT_WORKER_CA_FILE = "ca.pem"
 _AGENT_VAULT_WORKER_CA_PATH = f"{_AGENT_VAULT_WORKER_CA_MOUNT_DIR}/{_AGENT_VAULT_WORKER_CA_FILE}"
 # Worker pod env consumed by the sandbox runner to compose python/shell proxy env.
-_WORKER_EGRESS_PROXY_URL_ENV = "MINDROOM_WORKER_EGRESS_PROXY_URL"
-_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE"  # noqa: S105
-_WORKER_EGRESS_PROXY_CA_FILE_ENV = "MINDROOM_WORKER_EGRESS_PROXY_CA_FILE"
+_WORKER_EGRESS_PROXY_URL_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["proxy_url"]
+_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
+_WORKER_EGRESS_PROXY_CA_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
 # HOME is kept on the init container's own ephemeral filesystem (not the shared
 # token volume) so the owner CLI session never lands on a volume the
 # agent-executing container can read. Only the minted proxy token is written to
