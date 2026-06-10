@@ -37,6 +37,12 @@ _DEFAULT_MEMORY_LIMIT = "1Gi"
 _DEFAULT_CPU_REQUEST = "100m"
 _DEFAULT_CPU_LIMIT = "500m"
 
+_DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX = "agent-vault-bridge"
+_DEFAULT_AGENT_VAULT_BRIDGE_PORT = 18080
+_DEFAULT_AGENT_VAULT_API_URL = "http://agent-vault:14321"
+_DEFAULT_AGENT_VAULT_PROXY_URL = "http://agent-vault:14322"
+_DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME = "agent-vault-bootstrap"  # noqa: S105
+
 _WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
 _NAMESPACE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["namespace"]
 _IMAGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image"]
@@ -64,6 +70,16 @@ _CPU_REQUEST_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_request"]
 _CPU_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_limit"]
 _ENABLE_SERVICE_LINKS_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["enable_service_links"]
 _AUTH_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["auth_secret_name"]
+_AGENT_VAULT_BRIDGE_ENABLED_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_bridge_enabled"]
+_AGENT_VAULT_BRIDGE_NAME_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_bridge_name_prefix"]
+_AGENT_VAULT_BRIDGE_PORT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_bridge_port"]
+_AGENT_VAULT_CLI_IMAGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_cli_image"]
+_AGENT_VAULT_API_URL_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_api_url"]
+_AGENT_VAULT_PROXY_URL_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_proxy_url"]
+_AGENT_VAULT_OWNER_EMAIL_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_owner_email"]
+_AGENT_VAULT_BOOTSTRAP_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY[
+    "agent_vault_bootstrap_secret_name"
+]
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 
 
@@ -123,6 +139,72 @@ def _read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
 
 
 @dataclass(frozen=True, slots=True)
+class KubernetesAgentVaultBridgeConfig:
+    """Per-worker Agent Vault bridge provisioning settings.
+
+    When present, the backend creates one bridge Deployment/Service plus a
+    worker-pair NetworkPolicy alongside every dedicated worker. The bridge pod
+    mints its own proxy-role Agent Vault agent token at startup, so the token
+    never exists as a Kubernetes Secret or in the worker environment.
+    """
+
+    name_prefix: str
+    port: int
+    cli_image: str
+    api_url: str
+    proxy_url: str
+    owner_email: str
+    bootstrap_secret_name: str
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> KubernetesAgentVaultBridgeConfig | None:
+        """Parse bridge provisioning settings, returning ``None`` when disabled."""
+        if not _read_bool_env(env, _AGENT_VAULT_BRIDGE_ENABLED_ENV, default=False):
+            return None
+        cli_image = _read_env(env, _AGENT_VAULT_CLI_IMAGE_ENV)
+        if not cli_image:
+            msg = f"{_AGENT_VAULT_CLI_IMAGE_ENV} must be set when {_AGENT_VAULT_BRIDGE_ENABLED_ENV} is enabled."
+            raise WorkerBackendError(msg)
+        owner_email = _read_env(env, _AGENT_VAULT_OWNER_EMAIL_ENV)
+        if not owner_email:
+            msg = f"{_AGENT_VAULT_OWNER_EMAIL_ENV} must be set when {_AGENT_VAULT_BRIDGE_ENABLED_ENV} is enabled."
+            raise WorkerBackendError(msg)
+        return cls(
+            name_prefix=_read_env(env, _AGENT_VAULT_BRIDGE_NAME_PREFIX_ENV, _DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX)
+            or _DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX,
+            port=_read_int_env(env, _AGENT_VAULT_BRIDGE_PORT_ENV, _DEFAULT_AGENT_VAULT_BRIDGE_PORT),
+            cli_image=cli_image,
+            api_url=_read_env(env, _AGENT_VAULT_API_URL_ENV, _DEFAULT_AGENT_VAULT_API_URL)
+            or _DEFAULT_AGENT_VAULT_API_URL,
+            proxy_url=_read_env(env, _AGENT_VAULT_PROXY_URL_ENV, _DEFAULT_AGENT_VAULT_PROXY_URL)
+            or _DEFAULT_AGENT_VAULT_PROXY_URL,
+            owner_email=owner_email,
+            bootstrap_secret_name=_read_env(
+                env,
+                _AGENT_VAULT_BOOTSTRAP_SECRET_NAME_ENV,
+                _DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME,
+            )
+            or _DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME,
+        )
+
+    def signature(self) -> str:
+        """Return a stable signature fragment for backend cache keys."""
+        return json.dumps(
+            {
+                "name_prefix": self.name_prefix,
+                "port": self.port,
+                "cli_image": self.cli_image,
+                "api_url": self.api_url,
+                "proxy_url": self.proxy_url,
+                "owner_email": self.owner_email,
+                "bootstrap_secret_name": self.bootstrap_secret_name,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class KubernetesWorkerBackendConfig:
     """Resolved environment-backed configuration for the Kubernetes provider."""
 
@@ -150,6 +232,7 @@ class KubernetesWorkerBackendConfig:
     resource_limits: dict[str, str]
     enable_service_links: bool
     auth_secret_name: str | None
+    agent_vault_bridge: KubernetesAgentVaultBridgeConfig | None = None
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> KubernetesWorkerBackendConfig:
@@ -204,6 +287,7 @@ class KubernetesWorkerBackendConfig:
             resource_limits=resource_limits,
             enable_service_links=_read_bool_env(env, _ENABLE_SERVICE_LINKS_ENV, default=False),
             auth_secret_name=_read_env(env, _AUTH_SECRET_NAME_ENV) or None,
+            agent_vault_bridge=KubernetesAgentVaultBridgeConfig.from_env(env),
         )
 
 
@@ -248,6 +332,7 @@ def kubernetes_backend_config_signature(
         resource_limits_json,
         str(config.enable_service_links),
         config.auth_secret_name or "",
+        config.agent_vault_bridge.signature() if config.agent_vault_bridge is not None else "",
         credentials_encryption_key_marker,
         auth_token or "",
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",

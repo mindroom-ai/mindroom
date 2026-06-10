@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from mindroom.egress import agent_vault_bridge
-from mindroom.egress.agent_vault_bridge import start_adapter
+from mindroom.egress.agent_vault_bridge import _parse_args, _session_token_from_file, start_adapter
 
 _HOP_BY_HOP_HEADERS = {
     "connection",
@@ -1551,3 +1551,42 @@ def test_adapter_rejects_truncated_chunked_trailers() -> None:
         fake_proxy_thread.join(timeout=5)
 
     assert response.startswith(b"HTTP/1.0 400")
+
+
+def test_parse_args_supports_session_token_file(tmp_path: Path) -> None:
+    """The CLI accepts a token file as an alternative to the env-var source."""
+    args = _parse_args(
+        [
+            "--upstream-proxy-url",
+            "http://agent-vault:14322",
+            "--session-token-file",
+            "/agent-vault-work/token",
+        ],
+    )
+    assert args.session_token_file == "/agent-vault-work/token"
+
+    token_path = tmp_path / "token"
+    token_path.write_text("  session-token-value\n", encoding="utf-8")
+    assert _session_token_from_file(str(token_path)) == "session-token-value"
+
+    empty_path = tmp_path / "empty"
+    empty_path.write_text("\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="empty"):
+        _session_token_from_file(str(empty_path))
+    with pytest.raises(ValueError, match="could not read"):
+        _session_token_from_file(str(tmp_path / "missing"))
+
+
+def test_parse_args_rejects_both_token_sources() -> None:
+    """Env-var and file token sources are mutually exclusive."""
+    with pytest.raises(SystemExit):
+        _parse_args(
+            [
+                "--upstream-proxy-url",
+                "http://agent-vault:14322",
+                "--session-token-env",
+                "TOKEN_ENV",
+                "--session-token-file",
+                "/agent-vault-work/token",
+            ],
+        )

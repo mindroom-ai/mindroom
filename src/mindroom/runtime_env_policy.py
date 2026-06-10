@@ -125,6 +125,14 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "cpu_limit": "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
         "enable_service_links": "MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS",
         "auth_secret_name": "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME",
+        "agent_vault_bridge_enabled": "MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_ENABLED",
+        "agent_vault_bridge_name_prefix": "MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_NAME_PREFIX",
+        "agent_vault_bridge_port": "MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_PORT",
+        "agent_vault_cli_image": "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE",
+        "agent_vault_api_url": "MINDROOM_KUBERNETES_AGENT_VAULT_API_URL",
+        "agent_vault_proxy_url": "MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL",
+        "agent_vault_owner_email": "MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL",
+        "agent_vault_bootstrap_secret_name": "MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME",
     },
 )
 KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES = frozenset(KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values())

@@ -410,6 +410,28 @@ worker_egress_brokers:
     no_proxy: localhost,127.0.0.1,::1,.svc,.cluster.local
 ```
 
+### Per-worker bridge provisioning (Kubernetes backend)
+
+The Kubernetes worker backend can provision the per-worker bridges that `worker_scoped_proxy` brokers route to. When enabled, `ensure_worker` creates one bridge Deployment, Service, and NetworkPolicy alongside every dedicated worker, named with the same hash helper the broker uses (`worker_id_for_key(worker_key, prefix=service_name_prefix)`), so the broker-derived service name always resolves to that worker's own bridge.
+
+```bash
+MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_ENABLED=true
+MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE=infisical/agent-vault:<pinned>
+MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL=vault-owner@example.test
+# optional overrides and their defaults:
+MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_NAME_PREFIX=agent-vault-bridge
+MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_PORT=18080
+MINDROOM_KUBERNETES_AGENT_VAULT_API_URL=http://agent-vault:14321
+MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL=http://agent-vault:14322
+MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME=agent-vault-bootstrap
+```
+
+Each bridge pod runs an init container with the Agent Vault CLI image that logs in with the owner credential (read from the bootstrap Secret's `AGENT_VAULT_OWNER_PASSWORD` key), creates a vault named after the bridge if missing, then creates — or rotates — a proxy-role Agent Vault agent of the same name and writes its token to a shared `emptyDir`. The bridge container reads it via `--session-token-file`. The token therefore never exists as a Kubernetes Secret, in the worker environment, or in any process argument, and every bridge restart rotates it.
+
+The per-bridge NetworkPolicy admits ingress only from pods labeled with the matching `mindroom.ai/worker-id`, so a worker that points proxy env at another worker's bridge is blocked by the network. Proxy-role agent tokens cannot read or decrypt credentials through the Agent Vault API — they can only exercise them through the vault proxy (see the isolation smoke below).
+
+Bridge resources are deleted when their worker is scaled down for idleness or marked failed, and are recreated (with a freshly rotated token) the next time the worker starts. The backend service account additionally needs create/patch/delete on `networkpolicies` in the worker namespace, plus the worker namespace must contain the bootstrap Secret.
+
 ### Agent Vault bridge adapter
 
 MindRoom ships a small Agent Vault bridge adapter that can run as a private sidecar/service.

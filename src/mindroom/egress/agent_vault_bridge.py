@@ -11,6 +11,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Self, cast
 from urllib.parse import urlsplit
 
@@ -714,7 +715,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--upstream-proxy-url", required=True)
-    parser.add_argument("--session-token-env", default="AGENT_VAULT_PROXY_SESSION_TOKEN")
+    token_source = parser.add_mutually_exclusive_group()
+    token_source.add_argument("--session-token-env", default="AGENT_VAULT_PROXY_SESSION_TOKEN")
+    token_source.add_argument(
+        "--session-token-file",
+        default=None,
+        help="Read the upstream proxy session token from this file instead of an env var",
+    )
     return parser.parse_args(argv)
 
 
@@ -726,11 +733,26 @@ def _session_token_from_env(env_var: str) -> str:
     return session_token
 
 
+def _session_token_from_file(path: str) -> str:
+    try:
+        session_token = Path(path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        msg = f"could not read session token file {path}: {exc}"
+        raise ValueError(msg) from exc
+    if not session_token:
+        msg = f"session token file {path} is empty"
+        raise ValueError(msg)
+    return session_token
+
+
 def _main() -> None:
     """Run the adapter process."""
     args = _parse_args()
     try:
-        session_token = _session_token_from_env(args.session_token_env)
+        if args.session_token_file is not None:
+            session_token = _session_token_from_file(args.session_token_file)
+        else:
+            session_token = _session_token_from_env(args.session_token_env)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 

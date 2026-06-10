@@ -39,6 +39,7 @@ from mindroom.workers.backends.kubernetes import (
     KubernetesWorkerBackendConfig,
     kubernetes_backend_config_signature,
 )
+from mindroom.workers.backends.kubernetes_config import KubernetesAgentVaultBridgeConfig
 from mindroom.workers.backends.kubernetes_resources import (
     _ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH,
     _ANNOTATION_RUNNER_TOKEN_HASH,
@@ -337,6 +338,38 @@ class _FakeCoreApi:
         return pod
 
 
+class _FakeNetworkingApi:
+    def __init__(self) -> None:
+        self.network_policies: dict[str, object] = {}
+        self.created_bodies: list[dict[str, object]] = []
+        self.deleted_names: list[str] = []
+
+    def read_namespaced_network_policy(self, name: str, namespace: str) -> object:
+        _ = namespace
+        network_policy = self.network_policies.get(name)
+        if network_policy is None:
+            raise _FakeApiError(404)
+        return network_policy
+
+    def create_namespaced_network_policy(self, namespace: str, body: dict[str, object]) -> object:
+        _ = namespace
+        self.created_bodies.append(body)
+        network_policy = _to_namespace(body)
+        self.network_policies[network_policy.metadata.name] = network_policy
+        return network_policy
+
+    def patch_namespaced_network_policy(self, name: str, namespace: str, body: dict[str, object]) -> object:
+        _ = namespace
+        network_policy = _to_namespace(body)
+        self.network_policies[name] = network_policy
+        return network_policy
+
+    def delete_namespaced_network_policy(self, name: str, namespace: str) -> None:
+        _ = namespace
+        self.deleted_names.append(name)
+        self.network_policies.pop(name, None)
+
+
 class _FakeApiClient:
     def __init__(self, core_api: _FakeCoreApi) -> None:
         self._core_api = core_api
@@ -382,6 +415,7 @@ def _backend(
     extra_annotations: dict[str, str] | None = None,
     enable_service_links: bool = False,
     auth_secret_name: str | None = None,
+    agent_vault_bridge: KubernetesAgentVaultBridgeConfig | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = KubernetesWorkerBackendConfig(
         namespace="chat",
@@ -408,6 +442,7 @@ def _backend(
         resource_limits=resource_limits if resource_limits is not None else {"memory": "1Gi", "cpu": "500m"},
         enable_service_links=enable_service_links,
         auth_secret_name=auth_secret_name,
+        agent_vault_bridge=agent_vault_bridge,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -437,6 +472,7 @@ def _backend(
         )
     backend._resources.apps_api = apps_api
     backend._resources.core_api = core_api
+    backend._resources.networking_api = _FakeNetworkingApi()
     backend._resources.api_exception_cls = _FakeApiError
     if owner_deployment_name is not None:
         apps_api.deployments[owner_deployment_name] = SimpleNamespace(
@@ -2809,3 +2845,252 @@ def test_kubernetes_backend_keeps_digest_when_worker_name_prefix_is_long() -> No
     assert first.worker_id != second.worker_id
     assert len(first.worker_id) <= 63
     assert len(second.worker_id) <= 63
+
+
+def _test_bridge_config(**overrides: object) -> KubernetesAgentVaultBridgeConfig:
+    values: dict[str, object] = {
+        "name_prefix": "agent-vault-bridge",
+        "port": 18080,
+        "cli_image": "example.test/agent-vault:1",
+        "api_url": "http://agent-vault:14321",
+        "proxy_url": "http://agent-vault:14322",
+        "owner_email": "vault-owner@example.test",
+        "bootstrap_secret_name": "agent-vault-bootstrap",
+    }
+    values.update(overrides)
+    return KubernetesAgentVaultBridgeConfig(**values)  # type: ignore[arg-type]
+
+
+def test_kubernetes_backend_provisions_agent_vault_bridge_alongside_worker(tmp_path: Path) -> None:
+    """One bridge Deployment/Service/NetworkPolicy pair must track each worker."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        agent_vault_bridge=_test_bridge_config(),
+    )
+    networking_api = backend._resources.networking_api
+    assert isinstance(networking_api, _FakeNetworkingApi)
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
+
+    handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    bridge_id = backend._resources.agent_vault_bridge_id(worker_key)
+    assert bridge_id is not None
+    assert bridge_id.startswith("agent-vault-bridge-")
+    assert bridge_id != handle.worker_id
+    assert len(bridge_id) <= 63
+
+    bridge_deployments = [body for body in apps_api.created_bodies if body["metadata"]["name"] == bridge_id]
+    assert len(bridge_deployments) == 1
+    bridge_deployment = bridge_deployments[0]
+    bridge_labels = bridge_deployment["metadata"]["labels"]
+    assert bridge_labels["mindroom.ai/component"] == "agent-vault-bridge"
+    assert bridge_labels["mindroom.ai/worker-id"] == handle.worker_id
+    assert bridge_labels["app"] == bridge_id
+
+    template_spec = bridge_deployment["spec"]["template"]["spec"]
+    mint_container = template_spec["initContainers"][0]
+    assert mint_container["image"] == "example.test/agent-vault:1"
+    mint_script = mint_container["command"][2]
+    assert "agent-vault agent create" in mint_script
+    assert "agent-vault agent rotate" in mint_script
+    assert ":proxy" in mint_script
+    mint_env = {env["name"]: env["value"] for env in mint_container["env"]}
+    assert mint_env["AGENT_VAULT_BRIDGE_ID"] == bridge_id
+    assert mint_env["AGENT_VAULT_OWNER_EMAIL"] == "vault-owner@example.test"
+
+    bridge_container = template_spec["containers"][0]
+    assert bridge_container["image"] == backend.config.image
+    assert "--session-token-file" in bridge_container["command"]
+    assert "--upstream-proxy-url" in bridge_container["command"]
+    assert {"name": "bootstrap", "secret": {"secretName": "agent-vault-bootstrap"}} in template_spec["volumes"]
+
+    bridge_services = [body for body in core_api.created_bodies if body["metadata"]["name"] == bridge_id]
+    assert len(bridge_services) == 1
+    assert bridge_services[0]["spec"]["selector"] == {"app": bridge_id}
+    assert bridge_services[0]["spec"]["ports"][0]["port"] == 18080
+
+    assert len(networking_api.created_bodies) == 1
+    network_policy = networking_api.created_bodies[0]
+    assert network_policy["metadata"]["name"] == bridge_id
+    assert network_policy["spec"]["podSelector"] == {"matchLabels": {"app": bridge_id}}
+    ingress_rule = network_policy["spec"]["ingress"][0]
+    ingress_selector = ingress_rule["from"][0]["podSelector"]["matchLabels"]
+    assert ingress_selector["mindroom.ai/worker-id"] == handle.worker_id
+    assert ingress_selector["mindroom.ai/component"] == "worker"
+    assert ingress_rule["ports"] == [{"protocol": "TCP", "port": 18080}]
+
+    # The bridge agent token must never be materialized as a Kubernetes Secret.
+    assert all(body["metadata"]["name"] != bridge_id for body in core_api.created_secret_bodies)
+
+
+def test_kubernetes_backend_skips_agent_vault_bridge_when_disabled(tmp_path: Path) -> None:
+    """Without bridge config, no bridge resources are created or deleted."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    networking_api = backend._resources.networking_api
+    assert isinstance(networking_api, _FakeNetworkingApi)
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert backend._resources.agent_vault_bridge_id(_TEST_SCOPED_WORKER_KEY_A) is None
+    assert len(apps_api.created_bodies) == 1
+    assert apps_api.created_bodies[0]["metadata"]["name"] == handle.worker_id
+    assert networking_api.created_bodies == []
+
+    backend.cleanup_idle_workers(now=10_000.0)
+    assert networking_api.deleted_names == []
+
+
+def test_kubernetes_backend_cleanup_idle_deletes_agent_vault_bridge(tmp_path: Path) -> None:
+    """Scaling an idle worker down must also remove its bridge resources."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        idle_timeout_seconds=60.0,
+        agent_vault_bridge=_test_bridge_config(),
+    )
+    networking_api = backend._resources.networking_api
+    assert isinstance(networking_api, _FakeNetworkingApi)
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+    bridge_id = backend._resources.agent_vault_bridge_id(worker_key)
+    assert bridge_id is not None
+    assert bridge_id in apps_api.deployments
+    assert bridge_id in core_api.services
+    assert bridge_id in networking_api.network_policies
+
+    cleaned = backend.cleanup_idle_workers(now=10_000.0)
+
+    assert [handle.worker_key for handle in cleaned] == [worker_key]
+    assert bridge_id not in apps_api.deployments
+    assert bridge_id not in core_api.services
+    assert bridge_id not in networking_api.network_policies
+
+
+def test_kubernetes_backend_record_failure_deletes_agent_vault_bridge(tmp_path: Path) -> None:
+    """Failure handling must also remove the worker's bridge resources."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        agent_vault_bridge=_test_bridge_config(),
+    )
+    networking_api = backend._resources.networking_api
+    assert isinstance(networking_api, _FakeNetworkingApi)
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+    bridge_id = backend._resources.agent_vault_bridge_id(worker_key)
+    assert bridge_id is not None
+
+    handle = backend.record_failure(worker_key, "boom", now=20.0)
+
+    assert handle.status == "failed"
+    assert bridge_id not in apps_api.deployments
+    assert bridge_id not in core_api.services
+    assert bridge_id not in networking_api.network_policies
+
+
+def test_agent_vault_bridge_config_from_env_defaults_and_overrides() -> None:
+    """Bridge env parsing applies defaults and honors explicit values."""
+    assert KubernetesAgentVaultBridgeConfig.from_env({}) is None
+    assert (
+        KubernetesAgentVaultBridgeConfig.from_env(
+            {"MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_ENABLED": "false"},
+        )
+        is None
+    )
+
+    config = KubernetesAgentVaultBridgeConfig.from_env(
+        {
+            "MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_ENABLED": "true",
+            "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE": "example.test/agent-vault:1",
+            "MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL": "vault-owner@example.test",
+        },
+    )
+    assert config is not None
+    assert config.name_prefix == "agent-vault-bridge"
+    assert config.port == 18080
+    assert config.api_url == "http://agent-vault:14321"
+    assert config.proxy_url == "http://agent-vault:14322"
+    assert config.bootstrap_secret_name == "agent-vault-bootstrap"  # noqa: S105
+
+    overridden = KubernetesAgentVaultBridgeConfig.from_env(
+        {
+            "MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_ENABLED": "true",
+            "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE": "example.test/agent-vault:2",
+            "MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL": "other-owner@example.test",
+            "MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_NAME_PREFIX": "vault-bridge",
+            "MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_PORT": "28080",
+            "MINDROOM_KUBERNETES_AGENT_VAULT_API_URL": "http://vault.other:14321",
+            "MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL": "http://vault.other:14322",
+            "MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME": "vault-bootstrap",
+        },
+    )
+    assert overridden is not None
+    assert overridden.name_prefix == "vault-bridge"
+    assert overridden.port == 28080
+    assert overridden.api_url == "http://vault.other:14321"
+    assert overridden.proxy_url == "http://vault.other:14322"
+    assert overridden.bootstrap_secret_name == "vault-bootstrap"  # noqa: S105
+    assert overridden.signature() != config.signature()
+
+
+def test_agent_vault_bridge_config_from_env_requires_image_and_owner_email() -> None:
+    """Enabling bridge provisioning without required settings fails loudly."""
+    with pytest.raises(WorkerBackendError, match="CLI_IMAGE"):
+        KubernetesAgentVaultBridgeConfig.from_env(
+            {"MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_ENABLED": "true"},
+        )
+    with pytest.raises(WorkerBackendError, match="OWNER_EMAIL"):
+        KubernetesAgentVaultBridgeConfig.from_env(
+            {
+                "MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_ENABLED": "true",
+                "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE": "example.test/agent-vault:1",
+            },
+        )
+
+
+def test_kubernetes_backend_config_from_runtime_reads_agent_vault_bridge(tmp_path: Path) -> None:
+    """Backend config picks bridge settings up from runtime env files."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".env").write_text(
+        (
+            "MINDROOM_WORKER_BACKEND=kubernetes\n"
+            "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
+            "MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_ENABLED=true\n"
+            "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE=example.test/agent-vault:1\n"
+            "MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL=vault-owner@example.test\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert config.agent_vault_bridge is not None
+    assert config.agent_vault_bridge.cli_image == "example.test/agent-vault:1"
+    assert config.agent_vault_bridge.owner_email == "vault-owner@example.test"
+
+    signature = kubernetes_backend_config_signature(runtime_paths, auth_token="token")  # noqa: S106
+    assert config.agent_vault_bridge.signature() in signature
