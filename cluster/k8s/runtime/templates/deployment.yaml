@@ -297,18 +297,16 @@ spec:
             - name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME
               value: {{ default $fullname .Values.workers.kubernetes.ownerDeploymentName | quote }}
             {{- end }}
-            {{- with .Values.workers.kubernetes.agentVaultBridge }}
+            {{- with .Values.workers.kubernetes.agentVault }}
             {{- if .enabled }}
-            - name: MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_ENABLED
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED
               value: "true"
             - name: MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE
-              value: {{ required "workers.kubernetes.agentVaultBridge.cliImage is required when agentVaultBridge is enabled" .cliImage | quote }}
+              value: {{ required "workers.kubernetes.agentVault.cliImage is required when agentVault is enabled" .cliImage | quote }}
             - name: MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL
-              value: {{ required "workers.kubernetes.agentVaultBridge.ownerEmail is required when agentVaultBridge is enabled" .ownerEmail | quote }}
-            - name: MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_NAME_PREFIX
-              value: {{ .namePrefix | quote }}
-            - name: MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_PORT
-              value: {{ .port | quote }}
+              value: {{ required "workers.kubernetes.agentVault.ownerEmail is required when agentVault is enabled" .ownerEmail | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_VAULT_NAME_PREFIX
+              value: {{ .vaultNamePrefix | quote }}
             - name: MINDROOM_KUBERNETES_AGENT_VAULT_API_URL
               value: {{ .apiUrl | quote }}
             - name: MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL

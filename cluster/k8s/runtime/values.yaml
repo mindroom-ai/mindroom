@@ -312,26 +312,28 @@ workers:
       limits:
         cpu: 500m
         memory: 1Gi
-    # Per-worker Agent Vault bridge provisioning. When enabled, the runtime
-    # creates one bridge Deployment/Service/NetworkPolicy per dedicated worker
-    # so worker_scoped_proxy egress brokers resolve to a worker-private bridge.
-    agentVaultBridge:
+    # Per-worker Agent Vault egress. When enabled, each dedicated worker pod
+    # gets an init container that mints a proxy-role Agent Vault token for that
+    # worker's vault into an in-pod volume; the sandbox runner composes
+    # http://<token>:@<proxyUrl host> for python/shell egress. No separate
+    # bridge pod, Service, or NetworkPolicy.
+    agentVault:
       enabled: false
-      # Agent Vault CLI image used by the bridge init container to mint
-      # per-worker proxy-role agent tokens. Required when enabled.
+      # Agent Vault CLI image used by the init container to mint per-worker
+      # proxy-role agent tokens. Required when enabled.
       cliImage: ""
       # Agent Vault instance owner email used for provisioning. Required when enabled.
       ownerEmail: ""
-      namePrefix: agent-vault-bridge
-      port: 18080
+      # Prefix for the per-worker vault name (worker_id_for_key); must match the
+      # access tool's bridge_name_prefix so the UI manages the same vault.
+      vaultNamePrefix: agent-vault
       apiUrl: http://agent-vault:14321
       proxyUrl: http://agent-vault:14322
       # Secret in the worker namespace holding AGENT_VAULT_OWNER_PASSWORD.
       bootstrapSecretName: agent-vault-bootstrap
       # Optional ConfigMap (key ca.pem) with the Agent Vault root CA; when set,
       # worker pods mount it at /etc/agent-vault/ca.pem so brokered HTTPS
-      # traffic can trust the vault's TLS interception. Pair with the broker's
-      # ca_bundle setting in agent config.
+      # traffic can trust the vault's TLS interception.
       workerCaConfigMapName: ""
 
 # Optional external HTTP proxy for dedicated Kubernetes workers.

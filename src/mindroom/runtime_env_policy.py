@@ -80,7 +80,7 @@ AGENT_VAULT_ACCESS_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
         "admin_token": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN",
         "ui_base_url": "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL",
         "email_domain": "MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN",
-        "bridge_name_prefix": "MINDROOM_AGENT_VAULT_ACCESS_BRIDGE_NAME_PREFIX",
+        "vault_name_prefix": "MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX",
     },
 )
 
@@ -135,9 +135,8 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "cpu_limit": "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
         "enable_service_links": "MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS",
         "auth_secret_name": "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME",
-        "agent_vault_bridge_enabled": "MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_ENABLED",
-        "agent_vault_bridge_name_prefix": "MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_NAME_PREFIX",
-        "agent_vault_bridge_port": "MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_PORT",
+        "agent_vault_enabled": "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED",
+        "agent_vault_vault_name_prefix": "MINDROOM_KUBERNETES_AGENT_VAULT_VAULT_NAME_PREFIX",
         "agent_vault_cli_image": "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE",
         "agent_vault_api_url": "MINDROOM_KUBERNETES_AGENT_VAULT_API_URL",
         "agent_vault_proxy_url": "MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL",

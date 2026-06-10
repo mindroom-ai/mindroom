@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-_DEFAULT_BRIDGE_NAME_PREFIX = "agent-vault-bridge"
+_DEFAULT_VAULT_NAME_PREFIX = "agent-vault"
 _HTTP_TIMEOUT_SECONDS = 15.0
 
 
@@ -50,8 +50,8 @@ class AgentVaultAccessTools(Toolkit):
         self._admin_token = (runtime_paths.env_value(env["admin_token"]) or "").strip()
         self._ui_base_url = (runtime_paths.env_value(env["ui_base_url"]) or "").strip()
         self._email_domain = (runtime_paths.env_value(env["email_domain"]) or "").strip().lstrip("@")
-        self._bridge_name_prefix = (
-            runtime_paths.env_value(env["bridge_name_prefix"]) or _DEFAULT_BRIDGE_NAME_PREFIX
+        self._vault_name_prefix = (
+            runtime_paths.env_value(env["vault_name_prefix"]) or _DEFAULT_VAULT_NAME_PREFIX
         ).strip()
         missing = [
             name
@@ -94,7 +94,7 @@ class AgentVaultAccessTools(Toolkit):
                 "expected a Matrix ID whose localpart maps to the configured email domain.",
             )
 
-        vault = worker_id_for_key(target.worker_key, prefix=self._bridge_name_prefix)
+        vault = worker_id_for_key(target.worker_key, prefix=self._vault_name_prefix)
         try:
             await self._ensure_vault(vault)
             granted = await self._grant_member(vault, email)

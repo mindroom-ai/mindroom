@@ -113,7 +113,7 @@ async def test_request_vault_access_grants_and_returns_link(
 ) -> None:
     """A first request resolves the vault, grants membership, and returns the link."""
     target = _worker_target()
-    expected_vault = worker_id_for_key(target.worker_key, prefix="agent-vault-bridge")
+    expected_vault = worker_id_for_key(target.worker_key, prefix="agent-vault")
     api = _FakeVaultAPI({"/v1/vaults": 201, "/users": 201})
     _patch_client(monkeypatch, api)
 

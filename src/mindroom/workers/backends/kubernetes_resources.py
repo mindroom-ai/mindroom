@@ -38,7 +38,6 @@ from mindroom.workers.backends._dedicated_worker_common import (
 )
 from mindroom.workers.backends._lifecycle import WorkerLifecycleState
 from mindroom.workers.backends.kubernetes_config import (
-    DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX,
     credentials_encryption_key_hash,
     is_kubernetes_worker_backend_config_env_name,
 )
@@ -49,7 +48,7 @@ if TYPE_CHECKING:
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.workers.models import WorkerStatus
 
-    from .kubernetes_config import KubernetesAgentVaultBridgeConfig, KubernetesWorkerBackendConfig
+    from .kubernetes_config import KubernetesAgentVaultConfig, KubernetesWorkerBackendConfig
 
 _READY_POLL_INTERVAL_SECONDS = 1.0
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
@@ -76,20 +75,28 @@ _LABEL_MANAGED_BY_VALUE = "mindroom"
 _LABEL_NAME = "app.kubernetes.io/name"
 _LABEL_NAME_VALUE = "mindroom-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
-_BRIDGE_LABEL_COMPONENT_VALUE = "agent-vault-bridge"
-_BRIDGE_LABEL_NAME_VALUE = "mindroom-agent-vault-bridge"
-_BRIDGE_CONTAINER_NAME = "agent-vault-bridge"
-_BRIDGE_MINT_CONTAINER_NAME = "mint-agent-token"
-_BRIDGE_WORK_MOUNT_PATH = "/agent-vault-work"
-_BRIDGE_BOOTSTRAP_MOUNT_PATH = "/agent-vault-bootstrap"
-_BRIDGE_TOKEN_FILE = "token"  # noqa: S105
-_BRIDGE_OWNER_PASSWORD_SECRET_KEY = "AGENT_VAULT_OWNER_PASSWORD"  # noqa: S105
+# Agent Vault per-worker egress: an init container in the worker pod mints the
+# worker's proxy-role token into a shared in-pod volume; the sandbox runner
+# composes http://<token>:@<proxy host> for python/shell. No separate bridge pod.
+_AGENT_VAULT_MINT_CONTAINER_NAME = "agent-vault-mint-token"
+_AGENT_VAULT_TOKEN_MOUNT_DIR = "/agent-vault"  # noqa: S105
+_AGENT_VAULT_TOKEN_FILE = "token"  # noqa: S105
+_AGENT_VAULT_TOKEN_PATH = f"{_AGENT_VAULT_TOKEN_MOUNT_DIR}/{_AGENT_VAULT_TOKEN_FILE}"
+_AGENT_VAULT_BOOTSTRAP_MOUNT_PATH = "/agent-vault-bootstrap"
+_AGENT_VAULT_OWNER_PASSWORD_SECRET_KEY = "AGENT_VAULT_OWNER_PASSWORD"  # noqa: S105
+_AGENT_VAULT_TOKEN_VOLUME = "agent-vault-token"  # noqa: S105
+_AGENT_VAULT_BOOTSTRAP_VOLUME = "agent-vault-bootstrap"
+_AGENT_VAULT_CA_VOLUME = "agent-vault-ca"
 _AGENT_VAULT_WORKER_CA_MOUNT_DIR = "/etc/agent-vault"
 _AGENT_VAULT_WORKER_CA_FILE = "ca.pem"
 _AGENT_VAULT_WORKER_CA_PATH = f"{_AGENT_VAULT_WORKER_CA_MOUNT_DIR}/{_AGENT_VAULT_WORKER_CA_FILE}"
-_BRIDGE_MINT_SCRIPT = """\
+# Worker pod env consumed by the sandbox runner to compose python/shell proxy env.
+_AGENT_VAULT_PROXY_URL_ENV = "MINDROOM_AGENT_VAULT_PROXY_URL"
+_AGENT_VAULT_TOKEN_FILE_ENV = "MINDROOM_AGENT_VAULT_TOKEN_FILE"  # noqa: S105
+_AGENT_VAULT_CA_FILE_ENV = "MINDROOM_AGENT_VAULT_CA_FILE"
+_AGENT_VAULT_MINT_SCRIPT = """\
 set -eu
-export HOME="{work_path}"
+export HOME="{token_dir}"
 deadline=$(($(date +%s) + 180))
 until wget -q -O /dev/null "$AGENT_VAULT_API_URL/health"; do
   if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -102,13 +109,13 @@ agent-vault auth login \\
   --address "$AGENT_VAULT_API_URL" \\
   --email "$AGENT_VAULT_OWNER_EMAIL" \\
   --password-stdin < "{bootstrap_path}/{owner_password_key}" > /dev/null
-agent-vault vault create "$AGENT_VAULT_BRIDGE_ID" > /dev/null 2>&1 || true
-if ! agent-vault agent create "$AGENT_VAULT_BRIDGE_ID" \\
-  --vault "$AGENT_VAULT_BRIDGE_ID:proxy" \\
-  --token-only > "{work_path}/{token_file}"; then
-  agent-vault agent rotate "$AGENT_VAULT_BRIDGE_ID" --token-only > "{work_path}/{token_file}"
+agent-vault vault create "$AGENT_VAULT_VAULT" > /dev/null 2>&1 || true
+if ! agent-vault agent create "$AGENT_VAULT_VAULT" \\
+  --vault "$AGENT_VAULT_VAULT:proxy" \\
+  --token-only > "{token_path}"; then
+  agent-vault agent rotate "$AGENT_VAULT_VAULT" --token-only > "{token_path}"
 fi
-test -s "{work_path}/{token_file}"
+test -s "{token_path}"
 """
 
 _CONTAINER_NAME = "sandbox-runner"
@@ -224,16 +231,6 @@ class _CoreApiProtocol(Protocol):
     def delete_namespaced_secret(self, name: str, namespace: str) -> None: ...
 
     def read_namespaced_pod(self, name: str, namespace: str) -> _KubernetesPod: ...
-
-
-class _NetworkingApiProtocol(Protocol):
-    def read_namespaced_network_policy(self, name: str, namespace: str) -> object: ...
-
-    def create_namespaced_network_policy(self, namespace: str, body: dict[str, object]) -> object: ...
-
-    def patch_namespaced_network_policy(self, name: str, namespace: str, body: dict[str, object]) -> object: ...
-
-    def delete_namespaced_network_policy(self, name: str, namespace: str) -> None: ...
 
 
 def service_host(service_name: str, namespace: str, port: int) -> str:
@@ -419,7 +416,6 @@ class KubernetesResourceManager:
         self.resolved_agent_policies = _resolved_agent_policies_for_runtime_paths(runtime_paths)
         self.apps_api: _AppsApiProtocol | None = None
         self.core_api: _CoreApiProtocol | None = None
-        self.networking_api: _NetworkingApiProtocol | None = None
         self.api_exception_cls: type[_ApiStatusError] | None = None
         self._control_plane_node_name: str | None = None
         self._control_plane_node_name_loaded = False
@@ -437,14 +433,6 @@ class KubernetesResourceManager:
         self._load_clients()
         assert self.core_api is not None
         return self.core_api
-
-    @property
-    def _networking(self) -> _NetworkingApiProtocol:
-        self._load_clients()
-        if self.networking_api is None:
-            msg = "The Kubernetes networking API client is required for Agent Vault bridge provisioning."
-            raise WorkerBackendError(msg)
-        return self.networking_api
 
     @property
     def _api_exception(self) -> type[_ApiStatusError]:
@@ -584,282 +572,66 @@ class KubernetesResourceManager:
             return
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
-    def agent_vault_bridge_id(self, worker_key: str) -> str | None:
-        """Return the bridge resource name for one worker key, or ``None`` when disabled."""
-        bridge_config = self.config.agent_vault_bridge
-        if bridge_config is None:
+    def agent_vault_vault_name(self, worker_key: str) -> str | None:
+        """Return the Agent Vault vault name backing one worker, or None when disabled."""
+        cfg = self.config.agent_vault
+        if cfg is None:
             return None
-        return worker_id_for_key(worker_key, prefix=bridge_config.name_prefix)
+        return worker_id_for_key(worker_key, prefix=cfg.vault_name_prefix)
 
-    def apply_agent_vault_bridge(self, *, worker_key: str, worker_id: str) -> str | None:
-        """Create-or-patch the per-worker Agent Vault bridge resources.
-
-        Returns the bridge Deployment name, or ``None`` when bridge
-        provisioning is disabled.
-        """
-        bridge_config = self.config.agent_vault_bridge
-        bridge_id = self.agent_vault_bridge_id(worker_key)
-        if bridge_config is None or bridge_id is None:
-            return None
-        self._apply_object(
-            read_fn=self._apps.read_namespaced_deployment,
-            create_fn=self._apps.create_namespaced_deployment,
-            patch_fn=self._apps.patch_namespaced_deployment,
-            resource_name=bridge_id,
-            manifest=self._bridge_deployment_manifest(
-                bridge_config=bridge_config,
-                bridge_id=bridge_id,
-                worker_id=worker_id,
-            ),
+    def _agent_vault_init_container(self, *, worker_key: str) -> dict[str, object]:
+        cfg: KubernetesAgentVaultConfig | None = self.config.agent_vault
+        if cfg is None:
+            msg = "Agent Vault init container requested without Agent Vault config."
+            raise WorkerBackendError(msg)
+        vault = worker_id_for_key(worker_key, prefix=cfg.vault_name_prefix)
+        script = _AGENT_VAULT_MINT_SCRIPT.format(
+            token_dir=_AGENT_VAULT_TOKEN_MOUNT_DIR,
+            bootstrap_path=_AGENT_VAULT_BOOTSTRAP_MOUNT_PATH,
+            owner_password_key=_AGENT_VAULT_OWNER_PASSWORD_SECRET_KEY,
+            token_path=_AGENT_VAULT_TOKEN_PATH,
         )
-        self._apply_object(
-            read_fn=self._core.read_namespaced_service,
-            create_fn=self._core.create_namespaced_service,
-            patch_fn=self._core.patch_namespaced_service,
-            resource_name=bridge_id,
-            manifest=self._bridge_service_manifest(
-                bridge_config=bridge_config,
-                bridge_id=bridge_id,
-                worker_id=worker_id,
-            ),
-        )
-        self._apply_object(
-            read_fn=self._networking.read_namespaced_network_policy,
-            create_fn=self._networking.create_namespaced_network_policy,
-            patch_fn=self._networking.patch_namespaced_network_policy,
-            resource_name=bridge_id,
-            manifest=self._bridge_network_policy_manifest(
-                bridge_config=bridge_config,
-                bridge_id=bridge_id,
-                worker_id=worker_id,
-            ),
-        )
-        return bridge_id
-
-    def delete_agent_vault_bridge(self, worker_key: str) -> None:
-        """Delete the per-worker bridge resources, ignoring 404s.
-
-        Deletion intentionally does not require the bridge feature to be
-        enabled: bridges created while it was enabled are still cleaned up
-        after it is disabled, using the default name prefix. Deployments with
-        a custom ``name_prefix`` must keep the feature configured (or clean up
-        by label) for deletion to find their bridges.
-        """
-        bridge_config = self.config.agent_vault_bridge
-        if bridge_config is not None:
-            bridge_id = worker_id_for_key(worker_key, prefix=bridge_config.name_prefix)
-        else:
-            bridge_id = worker_id_for_key(worker_key, prefix=DEFAULT_AGENT_VAULT_BRIDGE_NAME_PREFIX)
-            if self.read_deployment(bridge_id) is None:
-                return
-        self._delete_object(self._apps.delete_namespaced_deployment, bridge_id)
-        self._delete_object(self._core.delete_namespaced_service, bridge_id)
-        self._delete_object(self._networking.delete_namespaced_network_policy, bridge_id)
-
-    def _bridge_labels(self, *, bridge_id: str, worker_id: str) -> dict[str, str]:
-        labels = {
-            _LABEL_COMPONENT: _BRIDGE_LABEL_COMPONENT_VALUE,
-            _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
-            _LABEL_NAME: _BRIDGE_LABEL_NAME_VALUE,
-        }
-        labels.update(self.config.extra_labels)
-        labels[_LABEL_WORKER_ID] = worker_id
-        labels["app"] = bridge_id
-        return labels
-
-    def _bridge_deployment_manifest(
-        self,
-        *,
-        bridge_config: KubernetesAgentVaultBridgeConfig,
-        bridge_id: str,
-        worker_id: str,
-    ) -> dict[str, object]:
-        bridge_labels = self._bridge_labels(bridge_id=bridge_id, worker_id=worker_id)
-        mint_script = _BRIDGE_MINT_SCRIPT.format(
-            work_path=_BRIDGE_WORK_MOUNT_PATH,
-            bootstrap_path=_BRIDGE_BOOTSTRAP_MOUNT_PATH,
-            owner_password_key=_BRIDGE_OWNER_PASSWORD_SECRET_KEY,
-            token_file=_BRIDGE_TOKEN_FILE,
-        )
-        template_spec: dict[str, object] = {
-            "automountServiceAccountToken": False,
-            "enableServiceLinks": False,
-            "securityContext": {
-                "runAsUser": 1000,
-                "runAsGroup": 1000,
-                "fsGroup": 1000,
-                "runAsNonRoot": True,
-                "seccompProfile": {"type": "RuntimeDefault"},
-            },
-            "initContainers": [
+        return {
+            "name": _AGENT_VAULT_MINT_CONTAINER_NAME,
+            "image": cfg.cli_image,
+            "imagePullPolicy": self.config.image_pull_policy,
+            "command": ["sh", "-ec", script],
+            "env": [
+                {"name": "AGENT_VAULT_API_URL", "value": cfg.api_url},
+                {"name": "AGENT_VAULT_OWNER_EMAIL", "value": cfg.owner_email},
+                {"name": "AGENT_VAULT_VAULT", "value": vault},
+            ],
+            "volumeMounts": [
+                {"name": _AGENT_VAULT_TOKEN_VOLUME, "mountPath": _AGENT_VAULT_TOKEN_MOUNT_DIR},
                 {
-                    "name": _BRIDGE_MINT_CONTAINER_NAME,
-                    "image": bridge_config.cli_image,
-                    "imagePullPolicy": self.config.image_pull_policy,
-                    "command": ["sh", "-ec", mint_script],
-                    "env": [
-                        {"name": "AGENT_VAULT_API_URL", "value": bridge_config.api_url},
-                        {"name": "AGENT_VAULT_OWNER_EMAIL", "value": bridge_config.owner_email},
-                        {"name": "AGENT_VAULT_BRIDGE_ID", "value": bridge_id},
-                    ],
-                    "volumeMounts": [
-                        {"name": "work", "mountPath": _BRIDGE_WORK_MOUNT_PATH},
-                        {
-                            "name": "bootstrap",
-                            "mountPath": _BRIDGE_BOOTSTRAP_MOUNT_PATH,
-                            "readOnly": True,
-                        },
-                    ],
-                    "securityContext": {
-                        "allowPrivilegeEscalation": False,
-                        "capabilities": {"drop": ["ALL"]},
-                    },
+                    "name": _AGENT_VAULT_BOOTSTRAP_VOLUME,
+                    "mountPath": _AGENT_VAULT_BOOTSTRAP_MOUNT_PATH,
+                    "readOnly": True,
                 },
             ],
-            "containers": [
-                {
-                    "name": _BRIDGE_CONTAINER_NAME,
-                    "image": self.config.image,
-                    "imagePullPolicy": self.config.image_pull_policy,
-                    "command": [
-                        "/app/.venv/bin/python",
-                        "-m",
-                        "mindroom.egress.agent_vault_bridge",
-                        "--host",
-                        "0.0.0.0",  # noqa: S104
-                        "--port",
-                        str(bridge_config.port),
-                        "--upstream-proxy-url",
-                        bridge_config.proxy_url,
-                        "--session-token-file",
-                        f"{_BRIDGE_WORK_MOUNT_PATH}/{_BRIDGE_TOKEN_FILE}",
-                    ],
-                    "ports": [{"containerPort": bridge_config.port, "name": "proxy"}],
-                    "readinessProbe": {
-                        "tcpSocket": {"port": "proxy"},
-                        "periodSeconds": 5,
-                        "failureThreshold": 6,
-                    },
-                    "livenessProbe": {
-                        "tcpSocket": {"port": "proxy"},
-                        "periodSeconds": 30,
-                        "failureThreshold": 6,
-                    },
-                    "volumeMounts": [
-                        {"name": "work", "mountPath": _BRIDGE_WORK_MOUNT_PATH, "readOnly": True},
-                    ],
-                    "resources": {
-                        "requests": {"memory": "64Mi", "cpu": "20m"},
-                        "limits": {"memory": "256Mi"},
-                    },
-                    "securityContext": {
-                        "allowPrivilegeEscalation": False,
-                        "capabilities": {"drop": ["ALL"]},
-                    },
-                },
-            ],
-            "volumes": [
-                {"name": "work", "emptyDir": {}},
-                {
-                    "name": "bootstrap",
-                    "secret": {"secretName": bridge_config.bootstrap_secret_name},
-                },
-            ],
-        }
-        metadata: dict[str, object] = {
-            "name": bridge_id,
-            "namespace": self.config.namespace,
-            "labels": bridge_labels,
-        }
-        owner_reference = self._owner_reference_or_none()
-        if owner_reference is not None:
-            metadata["ownerReferences"] = [owner_reference]
-        return {
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": metadata,
-            "spec": {
-                "replicas": 1,
-                "selector": {"matchLabels": {"app": bridge_id}},
-                "template": {
-                    "metadata": {"labels": bridge_labels},
-                    "spec": template_spec,
-                },
-            },
+            "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
         }
 
-    def _bridge_service_manifest(
-        self,
-        *,
-        bridge_config: KubernetesAgentVaultBridgeConfig,
-        bridge_id: str,
-        worker_id: str,
-    ) -> dict[str, object]:
-        metadata: dict[str, object] = {
-            "name": bridge_id,
-            "namespace": self.config.namespace,
-            "labels": self._bridge_labels(bridge_id=bridge_id, worker_id=worker_id),
-        }
-        owner_reference = self._owner_reference_or_none()
-        if owner_reference is not None:
-            metadata["ownerReferences"] = [owner_reference]
-        return {
-            "apiVersion": "v1",
-            "kind": "Service",
-            "metadata": metadata,
-            "spec": {
-                "selector": {"app": bridge_id},
-                "ports": [
-                    {
-                        "name": "proxy",
-                        "port": bridge_config.port,
-                        "targetPort": bridge_config.port,
-                    },
-                ],
-            },
-        }
+    def _agent_vault_main_env(self) -> list[dict[str, object]]:
+        cfg = self.config.agent_vault
+        if cfg is None:
+            return []
+        env: list[dict[str, object]] = [
+            {"name": _AGENT_VAULT_PROXY_URL_ENV, "value": cfg.proxy_url},
+            {"name": _AGENT_VAULT_TOKEN_FILE_ENV, "value": _AGENT_VAULT_TOKEN_PATH},
+        ]
+        if cfg.worker_ca_configmap_name is not None:
+            env.append({"name": _AGENT_VAULT_CA_FILE_ENV, "value": _AGENT_VAULT_WORKER_CA_PATH})
+        return env
 
-    def _bridge_network_policy_manifest(
-        self,
-        *,
-        bridge_config: KubernetesAgentVaultBridgeConfig,
-        bridge_id: str,
-        worker_id: str,
-    ) -> dict[str, object]:
-        metadata: dict[str, object] = {
-            "name": bridge_id,
-            "namespace": self.config.namespace,
-            "labels": self._bridge_labels(bridge_id=bridge_id, worker_id=worker_id),
-        }
-        owner_reference = self._owner_reference_or_none()
-        if owner_reference is not None:
-            metadata["ownerReferences"] = [owner_reference]
-        return {
-            "apiVersion": "networking.k8s.io/v1",
-            "kind": "NetworkPolicy",
-            "metadata": metadata,
-            "spec": {
-                "podSelector": {"matchLabels": {"app": bridge_id}},
-                "policyTypes": ["Ingress"],
-                "ingress": [
-                    {
-                        "from": [
-                            {
-                                "podSelector": {
-                                    "matchLabels": {
-                                        _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
-                                        _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
-                                        _LABEL_NAME: _LABEL_NAME_VALUE,
-                                        _LABEL_WORKER_ID: worker_id,
-                                    },
-                                },
-                            },
-                        ],
-                        "ports": [{"protocol": "TCP", "port": bridge_config.port}],
-                    },
-                ],
-            },
-        }
+    def _agent_vault_volumes(self) -> list[dict[str, object]]:
+        cfg = self.config.agent_vault
+        if cfg is None:
+            return []
+        return [
+            {"name": _AGENT_VAULT_TOKEN_VOLUME, "emptyDir": {}},
+            {"name": _AGENT_VAULT_BOOTSTRAP_VOLUME, "secret": {"secretName": cfg.bootstrap_secret_name}},
+        ]
 
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
         api_client = self._core.api_client
@@ -999,7 +771,6 @@ class KubernetesResourceManager:
 
         self.apps_api = cast("_AppsApiProtocol", kubernetes_client.AppsV1Api())
         self.core_api = cast("_CoreApiProtocol", kubernetes_client.CoreV1Api())
-        self.networking_api = cast("_NetworkingApiProtocol", kubernetes_client.NetworkingV1Api())
         self.api_exception_cls = cast("type[_ApiStatusError]", kubernetes_exceptions.ApiException)
 
     def _service_manifest(self, worker_id: str) -> dict[str, object]:
@@ -1182,6 +953,8 @@ class KubernetesResourceManager:
             ],
             "volumes": self._volumes(),
         }
+        if self.config.agent_vault is not None:
+            template_spec["initContainers"] = [self._agent_vault_init_container(worker_key=worker_key)]
         template: dict[str, object] = {
             "metadata": template_metadata,
             "spec": template_spec,
@@ -1246,6 +1019,8 @@ class KubernetesResourceManager:
         credentials_encryption_key_env = self._worker_credentials_encryption_key_env(worker_id=worker_id)
         if credentials_encryption_key_env is not None:
             env.append(credentials_encryption_key_env)
+
+        env.extend(self._agent_vault_main_env())
 
         for name, value in sorted(worker_extra_env(self.config.extra_env).items()):
             env.append({"name": name, "value": value})
@@ -1390,10 +1165,18 @@ class KubernetesResourceManager:
                     "readOnly": True,
                 },
             )
+        if self.config.agent_vault is not None:
+            mounts.append(
+                {
+                    "name": _AGENT_VAULT_TOKEN_VOLUME,
+                    "mountPath": _AGENT_VAULT_TOKEN_MOUNT_DIR,
+                    "readOnly": True,
+                },
+            )
         if self._agent_vault_worker_ca_configmap_name() is not None:
             mounts.append(
                 {
-                    "name": "agent-vault-ca",
+                    "name": _AGENT_VAULT_CA_VOLUME,
                     "mountPath": _AGENT_VAULT_WORKER_CA_MOUNT_DIR,
                     "readOnly": True,
                 },
@@ -1401,10 +1184,10 @@ class KubernetesResourceManager:
         return mounts
 
     def _agent_vault_worker_ca_configmap_name(self) -> str | None:
-        bridge_config = self.config.agent_vault_bridge
-        if bridge_config is None:
+        cfg = self.config.agent_vault
+        if cfg is None:
             return None
-        return bridge_config.worker_ca_configmap_name
+        return cfg.worker_ca_configmap_name
 
     def _file_config_storage_mounts(self) -> list[dict[str, object]]:
         storage_root = PurePosixPath(posixpath.normpath(self.config.storage_mount_path))
@@ -1440,11 +1223,12 @@ class KubernetesResourceManager:
                     "configMap": {"name": self.config.config_map_name},
                 },
             )
+        volumes.extend(self._agent_vault_volumes())
         ca_configmap_name = self._agent_vault_worker_ca_configmap_name()
         if ca_configmap_name is not None:
             volumes.append(
                 {
-                    "name": "agent-vault-ca",
+                    "name": _AGENT_VAULT_CA_VOLUME,
                     "configMap": {
                         "name": ca_configmap_name,
                         "items": [

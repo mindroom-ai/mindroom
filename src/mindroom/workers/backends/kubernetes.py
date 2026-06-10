@@ -436,23 +436,12 @@ class KubernetesWorkerBackend:
                         credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
                     )
                     self._resources.apply_service(worker_id)
-                    bridge_id = self._resources.apply_agent_vault_bridge(
-                        worker_key=worker_key,
-                        worker_id=worker_id,
-                    )
                     deployment = self._resources.wait_for_ready(
                         worker_id,
                         timeout_seconds=self.config.ready_timeout_seconds,
                         deployment_ready_fn=self._deployment_ready,
                         on_poll_tick=poll_reporter,
                     )
-                    if bridge_id is not None:
-                        self._resources.wait_for_ready(
-                            bridge_id,
-                            timeout_seconds=self.config.ready_timeout_seconds,
-                            deployment_ready_fn=self._deployment_ready,
-                            on_poll_tick=poll_reporter,
-                        )
                     destructive_failure_allowed = False
                     final_annotations = dict(annotations)
                     final_annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
@@ -524,7 +513,6 @@ class KubernetesWorkerBackend:
             self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
             self._resources.delete_service(handle.worker_id)
             self._resources.delete_secret(handle.worker_id)
-            self._resources.delete_agent_vault_bridge(handle.worker_key)
             deployment.spec.replicas = 0
             deployment.metadata.annotations = annotations
             cleaned.append(self._handle_from_deployment(deployment, now=timestamp))
@@ -560,7 +548,6 @@ class KubernetesWorkerBackend:
         self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
         self._resources.delete_service(worker_id)
         self._resources.delete_secret(worker_id)
-        self._resources.delete_agent_vault_bridge(worker_key)
         deployment.spec.replicas = 0
         deployment.metadata.annotations = annotations
         return self._handle_from_deployment(deployment, now=timestamp)
@@ -587,7 +574,6 @@ class KubernetesWorkerBackend:
                 )
         elif auth_secret_applied:
             self._resources.delete_secret(worker_id)
-            self._resources.delete_agent_vault_bridge(worker_key)
 
     def _worker_lock(self, worker_key: str) -> threading.Lock:
         with self._worker_locks_lock:

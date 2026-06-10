@@ -15552,54 +15552,36 @@ Broker profiles are backend-neutral: the same config works for Docker/static run
 The proxy should be an adapter or broker that owns the real credential or broker session.
 Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intentionally want the worker process to receive them.
 
-For Kubernetes deployments that run one proxy service per MindRoom worker identity, use a worker-scoped broker. MindRoom derives the service name from the resolved `worker_key`, using `service_name_prefix`, and injects `HTTP_PROXY`/`HTTPS_PROXY` for that worker only:
-Worker-scoped brokers only apply to agents with a worker execution scope; config validation fails if one is bound to an agent without `worker_scope`.
+### Per-worker Agent Vault egress (Kubernetes backend)
 
-```yaml
-worker_egress_brokers:
-  agent_vault:
-    kind: worker_scoped_proxy
-    service_name_prefix: agent-vault-bridge
-    port: 18080
-    no_proxy: localhost,127.0.0.1,::1,.svc,.cluster.local
-```
-
-### Per-worker bridge provisioning (Kubernetes backend)
-
-The Kubernetes worker backend can provision the per-worker bridges that `worker_scoped_proxy` brokers route to.
-When enabled, `ensure_worker` creates one bridge Deployment, Service, and NetworkPolicy alongside every dedicated worker, named with the same hash helper the broker uses (`worker_id_for_key(worker_key, prefix=service_name_prefix)`), so the broker-derived service name always resolves to that worker's own bridge.
+For per-user/per-agent isolation, the Kubernetes worker backend gives each dedicated worker its own Agent Vault identity against a single shared Agent Vault server — no per-worker bridge pod, Service, or NetworkPolicy.
+When enabled, each worker pod gets an init container that logs in with the instance owner credential (read from the bootstrap Secret's `AGENT_VAULT_OWNER_PASSWORD` key, mounted only on the init container), creates the worker's vault if missing (`worker_id_for_key(worker_key, prefix=vaultNamePrefix)`), then creates — or rotates — a proxy-role Agent Vault agent for that vault and writes its token to an in-pod `emptyDir`.
+The sandbox runner reads that token at execution time and composes `http://<token>:@<proxy host>` for python/shell only (Agent Vault accepts the token as the proxy basic-auth username), so credentials are injected in transit.
 
 ```bash
-MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_ENABLED=true
+MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED=true
 MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE=infisical/agent-vault:<pinned>
 MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL=vault-owner@example.test
 # optional overrides and their defaults:
-MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_NAME_PREFIX=agent-vault-bridge
-MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_PORT=18080
+MINDROOM_KUBERNETES_AGENT_VAULT_VAULT_NAME_PREFIX=agent-vault
 MINDROOM_KUBERNETES_AGENT_VAULT_API_URL=http://agent-vault:14321
 MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL=http://agent-vault:14322
 MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME=agent-vault-bootstrap
 ```
 
-Each bridge pod runs an init container with the Agent Vault CLI image that logs in with the owner credential (read from the bootstrap Secret's `AGENT_VAULT_OWNER_PASSWORD` key), creates a vault named after the bridge if missing, then creates — or rotates — a proxy-role Agent Vault agent of the same name and writes its token to a shared `emptyDir`.
-The bridge container reads it via `--session-token-file`.
-The token therefore never exists as a Kubernetes Secret, in the worker environment, or in any process argument, and every bridge restart rotates it.
+The proxy token lives only in the worker pod (in the `emptyDir` file and the python/shell subprocess env), never as a Kubernetes Secret, never in the primary, and never in process arguments; every worker restart rotates it.
+The agent's shell can read its own proxy token, but that token is proxy-role: it cannot read or decrypt credentials through the Agent Vault API and cannot reach any other worker's vault (see the isolation smoke below), so the isolation boundary is the per-worker vault scope rather than a network hop.
 
-The per-bridge NetworkPolicy admits ingress only from pods labeled with the matching `mindroom.ai/worker-id`, so a worker that points proxy env at another worker's bridge is blocked by the network.
-Proxy-role agent tokens cannot read or decrypt credentials through the Agent Vault API — they can only exercise them through the vault proxy (see the isolation smoke below).
+For HTTPS, Agent Vault terminates TLS at its proxy, so workers must trust the vault root CA.
+Publish the CA (from `agent-vault ca fetch`) as a ConfigMap with key `ca.pem` and set `MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME` (chart: `workers.kubernetes.agentVault.workerCaConfigMapName`).
+Worker pods mount it at `/etc/agent-vault/ca.pem` and the runner exports `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`SSL_CERT_FILE` for python/shell egress.
 
-Bridge resources are deleted when their worker is scaled down for idleness or marked failed, and are recreated (with a freshly rotated token) the next time the worker starts.
-The backend service account additionally needs create/patch/delete on `networkpolicies` in the worker namespace, plus the worker namespace must contain the bootstrap Secret.
-
-For brokered HTTPS traffic, Agent Vault terminates TLS at its proxy, so workers must trust the vault root CA.
-Publish the CA (from `agent-vault ca fetch`) as a ConfigMap with key `ca.pem` and set `MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME` (chart: `workers.kubernetes.agentVaultBridge.workerCaConfigMapName`).
-Worker pods then mount it at `/etc/agent-vault/ca.pem`; point the broker's `ca_bundle` at that path so brokered requests export `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`SSL_CERT_FILE`.
-Because those variables replace the default trust store for the request, publish a bundle that appends the vault CA to the standard system bundle if brokered tools also reach TLS endpoints on `no_proxy` hosts.
+For non-Kubernetes deployments, use a `static` worker egress broker pointing at a shared proxy you run yourself (the broker only sets proxy env; it does not provision anything).
 
 ### Self-service vault access
 
 The `agent_vault_access` tool lets a user ask their own agent for a link to manage that agent's vault.
-It resolves the caller's worker target to the vault name the worker-scoped broker routes to (`worker_id_for_key(worker_key, prefix)`), grants the caller's Agent Vault account membership of that vault through the API, and returns the gated UI link.
+It resolves the caller's worker target to that worker's vault (`worker_id_for_key(worker_key, prefix)`, matching `agentVault.vaultNamePrefix`), grants the caller's Agent Vault account membership of that vault through the API, and returns the gated UI link.
 Configure it per deployment:
 
 ```bash

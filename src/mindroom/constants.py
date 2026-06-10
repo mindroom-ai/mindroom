@@ -659,6 +659,50 @@ def _sandbox_shell_execution_runtime_env_values(
 
 EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 
+# Worker pod env (set by the Kubernetes backend) that lets the runner compose
+# the Agent Vault egress proxy for python/shell. The token never reaches the
+# primary; it is minted into the worker pod and read here at execution time.
+_AGENT_VAULT_PROXY_URL_ENV = "MINDROOM_AGENT_VAULT_PROXY_URL"
+_AGENT_VAULT_TOKEN_FILE_ENV = "MINDROOM_AGENT_VAULT_TOKEN_FILE"  # noqa: S105
+_AGENT_VAULT_CA_FILE_ENV = "MINDROOM_AGENT_VAULT_CA_FILE"
+_AGENT_VAULT_NO_PROXY = "localhost,127.0.0.1,::1,.svc,.cluster.local"
+
+
+def agent_vault_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]:
+    """Return the Agent Vault proxy env overlay for python/shell, or ``{}``.
+
+    Reads the per-worker proxy endpoint plus the token minted into the worker
+    pod and composes ``http://<token>:@<host>`` (Agent Vault accepts the token
+    as the proxy basic-auth username). Returns empty when Agent Vault egress is
+    not configured for this worker or the token is not yet present.
+    """
+    proxy_url = (process_env.get(_AGENT_VAULT_PROXY_URL_ENV) or "").strip()
+    token_file = (process_env.get(_AGENT_VAULT_TOKEN_FILE_ENV) or "").strip()
+    if not proxy_url or "://" not in proxy_url or not token_file:
+        return {}
+    try:
+        token = Path(token_file).read_text(encoding="utf-8").strip()
+    except OSError:
+        return {}
+    if not token:
+        return {}
+    scheme, _, rest = proxy_url.partition("://")
+    authed = f"{scheme}://{token}:@{rest}"
+    env = {
+        "HTTP_PROXY": authed,
+        "HTTPS_PROXY": authed,
+        "http_proxy": authed,
+        "https_proxy": authed,
+        "NO_PROXY": _AGENT_VAULT_NO_PROXY,
+        "no_proxy": _AGENT_VAULT_NO_PROXY,
+    }
+    ca_file = (process_env.get(_AGENT_VAULT_CA_FILE_ENV) or "").strip()
+    if ca_file:
+        env["REQUESTS_CA_BUNDLE"] = ca_file
+        env["CURL_CA_BUNDLE"] = ca_file
+        env["SSL_CERT_FILE"] = ca_file
+    return env
+
 
 def build_execution_tool_env(
     tool_name: str,
@@ -675,13 +719,17 @@ def build_execution_tool_env(
     so it is supplied by the caller.
     """
     if tool_name == "shell":
-        return dict(
+        env = dict(
             _sandbox_shell_execution_runtime_env_values(
                 extra_env_passthrough=extra_env_passthrough,
                 process_env=shell_process_env,
             ),
         )
-    return dict(_execution_tool_runtime_env_values(runtime_paths))
+        env.update(agent_vault_proxy_execution_env(shell_process_env or runtime_paths.process_env))
+        return env
+    env = dict(_execution_tool_runtime_env_values(runtime_paths))
+    env.update(agent_vault_proxy_execution_env(runtime_paths.process_env))
+    return env
 
 
 def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
