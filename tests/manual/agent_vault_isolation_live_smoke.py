@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Live isolation smoke test for Agent Vault multi-identity token scoping.
 
-This proves the security properties MindRoom's worker-scoped egress brokers
-rely on before real user secrets are stored behind per-worker bridges. The
-identity model matches per-worker bridge provisioning: one vault per worker
-identity, plus one proxy-role Agent Vault agent per worker whose token is the
-bridge's upstream credential.
+This proves the per-worker Agent Vault isolation model: one vault per worker
+identity plus one proxy-role agent per worker, against a single shared Agent
+Vault server. Each worker egresses by pointing HTTP(S)_PROXY straight at the
+vault MITM proxy with its proxy-role token as the basic-auth username (no
+bridge pod or adapter).
 
 1. agent A's token injects only vault A's credential
 2. agent B's token injects only vault B's credential
@@ -15,9 +15,8 @@ bridge's upstream credential.
 6. agent A's token cannot list or decrypt vault B's credentials via the API
 7. a proxy-role agent token cannot decrypt even its own vault's credentials
 
-Like ``agent_vault_bridge_live_smoke.py`` this intentionally uses the real
-``infisical/agent-vault`` image and Docker containers, so it is not part of
-normal pytest.
+This intentionally uses the real ``infisical/agent-vault`` image and Docker
+containers, so it is not part of normal pytest.
 """
 
 from __future__ import annotations
@@ -31,11 +30,8 @@ import time
 import urllib.error
 import urllib.request
 
-from mindroom.egress.agent_vault_bridge import start_adapter
-
 AGENT_VAULT_IMAGE = os.environ.get("AGENT_VAULT_IMAGE", "infisical/agent-vault:latest")
 WORKER_IMAGE = os.environ.get("MINDROOM_AGENT_VAULT_SMOKE_WORKER_IMAGE", "python:3.13-alpine")
-DOCKER_HOST_GATEWAY = "host.docker.internal"
 SHARED_ECHO_HOST = "shared-echo.test"
 ONLY_B_ECHO_HOST = "only-b-echo.test"
 ECHO_PORT = 80
@@ -229,9 +225,9 @@ def _configure_vault(
 ) -> str:
     """Create one vault and one proxy-role agent for it; return the agent token.
 
-    This mirrors per-worker bridge provisioning: the instance owner creates a
-    vault per worker identity plus a proxy-role agent whose token becomes that
-    worker bridge's upstream credential.
+    This mirrors per-worker provisioning: the instance owner creates a vault
+    per worker identity plus a proxy-role agent whose token the worker uses to
+    egress through the vault proxy.
     """
     _vault_cli(container, OWNER_HOME, ["vault", "create", vault])
     _vault_cli(
@@ -291,20 +287,23 @@ def _agent_cli(
     )
 
 
-def _run_worker(adapter_port: int, target_host: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
-    proxy_url = f"http://{DOCKER_HOST_GATEWAY}:{adapter_port}"
+def _run_worker(
+    network: str,
+    proxy_endpoint: str,
+    token: str,
+    target_host: str,
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Run a worker that egresses through the vault with its token in the proxy URL.
+
+    This is the no-bridge model: the worker points HTTP(S)_PROXY straight at the
+    Agent Vault MITM proxy with its proxy-role token as the basic-auth username.
+    """
+    proxy_url = f"http://{token}:@{proxy_endpoint}"
     worker_code = r"""
 import json
-import os
 import urllib.request
-
-leaked = {
-    key: value
-    for key, value in os.environ.items()
-    if "AGENT_VAULT" in key or "TOKEN" in key or "SECRET" in key
-}
-if leaked:
-    raise SystemExit(f"worker env leaked secret-like names: {sorted(leaked)}")
 
 with urllib.request.urlopen("http://__TARGET_HOST__/headers", timeout=20) as response:
     data = json.loads(response.read().decode("utf-8"))
@@ -315,7 +314,8 @@ print(json.dumps(data["headers"], sort_keys=True))
             "docker",
             "run",
             "--rm",
-            f"--add-host={DOCKER_HOST_GATEWAY}:host-gateway",
+            "--network",
+            network,
             "-e",
             f"HTTP_PROXY={proxy_url}",
             "-e",
@@ -443,28 +443,17 @@ def main() -> int:  # noqa: PLR0915
         _assert(bool(token_a) and bool(token_b), "expected non-empty agent tokens")
         _assert(token_a != token_b, "expected distinct agent tokens per vault")
 
-        upstream_proxy_url = f"http://127.0.0.1:{proxy_port}"
+        # The worker reaches the vault MITM proxy directly on the shared network.
+        proxy_endpoint = f"{container}:14322"
 
         # 1 + 2: each token injects exactly its own vault's credential.
-        with start_adapter(
-            host="0.0.0.0",  # noqa: S104
-            port=0,
-            upstream_proxy_url=upstream_proxy_url,
-            session_token=token_a,
-        ) as adapter_a:
-            shared_via_a = _parse_worker_headers(
-                _run_worker(adapter_a.port, SHARED_ECHO_HOST).stdout,
-            )
-            only_b_via_a = _run_worker(adapter_a.port, ONLY_B_ECHO_HOST, check=False)
-        with start_adapter(
-            host="0.0.0.0",  # noqa: S104
-            port=0,
-            upstream_proxy_url=upstream_proxy_url,
-            session_token=token_b,
-        ) as adapter_b:
-            shared_via_b = _parse_worker_headers(
-                _run_worker(adapter_b.port, SHARED_ECHO_HOST).stdout,
-            )
+        shared_via_a = _parse_worker_headers(
+            _run_worker(network, proxy_endpoint, token_a, SHARED_ECHO_HOST).stdout,
+        )
+        only_b_via_a = _run_worker(network, proxy_endpoint, token_a, ONLY_B_ECHO_HOST, check=False)
+        shared_via_b = _parse_worker_headers(
+            _run_worker(network, proxy_endpoint, token_b, SHARED_ECHO_HOST).stdout,
+        )
 
         _assert(
             shared_via_a.get("Authorization") == f"Bearer {SECRET_A}",
@@ -490,13 +479,13 @@ def main() -> int:  # noqa: PLR0915
             results["agent_a_to_vault_b_service"] = "request refused"
 
         # 4: a garbage session token cannot egress through the vault proxy.
-        with start_adapter(
-            host="0.0.0.0",  # noqa: S104
-            port=0,
-            upstream_proxy_url=upstream_proxy_url,
-            session_token="garbage-token-that-should-never-work",  # noqa: S106
-        ) as adapter_garbage:
-            garbage_result = _run_worker(adapter_garbage.port, SHARED_ECHO_HOST, check=False)
+        garbage_result = _run_worker(
+            network,
+            proxy_endpoint,
+            "garbage-token-that-should-never-work",
+            SHARED_ECHO_HOST,
+            check=False,
+        )
         _assert_no_secret_leak(garbage_result.stdout, context="garbage token request")
         if garbage_result.returncode == 0:
             garbage_headers = _parse_worker_headers(garbage_result.stdout)

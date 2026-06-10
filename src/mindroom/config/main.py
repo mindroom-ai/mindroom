@@ -604,18 +604,6 @@ class Config(BaseModel):
                 agent_config.worker_egress_broker,
                 config_path=f"agents.{agent_name}.worker_egress_broker",
             )
-        for agent_name in self.agents:
-            broker_reference = self._agent_worker_egress_broker_reference(agent_name)
-            if broker_reference is None:
-                continue
-            broker = self.worker_egress_brokers[broker_reference]
-            if broker.kind == "worker_scoped_proxy" and self.get_agent_execution_scope(agent_name) is None:
-                msg = (
-                    f"Agent '{agent_name}' uses worker-scoped egress broker '{broker_reference}' but has no "
-                    "worker execution scope. Set worker_scope on the agent or defaults, use a static broker, "
-                    f"or disable the broker with agents.{agent_name}.worker_egress_broker: false"
-                )
-                raise ValueError(msg)
         return self
 
     def _validate_worker_egress_broker_reference(

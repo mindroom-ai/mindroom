@@ -465,11 +465,7 @@ def _build_registered_agent_tool(
             else (frozenset() if worker_scope == "user_agent" else None)
         ),
     )
-    worker_egress_env = (
-        worker_egress_broker.execution_env_for_worker_target(worker_target)
-        if worker_egress_broker is not None
-        else None
-    )
+    worker_egress_env = worker_egress_broker.execution_env() if worker_egress_broker is not None else None
 
     return get_tool_by_name(
         tool_name,

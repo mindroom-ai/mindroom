@@ -446,42 +446,9 @@ The tool maps a requester's Matrix localpart to `localpart@EMAIL_DOMAIN` for the
 That mapping only decides *UI management access*; it never changes which worker reaches which bridge, so the runtime secret boundary stays worker identity plus NetworkPolicy.
 The grant is idempotent and requires the user to have already registered and verified an Agent Vault account.
 
-### Agent Vault bridge adapter
+### Validating the isolation model
 
-MindRoom ships a small Agent Vault bridge adapter that can run as a private sidecar/service.
-Workers point at the adapter; the adapter points at Agent Vault and adds the Agent Vault proxy session authorization.
-That keeps the Agent Vault session token out of the worker environment.
-
-Run the adapter with the MindRoom image or local package:
-
-```bash
-python -m mindroom.egress.agent_vault_bridge \
-  --host 0.0.0.0 \
-  --port 18080 \
-  --upstream-proxy-url http://agent-vault:14322 \
-  --session-token-env AGENT_VAULT_PROXY_SESSION_TOKEN
-```
-
-The adapter reads the named environment variable itself so the session token does not appear in process arguments.
-
-The adapter performs no inbound authentication: anyone who can reach its listener can egress through Agent Vault using the hidden session token.
-For that reason the CLI defaults `--host` to `127.0.0.1`, and the explicit `--host 0.0.0.0` above is required only when the adapter and workers run in separate containers or pods.
-When you bind a non-loopback interface, network isolation is load-bearing and must restrict the listener to intended workers.
-
-For Docker Compose, put the adapter on both the worker network and the Agent Vault network.
-MindRoom workers only need access to `agent-vault-bridge-adapter:18080`.
-For Kubernetes, run the adapter as a `Deployment` or sidecar, expose it with a private `ClusterIP` service, and use `NetworkPolicy` so workers can reach only the adapter while the adapter can reach Agent Vault.
-
-To validate the real integration locally with Docker and the real `infisical/agent-vault` image, run:
-
-```bash
-uv run python tests/manual/agent_vault_bridge_live_smoke.py
-```
-
-The smoke configures Agent Vault with a fake bearer credential, starts the MindRoom adapter, then runs a separate Docker worker that has only proxy env.
-It passes only when Agent Vault injects the fake credential and the worker receives no Agent Vault token or upstream secret env.
-
-To validate the multi-identity isolation model behind per-worker bridges, run:
+To validate the multi-identity isolation model end-to-end with Docker and the real `infisical/agent-vault` image, run:
 
 ```bash
 uv run python tests/manual/agent_vault_isolation_live_smoke.py
