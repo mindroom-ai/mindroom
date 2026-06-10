@@ -586,10 +586,10 @@ class KubernetesResourceManager:
 
     def _agent_vault_init_container(self, *, worker_key: str) -> dict[str, object]:
         cfg: KubernetesAgentVaultConfig | None = self.config.agent_vault
-        if cfg is None:
+        vault = self.agent_vault_vault_name(worker_key)
+        if cfg is None or vault is None:
             msg = "Agent Vault init container requested without Agent Vault config."
             raise WorkerBackendError(msg)
-        vault = worker_id_for_key(worker_key, prefix=cfg.vault_name_prefix)
         script = _AGENT_VAULT_MINT_SCRIPT.format(
             bootstrap_path=_AGENT_VAULT_BOOTSTRAP_MOUNT_PATH,
             owner_password_key=_AGENT_VAULT_OWNER_PASSWORD_SECRET_KEY,

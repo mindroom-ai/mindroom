@@ -316,7 +316,13 @@ workers:
     # gets an init container that mints a proxy-role Agent Vault token for that
     # worker's vault into an in-pod volume; the sandbox runner composes
     # http://<token>:@<proxyUrl host> for python/shell egress. No separate
-    # bridge pod, Service, or NetworkPolicy.
+    # bridge pod or Service is created.
+    #
+    # NOTE: if egressProxy/approvedEgress NetworkPolicies are also enabled, they
+    # restrict worker egress and do NOT open the Agent Vault api/proxy ports.
+    # You must allow the worker pods (and their init container) to reach the
+    # agent-vault api (apiUrl) and proxy (proxyUrl) ports, e.g. via
+    # egressProxy.networkPolicy.extraEgress, or the init container will time out.
     agentVault:
       enabled: false
       # Agent Vault CLI image used by the init container to mint per-worker
@@ -324,8 +330,10 @@ workers:
       cliImage: ""
       # Agent Vault instance owner email used for provisioning. Required when enabled.
       ownerEmail: ""
-      # Prefix for the per-worker vault name (worker_id_for_key); must match the
-      # access tool's bridge_name_prefix so the UI manages the same vault.
+      # Prefix for the per-worker vault name (worker_id_for_key); the
+      # agent_vault_access tool must use the same prefix
+      # (MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX) so the UI manages the
+      # same vault the worker reads.
       vaultNamePrefix: agent-vault
       apiUrl: http://agent-vault:14321
       proxyUrl: http://agent-vault:14322

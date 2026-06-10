@@ -368,8 +368,7 @@ Example:
 ```yaml
 worker_egress_brokers:
   agent_vault:
-    kind: static
-    proxy_url: http://agent-vault-bridge-adapter:18080
+    proxy_url: http://egress-proxy:8080
     ca_bundle: /etc/ssl/agent-vault-ca.pem
     no_proxy: localhost,127.0.0.1,.svc
 
@@ -422,6 +421,9 @@ For HTTPS, Agent Vault terminates TLS at its proxy, so workers must trust the va
 Publish the CA (from `agent-vault ca fetch`) as a ConfigMap with key `ca.pem` and set `MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME` (chart: `workers.kubernetes.agentVault.workerCaConfigMapName`).
 Worker pods mount it at `/etc/agent-vault/ca.pem` and the runner exports `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`SSL_CERT_FILE` for python/shell egress.
 
+If you also enable the worker egress-proxy / approved-egress NetworkPolicies, they restrict worker egress and do not open the Agent Vault ports.
+Allow the worker pods and their init container to reach the Agent Vault api (`apiUrl`) and proxy (`proxyUrl`) ports — e.g. via `egressProxy.networkPolicy.extraEgress` — or the init container's health-check loop times out and the pod never starts.
+
 For non-Kubernetes deployments, use a `static` worker egress broker pointing at a shared proxy you run yourself (the broker only sets proxy env; it does not provision anything).
 
 ### Self-service vault access
@@ -435,11 +437,11 @@ MINDROOM_AGENT_VAULT_ACCESS_API_URL=http://agent-vault:14321
 MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN=<owner or admin session/agent token>
 MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL=https://example.com/agent-vault
 MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN=example.com
-MINDROOM_AGENT_VAULT_ACCESS_BRIDGE_NAME_PREFIX=agent-vault-bridge  # must match the broker
+MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX=agent-vault  # must match workers.kubernetes.agentVault.vaultNamePrefix
 ```
 
 The tool maps a requester's Matrix localpart to `localpart@EMAIL_DOMAIN` for the account grant.
-That mapping only decides *UI management access*; it never changes which worker reaches which bridge, so the runtime secret boundary stays worker identity plus NetworkPolicy.
+That mapping only decides *UI management access*; it never changes which worker reaches which vault, so the runtime secret boundary stays the per-worker vault scope plus the in-pod proxy-role token.
 The grant is idempotent and requires the user to have already registered and verified an Agent Vault account.
 
 ### Validating the isolation model

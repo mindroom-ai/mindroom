@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import TypeGuard, cast
+from urllib.parse import quote
 
 from dotenv import dotenv_values
 
@@ -688,7 +689,10 @@ def worker_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]
     if not token:
         return {}
     scheme, _, rest = proxy_url.partition("://")
-    authed = f"{scheme}://{token}:@{rest}"
+    # Percent-encode the token: it becomes proxy basic-auth userinfo, so any
+    # URL-significant character (@ : / # ? % +, whitespace) would otherwise make
+    # HTTP clients mis-parse the proxy URL and silently break auth.
+    authed = f"{scheme}://{quote(token, safe='')}:@{rest}"
     env = {
         "HTTP_PROXY": authed,
         "HTTPS_PROXY": authed,

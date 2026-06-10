@@ -2,14 +2,14 @@
 
 Lets a user ask their own agent for a link to manage that agent's Agent
 Vault secrets. MindRoom resolves the caller's worker target to the vault that
-backs that worker (the same name the worker-scoped egress broker routes to),
-grants the caller's Agent Vault account membership of that vault, and returns
-the gated UI link.
+backs that worker (the deterministic per-worker vault name), grants the
+caller's Agent Vault account membership of that vault, and returns the gated
+UI link.
 
 This grants *UI management access* only. The runtime secret boundary is still
-the worker identity plus Kubernetes NetworkPolicy: a proxy-role bridge token
-can exercise a credential but cannot read it, and membership here never changes
-which worker reaches which bridge.
+the per-worker vault scope plus the in-pod proxy-role token: that token can
+exercise a credential but cannot read it, and membership here never changes
+which worker reaches which vault.
 """
 
 from __future__ import annotations

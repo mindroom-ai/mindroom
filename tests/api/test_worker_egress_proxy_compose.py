@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.api import sandbox_exec
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import resolve_runtime_paths, worker_proxy_execution_env
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,3 +62,36 @@ def test_request_execution_env_skips_non_execution_tools(tmp_path: Path) -> None
     """Non-execution tools never get the proxy overlay."""
     runtime_paths, _ = _runtime_paths_with_vault(tmp_path)
     assert sandbox_exec.request_execution_env("website", None, runtime_paths) == {}
+
+
+def test_worker_proxy_execution_env_percent_encodes_token(tmp_path: Path) -> None:
+    """A token with URL-significant characters must be percent-encoded into the proxy URL."""
+    token_path = tmp_path / "token"
+    token_path.write_text("av/sess+a:b@c\n", encoding="utf-8")
+    env = worker_proxy_execution_env(
+        {
+            "MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322",
+            "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(token_path),
+        },
+    )
+    assert env["HTTP_PROXY"] == "http://av%2Fsess%2Ba%3Ab%40c:@agent-vault:14322"
+
+
+def test_worker_proxy_execution_env_fail_closed_guards(tmp_path: Path) -> None:
+    """Every missing/invalid precondition returns exactly {} (no half-formed proxy)."""
+    token_path = tmp_path / "token"
+    token_path.write_text("tok\n", encoding="utf-8")
+    base = {
+        "MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322",
+        "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(token_path),
+    }
+    # scheme-less proxy URL
+    assert worker_proxy_execution_env({**base, "MINDROOM_WORKER_EGRESS_PROXY_URL": "agent-vault:14322"}) == {}
+    # token-file env absent
+    assert worker_proxy_execution_env({"MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322"}) == {}
+    # token file does not exist
+    assert worker_proxy_execution_env({**base, "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(tmp_path / "nope")}) == {}
+    # whitespace-only token
+    empty = tmp_path / "empty"
+    empty.write_text("   \n", encoding="utf-8")
+    assert worker_proxy_execution_env({**base, "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(empty)}) == {}
