@@ -587,6 +587,7 @@ class KubernetesWorkerBackend:
                 )
         elif auth_secret_applied:
             self._resources.delete_secret(worker_id)
+            self._resources.delete_agent_vault_bridge(worker_key)
 
     def _worker_lock(self, worker_key: str) -> threading.Lock:
         with self._worker_locks_lock:

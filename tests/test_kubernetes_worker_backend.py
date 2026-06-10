@@ -3130,3 +3130,40 @@ def test_kubernetes_backend_cleanup_deletes_bridges_created_before_disabling(tmp
     assert bridge_id not in apps_api.deployments
     assert bridge_id not in core_api.services
     assert bridge_id not in networking_api.network_policies
+
+
+def test_kubernetes_backend_startup_failure_with_vanished_deployment_deletes_bridge(tmp_path: Path) -> None:
+    """If the worker Deployment vanishes during a failed startup, its bridge must not be orphaned."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        agent_vault_bridge=_test_bridge_config(),
+    )
+    networking_api = backend._resources.networking_api
+    assert isinstance(networking_api, _FakeNetworkingApi)
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
+
+    handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+    bridge_id = backend._resources.agent_vault_bridge_id(worker_key)
+    assert bridge_id is not None
+    deployment = apps_api.deployments[handle.worker_id]
+    deployment.metadata.annotations[_ANNOTATION_TEMPLATE_HASH] = "stale"
+
+    def recreate_with_failure(deployment_name: str, _manifest: dict[str, object], *, timeout_seconds: float) -> None:
+        _ = timeout_seconds
+        apps_api.delete_namespaced_deployment(deployment_name, backend.config.namespace)
+        msg = "deployment recreate failed"
+        raise WorkerBackendError(msg)
+
+    backend._resources._recreate_deployment = recreate_with_failure  # type: ignore[method-assign]
+
+    with pytest.raises(WorkerBackendError, match="deployment recreate failed"):
+        backend.ensure_worker(WorkerSpec(worker_key), now=20.0)
+
+    assert handle.worker_id not in apps_api.deployments
+    assert bridge_id not in apps_api.deployments
+    assert bridge_id not in core_api.services
+    assert bridge_id not in networking_api.network_policies
