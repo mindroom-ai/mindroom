@@ -1,4 +1,13 @@
-"""Client-backed room-scan helpers for Matrix thread membership resolution."""
+"""Client-backed room-scan helpers for Matrix thread membership resolution.
+
+This module is the seam between pure resolution (``thread_membership``) and the homeserver transport
+(``client_thread_history``): it builds ``ThreadMembershipAccess`` adapters whose root proofs run real
+room scans.
+It exists as its own module because ``client_thread_history`` imports ``thread_membership`` (via
+``thread_projection`` and for ``ThreadRoomScanRootNotFoundError``), so ``thread_membership`` itself can
+never depend on the transport.
+Cache reads here are advisory accelerators only; the authoritative root proof is always the room scan.
+"""
 
 from __future__ import annotations
 

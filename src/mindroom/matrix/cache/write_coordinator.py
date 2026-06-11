@@ -1,4 +1,20 @@
-"""Shared runtime coordinator for advisory Matrix event-cache writes."""
+"""Shared runtime coordinator for advisory Matrix event-cache writes.
+
+Barrier ordering invariants (PR #716 fixed regressions in each of these):
+
+1. Room-kind updates are exclusive within their room: one starts only when no room or thread update is
+   active, and everything queued after it waits for it.
+
+2. Thread-kind updates run in parallel across different threads but are serialized within one thread,
+   and never start while a room update queued ahead of them is pending or active.
+
+3. A room update cancelled before it started leaves a fence in the queue: later thread updates still
+   wait for the earlier queue segment to drain, so cancellation cannot reorder writes.
+   Read-style operations may opt in to ``ignore_cancelled_room_fences`` because they mutate nothing.
+
+4. Readers establish the write-read barrier with ``wait_for_thread_idle``: a thread read started after a
+   mutation was queued never observes cache state older than that mutation.
+"""
 
 from __future__ import annotations
 

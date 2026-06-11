@@ -5,6 +5,43 @@ Ownership map:
 - scanned-event ordering and latest-thread-tail helpers: `mindroom.matrix.thread_projection`
 - mutation/bookkeeping impact: `mindroom.matrix.thread_bookkeeping`
 - tool-facing normalization: `mindroom.custom_tools.attachment_helpers`
+
+Invariants enforced here (every resolver in the repo must go through this module):
+
+1. An event is THREADED if and only if one of the following holds:
+   it carries a native ``m.thread`` relation (``EventInfo.thread_id``);
+   it is an edit whose ``m.new_content`` carries an ``m.thread`` relation (``thread_id_from_edit``);
+   a relation walk from it reaches an event satisfying either of the above;
+   or the walk terminates at a relation-free event that is proven to have at least one real threaded child,
+   in which case that terminal event is itself the thread root.
+   Per MSC3440 only relation-free events (``can_be_thread_root``) may become roots.
+
+2. The relation walk follows ``EventInfo.next_related_event_id``: edit original, then reaction target,
+   then ``m.reference`` target, then reply target.
+   An explicit thread relation always wins immediately; the walk never continues past one.
+   This is how implied membership works: plain replies, references, and reactions to threaded events
+   inherit the target's thread transitively.
+
+3. The walk always terminates: a visited set breaks relation cycles and ``_MAX_THREAD_MEMBERSHIP_HOPS``
+   caps pathological chains, resolving to the best answer found so far (initially ROOM_LEVEL).
+
+4. Root proof is three-valued (PROVEN, NOT_A_THREAD_ROOT, PROOF_UNAVAILABLE) and proof failure never
+   silently demotes to room level.
+   PROOF_UNAVAILABLE maps to ``ThreadResolution.indeterminate`` with the candidate root preserved so
+   callers can fail closed (mutation callers invalidate room-wide; dispatch callers coalesce on the
+   candidate root and retry).
+   Lookup failures and missing related events during the walk are likewise INDETERMINATE, never ROOM_LEVEL.
+
+5. Child proof excludes the candidate root itself and excludes edits of the root: an ``m.replace`` of a
+   relation-free event does not make that event a thread root.
+
+6. A root proof built from thread history whose read source is the explicit degraded fallback
+   (``THREAD_HISTORY_SOURCE_DEGRADED``, i.e. an empty fail-open read) is PROOF_UNAVAILABLE, never
+   NOT_A_THREAD_ROOT: an empty degraded read must not demote an existing thread to room level.
+   Stale-cache history (``stale_cache`` source) remains acceptable proof material.
+
+7. A room scan that completes without ever seeing the candidate root
+   (``ThreadRoomScanRootNotFoundError``) is definitive NOT_A_THREAD_ROOT, not a proof failure.
 """
 
 from __future__ import annotations

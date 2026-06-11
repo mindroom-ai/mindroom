@@ -1,4 +1,21 @@
-"""Cache mutation operations for Matrix thread cache writes."""
+"""Cache mutation operations for Matrix thread cache writes.
+
+This is the application layer below the write policies in ``thread_writes``; it owns how mutations land:
+
+1. Invalidation is durable-marker-first and fails closed: ``mark_thread_stale`` and
+   ``mark_room_threads_stale`` write monotonic stale markers; when a marker cannot be written the rows
+   are deleted instead, and when even deletion fails (and the backend is not just temporarily
+   unavailable) the cache is disabled for the rest of the runtime.
+
+2. Appends are incremental-only: ``append_event`` refuses when the thread has no cached snapshot rows
+   (it then only records lookup-index rows), and a failed append re-invalidates the thread so a partial
+   snapshot is never trusted.
+
+3. After a successful append the thread is revalidated only under the conditions enforced by
+   ``revalidate_thread_after_incremental_update`` (see ``sqlite_event_cache_threads``): the prior
+   invalidation must come from an incremental mutation reason and the room must not have been
+   invalidated at or after the last validation.
+"""
 
 from __future__ import annotations
 
