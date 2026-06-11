@@ -211,10 +211,10 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
     return {AI_RUN_METADATA_KEY: dict(ai_run_metadata)}
 
 
-def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
+def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     *,
     config: Config,
-    model_name: str | None,
+    model_name: str,
     run_id: str | None,
     session_id: str | None,
     status: RunStatus | str | None,
@@ -228,7 +228,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     context_cache_write_tokens: int | None = None,
     tool_count: int | None = None,
     prepared_history: PreparedHistoryState | None = None,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     """Build the Matrix event content fragment for one AI run.
 
     `model_name` is the configured model name resolved at run preparation time.
@@ -236,7 +236,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     mid-run (for example via `switch_thread_model`), and this metadata must
     describe the model that actually produced the response.
     """
-    model_config = config.models.get(model_name) if model_name is not None else None
+    model_config = config.models.get(model_name)
     model_id = model or (model_config.id if model_config is not None else None)
     provider = model_provider or (model_config.provider if model_config is not None else None)
 
@@ -294,16 +294,12 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     if status is not None:
         raw_status = status.value if isinstance(status, RunStatus) else str(status)
         payload["status"] = raw_status.lower()
-    if model_name is not None or model_id is not None or provider is not None:
-        model_payload: dict[str, Any] = {}
-        if model_name is not None:
-            model_payload["config"] = model_name
-        if model_id is not None:
-            model_payload["id"] = model_id
-        if provider is not None:
-            model_payload["provider"] = provider
-        if model_payload:
-            payload["model"] = model_payload
+    model_payload: dict[str, Any] = {"config": model_name}
+    if model_id is not None:
+        model_payload["id"] = model_id
+    if provider is not None:
+        model_payload["provider"] = provider
+    payload["model"] = model_payload
     if usage_payload:
         payload["usage"] = usage_payload
     context_payload = _build_context_payload(
@@ -324,6 +320,4 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     if tool_count is not None:
         payload["tools"] = {"count": tool_count}
 
-    if len(payload) == 1:
-        return None
     return {AI_RUN_METADATA_KEY: payload}

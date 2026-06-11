@@ -7,7 +7,7 @@ from agno.tools import Toolkit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.thread_models import (
     clear_thread_model_override,
-    get_thread_model_override,
+    resolve_thread_model_override,
     set_thread_model_override,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
@@ -41,25 +41,24 @@ class ThreadModelTools(Toolkit):
         if isinstance(resolved, str):
             return resolved
         context, thread_id = resolved
-        override = get_thread_model_override(context.runtime_paths, thread_id)
-        # Runtime resolution ignores an override whose model name no longer
-        # exists in config.models, so report it as stale instead of active.
-        if override is not None and override not in context.config.models:
-            return self._payload(
-                "ok",
-                action="get",
-                thread_id=thread_id,
-                override=None,
-                stale_override=override,
-                note="The stored override names a model that is no longer configured, so agents use their configured models.",
-                available_models=sorted(context.config.models),
+        override = resolve_thread_model_override(
+            context.runtime_paths,
+            thread_id,
+            configured_models=context.config.models,
+        )
+        stale_fields: dict[str, object] = {}
+        if override.stale is not None:
+            stale_fields["stale_override"] = override.stale
+            stale_fields["note"] = (
+                "The stored override names a model that is no longer configured, so agents use their configured models."
             )
         return self._payload(
             "ok",
             action="get",
             thread_id=thread_id,
-            override=override,
+            override=override.active,
             available_models=sorted(context.config.models),
+            **stale_fields,
         )
 
     async def switch_thread_model(self, model_name: str) -> str:

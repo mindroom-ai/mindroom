@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.thread_models import (
     clear_thread_model_override,
-    get_thread_model_override,
+    resolve_thread_model_override,
     set_thread_model_override,
 )
 
@@ -26,8 +26,8 @@ def _available_models_text(config: Config) -> str:
 
 
 def _show_thread_model(config: Config, runtime_paths: RuntimePaths, thread_id: str | None) -> str:
-    override = get_thread_model_override(runtime_paths, thread_id)
-    if override is not None and override in config.models:
+    override = resolve_thread_model_override(runtime_paths, thread_id, configured_models=config.models).active
+    if override is not None:
         model = config.models[override]
         current = f"This thread uses the `{override}` override ({model.provider} {model.id})."
     else:

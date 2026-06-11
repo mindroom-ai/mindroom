@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,6 +12,8 @@ from typing import TYPE_CHECKING
 from mindroom.constants import tracking_dir
 
 if TYPE_CHECKING:
+    from collections.abc import Container
+
     from mindroom.constants import RuntimePaths
 
 _THREAD_MODELS_FILENAME = "thread_models.json"
@@ -65,12 +68,40 @@ def _save_overrides(path: Path, overrides: dict[str, dict[str, str]]) -> None:
     _load_cache.pop(path, None)
 
 
-def get_thread_model_override(runtime_paths: RuntimePaths, thread_id: str | None) -> str | None:
+def _get_thread_model_override(runtime_paths: RuntimePaths, thread_id: str | None) -> str | None:
     """Return the model name stored for one thread root, if any."""
     if thread_id is None:
         return None
     record = _load_overrides(_store_path(runtime_paths)).get(thread_id)
     return record["model"] if record is not None else None
+
+
+@dataclass(frozen=True)
+class _ThreadModelOverrideState:
+    """One thread's stored override split into the runtime-active name and a stale leftover."""
+
+    active: str | None
+    stale: str | None
+
+
+def resolve_thread_model_override(
+    runtime_paths: RuntimePaths,
+    thread_id: str | None,
+    *,
+    configured_models: Container[str],
+) -> _ThreadModelOverrideState:
+    """Classify one thread's stored override against the configured model names.
+
+    An override naming a model that no longer exists in the config is stale:
+    runtime resolution, `!model`, and the `thread_model` tool must all ignore
+    it rather than apply or report it as active.
+    """
+    override = _get_thread_model_override(runtime_paths, thread_id)
+    if override is None:
+        return _ThreadModelOverrideState(active=None, stale=None)
+    if override in configured_models:
+        return _ThreadModelOverrideState(active=override, stale=None)
+    return _ThreadModelOverrideState(active=None, stale=override)
 
 
 def set_thread_model_override(

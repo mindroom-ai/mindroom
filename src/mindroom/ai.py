@@ -1170,8 +1170,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     tool_count=len(response.tools) if response.tools is not None else 0,
                     prepared_history=prepared_run.prepared_history,
                 )
-                if run_metadata:
-                    run_metadata_collector.update(run_metadata)
+                run_metadata_collector.update(run_metadata)
 
             if response.status == RunStatus.cancelled:
                 partial_text = _extract_interrupted_partial_text(
@@ -1748,8 +1747,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 tool_count=state.observed_tool_calls,
                                 prepared_history=prepared_run.prepared_history,
                             )
-                            if cancelled_metadata:
-                                run_metadata_collector.update(cancelled_metadata)
+                            run_metadata_collector.update(cancelled_metadata)
                         if turn_recorder is None:
                             persist_interrupted_replay(
                                 scope_context=scope_context,
@@ -1806,8 +1804,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         ),
                         prepared_history=prepared_run.prepared_history,
                     )
-                    if run_metadata:
-                        run_metadata_collector.update(run_metadata)
+                    run_metadata_collector.update(run_metadata)
                 if turn_recorder is not None:
                     final_visible_body = state.assistant_text or state.canonical_final_body_candidate or ""
                     turn_recorder.record_completed(

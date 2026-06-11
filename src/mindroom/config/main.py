@@ -75,7 +75,7 @@ from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.thread_models import get_thread_model_override
+from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
@@ -1841,8 +1841,12 @@ class Config(BaseModel):
             if runtime_paths is None:
                 msg = "runtime_paths are required to resolve a thread-specific runtime model"
                 raise ValueError(msg)
-            thread_override = get_thread_model_override(runtime_paths, thread_id)
-            if thread_override is not None and thread_override in self.models:
+            thread_override = resolve_thread_model_override(
+                runtime_paths,
+                thread_id,
+                configured_models=self.models,
+            ).active
+            if thread_override is not None:
                 resolved_model_name = thread_override
         if resolved_model_name is None:
             if entity_name is None:
