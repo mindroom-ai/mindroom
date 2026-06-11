@@ -349,7 +349,7 @@ workers:
         enabled: false
         # Service/Deployment name. Must match the host in apiUrl/proxyUrl.
         name: agent-vault
-        # Agent Vault server image, pinned by digest. Required when enabled.
+        # Agent Vault server image, pinned by digest; defaults to cliImage.
         image: ""
         imagePullPolicy: IfNotPresent
         apiPort: 14321
@@ -389,7 +389,7 @@ workers:
       # interception. Re-runs are idempotent.
       bootstrap:
         enabled: false
-        # Agent Vault image, pinned by digest. Required when enabled.
+        # Agent Vault image, pinned by digest; defaults to cliImage.
         image: ""
         # Image providing kubectl, used to publish the CA ConfigMap. Required
         # when enabled.
@@ -400,6 +400,27 @@ workers:
         allowedDomains: ""
         inviteOnly: true
         resources: {}
+      # Optional wiring for the agent_vault_access tool: agents grant their
+      # requester UI access to the vault backing their own worker. When
+      # bootstrap.enabled, the bootstrap Job mints an owner-role agent and
+      # publishes its token into adminTokenSecret; the control plane reads it
+      # from a mounted file so a bootstrap re-run (token rotation) takes
+      # effect without a restart.
+      accessTool:
+        enabled: false
+        # Public base URL of the (deployer-gated) Agent Vault UI, e.g.
+        # https://example.com/agent-vault. Required when enabled.
+        uiBaseUrl: ""
+        # Domain that maps a requester's Matrix localpart to their vault
+        # account email. Required when enabled.
+        emailDomain: ""
+        # Owner-role agent the bootstrap Job creates/rotates for the tool.
+        adminAgentName: access-admin
+        # Secret the bootstrap Job publishes the token into (and the control
+        # plane mounts). Provide it yourself when bootstrap is disabled.
+        adminTokenSecret:
+          name: agent-vault-access-admin
+          key: token
 
 # Optional external HTTP proxy for dedicated Kubernetes workers.
 # This chart can point worker pods at an existing proxy Service and, when

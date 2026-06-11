@@ -79,6 +79,11 @@ AGENT_VAULT_ACCESS_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
         "api_url": "MINDROOM_AGENT_VAULT_ACCESS_API_URL",
         "admin_token": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN",
+        # File alternative to admin_token, read per call: a Secret mounted as a
+        # volume refreshes in place, so token rotation by a re-run of the vault
+        # bootstrap takes effect without a process restart (env values would
+        # need one).
+        "admin_token_file": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE",
         "ui_base_url": "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL",
         "email_domain": "MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN",
         "vault_name_prefix": "MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX",

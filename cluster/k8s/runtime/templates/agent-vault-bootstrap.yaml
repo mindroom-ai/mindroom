@@ -1,6 +1,7 @@
 {{- if .Values.workers.kubernetes.agentVault.bootstrap.enabled }}
 {{- $av := .Values.workers.kubernetes.agentVault -}}
 {{- $bs := $av.bootstrap -}}
+{{- $accessTool := $av.accessTool -}}
 {{- $name := include "mindroom-runtime.agentVaultBootstrapName" . -}}
 {{- /* Target the same vault API the workers use, so bootstrap also works
      against an externally managed Agent Vault (server.enabled=false). */ -}}
@@ -32,6 +33,19 @@ rules:
       - create
       - update
       - patch
+  {{- if $accessTool.enabled }}
+  # Publishing the access-tool admin token. `create` cannot be name-scoped;
+  # the binding is namespace-local and only the bootstrap SA holds it.
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - create
+      - update
+      - patch
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -67,7 +81,7 @@ spec:
       serviceAccountName: {{ $name }}
       initContainers:
         - name: bootstrap-owner
-          image: {{ required "workers.kubernetes.agentVault.bootstrap.image is required when bootstrap is enabled" $bs.image | quote }}
+          image: {{ include "mindroom-runtime.agentVaultBootstrapImage" . | quote }}
           command:
             - sh
             - -ec
@@ -113,6 +127,18 @@ spec:
                 --allowed-domains "$AGENT_VAULT_ALLOWED_DOMAINS"
               agent-vault ca fetch --address "$addr" > /work/ca.pem
               test -s /work/ca.pem
+              {{- if $accessTool.enabled }}
+              # Owner-role agent for the agent_vault_access tool. Re-runs
+              # rotate the token; the control plane re-reads it from the
+              # mounted Secret per call, so rotation needs no restart.
+              if ! agent-vault agent create {{ $accessTool.adminAgentName | quote }} \
+                --token-only > /work/access-admin-token; then
+                agent-vault agent rotate {{ $accessTool.adminAgentName | quote }} \
+                  --token-only > /work/access-admin-token
+              fi
+              agent-vault agent set-role {{ $accessTool.adminAgentName | quote }} --role owner
+              test -s /work/access-admin-token
+              {{- end }}
           env:
             - name: AGENT_VAULT_OWNER_EMAIL
               value: {{ required "workers.kubernetes.agentVault.ownerEmail is required when bootstrap is enabled" $av.ownerEmail | quote }}
@@ -137,6 +163,11 @@ spec:
               kubectl -n "$POD_NAMESPACE" create configmap {{ $av.workerCaConfigMapName }} \
                 --from-file=ca.pem=/work/ca.pem \
                 --dry-run=client -o yaml | kubectl apply -f -
+              {{- if $accessTool.enabled }}
+              kubectl -n "$POD_NAMESPACE" create secret generic {{ $accessTool.adminTokenSecret.name }} \
+                --from-file={{ $accessTool.adminTokenSecret.key }}=/work/access-admin-token \
+                --dry-run=client -o yaml | kubectl apply -f -
+              {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:

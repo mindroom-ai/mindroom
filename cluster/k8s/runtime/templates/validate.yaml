@@ -159,3 +159,7 @@
 {{- fail "approvedEgress.persistence.size is required when chart-managed approved egress persistence is enabled" -}}
 {{- end -}}
 {{- end -}}
+{{- $agentVault := .Values.workers.kubernetes.agentVault -}}
+{{- if and $agentVault.accessTool.enabled (not $agentVault.enabled) -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.enabled requires workers.kubernetes.agentVault.enabled=true" -}}
+{{- end -}}

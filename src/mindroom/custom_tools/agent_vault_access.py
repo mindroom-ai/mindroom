@@ -15,6 +15,7 @@ which worker reaches which vault.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote, urljoin
 
@@ -48,6 +49,7 @@ class AgentVaultAccessTools(Toolkit):
         env = AGENT_VAULT_ACCESS_ENV_BY_KEY
         self._api_url = (runtime_paths.env_value(env["api_url"]) or "").strip()
         self._admin_token = (runtime_paths.env_value(env["admin_token"]) or "").strip()
+        self._admin_token_file = (runtime_paths.env_value(env["admin_token_file"]) or "").strip()
         self._ui_base_url = (runtime_paths.env_value(env["ui_base_url"]) or "").strip()
         self._email_domain = (runtime_paths.env_value(env["email_domain"]) or "").strip().lstrip("@")
         self._vault_name_prefix = (
@@ -57,12 +59,13 @@ class AgentVaultAccessTools(Toolkit):
             name
             for name, value in (
                 (env["api_url"], self._api_url),
-                (env["admin_token"], self._admin_token),
                 (env["ui_base_url"], self._ui_base_url),
                 (env["email_domain"], self._email_domain),
             )
             if not value
         ]
+        if not self._admin_token and not self._admin_token_file:
+            missing.append(f"{env['admin_token']} or {env['admin_token_file']}")
         if missing:
             msg = f"AgentVaultAccessTools requires these environment values: {', '.join(sorted(missing))}"
             raise _AgentVaultAccessError(msg)
@@ -132,8 +135,23 @@ class AgentVaultAccessTools(Toolkit):
             return localpart
         return f"{localpart}@{self._email_domain}"
 
+    def _resolve_admin_token(self) -> str:
+        # Re-read the token file on every call so a rotated Secret (refreshed
+        # in place by the kubelet) takes effect without a process restart.
+        if self._admin_token_file:
+            try:
+                token = Path(self._admin_token_file).read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                msg = f"could not read the Agent Vault admin token file {self._admin_token_file!r}: {exc}"
+                raise _AgentVaultAccessError(msg) from exc
+            if not token:
+                msg = f"the Agent Vault admin token file {self._admin_token_file!r} is empty."
+                raise _AgentVaultAccessError(msg)
+            return token
+        return self._admin_token
+
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._admin_token}", "Content-Type": "application/json"}
+        return {"Authorization": f"Bearer {self._resolve_admin_token()}", "Content-Type": "application/json"}
 
     async def _ensure_vault(self, vault: str) -> None:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:

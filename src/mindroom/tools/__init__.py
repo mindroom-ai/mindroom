@@ -367,8 +367,22 @@ def _homeassistant_tools() -> type[Toolkit]:
             name="MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN",
             label="Agent Vault Admin Token",
             type="password",
-            required=True,
-            description="Owner/admin session or agent token used to create vaults and grant membership.",
+            required=False,
+            description=(
+                "Owner/admin session or agent token used to create vaults and grant membership. "
+                "Provide this or the admin token file."
+            ),
+        ),
+        ConfigField(
+            name="MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE",
+            label="Agent Vault Admin Token File",
+            type="text",
+            required=False,
+            placeholder="/etc/agent-vault-access/token",
+            description=(
+                "Path to a file holding the admin token, re-read on every call so an in-place "
+                "Secret rotation takes effect without a restart. Takes precedence over the inline token."
+            ),
         ),
         ConfigField(
             name="MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL",

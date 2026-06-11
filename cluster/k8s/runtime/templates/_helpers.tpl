@@ -457,3 +457,13 @@ app.kubernetes.io/component: agent-vault-bootstrap
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- end -}}
+
+{{- define "mindroom-runtime.agentVaultServerImage" -}}
+{{- $av := .Values.workers.kubernetes.agentVault -}}
+{{- required "workers.kubernetes.agentVault.server.image or cliImage is required when the Agent Vault server is enabled" (default $av.cliImage $av.server.image) -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultBootstrapImage" -}}
+{{- $av := .Values.workers.kubernetes.agentVault -}}
+{{- required "workers.kubernetes.agentVault.bootstrap.image or cliImage is required when bootstrap is enabled" (default $av.cliImage $av.bootstrap.image) -}}
+{{- end -}}

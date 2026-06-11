@@ -319,6 +319,22 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            {{- with .Values.workers.kubernetes.agentVault }}
+            {{- if .accessTool.enabled }}
+            - name: MINDROOM_AGENT_VAULT_ACCESS_API_URL
+              value: {{ .apiUrl | quote }}
+            - name: MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL
+              value: {{ required "workers.kubernetes.agentVault.accessTool.uiBaseUrl is required when the access tool is enabled" .accessTool.uiBaseUrl | quote }}
+            - name: MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN
+              value: {{ required "workers.kubernetes.agentVault.accessTool.emailDomain is required when the access tool is enabled" .accessTool.emailDomain | quote }}
+            - name: MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX
+              value: {{ .vaultNamePrefix | quote }}
+            # Mounted Secret file, not env: the kubelet refreshes the mount in
+            # place, so a bootstrap re-run (token rotation) needs no restart.
+            - name: MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE
+              value: {{ printf "/etc/agent-vault-access/%s" .accessTool.adminTokenSecret.key | quote }}
+            {{- end }}
+            {{- end }}
             {{- end }}
             {{- if .Values.matrix.homeserverUrl }}
             - name: MATRIX_HOMESERVER
@@ -422,6 +438,11 @@ spec:
               subPath: {{ .Values.approvedEgress.allowlist.key | quote }}
               readOnly: true
             {{- end }}
+            {{- if .Values.workers.kubernetes.agentVault.accessTool.enabled }}
+            - name: agent-vault-access-admin
+              mountPath: /etc/agent-vault-access
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -505,6 +526,14 @@ spec:
         {{- if eq .Values.workers.backend "static_runner" }}
         - name: sandbox-workspace
           emptyDir: {}
+        {{- end }}
+        {{- if .Values.workers.kubernetes.agentVault.accessTool.enabled }}
+        - name: agent-vault-access-admin
+          secret:
+            secretName: {{ .Values.workers.kubernetes.agentVault.accessTool.adminTokenSecret.name }}
+            # Optional: lets the control plane start before the first
+            # bootstrap publishes the token; the tool errors cleanly until then.
+            optional: true
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
