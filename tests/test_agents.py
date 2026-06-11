@@ -4420,6 +4420,10 @@ def test_team_member_matches_solo_agent_construction() -> None:
         assert member.max_tool_calls_from_history == solo.max_tool_calls_from_history
         assert member.knowledge == solo.knowledge
         assert member.culture_manager == solo.culture_manager
+        assert member.add_culture_to_context == solo.add_culture_to_context
+        assert member.update_cultural_knowledge == solo.update_cultural_knowledge
+        assert member.enable_agentic_culture == solo.enable_agentic_culture
+        assert member.compress_tool_results == solo.compress_tool_results
 
         # The only authored construction delta: members never get the Matrix
         # reaction-based interactive question prompt.
