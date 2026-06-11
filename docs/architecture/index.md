@@ -71,10 +71,9 @@ MindRoom's architecture consists of several key components working together.
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
-| `streaming_delivery.py` | Internal delivery and supervision helpers for streaming responses |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
-| `streaming.py` | Response streaming via progressive message edits |
+| `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |

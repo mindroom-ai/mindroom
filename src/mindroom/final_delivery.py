@@ -24,6 +24,18 @@ class StreamTransportOutcome:  # noqa: D101
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None
 
+    @property
+    def visible_event_id(self) -> str | None:
+        """Return the streamed event id only when the stream showed real visible body text."""
+        if self.visible_body_state != "visible_body":
+            return None
+        return self.last_physical_stream_event_id
+
+    @property
+    def visible_body_text(self) -> str:
+        """Return the current streamed body snapshot used for hook and outcome decisions."""
+        return self.rendered_body or ""
+
 
 @dataclass(frozen=True)
 class FinalDeliveryOutcome:  # noqa: D101

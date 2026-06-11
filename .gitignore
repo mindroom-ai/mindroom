@@ -250,7 +250,6 @@ mindroom-test-storage/
 # Local AI-agent artifacts
 .claude/LIVE-TEST.md
 .claude/REPORT.md
-.claude/
 mindroom-test-storage/
 REVIEW-*.md
 .codex-worktrees/

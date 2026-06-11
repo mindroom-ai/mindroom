@@ -15,7 +15,8 @@ from mindroom.attachment_media import (
     _INLINE_MEDIA_RECORDS_BY_PATH,
     _MAX_INLINE_MEDIA_RECORDS,
     _remember_attachment_record,
-    resolve_attachment_media,
+    attachment_records_to_media,
+    resolve_scoped_attachments,
 )
 from mindroom.attachments import AttachmentRecord, register_local_attachment
 from mindroom.history.agno_team_patch import _dedupe_run_messages_inline_media
@@ -51,7 +52,7 @@ def test_inline_media_record_caches_evict_oldest_entries(tmp_path: Path) -> None
     assert all(str((tmp_path / f"{index}.png").resolve()) not in _INLINE_MEDIA_RECORDS_BY_PATH for index in range(50))
 
 
-def test_resolve_attachment_media_caches_records_before_partition(tmp_path: Path) -> None:
+def test_inline_media_dedupe_keeps_earliest_copy(tmp_path: Path) -> None:
     old_path = tmp_path / "old.png"
     new_path = tmp_path / "new.png"
     image_bytes = b"\x89PNG\r\n\x1a\nsame"
@@ -74,14 +75,17 @@ def test_resolve_attachment_media_caches_records_before_partition(tmp_path: Path
     assert old_record is not None
     assert new_record is not None
 
-    resolved_ids, _, images, _, _ = resolve_attachment_media(
+    resolved_records = resolve_scoped_attachments(
         tmp_path,
         [old_record.attachment_id, new_record.attachment_id],
-        current_attachment_ids={new_record.attachment_id},
     )
+    _, images, _, _ = attachment_records_to_media(resolved_records)
 
-    assert resolved_ids == [old_record.attachment_id, new_record.attachment_id]
-    assert [image.id for image in images] == [new_record.attachment_id]
+    assert [record.attachment_id for record in resolved_records] == [
+        old_record.attachment_id,
+        new_record.attachment_id,
+    ]
+    assert [image.id for image in images] == [old_record.attachment_id, new_record.attachment_id]
     assert _INLINE_MEDIA_RECORDS_BY_ID[old_record.attachment_id].local_path == old_record.local_path
     assert _INLINE_MEDIA_RECORDS_BY_ID[new_record.attachment_id].local_path == new_record.local_path
     assert _INLINE_MEDIA_RECORDS_BY_PATH[str(old_record.local_path.resolve())].attachment_id == old_record.attachment_id
@@ -118,8 +122,9 @@ def test_resolve_attachment_media_caches_records_before_partition(tmp_path: Path
 
     _dedupe_run_messages_inline_media(run_messages)
 
+    # The earliest (history) copy wins so media stays at a cache-stable position.
     assert [image.id for message in run_messages.messages for image in (message.images or [])] == [
-        new_record.attachment_id,
+        old_record.attachment_id,
     ]
-    assert old_message.images == []
-    assert [image.id for image in (new_message.images or [])] == [new_record.attachment_id]
+    assert [image.id for image in (old_message.images or [])] == [old_record.attachment_id]
+    assert new_message.images == []

@@ -11,6 +11,7 @@ import sys
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
@@ -38,7 +39,7 @@ from mindroom.approval_manager import (
     get_approval_store,
     initialize_approval_store,
 )
-from mindroom.attachments import _attachment_id_for_event, register_local_attachment
+from mindroom.attachments import AttachmentRecord, _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingGate, IngressOrderReservation, ReadyPendingEvent
@@ -174,7 +175,6 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
-    from pathlib import Path
 
     from mindroom.post_response_effects import ResponseOutcome
     from mindroom.turn_store import TurnStore
@@ -803,6 +803,16 @@ def _visible_message(
         event_id=event_id,
         timestamp=timestamp,
         content=content,
+    )
+
+
+def _attachment_record_stub(attachment_id: str, *, sender: str = "@user:localhost") -> AttachmentRecord:
+    """Create a minimal attachment record for mocked media resolution."""
+    return AttachmentRecord(
+        attachment_id=attachment_id,
+        local_path=Path(f"media/{attachment_id}.bin"),
+        kind="image",
+        sender=sender,
     )
 
 
@@ -7485,8 +7495,12 @@ class TestAgentBot:
                 return_value=attachment_record,
             ),
             patch(
-                "mindroom.inbound_turn_normalizer.resolve_attachment_media",
-                return_value=([attachment_id], [], [image], [], []),
+                "mindroom.inbound_turn_normalizer.resolve_scoped_attachments",
+                return_value=[_attachment_record_stub(attachment_id)],
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.attachment_records_to_media",
+                return_value=([], [image], [], []),
             ),
         ):
             await bot._on_media_message(room, event)
@@ -7496,9 +7510,9 @@ class TestAgentBot:
         generate_kwargs = bot._generate_response.await_args.kwargs
         response_target = generate_kwargs["response_envelope"].target
         assert response_target.room_id == "!test:localhost"
-        assert "Available attachment IDs" not in generate_kwargs["prompt"]
+        assert "Attachments sent with the current message" not in generate_kwargs["prompt"]
         assert generate_kwargs["model_prompt"] is not None
-        assert "Available attachment IDs" in generate_kwargs["model_prompt"]
+        assert "Attachments sent with the current message" in generate_kwargs["model_prompt"]
         assert attachment_id in generate_kwargs["model_prompt"]
         assert response_target.reply_to_event_id == "$img_event"
         assert response_target.resolved_thread_id == "$img_event"
@@ -8029,9 +8043,16 @@ class TestAgentBot:
                 return_value=[],
             ),
             patch(
-                "mindroom.inbound_turn_normalizer.resolve_attachment_media",
-                return_value=([current_attachment_id, history_attachment_id], [], [image], [], []),
+                "mindroom.inbound_turn_normalizer.resolve_scoped_attachments",
+                return_value=[
+                    _attachment_record_stub(current_attachment_id),
+                    _attachment_record_stub(history_attachment_id),
+                ],
             ) as mock_resolve_media,
+            patch(
+                "mindroom.inbound_turn_normalizer.attachment_records_to_media",
+                return_value=([], [image], [], []),
+            ) as mock_records_to_media,
         ):
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
@@ -8042,9 +8063,12 @@ class TestAgentBot:
                 [current_attachment_id, history_attachment_id],
                 room_id="!test:localhost",
                 thread_id="$thread_root",
-                current_attachment_ids={current_attachment_id},
             ),
         ]
+        # Only current-turn records convert to inline media; history media is
+        # pinned to its thread-history message instead.
+        converted_records = mock_records_to_media.call_args.args[0]
+        assert [record.attachment_id for record in converted_records] == [current_attachment_id]
 
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
@@ -8052,8 +8076,10 @@ class TestAgentBot:
         assert current_attachment_id not in generate_kwargs["prompt"]
         assert history_attachment_id not in generate_kwargs["prompt"]
         assert generate_kwargs["model_prompt"] is not None
-        assert current_attachment_id in generate_kwargs["model_prompt"]
-        assert history_attachment_id in generate_kwargs["model_prompt"]
+        model_prompt = generate_kwargs["model_prompt"]
+        assert model_prompt.startswith("Attachments sent with the current message")
+        assert current_attachment_id in model_prompt
+        assert history_attachment_id not in model_prompt
         tracker.record_handled_turn.assert_called_once_with(
             _agent_response_handled_turn(
                 agent_name=mock_agent_user.agent_name,
@@ -8069,13 +8095,13 @@ class TestAgentBot:
 
     @pytest.mark.parametrize("kind", ["audio", "image", "file", "video"])
     @pytest.mark.asyncio
-    async def test_dispatch_payload_inline_media_dedupes_same_content_across_history(
+    async def test_dispatch_payload_media_is_current_turn_only(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         kind: _MediaKind,
     ) -> None:
-        """Inline media should keep one copy while IDs stay thread/history-scoped."""
+        """Inline media carries only current-turn attachments while IDs stay thread/history-scoped."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -8135,12 +8161,12 @@ class TestAgentBot:
         assert payload.attachment_ids == [current_attachment_id, thread_attachment_id, history_attachment_id]
 
     @pytest.mark.asyncio
-    async def test_dispatch_payload_inline_media_distinct_content_all_kept(
+    async def test_dispatch_payload_keeps_history_media_off_current_turn(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Distinct images should each remain inline across current, thread, and history."""
+        """Thread and history media stay pinned to their messages, not the current turn."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -8152,12 +8178,12 @@ class TestAgentBot:
             attachment_id=current_attachment_id,
             filename="current.png",
         )
-        thread_path = _register_payload_image_attachment(
+        _register_payload_image_attachment(
             tmp_path,
             attachment_id=thread_attachment_id,
             filename="thread.png",
         )
-        history_path = _register_payload_image_attachment(
+        _register_payload_image_attachment(
             tmp_path,
             attachment_id=history_attachment_id,
             filename="history.png",
@@ -8187,59 +8213,8 @@ class TestAgentBot:
             )
 
         inline_image_paths = [image.filepath for image in payload.media.images]
-        assert inline_image_paths == [current_path, thread_path, history_path]
+        assert inline_image_paths == [current_path]
         assert payload.attachment_ids == [current_attachment_id, thread_attachment_id, history_attachment_id]
-
-    @pytest.mark.asyncio
-    async def test_dispatch_payload_inline_media_current_event_wins_over_history_duplicate(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """The current event's media copy should be the inline representative for duplicates."""
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        current_attachment_id = "att_current_duplicate"
-        history_attachment_id = "att_history_duplicate"
-        same_content = b"\x89PNG\r\n\x1a\nsame"
-        current_path = _register_payload_media_attachment(
-            tmp_path,
-            kind="image",
-            attachment_id=current_attachment_id,
-            filename="current-wins.png",
-            content=same_content,
-        )
-        _register_payload_media_attachment(
-            tmp_path,
-            kind="image",
-            attachment_id=history_attachment_id,
-            filename="history-duplicate.png",
-            content=same_content,
-        )
-        thread_history = [
-            _visible_message(
-                sender="@user:localhost",
-                event_id="$history",
-                content={ATTACHMENT_IDS_KEY: [history_attachment_id]},
-            ),
-        ]
-
-        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
-            DispatchPayloadWithAttachmentsRequest(
-                room_id="!test:localhost",
-                prompt="describe this",
-                current_attachment_ids=[current_attachment_id],
-                thread_id=None,
-                media_thread_id="$thread",
-                thread_history=thread_history,
-            ),
-        )
-
-        assert len(payload.media.images) == 1
-        assert payload.media.images[0].id == current_attachment_id
-        assert payload.media.images[0].filepath == current_path
-        assert payload.attachment_ids == [current_attachment_id, history_attachment_id]
 
     @pytest.mark.asyncio
     async def test_dispatch_payload_inline_media_empty_when_no_attachments(
@@ -8319,8 +8294,12 @@ class TestAgentBot:
                 return_value=[],
             ),
             patch(
-                "mindroom.inbound_turn_normalizer.resolve_attachment_media",
-                return_value=(["att_image"], [], [stored_image], [], []),
+                "mindroom.inbound_turn_normalizer.resolve_scoped_attachments",
+                return_value=[_attachment_record_stub("att_image")],
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.attachment_records_to_media",
+                return_value=([], [stored_image], [], []),
             ),
         ):
             payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
@@ -8338,7 +8317,7 @@ class TestAgentBot:
         assert payload.attachment_ids == ["att_image"]
         assert payload.prompt == "describe this"
         assert payload.model_prompt is not None
-        assert "Available attachment IDs" in payload.model_prompt
+        assert "Attachments sent with the current message" in payload.model_prompt
         assert "att_image" in payload.model_prompt
         assert list(payload.media.images) == [stored_image, fallback_image]
 
@@ -8361,8 +8340,12 @@ class TestAgentBot:
                 return_value=[],
             ),
             patch(
-                "mindroom.inbound_turn_normalizer.resolve_attachment_media",
-                return_value=(["att_image"], [], [stored_image], [], []),
+                "mindroom.inbound_turn_normalizer.resolve_scoped_attachments",
+                return_value=[_attachment_record_stub("att_image")],
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.attachment_records_to_media",
+                return_value=([], [stored_image], [], []),
             ),
         ):
             payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
@@ -8378,7 +8361,7 @@ class TestAgentBot:
 
         assert payload.prompt == "describe this"
         assert payload.model_prompt is not None
-        assert "Available attachment IDs" in payload.model_prompt
+        assert "Attachments sent with the current message" in payload.model_prompt
         assert "att_image" in payload.model_prompt
 
     @pytest.mark.asyncio
@@ -8565,9 +8548,9 @@ class TestAgentBot:
         assert response_target.source_thread_id is None
         assert generate_kwargs["user_id"] == "@user:localhost"
         assert generate_kwargs["attachment_ids"] == [attachment_id]
-        assert "Available attachment IDs" not in generate_kwargs["prompt"]
+        assert "Attachments sent with the current message" not in generate_kwargs["prompt"]
         assert generate_kwargs["model_prompt"] is not None
-        assert "Available attachment IDs" in generate_kwargs["model_prompt"]
+        assert "Attachments sent with the current message" in generate_kwargs["model_prompt"]
         assert attachment_id in generate_kwargs["model_prompt"]
         media = generate_kwargs["media"]
         assert len(media.files) == 1
@@ -9408,8 +9391,6 @@ class TestAgentBot:
         bot._generate_response = AsyncMock(return_value="$response")
         install_generate_response_mock(bot, bot._generate_response)
 
-        fake_image = Image(content=b"png-bytes", mime_type="image/png")
-
         # Simulate the routing mention event in a thread rooted at the image
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_calculator:localhost")
 
@@ -9456,8 +9437,8 @@ class TestAgentBot:
                 return_value=["att_img_root"],
             ) as mock_resolve_attachment_ids,
             patch(
-                "mindroom.inbound_turn_normalizer.resolve_attachment_media",
-                return_value=(["att_img_root"], [], [fake_image], [], []),
+                "mindroom.inbound_turn_normalizer.resolve_scoped_attachments",
+                return_value=[_attachment_record_stub("att_img_root")],
             ),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -9472,8 +9453,11 @@ class TestAgentBot:
         mock_resolve_attachment_ids.assert_awaited_once()
         bot._generate_response.assert_awaited_once()
         call_kwargs = bot._generate_response.call_args.kwargs
-        assert list(call_kwargs["media"].images) == [fake_image]
+        # The root image is a thread-history attachment now, so it is pinned to
+        # its history message instead of riding the current-turn media inputs.
+        assert list(call_kwargs["media"].images) == []
         assert call_kwargs["attachment_ids"] == ["att_img_root"]
+        assert call_kwargs["model_prompt"] is None
 
     @pytest.mark.asyncio
     async def test_decide_team_for_sender_passes_sender_filtered_dm_agents(

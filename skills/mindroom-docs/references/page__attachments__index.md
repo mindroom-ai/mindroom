@@ -43,11 +43,21 @@ Attachments work in both direct messages and threads, and with both individual a
 ## Attachment IDs
 
 Each uploaded file or video is assigned a stable attachment ID (e.g., `att_abc123`).
-The agent's prompt is augmented with the available IDs:
+Attachments sent with the current message are listed in the prompt with full provenance (kind, filename, sender, send time, and originating event ID):
 
 ```
-Available attachment IDs: att_abc123. Use tool calls to inspect or process them.
+Attachments sent with the current message (use tool calls to inspect or process them by ID):
+- att_abc123 (image, "car.jpg", from @user:example.org, sent 2026-06-06 09:00 UTC, event $abc)
 ```
+
+Earlier attachments stay attached to the conversation messages that carried them: when thread history is rendered for the model, each message gets an inline annotation and (for user messages) the media itself, so attachments appear in chronological position:
+
+```
+@user:example.org: check this out
+[attachments: att_def456 (image, "house.jpg")]
+```
+
+Keeping media bytes pinned to their original messages also keeps the request prefix stable across turns, so provider prompt caching covers previously sent media instead of re-processing it every turn.
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
@@ -72,7 +82,7 @@ agents:
 
 | Operation | Description |
 |-----------|-------------|
-| `list_attachments(target?)` | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, created_at) |
+| `list_attachments(target?)` | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, event_timestamp, created_at) |
 | `get_attachment(attachment_id, mindroom_output_path?)` | Return one context attachment record, or save its bytes to a workspace-relative path and return a save receipt |
 | `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`) |
 

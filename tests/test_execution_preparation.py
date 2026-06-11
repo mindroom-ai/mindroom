@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from agno.models.message import Message
 from agno.run.agent import RunOutput
@@ -9,14 +11,16 @@ from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
 from mindroom import execution_preparation
+from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.execution_preparation import (
     _build_thread_history_messages,
     _build_unseen_context_messages,
     _fallback_static_token_budget,
     _prepare_execution_context_common,
+    _ThreadAttachmentContext,
     render_prepared_messages_text,
 )
 from mindroom.history import HistoryPolicy, HistoryScope, PreparedScopeHistory, ResolvedHistorySettings
@@ -24,6 +28,9 @@ from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.runtime import _ResolvedPreparationInputs
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import make_visible_message
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _config() -> Config:
@@ -152,6 +159,232 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
     assert messages[0].content == f"@alice:localhost: {'x' * 199}…"
     assert long_body not in str(messages[0].content)
     assert messages[1].content == "Current request"
+
+
+def test_fallback_thread_history_pins_attachments_to_their_messages(tmp_path: Path) -> None:
+    """History attachments annotate and attach media on the message that carried them."""
+    image_path = tmp_path / "car.jpg"
+    image_path.write_bytes(b"\xff\xd8\xffjpeg")
+    record = register_local_attachment(
+        tmp_path,
+        image_path,
+        kind="image",
+        attachment_id="att_car",
+        filename="car.jpg",
+        mime_type="image/jpeg",
+        room_id="!room:localhost",
+    )
+    assert record is not None
+
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body="look at this",
+                event_id="$img",
+                content={ATTACHMENT_IDS_KEY: ["att_car"]},
+            ),
+            make_visible_message(
+                sender="@alice:localhost",
+                body="no attachments here",
+                event_id="$text",
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+    )
+
+    assert len(messages) == 3
+    history_with_media = messages[0]
+    assert history_with_media.role == "user"
+    assert history_with_media.content == ('@alice:localhost: look at this\n[attachments: att_car (image, "car.jpg")]')
+    assert [image.id for image in (history_with_media.images or [])] == ["att_car"]
+    assert messages[1].content == "@alice:localhost: no attachments here"
+    assert not messages[1].images
+    assert not messages[2].images
+
+
+def test_fallback_thread_history_maps_raw_media_events_to_attachments(tmp_path: Path) -> None:
+    """Raw media events without MindRoom metadata resolve via the deterministic event ID."""
+    attachment_id = _attachment_id_for_event("$raw-img")
+    image_path = tmp_path / "photo.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    record = register_local_attachment(
+        tmp_path,
+        image_path,
+        kind="image",
+        attachment_id=attachment_id,
+        filename="photo.png",
+        mime_type="image/png",
+        room_id="!room:localhost",
+    )
+    assert record is not None
+
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body="photo.png",
+                event_id="$raw-img",
+                content={"msgtype": "m.image", "body": "photo.png"},
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+    )
+
+    assert messages[0].content == (f'@alice:localhost: photo.png\n[attachments: {attachment_id} (image, "photo.png")]')
+    assert [image.id for image in (messages[0].images or [])] == [attachment_id]
+
+
+def test_fallback_thread_history_agent_attachments_annotate_without_media(tmp_path: Path) -> None:
+    """Assistant-authored attachments surface as text only; providers reject assistant media."""
+    file_path = tmp_path / "report.pdf"
+    file_path.write_bytes(b"%PDF-1.4")
+    record = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_report",
+        filename="report.pdf",
+        room_id="!room:localhost",
+    )
+    assert record is not None
+
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body="here is the report",
+                event_id="$agent-file",
+                content={ATTACHMENT_IDS_KEY: ["att_report"]},
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+    )
+
+    assert messages[0].role == "assistant"
+    assert messages[0].content == 'here is the report\n[attachments: att_report (file, "report.pdf")]'
+    assert not messages[0].files
+
+
+def test_fallback_thread_history_drops_cross_room_attachments(tmp_path: Path) -> None:
+    """Attachment references from other rooms neither annotate nor attach media."""
+    file_path = tmp_path / "secret.txt"
+    file_path.write_text("secret", encoding="utf-8")
+    record = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_other_room",
+        filename="secret.txt",
+        room_id="!other:localhost",
+    )
+    assert record is not None
+
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body="see file",
+                event_id="$cross",
+                content={ATTACHMENT_IDS_KEY: ["att_other_room"]},
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+    )
+
+    assert messages[0].content == "@alice:localhost: see file"
+    assert not messages[0].files
+
+
+def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) -> None:
+    """Attachment references from another thread in the same room stay out of scope."""
+    file_path = tmp_path / "other-thread.txt"
+    file_path.write_text("other thread", encoding="utf-8")
+    cross_thread = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_other_thread",
+        filename="other-thread.txt",
+        room_id="!room:localhost",
+        thread_id="$other_thread",
+    )
+    in_thread = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_in_thread",
+        filename="in-thread.txt",
+        room_id="!room:localhost",
+        thread_id="$thread",
+    )
+    assert cross_thread is not None
+    assert in_thread is not None
+
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body="see files",
+                event_id="$in-thread",
+                thread_id="$thread",
+                content={ATTACHMENT_IDS_KEY: ["att_other_thread", "att_in_thread"]},
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+    )
+
+    assert messages[0].content == ('@alice:localhost: see files\n[attachments: att_in_thread (file, "in-thread.txt")]')
+    assert [file.id for file in (messages[0].files or [])] == ["att_in_thread"]
+
+
+def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path) -> None:
+    """Thread-root media records (registered under the root event ID) stay in scope."""
+    image_path = tmp_path / "root.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    record = register_local_attachment(
+        tmp_path,
+        image_path,
+        kind="image",
+        attachment_id="att_root",
+        filename="root.png",
+        room_id="!room:localhost",
+        thread_id="$root",
+    )
+    assert record is not None
+
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body="root image",
+                event_id="$root",
+                content={ATTACHMENT_IDS_KEY: ["att_root"]},
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+    )
+
+    assert messages[0].content == '@alice:localhost: root image\n[attachments: att_root (image, "root.png")]'
+    assert [image.id for image in (messages[0].images or [])] == ["att_root"]
 
 
 def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_context() -> None:

@@ -63,7 +63,7 @@ Matrix sync callback
        -> coalescing.py                                          (debounced batching per room/thread)
        -> text_ingress_dispatch.py + turn_policy.py              (commands; ignore / route / respond decision)
        -> response_runner.py -> ai.py                            (lifecycle lock, Agno agent/team run)
-       -> streaming.py + streaming_delivery.py -> delivery_gateway.py  (progressive edits, Matrix send)
+       -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
        -> turn_store.py / handled_turns.py                       (durable dedup so restarts don't double-reply)
 ```
 
@@ -91,7 +91,6 @@ Matrix sync callback
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
-| `streaming_delivery.py` | Internal delivery and supervision helpers for streaming responses |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval_manager.py` | Matrix-backed tool approval runtime state |
@@ -133,7 +132,7 @@ Matrix sync callback
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
 | `voice_handler.py` | Voice message download, transcription, and command recognition |
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
-| `streaming.py` | Response streaming via progressive message edits |
+| `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachment_media.py` | Convert attachment records to Agno media objects |

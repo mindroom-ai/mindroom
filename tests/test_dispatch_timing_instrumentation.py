@@ -19,7 +19,7 @@ from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallC
 from mindroom.matrix.cache.thread_writes import ThreadOutboundWritePolicy
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.media_inputs import MediaInputs
-from mindroom.streaming_delivery import _queue_delivery_request
+from mindroom.streaming import _queue_delivery_request
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
 
 if TYPE_CHECKING:
@@ -87,7 +87,7 @@ async def test_queue_delivery_request_marks_enqueued_delivery() -> None:
     delivery_queue: asyncio.Queue[object | None] = asyncio.Queue()
 
     with patch(
-        "mindroom.streaming_delivery.emit_timing_event",
+        "mindroom.streaming.emit_timing_event",
         side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
         create=True,
     ):

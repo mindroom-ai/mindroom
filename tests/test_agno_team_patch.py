@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from mindroom.attachment_media import (
     _INLINE_MEDIA_RECORDS_BY_ID,
     _INLINE_MEDIA_RECORDS_BY_PATH,
-    resolve_attachment_media,
+    resolve_scoped_attachments,
 )
 from mindroom.attachments import AttachmentRecord, register_local_attachment
 from mindroom.history import agno_team_patch
@@ -143,7 +143,7 @@ async def _patched_history_run_messages(
     history_messages: list[Message],
     current_images: list[Image],
 ) -> RunMessages:
-    resolve_attachment_media(tmp_path, [record.attachment_id for record in records])
+    resolve_scoped_attachments(tmp_path, [record.attachment_id for record in records])
     model = RecordingOpenAIChat(id="gpt-test", api_key="sk-test")
     team = _team(model)
     team.num_history_runs = len(history_messages)
@@ -308,9 +308,10 @@ async def test_cross_run_image_dedupe_collapses_22_replays_to_3_inlines(tmp_path
     assert len(images) == 3
     assert {image.id for image in images} == {"att_a", "att_b", "att_c"}
     assert len(history_user_messages) == 22
-    assert all((message.images or []) == [] for message in history_user_messages)
+    assert {image.id for image in (history_user_messages[0].images or [])} == {"att_a", "att_b", "att_c"}
+    assert all((message.images or []) == [] for message in history_user_messages[1:])
     assert run_messages.user_message is not None
-    assert {image.id for image in (run_messages.user_message.images or [])} == {"att_a", "att_b", "att_c"}
+    assert run_messages.user_message.images == []
 
 
 @pytest.mark.asyncio
@@ -329,15 +330,15 @@ async def test_two_att_ids_with_identical_bytes_collapse_to_one(tmp_path: Path) 
     history_user_messages = [
         message for message in run_messages.messages if message.from_history and message.role == "user"
     ]
-    assert [image.id for image in _all_images(run_messages)] == ["att_newer"]
+    assert [image.id for image in _all_images(run_messages)] == ["att_older"]
     assert run_messages.user_message is not None
-    assert [image.id for image in (run_messages.user_message.images or [])] == ["att_newer"]
+    assert run_messages.user_message.images == []
     assert len(history_user_messages) == 1
-    assert history_user_messages[0].images == []
+    assert [image.id for image in (history_user_messages[0].images or [])] == ["att_older"]
 
 
 @pytest.mark.asyncio
-async def test_current_image_wins_over_matching_history_image(tmp_path: Path) -> None:
+async def test_history_image_wins_over_matching_current_image(tmp_path: Path) -> None:
     record = _register_image_attachment(tmp_path, "att_same", b"\x89PNG\r\n\x1a\nsame")
     history_message = Message(role="user", content="history", images=[_image(record)])
 
@@ -353,9 +354,9 @@ async def test_current_image_wins_over_matching_history_image(tmp_path: Path) ->
     ]
     assert [image.id for image in _all_images(run_messages)] == ["att_same"]
     assert run_messages.user_message is not None
-    assert [image.id for image in (run_messages.user_message.images or [])] == ["att_same"]
+    assert run_messages.user_message.images == []
     assert len(history_user_messages) == 1
-    assert history_user_messages[0].images == []
+    assert [image.id for image in (history_user_messages[0].images or [])] == ["att_same"]
 
 
 @pytest.mark.asyncio
@@ -363,7 +364,7 @@ async def test_non_att_image_id_not_used_as_lookup_key(tmp_path: Path) -> None:
     wrong_record = _register_image_attachment(tmp_path, "att_wrong", b"\x89PNG\r\n\x1a\nwrong")
     filepath_record = _register_image_attachment(tmp_path, "att_filepath", b"\x89PNG\r\n\x1a\nfilepath")
     random_id = "random-uuid-from-agno"
-    resolve_attachment_media(tmp_path, [wrong_record.attachment_id, filepath_record.attachment_id])
+    resolve_scoped_attachments(tmp_path, [wrong_record.attachment_id, filepath_record.attachment_id])
     _INLINE_MEDIA_RECORDS_BY_ID[random_id] = wrong_record
     history_message = Message(role="user", content="history", images=[_image(filepath_record, image_id=random_id)])
 
@@ -377,11 +378,11 @@ async def test_non_att_image_id_not_used_as_lookup_key(tmp_path: Path) -> None:
     history_user_messages = [
         message for message in run_messages.messages if message.from_history and message.role == "user"
     ]
-    assert [image.id for image in _all_images(run_messages)] == ["att_filepath"]
+    assert [image.id for image in _all_images(run_messages)] == [random_id]
     assert run_messages.user_message is not None
-    assert [image.id for image in (run_messages.user_message.images or [])] == ["att_filepath"]
+    assert run_messages.user_message.images == []
     assert len(history_user_messages) == 1
-    assert history_user_messages[0].images == []
+    assert [image.id for image in (history_user_messages[0].images or [])] == [random_id]
 
 
 def test_apply_patch_is_idempotent() -> None:
