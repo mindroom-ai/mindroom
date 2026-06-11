@@ -55,7 +55,6 @@ class _KnowledgeResolution:
     """Resolved knowledge plus availability diagnostics for one agent."""
 
     knowledge: Knowledge | None
-    missing: tuple[str, ...] = ()
     unavailable: Mapping[str, KnowledgeAvailabilityDetail] = field(default_factory=dict)
 
 
@@ -447,7 +446,6 @@ def resolve_agent_knowledge_access(
         )
     return _KnowledgeResolution(
         knowledge=_merge_knowledge(agent_name, knowledges),
-        missing=tuple(missing_base_ids),
         unavailable=unavailable_bases,
     )
 
