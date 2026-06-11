@@ -12814,19 +12814,15 @@ class TestAgentBot:
 
         mock_select_team_mode = AsyncMock(return_value=TeamMode.COORDINATE)
         with (
-            patch.object(TurnController, "_log_dispatch_latency"),
+            patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch("mindroom.turn_controller.select_ad_hoc_team_mode", new=mock_select_team_mode),
         ):
-
-            async def payload_builder(_context: MessageContext) -> DispatchPayload:
-                return DispatchPayload(prompt="help me")
-
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
                 dispatch,
                 action,
-                payload_builder,
+                DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
@@ -12905,19 +12901,15 @@ class TestAgentBot:
 
         mock_select_team_mode = AsyncMock(return_value=TeamMode.COLLABORATE)
         with (
-            patch.object(TurnController, "_log_dispatch_latency"),
+            patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch("mindroom.turn_controller.select_ad_hoc_team_mode", new=mock_select_team_mode),
         ):
-
-            async def payload_builder(_context: MessageContext) -> DispatchPayload:
-                return DispatchPayload(prompt="help me")
-
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
                 dispatch,
                 action,
-                payload_builder,
+                DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
