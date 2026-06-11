@@ -69,7 +69,6 @@ from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
     deactivate_plugins,
-    get_configured_plugin_roots,
     load_plugins,
     prepare_plugin_reload,
     reload_plugins,
@@ -84,12 +83,7 @@ from .credentials_sync import sync_env_to_credentials
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import configured_entity_names
-from .orchestration.plugin_watch import (
-    capture_plugin_root_snapshots,
-    replace_plugin_root_snapshots,
-    sync_plugin_root_snapshots,
-    watch_plugins_task,
-)
+from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
 from .orchestration.rooms import get_authorized_user_ids_to_invite, get_root_space_user_ids_to_invite
 from .orchestration.runtime import (
     STARTUP_RETRY_INITIAL_DELAY_SECONDS,
@@ -220,8 +214,7 @@ class _MultiAgentOrchestrator:
     _plugin_reload_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
-    _plugin_watch_last_snapshot_by_root: dict[Path, dict[Path, int]] = field(default_factory=dict, init=False)
-    _plugin_watch_state_revision: int = field(default=0, init=False)
+    plugin_watch: PluginWatchState = field(init=False)
     _knowledge_refresh_scheduler: KnowledgeRefreshScheduler = field(init=False)
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
@@ -240,6 +233,7 @@ class _MultiAgentOrchestrator:
         )
         self._knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler)
+        self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
         self.config_reload = ConfigReloadLifecycle(
             runtime_paths=self.runtime_paths,
             is_running=lambda: self.running,
@@ -716,40 +710,6 @@ class _MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.hook_registry = hook_registry
 
-    def _sync_plugin_watch_roots(self, config: Config | None = None) -> tuple[Path, ...]:
-        """Align watcher baselines with the currently configured plugin roots."""
-        active_config = self.config if config is None else config
-        configured_roots = (
-            get_configured_plugin_roots(active_config, self.runtime_paths) if active_config is not None else ()
-        )
-        sync_plugin_root_snapshots(configured_roots, self._plugin_watch_last_snapshot_by_root)
-        return configured_roots
-
-    def _replace_plugin_watch_snapshots(
-        self,
-        configured_roots: tuple[Path, ...],
-        root_snapshots: dict[Path, dict[Path, int]],
-    ) -> None:
-        """Replace watcher baselines and clear any stale pending dirty state."""
-        replace_plugin_root_snapshots(
-            configured_roots,
-            root_snapshots,
-            self._plugin_watch_last_snapshot_by_root,
-        )
-        self._plugin_watch_state_revision += 1
-
-    def _refresh_plugin_watch_state(self, config: Config | None = None) -> tuple[Path, ...]:
-        """Capture fresh watcher baselines for the current plugin roots."""
-        active_config = self.config if config is None else config
-        configured_roots = (
-            get_configured_plugin_roots(active_config, self.runtime_paths) if active_config is not None else ()
-        )
-        self._replace_plugin_watch_snapshots(
-            configured_roots,
-            capture_plugin_root_snapshots(configured_roots),
-        )
-        return configured_roots
-
     async def reload_plugins_now(
         self,
         *,
@@ -776,12 +736,12 @@ class _MultiAgentOrchestrator:
                 )
                 self._activate_hook_registry(recovery_result.hook_registry)
                 clear_worker_validation_snapshot_cache()
-                self._refresh_plugin_watch_state(config)
+                self.plugin_watch.refresh(config)
                 logger.warning(warning_message, source=source, **warning_kwargs)
                 raise
             self._activate_hook_registry(result.hook_registry)
             clear_worker_validation_snapshot_cache()
-            self._refresh_plugin_watch_state(config)
+            self.plugin_watch.refresh(config)
             logger.info(
                 "Plugin reload complete",
                 source=source,
@@ -799,8 +759,7 @@ class _MultiAgentOrchestrator:
     ) -> set[str]:
         """Stage and commit plugin changes without interleaving live reloads."""
         async with self._plugin_reload_lock:
-            prepared_plugin_roots = get_configured_plugin_roots(new_config, self.runtime_paths)
-            prepared_plugin_root_snapshots = capture_plugin_root_snapshots(prepared_plugin_roots)
+            prepared_plugin_roots, prepared_plugin_root_snapshots = self.plugin_watch.capture(new_config)
             prepared_plugin_reload = prepare_plugin_reload(
                 new_config,
                 self.runtime_paths,
@@ -816,7 +775,7 @@ class _MultiAgentOrchestrator:
                 prepared_plugin_reload,
                 cancel_existing_tasks=True,
             ).hook_registry
-            self._replace_plugin_watch_snapshots(
+            self.plugin_watch.replace_snapshots(
                 prepared_plugin_roots,
                 prepared_plugin_root_snapshots,
             )
@@ -1326,7 +1285,7 @@ class _MultiAgentOrchestrator:
                 )
                 # Only apply the new config after validation and account checks succeed.
                 self.config = new_config
-                self._sync_plugin_watch_roots(new_config)
+                self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)

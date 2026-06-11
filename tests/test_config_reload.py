@@ -508,7 +508,7 @@ async def test_plugin_watcher_catches_first_save_after_config_switch(
     try:
         await asyncio.sleep(0.08)
         orchestrator.config = second_config
-        orchestrator._sync_plugin_watch_roots(second_config)
+        orchestrator.plugin_watch.sync_roots(second_config)
         await asyncio.sleep(0.01)
         second_hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
         await asyncio.wait_for(reload_seen.wait(), timeout=1)
@@ -566,7 +566,7 @@ async def test_plugin_watcher_does_not_reload_on_config_switch_without_plugin_ed
     try:
         await asyncio.sleep(0.08)
         orchestrator.config = second_config
-        orchestrator._sync_plugin_watch_roots(second_config)
+        orchestrator.plugin_watch.sync_roots(second_config)
         await asyncio.sleep(0.25)
     finally:
         watcher_task.cancel()
