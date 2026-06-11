@@ -338,8 +338,7 @@ async def test_unauthorized_sender_is_ignored_even_when_mentioned(tmp_path: Path
     assert policy.can_reply_to_sender(_SENDER) is False
 
 
-@pytest.mark.asyncio
-async def test_internal_agent_sender_bypasses_reply_allowlist(tmp_path: Path) -> None:
+def test_internal_agent_sender_bypasses_reply_allowlist(tmp_path: Path) -> None:
     """Bot-to-bot senders are system participants and bypass per-agent reply allowlists."""
     config = bind_runtime_paths(
         Config(
