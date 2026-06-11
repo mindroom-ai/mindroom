@@ -359,6 +359,7 @@ tavily = [
 telegram = [
   "httpx>=0.27",
 ]
+thread_model = []
 thread_summary = []
 thread_tags = []
 todoist = [

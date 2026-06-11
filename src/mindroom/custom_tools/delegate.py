@@ -174,6 +174,7 @@ class DelegateTools(Toolkit):
         runtime_model = self._config.resolve_runtime_model(
             entity_name=agent_name,
             room_id=room_id,
+            thread_id=runtime_context.resolved_thread_id,
             runtime_paths=self._runtime_paths,
         )
         return replace(

@@ -542,6 +542,7 @@ async def _aexecute_room_agent_participant(
     runtime_model = context.config.resolve_runtime_model(
         entity_name=agent_name,
         room_id=context.room_id,
+        thread_id=context.resolved_thread_id,
         runtime_paths=context.runtime_paths,
     )
     active_model_name = runtime_model.model_name
@@ -872,6 +873,7 @@ def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dic
             model_name = context.config.resolve_runtime_model(
                 entity_name=agent_name,
                 room_id=context.room_id,
+                thread_id=context.resolved_thread_id,
                 runtime_paths=context.runtime_paths,
             ).model_name
         else:
@@ -942,6 +944,7 @@ def _caller_runtime_model_name(context: ToolRuntimeContext) -> str:
     return context.config.resolve_runtime_model(
         entity_name=context.agent_name,
         room_id=context.room_id,
+        thread_id=context.resolved_thread_id,
         runtime_paths=context.runtime_paths,
     ).model_name
 

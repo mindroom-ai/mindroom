@@ -37,6 +37,7 @@ def _get_model_config(
     *,
     runtime_paths: RuntimePaths,
     room_id: str | None = None,
+    thread_id: str | None = None,
 ) -> tuple[str | None, ModelConfig | None]:
     """Return configured model name/config for an agent when available."""
     if agent_name not in config.agents and agent_name not in config.teams and agent_name != ROUTER_AGENT_NAME:
@@ -44,6 +45,7 @@ def _get_model_config(
     model_name = config.resolve_runtime_model(
         entity_name=agent_name,
         room_id=room_id,
+        thread_id=thread_id,
         runtime_paths=runtime_paths,
     ).model_name
     return model_name, config.models.get(model_name)
@@ -240,6 +242,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     model: str | None,
     model_provider: str | None,
     room_id: str | None = None,
+    thread_id: str | None = None,
     metrics: Metrics | dict[str, Any] | None = None,
     metrics_fallback: dict[str, Any] | None = None,
     context_raw_input_tokens: int | None = None,
@@ -255,6 +258,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
         agent_name,
         runtime_paths=runtime_paths,
         room_id=room_id,
+        thread_id=thread_id,
     )
     model_id = model or (model_config.id if model_config is not None else None)
     provider = model_provider or (model_config.provider if model_config is not None else None)

@@ -148,6 +148,7 @@ Matrix sync callback
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
 | `thread_utils.py` | Thread analysis and agent detection |
+| `thread_models.py` | Durable per-thread model overrides backing `!model` and the `thread_model` tool |
 | `file_watcher.py` | File change detection for config hot-reload |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
 | `stop.py` | StopManager for cancelling in-progress responses |

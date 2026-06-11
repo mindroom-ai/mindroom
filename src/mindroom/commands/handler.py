@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
+from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
 from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
 from mindroom.handled_turns import HandledTurnState
@@ -360,6 +361,16 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 if response_event_id is None:
                     context.record_handled_turn(handled_turn)
                 return  # Exit early since we've handled the response
+
+    elif command.type == CommandType.MODEL:
+        response_text = handle_model_command(
+            command.args.get("args_text", ""),
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            room_id=room.room_id,
+            thread_id=effective_thread_id,
+            requester_user_id=requester_user_id,
+        )
 
     elif command.type == CommandType.UNKNOWN:
         # Handle unknown commands

@@ -17,6 +17,7 @@ Commands start with `!` and are handled by the router agent.
 | `!list_schedules` | List pending scheduled tasks |
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
+| `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
 | `!config <operation>` | View and modify configuration (disabled by default, admin only when enabled) |
 | `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
@@ -54,7 +55,7 @@ Display available commands or get detailed help on a specific topic.
 !help edit_schedule
 ```
 
-**Topics:** `schedule`, `config`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
+**Topics:** `schedule`, `config`, `model`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
 
 ### `!hi`
 
@@ -144,6 +145,23 @@ The task description is re-parsed to update timing and content.
 Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel and recreate instead.
 
 **Aliases:** `!editschedule`, `!edit-schedule`
+
+### `!model`
+
+Show or switch the model that every agent, team, and the router uses in the current thread.
+
+```
+!model
+!model list
+!model opus
+!model reset
+```
+
+`!model` and `!model list` show the current override and the available model names.
+Model names come from the `models:` section of `config.yaml`.
+The override applies from the next message in the thread and survives restarts.
+Other threads and rooms keep their configured models; room-wide overrides are configured via `room_models` in `config.yaml`.
+Agents can also switch the thread model themselves when they have the `thread_model` tool.
 
 ### `!config`
 
