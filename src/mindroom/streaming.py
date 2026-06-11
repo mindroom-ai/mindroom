@@ -1592,8 +1592,8 @@ async def _handle_auxiliary_task_completion(
         if not isinstance(task_error, Exception):
             raise task_error
         if task is delivery_task:
-            raise _NonTerminalDeliveryError(task_error) from task_error
-        _raise_progress_delivery_error(task_error)
+            _raise_nonterminal_delivery_error(task_error)
+        raise task_error
 
     monitored_tasks.discard(task)
     return True
