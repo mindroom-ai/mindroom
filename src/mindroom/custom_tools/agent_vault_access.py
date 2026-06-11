@@ -157,16 +157,16 @@ class AgentVaultAccessTools(Toolkit):
     def _headers(self, token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    async def _post(self, path: str, token: str, json: dict | None = None) -> httpx.Response:
+    async def _post(self, path: str, token: str, payload: dict | None = None) -> httpx.Response:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
             return await client.post(
                 urljoin(self._api_url.rstrip("/") + "/", path),
                 headers=self._headers(token),
-                json=json,
+                json=payload,
             )
 
     async def _ensure_vault(self, vault: str, token: str) -> None:
-        response = await self._post("v1/vaults", token, json={"name": vault})
+        response = await self._post("v1/vaults", token, {"name": vault})
         # 409/422 mean the vault already exists, which is fine for an idempotent grant.
         if response.status_code in {200, 201, 409, 422}:
             return
@@ -194,7 +194,7 @@ class AgentVaultAccessTools(Toolkit):
         response = await self._post(
             f"v1/vaults/{quote(vault, safe='')}/users",
             token,
-            json={"email": email, "role": "member"},
+            {"email": email, "role": "member"},
         )
         if response.status_code in {200, 201}:
             return True
