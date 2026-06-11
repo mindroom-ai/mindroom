@@ -140,7 +140,7 @@ Email: I'll compile and send every Friday
 
 ### 🔌 100+ Integrations
 Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, news APIs, financial data, and many more. Your agents can interact with all your tools.
-Native Matrix tools include `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` for room, thread, event, state, and room-search operations.
+Native Matrix tools include `matrix_message`, `matrix_room`, `thread_tags`, `thread_model`, and `matrix_api` for room, thread, event, state, and room-search operations.
 
 ### 📅 Automation & Scheduling
 - Daily check-ins from your mindfulness agent
