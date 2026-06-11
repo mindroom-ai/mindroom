@@ -132,7 +132,7 @@ Expected outcome: Root space creation, room grouping, and avatar propagation beh
 
 ## 4. Message Dispatch, DMs, Threads, And Plain-Reply Inheritance
 
-Source anchors: `src/mindroom/bot.py`, `src/mindroom/routing.py`, `src/mindroom/thread_utils.py`, `src/mindroom/conversation_resolver.py`, `src/mindroom/matrix/event_info.py`, `src/mindroom/matrix/thread_membership.py`, `src/mindroom/response_tracker.py`.
+Source anchors: `src/mindroom/bot.py`, `src/mindroom/routing.py`, `src/mindroom/thread_utils.py`, `src/mindroom/conversation_resolver.py`, `src/mindroom/matrix/event_info.py`, `src/mindroom/matrix/thread_membership.py`, `src/mindroom/handled_turns.py`.
 
 - [ ] `MSG-001` Send a non-command message in a single-agent room without any mention.
 Expected outcome: The sole configured agent responds directly without invoking AI router selection.
