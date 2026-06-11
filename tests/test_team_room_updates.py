@@ -48,7 +48,10 @@ class TestTeamRoomUpdates:
             "router": {"model": "default"},
         }
 
-        with patch("mindroom.orchestrator.load_config") as mock_load_config:
+        with (
+            patch("mindroom.orchestrator.load_config") as mock_load_config,
+            patch("mindroom.orchestration.config_lifecycle.load_config", new=mock_load_config),
+        ):
             config1 = Config.model_validate(initial_config_data)
             mock_load_config.return_value = config1
 
@@ -101,7 +104,7 @@ class TestTeamRoomUpdates:
                             mock_load_config.return_value = config2
 
                             # Update config
-                            updated = await orchestrator.update_config()
+                            updated = await orchestrator.config_reload.update_config()
 
                             # Verify the team was restarted
                             assert updated is True
@@ -136,7 +139,10 @@ class TestTeamRoomUpdates:
             "router": {"model": "default"},
         }
 
-        with patch("mindroom.orchestrator.load_config") as mock_load_config:
+        with (
+            patch("mindroom.orchestrator.load_config") as mock_load_config,
+            patch("mindroom.orchestration.config_lifecycle.load_config", new=mock_load_config),
+        ):
             config1 = Config.model_validate(initial_config_data)
             mock_load_config.return_value = config1
 
@@ -199,7 +205,7 @@ class TestTeamRoomUpdates:
                             }
 
                             # Update config
-                            updated = await orchestrator.update_config()
+                            updated = await orchestrator.config_reload.update_config()
 
                             # Verify the new team was created
                             assert updated is True
@@ -239,7 +245,10 @@ class TestTeamRoomUpdates:
             "router": {"model": "default"},
         }
 
-        with patch("mindroom.orchestrator.load_config") as mock_load_config:
+        with (
+            patch("mindroom.orchestrator.load_config") as mock_load_config,
+            patch("mindroom.orchestration.config_lifecycle.load_config", new=mock_load_config),
+        ):
             config = Config.model_validate(config_data)
             mock_load_config.return_value = config
 
@@ -290,7 +299,7 @@ class TestTeamRoomUpdates:
                             mock_create_bot.reset_mock()
 
                             # Update with same config
-                            updated = await orchestrator.update_config()
+                            updated = await orchestrator.config_reload.update_config()
 
                             # Verify nothing was restarted
                             assert updated is False

@@ -802,7 +802,7 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
     orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
     with (
-        patch("mindroom.orchestrator.load_config", return_value=updated_config),
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
         patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
         patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         patch.object(
@@ -814,7 +814,7 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
         patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
     ):
-        updated = await orchestrator.update_config()
+        updated = await orchestrator.config_reload.update_config()
 
     assert updated is True
     assert general_bot.config == updated_config

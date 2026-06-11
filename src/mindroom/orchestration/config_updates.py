@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
 
@@ -71,6 +72,21 @@ class ConfigUpdatePlan:
             or self.authorization_changed
             or self.room_metadata_changed
         )
+
+
+def configured_entity_names(config: Config) -> list[str]:
+    """Return configured entity names with the router first."""
+    return [ROUTER_AGENT_NAME, *config.agents.keys(), *config.teams.keys()]
+
+
+def plugin_change_paths(current_config: Config, new_config: Config) -> tuple[str, ...]:
+    """Return plugin paths whose entry config changed across a reload."""
+    old_entries = {entry.path: entry.model_dump(mode="python") for entry in current_config.plugins}
+    new_entries = {entry.path: entry.model_dump(mode="python") for entry in new_config.plugins}
+    changed_paths = {
+        path for path in set(old_entries) | set(new_entries) if old_entries.get(path) != new_entries.get(path)
+    }
+    return tuple(sorted(changed_paths))
 
 
 def _config_entries_differ(old_entry: BaseModel | None, new_entry: BaseModel | None) -> bool:

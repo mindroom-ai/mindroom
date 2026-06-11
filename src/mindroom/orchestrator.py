@@ -69,7 +69,6 @@ from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
     deactivate_plugins,
-    get_configured_plugin_roots,
     load_plugins,
     prepare_plugin_reload,
     reload_plugins,
@@ -82,19 +81,14 @@ from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config, load_config
 from .credentials_sync import sync_env_to_credentials
 from .logging_config import get_logger, setup_logging
-from .orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
-from .orchestration.plugin_watch import (
-    capture_plugin_root_snapshots,
-    replace_plugin_root_snapshots,
-    sync_plugin_root_snapshots,
-    watch_plugins_task,
-)
+from .orchestration.config_lifecycle import ConfigReloadLifecycle
+from .orchestration.config_updates import configured_entity_names
+from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
 from .orchestration.rooms import get_authorized_user_ids_to_invite, get_root_space_user_ids_to_invite
 from .orchestration.runtime import (
     STARTUP_RETRY_INITIAL_DELAY_SECONDS,
     STARTUP_RETRY_MAX_DELAY_SECONDS,
     EntityStartResults,
-    cancel_logged_task,
     cancel_sync_task,
     cancel_task,
     create_logged_task,
@@ -122,15 +116,11 @@ if TYPE_CHECKING:
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
 
     from .constants import RuntimePaths
+    from .orchestration.config_updates import ConfigUpdatePlan
 logger = get_logger(__name__)
 
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
-_CONFIG_RELOAD_DEBOUNCE_SECONDS = 2.0
-_CONFIG_RELOAD_IDLE_POLL_SECONDS = 0.5
-_CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS = 30.0
-_CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
-_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS = 120.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 
 
@@ -180,62 +170,6 @@ def _raise_orchestrator_exit(*, reason: str) -> NoReturn:
     raise RuntimeError(msg)
 
 
-@dataclass
-class _ConfigReloadDrainState:
-    """Track response-drain state for a queued config reload."""
-
-    waiting_for_idle: bool = False
-    wait_started_at: float | None = None
-    last_warning_at: float | None = None
-    request_started_at: float | None = None
-
-    def reset(self) -> None:
-        """Clear all drain tracking state."""
-        self.waiting_for_idle = False
-        self.wait_started_at = None
-        self.last_warning_at = None
-        self.request_started_at = None
-
-    def begin_wait(self, *, now: float, requested_at: float) -> None:
-        """Start a fresh drain window for the current reload request."""
-        self.waiting_for_idle = True
-        self.wait_started_at = now
-        self.last_warning_at = None
-        self.request_started_at = requested_at
-
-    def should_reset_for_request(self, requested_at: float) -> bool:
-        """Return whether a newer request should restart the drain window."""
-        return self.waiting_for_idle and self.request_started_at != requested_at
-
-    def wait_seconds(self, now: float) -> float:
-        """Return how long the current drain window has been waiting."""
-        if self.wait_started_at is None:
-            return 0.0
-        return now - self.wait_started_at
-
-    def should_warn(
-        self,
-        *,
-        now: float,
-        warning_after_seconds: float,
-        warning_interval_seconds: float,
-    ) -> bool:
-        """Return whether the current drain should emit a warning."""
-        if self.wait_started_at is None or self.wait_seconds(now) < warning_after_seconds:
-            return False
-        if self.last_warning_at is None:
-            return True
-        return now - self.last_warning_at >= warning_interval_seconds
-
-    def mark_warning(self, now: float) -> None:
-        """Record the time a drain warning was logged."""
-        self.last_warning_at = now
-
-    def should_force_reload(self, *, now: float, force_after_seconds: float) -> bool:
-        """Return whether the drain timeout has expired."""
-        return self.wait_started_at is not None and self.wait_seconds(now) >= force_after_seconds
-
-
 class _SignalAwareUvicornServer(uvicorn.Server):
     """Uvicorn server that marks the shared shutdown event on signal exit."""
 
@@ -274,15 +208,13 @@ class _MultiAgentOrchestrator:
     _bot_start_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
-    _config_reload_task: asyncio.Task | None = field(default=None, init=False)
-    _config_reload_requested_at: float | None = field(default=None, init=False)
+    config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _plugin_reload_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
-    _plugin_watch_last_snapshot_by_root: dict[Path, dict[Path, int]] = field(default_factory=dict, init=False)
-    _plugin_watch_state_revision: int = field(default=0, init=False)
+    plugin_watch: PluginWatchState = field(init=False)
     _knowledge_refresh_scheduler: KnowledgeRefreshScheduler = field(init=False)
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
@@ -301,6 +233,16 @@ class _MultiAgentOrchestrator:
         )
         self._knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler)
+        self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
+        self.config_reload = ConfigReloadLifecycle(
+            runtime_paths=self.runtime_paths,
+            is_running=lambda: self.running,
+            current_config=lambda: self.config,
+            agent_bots=lambda: self.agent_bots,
+            in_flight_response_count=self.in_flight_response_count,
+            load_initial_config=self._load_initial_config,
+            apply_update_plan=self._apply_config_update_plan,
+        )
         self._approval_transport = ApprovalMatrixTransport(
             runtime_paths=self.runtime_paths,
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
@@ -473,13 +415,6 @@ class _MultiAgentOrchestrator:
             update_runtime_state=update_runtime_state,
         )
 
-    async def _cancel_config_reload_task(self) -> None:
-        """Cancel any queued config reload task."""
-        task = self._config_reload_task
-        self._config_reload_task = None
-        self._config_reload_requested_at = None
-        await cancel_logged_task(task)
-
     async def _cancel_bot_start_task(self, entity_name: str) -> None:
         """Cancel any background start task for one bot."""
         task = self._bot_start_tasks.pop(entity_name, None)
@@ -601,134 +536,6 @@ class _MultiAgentOrchestrator:
         """Return the number of active response tasks across all managed bots."""
         return sum(bot.in_flight_response_count for bot in self.agent_bots.values())
 
-    def request_config_reload(self) -> None:
-        """Queue a debounced config reload for the running orchestrator."""
-        if not self.running:
-            logger.info("Ignoring config change while startup is still in progress")
-            return
-        self._config_reload_requested_at = asyncio.get_running_loop().time()
-        if self._config_reload_task is not None and not self._config_reload_task.done():
-            logger.info("Configuration reload already queued; extending debounce window")
-            return
-        logger.info("Queued configuration reload")
-        self._config_reload_task = create_logged_task(
-            self._run_config_reload_loop(),
-            name="config_reload",
-            failure_message="Queued config reload failed",
-        )
-
-    async def _wait_for_reload_debounce(
-        self,
-        requested_at: float,
-        loop: asyncio.AbstractEventLoop,
-    ) -> None:
-        """Sleep until the debounce window closes for a queued reload request."""
-        reload_at = requested_at + _CONFIG_RELOAD_DEBOUNCE_SECONDS
-        delay_seconds = reload_at - loop.time()
-        if delay_seconds > 0:
-            await asyncio.sleep(delay_seconds)
-
-    async def _should_defer_reload_for_active_responses(
-        self,
-        *,
-        drain_state: _ConfigReloadDrainState,
-        requested_at: float,
-        active_response_count: int,
-        loop: asyncio.AbstractEventLoop,
-    ) -> bool:
-        """Return whether a queued reload should keep waiting for responses to finish."""
-        if active_response_count <= 0:
-            return False
-
-        now = loop.time()
-        if not drain_state.waiting_for_idle:
-            logger.info(
-                "Deferring configuration reload until active responses finish",
-                active_response_count=active_response_count,
-            )
-            drain_state.begin_wait(now=now, requested_at=requested_at)
-        elif drain_state.should_warn(
-            now=now,
-            warning_after_seconds=_CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS,
-            warning_interval_seconds=_CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS,
-        ):
-            logger.warning(
-                "Configuration reload still waiting for active responses to finish",
-                active_response_count=active_response_count,
-                drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
-            )
-            drain_state.mark_warning(now)
-
-        if drain_state.should_force_reload(
-            now=now,
-            force_after_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
-        ):
-            logger.error(
-                "Forcing configuration reload while responses are still active",
-                active_response_count=active_response_count,
-                drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
-                timeout_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
-            )
-            return False
-
-        await asyncio.sleep(_CONFIG_RELOAD_IDLE_POLL_SECONDS)
-        return True
-
-    async def _apply_queued_config_reload(self) -> None:
-        """Apply one queued config reload attempt and log the result."""
-        self._config_reload_requested_at = None
-        logger.info("Configuration file changed, checking for updates...")
-        try:
-            updated = await self.update_config()
-        except Exception:
-            logger.exception("Configuration update failed; will retry if a new change is queued")
-            return
-        if updated:
-            logger.info("Configuration update applied to affected agents")
-        else:
-            logger.info("No agent changes detected in configuration update")
-
-    async def _run_config_reload_loop(self) -> None:
-        """Apply queued config reloads after debounce and response drain."""
-        current_task = asyncio.current_task()
-        loop = asyncio.get_running_loop()
-        drain_state = _ConfigReloadDrainState()
-
-        try:
-            while self.running and self._config_reload_requested_at is not None:
-                requested_at = self._config_reload_requested_at
-                await self._wait_for_reload_debounce(requested_at, loop)
-                if self._config_reload_requested_at != requested_at:
-                    # A newer config change superseded the current one.
-                    # Reset drain state so the new change gets a full drain window.
-                    drain_state.reset()
-                    continue
-
-                if drain_state.should_reset_for_request(requested_at):
-                    # A newer config change arrived while we were already waiting
-                    # for responses to drain, so restart the drain window.
-                    drain_state.reset()
-                    continue
-
-                active_response_count = self.in_flight_response_count()
-                if await self._should_defer_reload_for_active_responses(
-                    drain_state=drain_state,
-                    requested_at=requested_at,
-                    active_response_count=active_response_count,
-                    loop=loop,
-                ):
-                    continue
-
-                if drain_state.waiting_for_idle and active_response_count == 0:
-                    logger.info("Active responses finished; applying queued configuration reload")
-                if drain_state.waiting_for_idle:
-                    drain_state.reset()
-
-                await self._apply_queued_config_reload()
-        finally:
-            if self._config_reload_task is current_task:
-                self._config_reload_task = None
-
     async def _sync_runtime_support_services(
         self,
         config: Config,
@@ -793,11 +600,6 @@ class _MultiAgentOrchestrator:
             return set()
         await self._sync_mcp_manager(config)
         return self._entities_blocked_by_failed_mcp_servers(entity_names, config)
-
-    @staticmethod
-    def _configured_entity_names(config: Config) -> list[str]:
-        """Return configured entity names with the router first."""
-        return [ROUTER_AGENT_NAME, *config.agents.keys(), *config.teams.keys()]
 
     @staticmethod
     def _entity_display_name(config: Config, entity_name: str) -> str:
@@ -908,40 +710,6 @@ class _MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.hook_registry = hook_registry
 
-    def _sync_plugin_watch_roots(self, config: Config | None = None) -> tuple[Path, ...]:
-        """Align watcher baselines with the currently configured plugin roots."""
-        active_config = self.config if config is None else config
-        configured_roots = (
-            get_configured_plugin_roots(active_config, self.runtime_paths) if active_config is not None else ()
-        )
-        sync_plugin_root_snapshots(configured_roots, self._plugin_watch_last_snapshot_by_root)
-        return configured_roots
-
-    def _replace_plugin_watch_snapshots(
-        self,
-        configured_roots: tuple[Path, ...],
-        root_snapshots: dict[Path, dict[Path, int]],
-    ) -> None:
-        """Replace watcher baselines and clear any stale pending dirty state."""
-        replace_plugin_root_snapshots(
-            configured_roots,
-            root_snapshots,
-            self._plugin_watch_last_snapshot_by_root,
-        )
-        self._plugin_watch_state_revision += 1
-
-    def _refresh_plugin_watch_state(self, config: Config | None = None) -> tuple[Path, ...]:
-        """Capture fresh watcher baselines for the current plugin roots."""
-        active_config = self.config if config is None else config
-        configured_roots = (
-            get_configured_plugin_roots(active_config, self.runtime_paths) if active_config is not None else ()
-        )
-        self._replace_plugin_watch_snapshots(
-            configured_roots,
-            capture_plugin_root_snapshots(configured_roots),
-        )
-        return configured_roots
-
     async def reload_plugins_now(
         self,
         *,
@@ -968,12 +736,12 @@ class _MultiAgentOrchestrator:
                 )
                 self._activate_hook_registry(recovery_result.hook_registry)
                 clear_worker_validation_snapshot_cache()
-                self._refresh_plugin_watch_state(config)
+                self.plugin_watch.refresh(config)
                 logger.warning(warning_message, source=source, **warning_kwargs)
                 raise
             self._activate_hook_registry(result.hook_registry)
             clear_worker_validation_snapshot_cache()
-            self._refresh_plugin_watch_state(config)
+            self.plugin_watch.refresh(config)
             logger.info(
                 "Plugin reload complete",
                 source=source,
@@ -991,8 +759,7 @@ class _MultiAgentOrchestrator:
     ) -> set[str]:
         """Stage and commit plugin changes without interleaving live reloads."""
         async with self._plugin_reload_lock:
-            prepared_plugin_roots = get_configured_plugin_roots(new_config, self.runtime_paths)
-            prepared_plugin_root_snapshots = capture_plugin_root_snapshots(prepared_plugin_roots)
+            prepared_plugin_roots, prepared_plugin_root_snapshots = self.plugin_watch.capture(new_config)
             prepared_plugin_reload = prepare_plugin_reload(
                 new_config,
                 self.runtime_paths,
@@ -1008,7 +775,7 @@ class _MultiAgentOrchestrator:
                 prepared_plugin_reload,
                 cancel_existing_tasks=True,
             ).hook_registry
-            self._replace_plugin_watch_snapshots(
+            self.plugin_watch.replace_snapshots(
                 prepared_plugin_roots,
                 prepared_plugin_root_snapshots,
             )
@@ -1085,7 +852,7 @@ class _MultiAgentOrchestrator:
 
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)
-        entity_names = self._configured_entity_names(config)
+        entity_names = configured_entity_names(config)
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
@@ -1308,15 +1075,16 @@ class _MultiAgentOrchestrator:
         # config-triggered restart look like normal orchestrator completion.
         await runtime_shutdown_event.wait()
 
-    async def _load_initial_config(self, new_config: Config, hook_registry: HookRegistry) -> bool:
+    async def _load_initial_config(self, new_config: Config) -> bool:
         """Handle config loading before the runtime has an active config."""
+        hook_registry = self._build_hook_registry(new_config)
         self._preflight_account_provisioning(
             new_config,
-            entity_names=self._configured_entity_names(new_config),
+            entity_names=configured_entity_names(new_config),
             include_internal_user=True,
         )
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
-        await self._prepare_entity_accounts(new_config, self._configured_entity_names(new_config))
+        await self._prepare_entity_accounts(new_config, configured_entity_names(new_config))
         self.config = new_config
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(new_config)
@@ -1334,16 +1102,6 @@ class _MultiAgentOrchestrator:
             bot.hook_registry = self.hook_registry
             await bot._set_presence_with_model_info()
             logger.debug("bot_config_updated", agent=entity_name)
-
-    @staticmethod
-    def _plugin_change_paths(current_config: Config, new_config: Config) -> tuple[str, ...]:
-        """Return plugin paths whose entry config changed across a reload."""
-        old_entries = {entry.path: entry.model_dump(mode="python") for entry in current_config.plugins}
-        new_entries = {entry.path: entry.model_dump(mode="python") for entry in new_config.plugins}
-        changed_paths = {
-            path for path in set(old_entries) | set(new_entries) if old_entries.get(path) != new_entries.get(path)
-        }
-        return tuple(sorted(changed_paths))
 
     async def _emit_config_reloaded(
         self,
@@ -1501,25 +1259,14 @@ class _MultiAgentOrchestrator:
         elif plan.mindroom_user_changed:
             self._validate_entity_accounts(new_config)
 
-    async def update_config(self) -> bool:
-        """Reload configuration, restart affected entities, and reconcile room state."""
-        new_config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
-
-        if not self.config:
-            return await self._load_initial_config(new_config, self._build_hook_registry(new_config))
-
-        current_config = self._require_config()
-        plugin_changes = self._plugin_change_paths(current_config, new_config)
-        plan = build_config_update_plan(
-            current_config=current_config,
-            new_config=new_config,
-            configured_entities=set(self._configured_entity_names(new_config)),
-            existing_entities=set(self.agent_bots.keys()),
-            agent_bots=self.agent_bots,
-        )
-        if plugin_changes:
-            plan = replace(plan, entities_to_restart=plan.entities_to_restart | set(self.agent_bots))
-
+    async def _apply_config_update_plan(
+        self,
+        current_config: Config,
+        plan: ConfigUpdatePlan,
+        plugin_changes: tuple[str, ...],
+    ) -> bool:
+        """Apply one computed config update plan: restart entities and reconcile state."""
+        new_config = plan.new_config
         await self._prepare_accounts_for_config_update(new_config, plan)
         replay_startup_maintenance = await self._startup_maintenance.cancel()
 
@@ -1538,7 +1285,7 @@ class _MultiAgentOrchestrator:
                 )
                 # Only apply the new config after validation and account checks succeed.
                 self.config = new_config
-                self._sync_plugin_watch_roots(new_config)
+                self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
@@ -1859,7 +1606,7 @@ class _MultiAgentOrchestrator:
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         await shutdown_approval_runtime()
-        await self._cancel_config_reload_task()
+        await self.config_reload.cancel()
         await self._startup_maintenance.cancel()
         await self._stop_memory_auto_flush_worker()
         await self._knowledge_source_watcher.shutdown()
@@ -1903,7 +1650,7 @@ def _recover_failed_plugin_reload(
 async def _handle_config_change(orchestrator: _MultiAgentOrchestrator) -> None:
     """Handle configuration file changes."""
     logger.info("Configuration file changed; queueing hot reload")
-    orchestrator.request_config_reload()
+    orchestrator.config_reload.request_reload()
 
 
 async def _watch_config_task(config_path: Path, orchestrator: _MultiAgentOrchestrator) -> None:
