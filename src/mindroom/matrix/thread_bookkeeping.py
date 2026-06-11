@@ -48,7 +48,6 @@ from mindroom.matrix.thread_membership import (
     ThreadResolution,
     ThreadResolutionState,
     ThreadRootProof,
-    fetch_event_info_for_client,
     page_event_info_counts_as_thread_child_proof,
     resolve_event_thread_membership,
     resolve_related_event_thread_membership,
@@ -56,6 +55,7 @@ from mindroom.matrix.thread_membership import (
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from mindroom.matrix.thread_room_scan import (
     RoomScanConversationCache,
+    fetch_event_info_for_client,
     fetch_event_info_from_conversation_cache,
     room_scan_membership_access_for_client,
 )

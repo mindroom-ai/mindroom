@@ -1,7 +1,8 @@
 """Canonical Matrix thread resolution.
 
 Ownership map:
-- canonical thread identity: this module
+- canonical thread identity: this module (pure domain rules, no client or cache transport)
+- client- and cache-backed membership accessors: `mindroom.matrix.thread_room_scan`
 - scanned-event ordering and latest-thread-tail helpers: `mindroom.matrix.thread_projection`
 - mutation/bookkeeping impact: `mindroom.matrix.thread_bookkeeping`
 - tool-facing normalization: `mindroom.custom_tools.attachment_helpers`
@@ -49,15 +50,10 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Protocol
-
-import nio
+from typing import Protocol
 
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_diagnostics import is_thread_history_source_degraded
-
-if TYPE_CHECKING:
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 type _ThreadIdLookup = Callable[[str, str], Awaitable[str | None]]
 type _EventInfoLookup = Callable[[str, str], Awaitable[EventInfo | None]]
@@ -464,49 +460,4 @@ def room_scan_thread_membership_access(
         lookup_thread_id=lookup_thread_id,
         fetch_event_info=fetch_event_info,
         prove_thread_root=prove_thread_root,
-    )
-
-
-async def lookup_thread_id_from_conversation_cache(
-    conversation_cache: ConversationCacheProtocol | None,
-    room_id: str,
-    event_id: str,
-) -> str | None:
-    """Return one cached thread root when a conversation cache is available."""
-    if conversation_cache is None:
-        return None
-    return await conversation_cache.get_thread_id_for_event(room_id, event_id)
-
-
-def _event_info_from_lookup_response(
-    response: object,
-    *,
-    event_id: str,
-    strict: bool,
-) -> EventInfo | None:
-    """Normalize one room-get-event style response into EventInfo when available."""
-    if isinstance(response, nio.RoomGetEventResponse):
-        return EventInfo.from_event(response.event.source)
-    if not strict:
-        return None
-    if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
-        return None
-    detail = response.message if isinstance(response, nio.RoomGetEventError) else "unknown error"
-    msg = f"Failed to resolve Matrix event {event_id}: {detail}"
-    raise RuntimeError(msg)
-
-
-async def fetch_event_info_for_client(
-    client: nio.AsyncClient,
-    room_id: str,
-    event_id: str,
-    *,
-    strict: bool,
-) -> EventInfo | None:
-    """Fetch one event directly from Matrix and parse its relation metadata."""
-    response = await client.room_get_event(room_id, event_id)
-    return _event_info_from_lookup_response(
-        response,
-        event_id=event_id,
-        strict=strict,
     )

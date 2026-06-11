@@ -42,12 +42,12 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix.thread_membership import (
+from mindroom.matrix.thread_membership import resolve_event_thread_membership
+from mindroom.matrix.thread_room_scan import (
     fetch_event_info_for_client,
     lookup_thread_id_from_conversation_cache,
-    resolve_event_thread_membership,
+    room_scan_membership_access_for_client,
 )
-from mindroom.matrix.thread_room_scan import room_scan_membership_access_for_client
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:

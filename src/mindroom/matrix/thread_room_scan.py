@@ -64,7 +64,7 @@ def _event_info_from_lookup_response(
     raise RuntimeError(msg)
 
 
-async def _lookup_thread_id_from_conversation_cache(
+async def lookup_thread_id_from_conversation_cache(
     conversation_cache: RoomScanConversationCache | None,
     room_id: str,
     event_id: str,
@@ -73,6 +73,22 @@ async def _lookup_thread_id_from_conversation_cache(
     if conversation_cache is None:
         return None
     return await conversation_cache.get_thread_id_for_event(room_id, event_id)
+
+
+async def fetch_event_info_for_client(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    *,
+    strict: bool,
+) -> EventInfo | None:
+    """Fetch one event directly from Matrix and parse its relation metadata."""
+    response = await client.room_get_event(room_id, event_id)
+    return _event_info_from_lookup_response(
+        response,
+        event_id=event_id,
+        strict=strict,
+    )
 
 
 async def fetch_event_info_from_conversation_cache(
@@ -100,7 +116,7 @@ def room_scan_membership_access_for_client(
     """Build client-backed membership access without widening the cache protocol."""
 
     async def lookup_thread_id(lookup_room_id: str, lookup_event_id: str) -> str | None:
-        return await _lookup_thread_id_from_conversation_cache(
+        return await lookup_thread_id_from_conversation_cache(
             conversation_cache,
             lookup_room_id,
             lookup_event_id,
@@ -131,6 +147,8 @@ def room_scan_membership_access_for_client(
 
 __all__ = [
     "RoomScanConversationCache",
+    "fetch_event_info_for_client",
     "fetch_event_info_from_conversation_cache",
+    "lookup_thread_id_from_conversation_cache",
     "room_scan_membership_access_for_client",
 ]
