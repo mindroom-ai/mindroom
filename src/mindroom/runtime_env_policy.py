@@ -302,6 +302,7 @@ _NON_SANDBOX_RUNTIME_CONTROL_ENV_NAMES = frozenset(
 _SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES = frozenset(
     {
         "CURL_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
         "HOME",
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -311,6 +312,7 @@ _SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES = frozenset(
         "LD_LIBRARY_PATH",
         "NIX_LD",
         "NIX_LD_LIBRARY_PATH",
+        "NODE_EXTRA_CA_CERTS",
         "NO_PROXY",
         "PATH",
         "PYTHONPATH",

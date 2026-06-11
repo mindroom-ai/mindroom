@@ -40,12 +40,14 @@ from mindroom.vendor_telemetry import vendor_telemetry_env_values
 _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
     {
         "CURL_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
         "HOME",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
+        "NODE_EXTRA_CA_CERTS",
         "NO_PROXY",
         "PATH",
         "PIP_CACHE_DIR",

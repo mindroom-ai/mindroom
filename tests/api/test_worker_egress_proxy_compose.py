@@ -38,6 +38,9 @@ def test_request_execution_env_overlays_proxy_when_no_primary_env(tmp_path: Path
     assert env["HTTP_PROXY"] == expected_proxy
     assert env["HTTPS_PROXY"] == expected_proxy
     assert env["REQUESTS_CA_BUNDLE"] == "/etc/agent-vault/ca.pem"
+    # git and node ignore the curl/python bundles; they need their own keys.
+    assert env["GIT_SSL_CAINFO"] == "/etc/agent-vault/ca.pem"
+    assert env["NODE_EXTRA_CA_CERTS"] == "/etc/agent-vault/ca.pem"
 
 
 def test_request_execution_env_overlays_proxy_onto_shipped_env(tmp_path: Path) -> None:

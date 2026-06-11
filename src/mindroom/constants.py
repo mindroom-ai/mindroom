@@ -706,6 +706,11 @@ def worker_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]
         env["REQUESTS_CA_BUNDLE"] = ca_file
         env["CURL_CA_BUNDLE"] = ca_file
         env["SSL_CERT_FILE"] = ca_file
+        # git and node do not honor the bundles above: git needs GIT_SSL_CAINFO
+        # (else `git clone` over HTTPS rejects the MITM proxy's certificate)
+        # and node only *adds* roots via NODE_EXTRA_CA_CERTS.
+        env["GIT_SSL_CAINFO"] = ca_file
+        env["NODE_EXTRA_CA_CERTS"] = ca_file
     return env
 
 
