@@ -23,26 +23,40 @@ metadata:
   name: {{ $name }}
   labels:
     {{- include "mindroom-runtime.agentVaultBootstrapLabels" . | nindent 4 }}
+# `create` cannot be name-scoped in RBAC; everything else is restricted to
+# the exact objects the Job publishes.
 rules:
   - apiGroups:
       - ""
     resources:
       - configmaps
     verbs:
-      - get
       - create
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - {{ $av.workerCaConfigMapName }}
+    verbs:
+      - get
       - update
       - patch
   {{- if $accessTool.enabled }}
-  # Publishing the access-tool admin token. `create` cannot be name-scoped;
-  # the binding is namespace-local and only the bootstrap SA holds it.
   - apiGroups:
       - ""
     resources:
       - secrets
     verbs:
-      - get
       - create
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    resourceNames:
+      - {{ $accessTool.adminTokenSecret.name }}
+    verbs:
+      - get
       - update
       - patch
   {{- end }}

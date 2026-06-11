@@ -99,8 +99,11 @@ class AgentVaultAccessTools(Toolkit):
 
         vault = worker_id_for_key(target.worker_key, prefix=self._vault_name_prefix)
         try:
-            await self._ensure_vault(vault)
-            granted = await self._grant_member(vault, email)
+            # One token read per request: both API calls must use the same
+            # token, or a rotation between them could 401 the second call.
+            token = self._resolve_admin_token()
+            await self._ensure_vault(vault, token)
+            granted = await self._grant_member(vault, email, token)
         except _AgentVaultAccessError as exc:
             return self._error(str(exc))
         except httpx.HTTPError as exc:
@@ -150,14 +153,14 @@ class AgentVaultAccessTools(Toolkit):
             return token
         return self._admin_token
 
-    def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._resolve_admin_token()}", "Content-Type": "application/json"}
+    def _headers(self, token: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    async def _ensure_vault(self, vault: str) -> None:
+    async def _ensure_vault(self, vault: str, token: str) -> None:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
             response = await client.post(
                 urljoin(self._api_url.rstrip("/") + "/", "v1/vaults"),
-                headers=self._headers(),
+                headers=self._headers(token),
                 json={"name": vault},
             )
         # 409/422 mean the vault already exists, which is fine for an idempotent grant.
@@ -165,11 +168,11 @@ class AgentVaultAccessTools(Toolkit):
             return
         response.raise_for_status()
 
-    async def _grant_member(self, vault: str, email: str) -> bool:
+    async def _grant_member(self, vault: str, email: str, token: str) -> bool:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
             response = await client.post(
                 urljoin(self._api_url.rstrip("/") + "/", f"v1/vaults/{quote(vault, safe='')}/users"),
-                headers=self._headers(),
+                headers=self._headers(token),
                 json={"email": email, "role": "member"},
             )
         if response.status_code in {200, 201}:

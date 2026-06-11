@@ -160,6 +160,14 @@
 {{- end -}}
 {{- end -}}
 {{- $agentVault := .Values.workers.kubernetes.agentVault -}}
-{{- if and $agentVault.accessTool.enabled (not $agentVault.enabled) -}}
+{{- if $agentVault.accessTool.enabled -}}
+{{- if not $agentVault.enabled -}}
 {{- fail "workers.kubernetes.agentVault.accessTool.enabled requires workers.kubernetes.agentVault.enabled=true" -}}
+{{- end -}}
+{{- if not $agentVault.accessTool.adminAgentName -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.adminAgentName must not be empty" -}}
+{{- end -}}
+{{- if not (and $agentVault.accessTool.adminTokenSecret.name $agentVault.accessTool.adminTokenSecret.key) -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.adminTokenSecret.name and .key must not be empty" -}}
+{{- end -}}
 {{- end -}}
