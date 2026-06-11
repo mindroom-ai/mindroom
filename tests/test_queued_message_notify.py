@@ -3049,6 +3049,7 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
             runtime_paths=runtime_paths,
             team_display_name="Queued Notice Team",
             fallback_team_id="queued-notice-team",
+            execution_identity=None,
         )
         messages = [Message(role="user", content="hello")]
         team.model.format_function_call_results(
