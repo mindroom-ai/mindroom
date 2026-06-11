@@ -67,6 +67,11 @@ class _FakeGateway:
 
     def __init__(self) -> None:
         self.ops: list[_GatewayOp] = []
+        self._op_recorded = asyncio.Event()
+
+    def _record(self, op: _GatewayOp) -> None:
+        self.ops.append(op)
+        self._op_recorded.set()
 
     async def send(
         self,
@@ -77,7 +82,7 @@ class _FakeGateway:
         config: Config,
     ) -> DeliveredMatrixEvent:
         assert isinstance(config, Config)
-        self.ops.append(_GatewayOp(kind="send", content=dict(content), display_text=content["body"]))
+        self._record(_GatewayOp(kind="send", content=dict(content), display_text=content["body"]))
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
     async def edit(
@@ -91,17 +96,15 @@ class _FakeGateway:
         config: Config,
     ) -> DeliveredMatrixEvent:
         assert isinstance(config, Config)
-        self.ops.append(_GatewayOp(kind="edit", content=dict(new_content), display_text=new_text))
+        self._record(_GatewayOp(kind="edit", content=dict(new_content), display_text=new_text))
         return DeliveredMatrixEvent(event_id=f"$edit_{len(self.ops)}", content_sent=dict(new_content))
 
     async def wait_for_ops(self, count: int) -> None:
         """Wait until the streaming machine has delivered `count` calls."""
-        for _ in range(1000):
-            if len(self.ops) >= count:
-                return
-            await asyncio.sleep(0.005)
-        msg = f"Timed out waiting for {count} gateway calls; got {len(self.ops)}"
-        raise AssertionError(msg)
+        async with asyncio.timeout(30):
+            while len(self.ops) < count:
+                self._op_recorded.clear()
+                await self._op_recorded.wait()
 
 
 @pytest.fixture
