@@ -138,9 +138,15 @@ class _ThreadAttachmentContext:
         if not attachment_ids:
             return []
         records = resolve_attachments(self.storage_path, attachment_ids)
-        if self.room_id is not None:
-            records = [record for record in records if record.room_id == self.room_id]
-        return records
+        return [record for record in records if self._record_in_scope(record, message)]
+
+    def _record_in_scope(self, record: AttachmentRecord, message: ResolvedVisibleMessage) -> bool:
+        if self.room_id is not None and record.room_id != self.room_id:
+            return False
+        # A record belongs to the thread of the message that references it:
+        # thread members match by thread ID, thread roots by their own event ID,
+        # and room-level messages only see room-level (thread-less) records.
+        return record.thread_id in (message.thread_id, message.event_id)
 
 
 def _wrap_msg_body(sender: str, body: str) -> str:

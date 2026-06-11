@@ -150,6 +150,12 @@ def _dedupe_run_messages_inline_media(run_messages: RunMessages) -> RunMessages:
     function runs, so clearing older duplicate media here affects the current
     request payload rather than persisted session history. The first content key
     in provider payload order (earliest message) wins.
+
+    Accepted trade-off: when a user re-sends byte-identical content, the
+    current turn's copy is stripped and the bytes stay at the earlier history
+    position. The model still sees the content exactly once, and exempting the
+    current message instead would double-send all history media for team runs,
+    which re-collect pinned history media onto their current turn.
     """
     seen_images: set[tuple[str, ...]] = set()
     seen_audio: set[tuple[str, ...]] = set()

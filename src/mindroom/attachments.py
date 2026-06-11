@@ -172,10 +172,21 @@ def merge_attachment_ids(*attachment_id_lists: list[str]) -> list[str]:
     )
 
 
+_MAX_RENDERED_FILENAME_LENGTH = 80
+
+
+def _sanitize_rendered_filename(filename: str) -> str:
+    """Neutralize newline/quote injection from attacker-controlled filenames."""
+    sanitized = "".join(char for char in filename if char.isprintable()).replace('"', "'").strip()
+    if len(sanitized) > _MAX_RENDERED_FILENAME_LENGTH:
+        sanitized = f"{sanitized[: _MAX_RENDERED_FILENAME_LENGTH - 1]}…"
+    return sanitized
+
+
 def _attachment_provenance_line(record: AttachmentRecord) -> str:
     details: list[str] = [record.kind]
     if record.filename:
-        details.append(f'"{record.filename}"')
+        details.append(f'"{_sanitize_rendered_filename(record.filename)}"')
     if record.sender:
         details.append(f"from {record.sender}")
     if record.event_timestamp is not None:
@@ -204,7 +215,7 @@ def format_attachment_annotation(attachment_records: list[AttachmentRecord]) -> 
     if not attachment_records:
         return None
     parts = [
-        f'{record.attachment_id} ({record.kind}, "{record.filename}")'
+        f'{record.attachment_id} ({record.kind}, "{_sanitize_rendered_filename(record.filename)}")'
         if record.filename
         else f"{record.attachment_id} ({record.kind})"
         for record in attachment_records

@@ -308,6 +308,85 @@ def test_fallback_thread_history_drops_cross_room_attachments(tmp_path: Path) ->
     assert not messages[0].files
 
 
+def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) -> None:
+    """Attachment references from another thread in the same room stay out of scope."""
+    file_path = tmp_path / "other-thread.txt"
+    file_path.write_text("other thread", encoding="utf-8")
+    cross_thread = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_other_thread",
+        filename="other-thread.txt",
+        room_id="!room:localhost",
+        thread_id="$other_thread",
+    )
+    in_thread = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_in_thread",
+        filename="in-thread.txt",
+        room_id="!room:localhost",
+        thread_id="$thread",
+    )
+    assert cross_thread is not None
+    assert in_thread is not None
+
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body="see files",
+                event_id="$in-thread",
+                thread_id="$thread",
+                content={ATTACHMENT_IDS_KEY: ["att_other_thread", "att_in_thread"]},
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+    )
+
+    assert messages[0].content == ('@alice:localhost: see files\n[attachments: att_in_thread (file, "in-thread.txt")]')
+    assert [file.id for file in (messages[0].files or [])] == ["att_in_thread"]
+
+
+def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path) -> None:
+    """Thread-root media records (registered under the root event ID) stay in scope."""
+    image_path = tmp_path / "root.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    record = register_local_attachment(
+        tmp_path,
+        image_path,
+        kind="image",
+        attachment_id="att_root",
+        filename="root.png",
+        room_id="!room:localhost",
+        thread_id="$root",
+    )
+    assert record is not None
+
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body="root image",
+                event_id="$root",
+                content={ATTACHMENT_IDS_KEY: ["att_root"]},
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+    )
+
+    assert messages[0].content == '@alice:localhost: root image\n[attachments: att_root (image, "root.png")]'
+    assert [image.id for image in (messages[0].images or [])] == ["att_root"]
+
+
 def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_context() -> None:
     """Visible Matrix tool markers should not train the model to echo fake tool calls."""
     messages = _build_thread_history_messages(
