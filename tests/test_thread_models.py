@@ -320,6 +320,25 @@ def test_model_command_show(tmp_path: Path) -> None:
     assert "`large` override" in response
 
 
+def test_model_command_list_alias_shows_models(tmp_path: Path) -> None:
+    """!model list must show the override state, even outside a thread."""
+    config = _config_with_models(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+
+    for thread_id in (THREAD_ID, None):
+        response = handle_model_command(
+            "list",
+            config=config,
+            runtime_paths=runtime_paths,
+            room_id=ROOM_ID,
+            thread_id=thread_id,
+            requester_user_id="@user:localhost",
+        )
+        assert "No thread model override" in response
+        assert "`default`" in response
+        assert "`large`" in response
+
+
 def test_model_command_rejects_unknown_model(tmp_path: Path) -> None:
     """!model should reject names missing from config.models."""
     config = _config_with_models(tmp_path)

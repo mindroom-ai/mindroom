@@ -37,7 +37,7 @@ _COMMAND_DOCS = {
     CommandType.HELP: ("!help [topic]", "Get help"),
     CommandType.RELOAD_PLUGINS: ("!reload-plugins", "Reload configured plugins (admin only)"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
-    CommandType.MODEL: ("!model [name|reset]", "Show or switch the model used in the current thread"),
+    CommandType.MODEL: ("!model [name|list|reset]", "Show or switch the model used in the current thread"),
     CommandType.HI: ("!hi", "Show welcome message"),
 }
 _WELCOME_COMMAND_TYPES = (CommandType.HI, CommandType.SCHEDULE, CommandType.HELP)
@@ -331,10 +331,10 @@ Set `authorization.config_command_enabled: true`; caller must also be in `author
     if topic == "model":
         return """**Model Command**
 
-Usage: `!model [name|reset]` - Show or switch the model used in the current thread
+Usage: `!model [name|list|reset]` - Show or switch the model used in the current thread
 
 **Examples:**
-- `!model` - Show the current thread's model override and the available models
+- `!model` or `!model list` - Show the current thread's model override and the available models
 - `!model opus` - Make every agent and team in this thread use the `opus` model
 - `!model reset` - Remove the override so agents use their configured models again
 

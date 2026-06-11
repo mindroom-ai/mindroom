@@ -260,7 +260,7 @@ Plain replies that never reach threaded context still stay plain replies.
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
 - `!config <operation>` - Manage configuration
-- `!model [name|reset]` - Show or switch the model used in the current thread
+- `!model [name|list|reset]` - Show or switch the model used in the current thread
 - `!hi` - Show welcome message
 
 <!-- OUTPUT:END -->

@@ -17,7 +17,7 @@ Commands start with `!` and are handled by the router agent.
 | `!list_schedules` | List pending scheduled tasks |
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
-| `!model [name\|reset]` | Show or switch the model used in the current thread |
+| `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
 | `!config <operation>` | View and modify configuration (disabled by default, admin only when enabled) |
 | `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
@@ -152,10 +152,12 @@ Show or switch the model that every agent, team, and the router uses in the curr
 
 ```
 !model
+!model list
 !model opus
 !model reset
 ```
 
+`!model` and `!model list` show the current override and the available model names.
 Model names come from the `models:` section of `config.yaml`.
 The override applies from the next message in the thread and survives restarts.
 Other threads and rooms keep their configured models; room-wide overrides are configured via `room_models` in `config.yaml`.

@@ -15,6 +15,10 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _RESET_ARGUMENTS = frozenset({"reset", "clear"})
+_LIST_ARGUMENTS = frozenset({"list", "show"})
+_THREAD_REQUIRED_MESSAGE = (
+    "❌ `!model` overrides only work inside a thread. Start a thread (or reply in one) and run it there."
+)
 
 
 def _available_models_text(config: Config) -> str:
@@ -34,7 +38,7 @@ def _show_thread_model(config: Config, runtime_paths: RuntimePaths, thread_id: s
     )
 
 
-def handle_model_command(
+def handle_model_command(  # noqa: PLR0911
     args_text: str,
     *,
     config: Config,
@@ -45,18 +49,20 @@ def handle_model_command(
 ) -> str:
     """Show, set, or clear the model override for one Matrix thread."""
     requested = args_text.strip()
-    if not requested:
-        return _show_thread_model(config, runtime_paths, thread_id)
-    if thread_id is None:
-        return "❌ `!model` overrides only work inside a thread. Start a thread (or reply in one) and run it there."
-    # Configured model names win over reset aliases, so a model named "reset"
-    # or "clear" stays reachable and "default" sets the default model.
+    # Configured model names win over list/reset aliases, so a model named
+    # "list", "reset", or "default" stays reachable by its exact name.
     if requested not in config.models:
+        if not requested or requested.lower() in _LIST_ARGUMENTS:
+            return _show_thread_model(config, runtime_paths, thread_id)
+        if thread_id is None:
+            return _THREAD_REQUIRED_MESSAGE
         if requested.lower() in _RESET_ARGUMENTS:
             if clear_thread_model_override(runtime_paths, thread_id):
                 return "✅ Thread model override removed. Agents use their configured models again."
             return "This thread has no model override."
         return f"❌ Unknown model `{requested}`. Available models:\n{_available_models_text(config)}"
+    if thread_id is None:
+        return _THREAD_REQUIRED_MESSAGE
     set_thread_model_override(
         runtime_paths,
         thread_id=thread_id,
