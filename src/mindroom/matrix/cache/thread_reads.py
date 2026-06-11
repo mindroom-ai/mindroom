@@ -1,4 +1,25 @@
-"""Thread read policy for Matrix conversation cache."""
+"""Thread read policy for Matrix conversation cache.
+
+Read-side invariants:
+
+1. Every thread read through this policy first waits for the room and same-thread write queue to drain
+   (``wait_for_thread_idle``), so a read never observes cache state older than mutations already queued
+   when the read began.
+   Startup prewarm deliberately bypasses this policy and relies on the write-time replacement guard
+   instead.
+
+2. Dispatch-safe modes (``DISPATCH_SNAPSHOT``, ``DISPATCH_FULL``) bound the whole wait-plus-fetch by one
+   shared timeout and return an explicitly degraded empty result
+   (``THREAD_HISTORY_SOURCE_DEGRADED``) instead of blocking dispatch; consumers must treat that result
+   as unusable for caching, memoization, and root proofs.
+
+3. ``ADVISORY_FULL`` and ``STRICT_FULL`` have no dispatch timeout and run through the same-thread
+   barrier; ``STRICT_FULL`` is intentionally not dispatch-safe because it may block for authoritative
+   post-lock model context.
+
+4. A stale-cache thread tail is never used for MSC3440 latest-event fallback:
+   ``get_latest_thread_event_id_if_needed`` falls back to the thread root instead.
+"""
 
 from __future__ import annotations
 

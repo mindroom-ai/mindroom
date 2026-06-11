@@ -1,4 +1,15 @@
-"""Facade for Matrix conversation reads and advisory cache notifications."""
+"""Facade for Matrix conversation reads and advisory cache notifications.
+
+``MatrixConversationCache`` is the facade for conversation reads and advisory thread bookkeeping; it
+composes the read policy (``cache.thread_reads``), the three write policies (``cache.thread_writes``),
+and the mutation resolver (``thread_bookkeeping``) over one shared write coordinator.
+Bots and tools still read the event cache directly for non-thread point lookups such as agent message
+snapshots and recent room events, but all thread reads and thread bookkeeping go through this facade.
+
+Per-turn memoization invariant: ``turn_scope`` may replay an event lookup or thread read within one
+inbound turn, but degraded or stale thread reads are never memoized, so a failed read early in a turn
+cannot poison later reads in the same turn.
+"""
 
 from __future__ import annotations
 
@@ -33,12 +44,12 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix.thread_membership import (
+from mindroom.matrix.thread_membership import resolve_event_thread_membership
+from mindroom.matrix.thread_room_scan import (
     fetch_event_info_for_client,
     lookup_thread_id_from_conversation_cache,
-    resolve_event_thread_membership,
+    room_scan_membership_access_for_client,
 )
-from mindroom.matrix.thread_room_scan import room_scan_membership_access_for_client
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:

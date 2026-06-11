@@ -1,4 +1,21 @@
-"""Shared Matrix thread-read diagnostic keys."""
+"""Shared Matrix thread-read diagnostic keys.
+
+This module is a deliberate dependency-cycle breaker between the cache package (which produces
+``ThreadHistoryResult`` diagnostics) and ``thread_membership`` (which consumes them for root proofs).
+
+Diagnostic semantics:
+
+1. ``thread_read_source`` distinguishes ``cache`` (trusted snapshot), ``homeserver`` (fresh fetch),
+   ``stale_cache`` (advisory fallback after a failed refetch), and ``degraded`` (empty fail-open result
+   from a dispatch timeout).
+
+2. ``is_thread_history_degraded`` is the planning-level check: both ``stale_cache`` and ``degraded``
+   reads count as degraded and must not be memoized or treated as authoritative context.
+
+3. ``is_thread_history_source_degraded`` is the stricter proof-level check: only the explicit
+   ``degraded`` source disqualifies a history from serving as thread-root proof, because a stale
+   snapshot still proves children existed while an empty degraded read proves nothing.
+"""
 
 from __future__ import annotations
 

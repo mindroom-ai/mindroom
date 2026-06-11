@@ -13,6 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.attachment_helpers import resolve_canonical_tool_thread_target
 from mindroom.matrix import thread_bookkeeping
+from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import (
     MutationThreadImpact,
@@ -20,11 +21,21 @@ from mindroom.matrix.thread_bookkeeping import (
     resolve_event_thread_impact_for_client,
     resolve_redaction_thread_impact_for_client,
 )
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_DEGRADED,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+)
 from mindroom.matrix.thread_membership import (
+    ThreadMembershipAccess,
     ThreadResolution,
+    ThreadResolutionState,
+    ThreadRootProof,
     map_backed_thread_membership_access,
     page_event_info_counts_as_thread_child_proof,
     resolve_event_thread_membership,
+    resolve_related_event_thread_membership,
+    thread_messages_thread_membership_access,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
@@ -216,6 +227,89 @@ async def test_resolve_event_thread_membership_proves_current_root_when_allowed(
     )
 
     assert resolution == ThreadResolution.threaded("$thread-root:localhost")
+
+
+@pytest.mark.asyncio
+async def test_resolve_related_event_thread_membership_terminates_on_relation_cycle() -> None:
+    """A reply cycle must terminate as room-level instead of walking relations forever."""
+    event_infos = {
+        "$cycle-a:localhost": _message_event_info(
+            {
+                "body": "a",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$cycle-b:localhost"}},
+            },
+        ),
+        "$cycle-b:localhost": _message_event_info(
+            {
+                "body": "b",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$cycle-a:localhost"}},
+            },
+        ),
+    }
+    fetched_event_ids: list[str] = []
+
+    async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+        return None
+
+    async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+        fetched_event_ids.append(event_id)
+        return event_infos[event_id]
+
+    async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
+        msg = "events with relations can never become thread roots"
+        raise AssertionError(msg)
+
+    resolution = await resolve_related_event_thread_membership(
+        "!room:localhost",
+        "$cycle-a:localhost",
+        access=ThreadMembershipAccess(
+            lookup_thread_id=lookup_thread_id,
+            fetch_event_info=fetch_event_info,
+            prove_thread_root=prove_thread_root,
+        ),
+    )
+
+    assert resolution == ThreadResolution.room_level()
+    assert fetched_event_ids == ["$cycle-a:localhost", "$cycle-b:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_thread_root_proof_from_degraded_history_is_indeterminate() -> None:
+    """An empty degraded thread read must yield an indeterminate result, never room-level demotion."""
+    thread_root_id = "$thread-root:localhost"
+    degraded_history = ThreadHistoryResult(
+        [],
+        is_full_history=False,
+        diagnostics={
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+        },
+    )
+
+    async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+        return None
+
+    async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
+        return _message_event_info({"body": "root", "msgtype": "m.text"})
+
+    async def fetch_thread_messages(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
+        return degraded_history
+
+    resolution = await resolve_related_event_thread_membership(
+        "!room:localhost",
+        thread_root_id,
+        access=thread_messages_thread_membership_access(
+            lookup_thread_id=lookup_thread_id,
+            fetch_event_info=fetch_event_info,
+            fetch_thread_messages=fetch_thread_messages,
+        ),
+    )
+
+    assert resolution.state is ThreadResolutionState.INDETERMINATE
+    assert resolution.candidate_thread_root_id == thread_root_id
+    assert resolution.thread_id is None
 
 
 @pytest.mark.asyncio
