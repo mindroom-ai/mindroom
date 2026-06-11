@@ -8,6 +8,8 @@ Durable trust-state invariants (mirrored by ``postgres_event_cache_threads``):
 2. Snapshot replacement is race-guarded: ``replace_thread_locked_if_not_newer`` refuses when
    ``validated_at``, ``invalidated_at``, or ``room_invalidated_at`` changed after the fetch began, so a
    slow fetch cannot bury an invalidation that landed mid-flight (PR #716).
+   The concrete caches additionally clamp the stored ``validated_at`` to the fetch start time, so an
+   invalidation that lands during the fetch still outranks the snapshot at read time.
 
 3. Incremental revalidation is allowlisted: ``revalidate_thread_after_incremental_update_locked`` clears
    an invalidation only when the thread was previously validated, the invalidation reason is one of the
