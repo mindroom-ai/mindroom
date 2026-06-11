@@ -42,10 +42,13 @@ def _inline_media_content_key(record: AttachmentRecord) -> tuple[str, ...]:
     return (record.kind, mime_type, "filepath", str(record.local_path))
 
 
-def _attachment_records_to_media(
+def attachment_records_to_media(
     attachment_records: list[AttachmentRecord],
 ) -> tuple[list[Audio], list[Image], list[File], list[Video]]:
-    """Convert persisted attachments into Agno media objects."""
+    """Convert attachment records into Agno media objects and remember them for dedupe."""
+    for record in attachment_records:
+        _remember_attachment_record(record)
+
     audio: list[Audio] = []
     images: list[Image] = []
     files: list[File] = []
@@ -97,15 +100,6 @@ def _attachment_records_to_media(
             )
 
     return audio, images, files, videos
-
-
-def attachment_records_to_media(
-    attachment_records: list[AttachmentRecord],
-) -> tuple[list[Audio], list[Image], list[File], list[Video]]:
-    """Convert attachment records into Agno media objects and remember them for dedupe."""
-    for record in attachment_records:
-        _remember_attachment_record(record)
-    return _attachment_records_to_media(attachment_records)
 
 
 def resolve_scoped_attachments(
