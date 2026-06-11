@@ -4385,3 +4385,48 @@ def test_private_user_agent_agents_share_culture_manager_within_same_requester_s
     second_kwargs = mock_agent_class.call_args_list[1].kwargs
     assert first_kwargs["culture_manager"] is created_culture_manager
     assert second_kwargs["culture_manager"] is created_culture_manager
+
+
+def test_team_member_matches_solo_agent_construction() -> None:
+    """A team-materialized member must equal the same agent built solo, modulo explicit deltas."""
+    from mindroom.history import close_team_runtime_state_dbs  # noqa: PLC0415
+    from mindroom.teams import materialize_exact_team_members  # noqa: PLC0415
+    from tests.conftest import runtime_paths_for  # noqa: PLC0415
+
+    config = _test_config()
+    runtime_paths = runtime_paths_for(config)
+
+    solo = create_agent("calculator", config, runtime_paths, execution_identity=None)
+    member = materialize_exact_team_members(
+        ["calculator"],
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+    ).agents[0]
+    try:
+        assert member.role == solo.role
+        assert member.name == solo.name
+        assert member.id == solo.id
+        assert type(member.model) is type(solo.model)
+        assert member.model is not None
+        assert solo.model is not None
+        assert member.model.id == solo.model.id
+        assert [tool.name for tool in member.tools or []] == [tool.name for tool in solo.tools or []]
+        assert member.markdown == solo.markdown
+        assert type(member.learning) is type(solo.learning)
+        assert member.add_history_to_context == solo.add_history_to_context
+        assert member.num_history_runs == solo.num_history_runs
+        assert member.num_history_messages == solo.num_history_messages
+        assert member.max_tool_calls_from_history == solo.max_tool_calls_from_history
+        assert member.knowledge == solo.knowledge
+        assert member.culture_manager == solo.culture_manager
+
+        # The only authored construction delta: members never get the Matrix
+        # reaction-based interactive question prompt.
+        interactive_prompt = config.get_prompt("INTERACTIVE_QUESTION_PROMPT")
+        assert interactive_prompt in solo.instructions
+        assert list(member.instructions or []) == [
+            instruction for instruction in solo.instructions or [] if instruction != interactive_prompt
+        ]
+    finally:
+        close_team_runtime_state_dbs(agents=[solo, member], team_db=None)
