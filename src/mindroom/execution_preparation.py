@@ -10,6 +10,12 @@ from xml.sax.saxutils import quoteattr as xml_quoteattr
 from agno.models.message import Message
 
 from mindroom import ai_runtime
+from mindroom.attachment_media import attachment_records_to_media
+from mindroom.attachments import (
+    attachment_ids_for_visible_message,
+    format_attachment_annotation,
+    resolve_attachments,
+)
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
     ORIGINAL_SENDER_KEY,
@@ -44,10 +50,12 @@ from mindroom.timing import timed
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Sequence
+    from pathlib import Path
 
     from agno.agent import Agent
     from agno.team import Team
 
+    from mindroom.attachments import AttachmentRecord
     from mindroom.config.main import Config
     from mindroom.history import CompactionDecision, CompactionLifecycle, CompactionOutcome, CompactionReplyOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -116,6 +124,23 @@ class ThreadHistoryRenderLimits:
     max_messages: int | None = None
     max_message_length: int | None = None
     missing_sender_label: str | None = None
+
+
+@dataclass(frozen=True)
+class _ThreadAttachmentContext:
+    """Resolve per-message attachment records for thread-history rendering."""
+
+    storage_path: Path
+    room_id: str | None
+
+    def records_for(self, message: ResolvedVisibleMessage) -> list[AttachmentRecord]:
+        attachment_ids = attachment_ids_for_visible_message(message)
+        if not attachment_ids:
+            return []
+        records = resolve_attachments(self.storage_path, attachment_ids)
+        if self.room_id is not None:
+            records = [record for record in records if record.room_id == self.room_id]
+        return records
 
 
 def _wrap_msg_body(sender: str, body: str) -> str:
@@ -241,24 +266,39 @@ def _context_message_from_visible_message(
     response_sender_id: str | None,
     missing_sender_label: str | None = None,
     body: str | None = None,
+    attachment_records: Sequence[AttachmentRecord] = (),
 ) -> Message:
     """Convert one visible Matrix message into a structured Agno message."""
     # Matrix bodies include human-facing tool markers like "🔧 `tool` [1]".
     # Those markers are display chrome, not conversation content; if we replay
     # them to the model it can continue the pattern as plain text with no trace.
     body = _context_body_from_visible_message(message, response_sender_id=response_sender_id) if body is None else body
+    annotation = format_attachment_annotation(list(attachment_records))
+    if annotation:
+        body = f"{body}\n{annotation}" if body else annotation
     if (
         response_sender_id is not None
         and message.sender == response_sender_id
         and not _is_relayed_user_message(message)
     ):
+        # Provider APIs reject media on assistant turns, so agent-sent
+        # attachments surface through the annotation text only.
         return Message(role="assistant", content=body)
     speaker_label = _message_speaker_label(message)
     if not speaker_label:
         speaker_label = missing_sender_label
-    if speaker_label:
-        return Message(role="user", content=f"{speaker_label}: {body}")
-    return Message(role="user", content=body)
+    content = f"{speaker_label}: {body}" if speaker_label else body
+    if not attachment_records:
+        return Message(role="user", content=content)
+    audio, images, files, videos = attachment_records_to_media(list(attachment_records))
+    return Message(
+        role="user",
+        content=content,
+        audio=audio or None,
+        images=images or None,
+        files=files or None,
+        videos=videos or None,
+    )
 
 
 def _context_messages_from_visible_messages(
@@ -268,6 +308,7 @@ def _context_messages_from_visible_messages(
     max_messages: int | None = None,
     max_message_length: int | None = None,
     missing_sender_label: str | None = None,
+    attachment_context: _ThreadAttachmentContext | None = None,
 ) -> tuple[Message, ...]:
     """Convert visible Matrix context into provider-native message objects."""
     visible_messages = messages[-max_messages:] if max_messages is not None else messages
@@ -276,13 +317,14 @@ def _context_messages_from_visible_messages(
         # Strip before length capping so display-only markers do not consume the
         # model-context budget or leave marker-only turns behind.
         body = _context_body_from_visible_message(message, response_sender_id=response_sender_id)
-        if not body:
+        attachment_records = attachment_context.records_for(message) if attachment_context is not None else []
+        if not body and not attachment_records:
             continue
         capped_body = body
         capped_message = replace_visible_message(message, body=capped_body)
         if max_message_length is not None:
             capped_body = _cap_visible_message_body(body, max_message_length)
-            if not capped_body:
+            if not capped_body and not attachment_records:
                 continue
             capped_message = replace_visible_message(message, body=capped_body)
         context_messages.append(
@@ -291,6 +333,7 @@ def _context_messages_from_visible_messages(
                 response_sender_id=response_sender_id,
                 missing_sender_label=missing_sender_label,
                 body=capped_body,
+                attachment_records=attachment_records,
             ),
         )
     return tuple(context_messages)
@@ -382,6 +425,7 @@ def _build_unseen_context_messages(
     response_sender_id: str | None,
     current_sender_id: str | None = None,
     config: Config,
+    attachment_context: _ThreadAttachmentContext | None = None,
 ) -> tuple[tuple[Message, ...], list[str]]:
     """Return canonical request messages for unseen thread context plus the current turn."""
     unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
@@ -394,6 +438,7 @@ def _build_unseen_context_messages(
     context_messages = _context_messages_from_visible_messages(
         unseen_messages,
         response_sender_id=response_sender_id,
+        attachment_context=attachment_context,
     )
     if partial_reply_kinds:
         context_messages = (
@@ -427,6 +472,7 @@ def _build_thread_history_messages(
     static_token_budget: int | None = None,
     estimate_static_tokens_fn: Callable[[str], int] | None = None,
     render_messages_text_fn: Callable[[Sequence[Message]], str] | None = None,
+    attachment_context: _ThreadAttachmentContext | None = None,
 ) -> tuple[Message, ...]:
     """Return canonical request messages for fallback full-thread replay."""
     if not thread_history:
@@ -437,6 +483,7 @@ def _build_thread_history_messages(
         max_messages=max_messages,
         max_message_length=max_message_length,
         missing_sender_label=missing_sender_label,
+        attachment_context=attachment_context,
     )
     if (
         static_token_budget is not None
@@ -600,6 +647,7 @@ async def _prepare_execution_context_common(
     render_messages_text_fn: Callable[[Sequence[Message]], str],
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     fallback_static_token_budget: int | None = None,
+    attachment_context: _ThreadAttachmentContext | None = None,
     timing_scope: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
@@ -618,6 +666,7 @@ async def _prepare_execution_context_common(
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
             config=config,
+            attachment_context=attachment_context,
         )
 
     prepared_scope_history = await prepare_scope_history_fn(render_messages_text_fn(provisional_messages))
@@ -633,6 +682,7 @@ async def _prepare_execution_context_common(
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
             config=config,
+            attachment_context=attachment_context,
         )
     else:
         unseen_event_ids = []
@@ -670,6 +720,7 @@ async def _prepare_execution_context_common(
             static_token_budget=fallback_static_token_budget,
             estimate_static_tokens_fn=estimate_static_tokens_fn,
             render_messages_text_fn=render_messages_text_fn,
+            attachment_context=attachment_context,
         )
         final_messages = replay_fallback_messages
         fallback_context_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
@@ -774,6 +825,10 @@ async def prepare_agent_execution_context(
             context_window=runtime_model.context_window,
             reserve_tokens=config.get_entity_compaction_config(agent_name).reserve_tokens,
         ),
+        attachment_context=_ThreadAttachmentContext(
+            storage_path=runtime_paths.storage_root,
+            room_id=room_id,
+        ),
         timing_scope=timing_scope,
         pipeline_timing=pipeline_timing,
     )
@@ -791,6 +846,7 @@ async def _prepare_bound_team_execution_context(
     team_name: str | None,
     active_model_name: str | None,
     active_context_window: int | None,
+    room_id: str | None = None,
     reply_to_event_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
@@ -841,6 +897,10 @@ async def _prepare_bound_team_execution_context(
         estimate_static_tokens_fn=_estimate_team_static_tokens,
         render_messages_text_fn=render_prepared_team_messages_text,
         thread_history_render_limits=thread_history_render_limits,
+        attachment_context=_ThreadAttachmentContext(
+            storage_path=runtime_paths.storage_root,
+            room_id=room_id,
+        ),
         fallback_static_token_budget=_fallback_static_token_budget(
             context_window=active_context_window,
             reserve_tokens=(
@@ -878,6 +938,7 @@ async def prepare_bound_team_run_context(
     entity_name: str | None,
     active_model_name: str | None,
     active_context_window: int | None,
+    room_id: str | None = None,
     reply_to_event_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
@@ -904,6 +965,7 @@ async def prepare_bound_team_run_context(
         team_name=entity_name,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
+        room_id=room_id,
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,

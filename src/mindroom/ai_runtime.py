@@ -17,12 +17,13 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.logging_config import get_logger
-from mindroom.media_fallback import append_inline_media_fallback_prompt
+from mindroom.media_fallback import MediaKind, append_inline_media_fallback_prompt
 from mindroom.media_inputs import MediaInputs
 
 if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
+    from agno.media import Audio, File, Image, Video
     from agno.models.base import Model
 
     from mindroom.history import ScopeSessionContext
@@ -35,9 +36,11 @@ __all__ = [
     "cleanup_queued_notice_state",
     "copy_run_input",
     "install_queued_message_notice_hook",
+    "media_inputs_from_run_input",
     "next_retry_run_id",
     "note_attempt_run_id",
     "queued_message_signal_context",
+    "run_input_media_kinds",
     "scrub_queued_notice_session_context",
 ]
 
@@ -75,20 +78,67 @@ def attach_media_to_run_input(
     return run_messages
 
 
+_ALL_MEDIA_KINDS: frozenset[MediaKind] = frozenset({"audio", "file", "image", "video"})
+
+
+def run_input_media_kinds(run_input: ModelRunInput) -> frozenset[MediaKind]:
+    """Return media kinds attached to canonical run-input messages."""
+    if isinstance(run_input, str):
+        return frozenset()
+    kinds: set[MediaKind] = set()
+    for message in run_input:
+        if message.audio:
+            kinds.add("audio")
+        if message.images:
+            kinds.add("image")
+        if message.files:
+            kinds.add("file")
+        if message.videos:
+            kinds.add("video")
+    return frozenset(kinds)
+
+
+def media_inputs_from_run_input(run_input: ModelRunInput) -> MediaInputs:
+    """Collect media attached to canonical run-input messages.
+
+    Team runs flatten context messages to text, so media pinned to
+    thread-history messages must be re-collected into the current turn.
+    """
+    if isinstance(run_input, str):
+        return MediaInputs()
+    audio: list[Audio] = []
+    images: list[Image] = []
+    files: list[File] = []
+    videos: list[Video] = []
+    for message in run_input:
+        audio.extend(message.audio or ())
+        images.extend(message.images or ())
+        files.extend(message.files or ())
+        videos.extend(message.videos or ())
+    return MediaInputs.from_optional(audio=audio, images=images, files=files, videos=videos)
+
+
 def append_inline_media_fallback_to_run_input(
     run_input: ModelRunInput,
     *,
     fallback_prompt: str,
+    removed_kinds: frozenset[MediaKind] | None = None,
 ) -> list[Message]:
-    """Append the inline-media fallback note to the current user turn."""
+    """Strip rejected media kinds from all run-input messages and append the fallback note."""
     run_messages = copy_run_input(run_input)
+    kinds = _ALL_MEDIA_KINDS if removed_kinds is None else removed_kinds
+    for message in run_messages:
+        if "audio" in kinds:
+            message.audio = None
+        if "image" in kinds:
+            message.images = None
+        if "file" in kinds:
+            message.files = None
+        if "video" in kinds:
+            message.videos = None
     current_message = run_messages[-1]
     current_text = current_message.content if isinstance(current_message.content, str) else ""
     current_message.content = append_inline_media_fallback_prompt(current_text, fallback_prompt=fallback_prompt)
-    current_message.audio = None
-    current_message.images = None
-    current_message.files = None
-    current_message.videos = None
     return run_messages
 
 

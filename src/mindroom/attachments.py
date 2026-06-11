@@ -136,6 +136,24 @@ def _thread_history_message_in_scope(message: ResolvedVisibleMessage, thread_id:
     return thread_id in (message.thread_id, message.event_id)
 
 
+_MEDIA_MSGTYPES = frozenset({"m.audio", "m.file", "m.image", "m.video"})
+
+
+def attachment_ids_for_visible_message(message: ResolvedVisibleMessage) -> list[str]:
+    """Return attachment IDs carried by one visible message.
+
+    MindRoom-sent messages reference attachments via content metadata; raw
+    media events map to the deterministic per-event attachment ID used at
+    registration time.
+    """
+    attachment_ids = parse_attachment_ids_from_event_source({"content": message.content})
+    if attachment_ids:
+        return attachment_ids
+    if message.content.get("msgtype") in _MEDIA_MSGTYPES and message.event_id:
+        return [_attachment_id_for_event(message.event_id)]
+    return []
+
+
 def unique_attachment_ids(attachment_ids: Iterable[str]) -> list[str]:
     """Return unique non-empty attachment IDs preserving first-seen order."""
     unique_ids: list[str] = []
@@ -168,24 +186,30 @@ def _attachment_provenance_line(record: AttachmentRecord) -> str:
     return f"- {record.attachment_id} ({', '.join(details)})"
 
 
-def format_attachments_prompt(
-    attachment_records: list[AttachmentRecord],
-    *,
-    current_attachment_ids: set[str],
-) -> str | None:
-    """Render attachment guidance with provenance, split by current turn vs earlier in the conversation."""
+def format_attachments_prompt(current_records: list[AttachmentRecord]) -> str | None:
+    """Render provenance for attachments sent with the current message.
+
+    Earlier attachments are not listed here; they are annotated in place on
+    the thread-history messages that carried them.
+    """
+    if not current_records:
+        return None
+    lines = ["Attachments sent with the current message (use tool calls to inspect or process them by ID):"]
+    lines.extend(_attachment_provenance_line(record) for record in current_records)
+    return "\n".join(lines)
+
+
+def format_attachment_annotation(attachment_records: list[AttachmentRecord]) -> str | None:
+    """Render a compact inline annotation for attachments carried by one message."""
     if not attachment_records:
         return None
-    current_records = [record for record in attachment_records if record.attachment_id in current_attachment_ids]
-    earlier_records = [record for record in attachment_records if record.attachment_id not in current_attachment_ids]
-    lines = ["Available attachments (use tool calls to inspect or process them by ID):"]
-    if current_records:
-        lines.append("Sent with the current message:")
-        lines.extend(_attachment_provenance_line(record) for record in current_records)
-    if earlier_records:
-        lines.append("From earlier in this conversation (NOT sent with the current message):")
-        lines.extend(_attachment_provenance_line(record) for record in earlier_records)
-    return "\n".join(lines)
+    parts = [
+        f'{record.attachment_id} ({record.kind}, "{record.filename}")'
+        if record.filename
+        else f"{record.attachment_id} ({record.kind})"
+        for record in attachment_records
+    ]
+    return f"[attachments: {', '.join(parts)}]"
 
 
 def _attachments_dir(storage_path: Path) -> Path:

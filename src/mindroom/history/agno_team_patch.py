@@ -123,27 +123,24 @@ def _keep_first_inline_media(
 
 
 def _messages_in_inline_media_dedupe_order(run_messages: RunMessages) -> list[Message]:
-    current_message = run_messages.user_message
+    # Walk in provider payload order so the earliest occurrence of each media
+    # content key wins. Keeping media at its first (history) position keeps the
+    # request prefix byte-stable across turns for provider prompt caching.
     # Identity-based dedupe — Agno keeps the same Message instance in run_messages.messages and run_messages.user_message.
     seen_message_ids: set[int] = set()
-    current_messages: list[Message] = []
-    non_history_messages: list[Message] = []
-    history_messages: list[Message] = []
-
-    if current_message is not None:
-        current_messages.append(current_message)
-        seen_message_ids.add(id(current_message))
+    ordered_messages: list[Message] = []
 
     for message in run_messages.messages:
         if id(message) in seen_message_ids:
             continue
         seen_message_ids.add(id(message))
-        if message.from_history:
-            history_messages.append(message)
-        else:
-            non_history_messages.append(message)
+        ordered_messages.append(message)
 
-    return [*current_messages, *non_history_messages, *history_messages]
+    current_message = run_messages.user_message
+    if current_message is not None and id(current_message) not in seen_message_ids:
+        ordered_messages.append(current_message)
+
+    return ordered_messages
 
 
 def _dedupe_run_messages_inline_media(run_messages: RunMessages) -> RunMessages:
@@ -152,7 +149,7 @@ def _dedupe_run_messages_inline_media(run_messages: RunMessages) -> RunMessages:
     Agno builds fresh per-run Message objects for persisted history before this
     function runs, so clearing older duplicate media here affects the current
     request payload rather than persisted session history. The first content key
-    in current, non-history, then history order wins.
+    in provider payload order (earliest message) wins.
     """
     seen_images: set[tuple[str, ...]] = set()
     seen_audio: set[tuple[str, ...]] = set()

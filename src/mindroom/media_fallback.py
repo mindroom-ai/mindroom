@@ -25,12 +25,14 @@ if TYPE_CHECKING:
     from agno.models.base import Model
 
 __all__ = [
+    "MediaKind",
     "ModelMediaRoute",
     "append_inline_media_fallback_prompt",
     "build_model_media_route",
     "filter_media_inputs_for_route",
     "reset_model_media_capability_cache",
     "retry_media_inputs_after_failure",
+    "unsupported_media_kinds_for_route",
 ]
 
 _INLINE_MEDIA_FALLBACK_MARKER = "[Inline media unavailable for this model]"
@@ -48,10 +50,10 @@ _INLINE_MEDIA_UNSUPPORTED_PATTERNS = (
     re.compile(rf"at most 0 (?P<kind>{_MEDIA_KIND_PATTERN})\(s\) may be provided"),
 )
 
-type _MediaKind = Literal["audio", "image", "file", "video"]
+type MediaKind = Literal["audio", "image", "file", "video"]
 
 # Provider error vocabulary -> our MediaInputs kind (providers say "document" for files).
-_PROVIDER_MEDIA_KINDS: dict[str, _MediaKind] = {
+_PROVIDER_MEDIA_KINDS: dict[str, MediaKind] = {
     "audio": "audio",
     "image": "image",
     "video": "video",
@@ -74,7 +76,7 @@ class _MediaFilterResult:
     """Media inputs after route capability filtering."""
 
     media_inputs: MediaInputs
-    removed_kinds: frozenset[_MediaKind]
+    removed_kinds: frozenset[MediaKind]
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,11 +85,11 @@ class _MediaRetryDecision:
 
     should_retry: bool
     media_inputs: MediaInputs
-    removed_kinds: frozenset[_MediaKind]
+    removed_kinds: frozenset[MediaKind]
 
 
 # Intentional process-lifetime pessimism: learned negative capability state is cleared by restart.
-_UNSUPPORTED_MEDIA_KINDS_BY_ROUTE: dict[ModelMediaRoute, set[_MediaKind]] = {}
+_UNSUPPORTED_MEDIA_KINDS_BY_ROUTE: dict[ModelMediaRoute, set[MediaKind]] = {}
 
 
 def build_model_media_route(model: Model | None) -> ModelMediaRoute | None:
@@ -104,15 +106,19 @@ def build_model_media_route(model: Model | None) -> ModelMediaRoute | None:
     )
 
 
+def unsupported_media_kinds_for_route(route: ModelMediaRoute | None) -> frozenset[MediaKind]:
+    """Return media kinds this route has been learned to reject."""
+    if route is None:
+        return frozenset()
+    return frozenset(_UNSUPPORTED_MEDIA_KINDS_BY_ROUTE.get(route, set()))
+
+
 def filter_media_inputs_for_route(
     route: ModelMediaRoute | None,
     media_inputs: MediaInputs,
 ) -> _MediaFilterResult:
     """Omit learned-unsupported media kinds before a model request."""
-    unsupported_kinds = (
-        frozenset(_UNSUPPORTED_MEDIA_KINDS_BY_ROUTE.get(route, set())) if route is not None else frozenset()
-    )
-    removed_kinds = unsupported_kinds & _media_kinds_present(media_inputs)
+    removed_kinds = unsupported_media_kinds_for_route(route) & _media_kinds_present(media_inputs)
     if not removed_kinds:
         return _MediaFilterResult(media_inputs=media_inputs, removed_kinds=frozenset())
     return _MediaFilterResult(
@@ -125,15 +131,19 @@ def retry_media_inputs_after_failure(
     route: ModelMediaRoute | None,
     error: Exception | str,
     media_inputs: MediaInputs,
+    *,
+    extra_present_kinds: frozenset[MediaKind] = frozenset(),
 ) -> _MediaRetryDecision:
     """Decide whether and how one media-bearing request should retry.
 
     Explicit "kind is not supported" errors teach the route cache so later
     requests pre-drop that kind; validation and ambiguous media errors retry
     once without poisoning the cache. A kind can only be learned when it was
-    actually present in ``media_inputs``.
+    actually present in ``media_inputs`` or ``extra_present_kinds`` (media
+    pinned to thread-history messages in the run input).
     """
-    if not media_inputs.has_any():
+    present_kinds = _media_kinds_present(media_inputs) | extra_present_kinds
+    if not present_kinds:
         return _no_media_retry_decision(media_inputs)
 
     error_text = str(error)
@@ -142,19 +152,19 @@ def retry_media_inputs_after_failure(
         return _media_retry_decision_for_kinds(
             media_inputs,
             unsupported_kinds,
+            present_kinds=present_kinds,
             cache_route=route,
         )
 
     validation_kinds = _media_validation_kinds_from_error(error_text)
     if validation_kinds:
-        return _media_retry_decision_for_kinds(media_inputs, validation_kinds)
+        return _media_retry_decision_for_kinds(media_inputs, validation_kinds, present_kinds=present_kinds)
 
     if _is_ambiguous_media_error(error_text):
-        removed_kinds = _media_kinds_present(media_inputs)
         return _MediaRetryDecision(
             should_retry=True,
-            media_inputs=_without_media_kinds(media_inputs, removed_kinds),
-            removed_kinds=removed_kinds,
+            media_inputs=_without_media_kinds(media_inputs, present_kinds),
+            removed_kinds=present_kinds,
         )
 
     return _no_media_retry_decision(media_inputs)
@@ -179,11 +189,12 @@ def append_inline_media_fallback_prompt(
 
 def _media_retry_decision_for_kinds(
     media_inputs: MediaInputs,
-    kinds: frozenset[_MediaKind],
+    kinds: frozenset[MediaKind],
     *,
+    present_kinds: frozenset[MediaKind],
     cache_route: ModelMediaRoute | None = None,
 ) -> _MediaRetryDecision:
-    removed_kinds = kinds & _media_kinds_present(media_inputs)
+    removed_kinds = kinds & present_kinds
     if not removed_kinds:
         return _no_media_retry_decision(media_inputs)
     if cache_route is not None:
@@ -203,9 +214,9 @@ def _no_media_retry_decision(media_inputs: MediaInputs) -> _MediaRetryDecision:
     )
 
 
-def _unsupported_media_kinds_from_error(error_text: str) -> frozenset[_MediaKind]:
+def _unsupported_media_kinds_from_error(error_text: str) -> frozenset[MediaKind]:
     lowered_error_text = error_text.lower()
-    kinds: set[_MediaKind] = set()
+    kinds: set[MediaKind] = set()
     for pattern in _INLINE_MEDIA_UNSUPPORTED_PATTERNS:
         for match in pattern.finditer(lowered_error_text):
             kind = _canonical_media_kind(match.group("kind"))
@@ -214,7 +225,7 @@ def _unsupported_media_kinds_from_error(error_text: str) -> frozenset[_MediaKind
     return frozenset(kinds)
 
 
-def _media_validation_kinds_from_error(error_text: str) -> frozenset[_MediaKind]:
+def _media_validation_kinds_from_error(error_text: str) -> frozenset[MediaKind]:
     lowered_error_text = error_text.lower()
     kinds = {
         kind
@@ -230,12 +241,12 @@ def _is_ambiguous_media_error(error_text: str) -> bool:
     return bool(_INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN.search(error_text.lower()))
 
 
-def _canonical_media_kind(provider_kind: str) -> _MediaKind | None:
+def _canonical_media_kind(provider_kind: str) -> MediaKind | None:
     return _PROVIDER_MEDIA_KINDS.get(provider_kind)
 
 
-def _media_kinds_present(media_inputs: MediaInputs) -> frozenset[_MediaKind]:
-    kinds: set[_MediaKind] = set()
+def _media_kinds_present(media_inputs: MediaInputs) -> frozenset[MediaKind]:
+    kinds: set[MediaKind] = set()
     if media_inputs.audio:
         kinds.add("audio")
     if media_inputs.images:
@@ -247,7 +258,7 @@ def _media_kinds_present(media_inputs: MediaInputs) -> frozenset[_MediaKind]:
     return frozenset(kinds)
 
 
-def _without_media_kinds(media_inputs: MediaInputs, kinds: frozenset[_MediaKind]) -> MediaInputs:
+def _without_media_kinds(media_inputs: MediaInputs, kinds: frozenset[MediaKind]) -> MediaInputs:
     return MediaInputs(
         audio=() if "audio" in kinds else media_inputs.audio,
         images=() if "image" in kinds else media_inputs.images,

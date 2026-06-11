@@ -7,7 +7,7 @@ from collections.abc import Sequence  # noqa: TC003
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.attachment_media import resolve_attachment_media
+from mindroom.attachment_media import attachment_records_to_media, resolve_scoped_attachments
 from mindroom.attachments import (
     format_attachments_prompt,
     merge_attachment_ids,
@@ -378,41 +378,32 @@ class InboundTurnNormalizer:
         scoped_attachment_ids = [
             attachment_id for attachment_id in attachment_ids if attachment_id not in trusted_current_attachment_ids
         ]
-        resolved_records, attachment_audio, attachment_images, attachment_files, attachment_videos = (
-            resolve_attachment_media(
-                self.deps.storage_path,
-                scoped_attachment_ids,
-                room_id=request.room_id,
-                thread_id=request.media_thread_id,
-                current_attachment_ids=set(request.current_attachment_ids),
-            )
+        scoped_records = resolve_scoped_attachments(
+            self.deps.storage_path,
+            scoped_attachment_ids,
+            room_id=request.room_id,
+            thread_id=request.media_thread_id,
         )
-        if trusted_current_attachment_ids:
-            (
-                trusted_records,
-                trusted_audio,
-                trusted_images,
-                trusted_files,
-                trusted_videos,
-            ) = resolve_attachment_media(
-                self.deps.storage_path,
-                trusted_current_attachment_ids,
-            )
-            trusted_record_ids = {record.attachment_id for record in trusted_records}
-            resolved_records = [
-                *trusted_records,
-                *[record for record in resolved_records if record.attachment_id not in trusted_record_ids],
-            ]
-            attachment_audio = [*trusted_audio, *attachment_audio]
-            attachment_images = [*trusted_images, *attachment_images]
-            attachment_files = [*trusted_files, *attachment_files]
-            attachment_videos = [*trusted_videos, *attachment_videos]
+        trusted_records = (
+            resolve_scoped_attachments(self.deps.storage_path, trusted_current_attachment_ids)
+            if trusted_current_attachment_ids
+            else []
+        )
+        trusted_record_ids = {record.attachment_id for record in trusted_records}
+        resolved_records = [
+            *trusted_records,
+            *[record for record in scoped_records if record.attachment_id not in trusted_record_ids],
+        ]
+        # Media bytes for earlier attachments stay pinned to the thread-history
+        # messages that carried them; only current-turn media rides this input.
+        current_attachment_id_set = {*trusted_current_attachment_ids, *request.current_attachment_ids}
+        current_records = [record for record in resolved_records if record.attachment_id in current_attachment_id_set]
+        attachment_audio, attachment_images, attachment_files, attachment_videos = attachment_records_to_media(
+            current_records,
+        )
         if request.fallback_images:
             attachment_images = [*attachment_images, *request.fallback_images]
-        attachment_prompt = format_attachments_prompt(
-            resolved_records,
-            current_attachment_ids={*trusted_current_attachment_ids, *request.current_attachment_ids},
-        )
+        attachment_prompt = format_attachments_prompt(current_records)
         resolved_attachment_ids = [record.attachment_id for record in resolved_records]
         return DispatchPayload(
             prompt=request.prompt,

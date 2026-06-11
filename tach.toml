@@ -719,6 +719,8 @@ depends_on = [
 path = "mindroom.execution_preparation"
 depends_on = [
     "mindroom.ai_runtime",
+    "mindroom.attachment_media",
+    "mindroom.attachments",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.history",
