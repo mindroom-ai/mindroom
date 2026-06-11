@@ -601,8 +601,9 @@ class _MultiAgentOrchestrator:
         manager = self._mcp_manager
         if manager is None:
             return
+        running_entities = {entity_name for entity_name, bot in self.agent_bots.items() if bot.running}
         for server_id in sorted(manager.failed_server_ids() - manager.failed_required_server_ids()):
-            degraded_entities = config.get_entities_referencing_tools({mcp_tool_name(server_id)})
+            degraded_entities = config.get_entities_referencing_tools({mcp_tool_name(server_id)}) & running_entities
             if not degraded_entities:
                 continue
             logger.warning(

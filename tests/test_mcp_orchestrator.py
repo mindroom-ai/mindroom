@@ -135,10 +135,15 @@ async def test_start_entities_marks_mcp_blocked_entities_retryable(tmp_path: Pat
 
 
 def test_log_mcp_degraded_entities_warns_per_failed_optional_server(tmp_path: Path) -> None:
-    """Report entities running without tools from an unavailable optional MCP server."""
+    """Report only running entities as degraded by an unavailable optional MCP server."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     config = _config(tmp_path)
     orchestrator._mcp_manager = _manager_with_failed_server(required=False)
+    running_bot = MagicMock(spec=AgentBot)
+    running_bot.running = True
+    stopped_bot = MagicMock(spec=AgentBot)
+    stopped_bot.running = False
+    orchestrator.agent_bots = {"code": running_bot, "dev_team": stopped_bot}
 
     with patch("mindroom.orchestrator.logger") as mock_logger:
         orchestrator._log_mcp_degraded_entities(config)
@@ -146,7 +151,7 @@ def test_log_mcp_degraded_entities_warns_per_failed_optional_server(tmp_path: Pa
     mock_logger.warning.assert_called_once()
     kwargs = mock_logger.warning.call_args.kwargs
     assert kwargs["server_id"] == "demo"
-    assert kwargs["degraded_entities"] == ["code", "dev_team"]
+    assert kwargs["degraded_entities"] == ["code"]
 
 
 @pytest.mark.asyncio

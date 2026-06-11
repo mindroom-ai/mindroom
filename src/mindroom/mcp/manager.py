@@ -54,8 +54,10 @@ _DISCOVERY_RETRY_MAX_DELAY_SECONDS = 60.0
 
 def _discovery_retry_delay_seconds(consecutive_failures: int) -> float:
     """Return the exponential-backoff delay before the next discovery retry."""
+    # Clamp the exponent so a long outage cannot overflow float conversion.
+    exponent = min(max(consecutive_failures - 1, 0), 10)
     return min(
-        _DISCOVERY_RETRY_INITIAL_DELAY_SECONDS * 2 ** max(consecutive_failures - 1, 0),
+        _DISCOVERY_RETRY_INITIAL_DELAY_SECONDS * 2**exponent,
         _DISCOVERY_RETRY_MAX_DELAY_SECONDS,
     )
 

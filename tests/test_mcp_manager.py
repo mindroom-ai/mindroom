@@ -21,7 +21,7 @@ from mindroom.credentials import get_runtime_credentials_manager, save_scoped_cr
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.errors import MCPProtocolError, MCPTimeoutError, MCPToolCallError
-from mindroom.mcp.manager import MCPServerManager
+from mindroom.mcp.manager import MCPServerManager, _discovery_retry_delay_seconds
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
@@ -668,6 +668,13 @@ async def test_mcp_manager_retries_failed_discovery_and_notifies_on_recovery(
     assert manager.failed_server_ids() == set()
     assert recovered == ["demo"]
     await manager.shutdown()
+
+
+def test_discovery_retry_delay_saturates_for_long_outages() -> None:
+    """The backoff delay must stay at the cap for arbitrarily long outages instead of overflowing."""
+    delays = [_discovery_retry_delay_seconds(failures) for failures in (1, 2, 3, 4, 5)]
+    assert delays == [5.0, 10.0, 20.0, 40.0, 60.0]
+    assert _discovery_retry_delay_seconds(100_000) == 60.0
 
 
 @pytest.mark.asyncio
