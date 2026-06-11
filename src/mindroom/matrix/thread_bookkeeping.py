@@ -10,13 +10,17 @@ Who may mutate thread state, and how:
 1. This module never writes thread state.
    It only classifies one mutation into ``MutationThreadImpact``: THREADED(thread_id), ROOM_LEVEL, or UNKNOWN.
 
-2. Durable thread-cache state is mutated through exactly one path:
+2. Mutation-driven thread-cache writes go through exactly one path:
    the three write policies in ``mindroom.matrix.cache.thread_writes``
    (``ThreadOutboundWritePolicy``, ``ThreadLiveWritePolicy``, ``ThreadSyncWritePolicy``),
    which all resolve impact through this module's ``ThreadMutationResolver``,
    apply it through ``mindroom.matrix.cache.thread_write_cache_ops.ThreadMutationCacheOps``,
    and order every write through the per-room ``EventCacheWriteCoordinator`` barrier.
-   No other code may call the event cache's thread-write methods.
+   The only other thread-cache writer is the read-refill in
+   ``mindroom.matrix.client_thread_history``: after an authoritative homeserver fetch it stores the
+   snapshot through the guarded ``replace_thread_if_not_newer``, and it invalidates entries it proves
+   corrupt (unresolvable payloads or rows missing the thread root).
+   No code outside those two sites may call the event cache's thread-write methods.
 
 3. Custom tools may not write thread state.
    A tool that sends or redacts Matrix events (see ``mindroom.custom_tools.matrix_api``) must resolve

@@ -18,8 +18,9 @@ These three policies are the only writers of durable thread-cache state:
    queue: concurrent per-thread writers cannot uphold the ``room_invalidated_at >= validated_at``
    ordering that read-time revalidation relies on.
 
-5. Within one sync batch, the room is invalidated at most once for UNKNOWN impacts; later UNKNOWN
-   mutations in the same batch reuse that invalidation instead of writing duplicate markers.
+5. Within one sync batch, UNKNOWN impacts invalidate the room at most once per pass (once across the
+   message pass and once across the redaction pass); later UNKNOWN mutations in the same pass reuse
+   that invalidation instead of writing duplicate markers.
 """
 
 from __future__ import annotations
