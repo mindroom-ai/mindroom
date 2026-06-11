@@ -29,7 +29,6 @@ if TYPE_CHECKING:
 
     from agno.knowledge.document import Document
     from agno.knowledge.knowledge import Knowledge
-    from structlog.stdlib import BoundLogger
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -373,6 +372,40 @@ def _semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple
     )
 
 
+def _resolve_base_knowledge(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    execution_identity: ToolExecutionIdentity | None,
+) -> tuple[Knowledge | None, KnowledgeAvailability]:
+    """Resolve one knowledge base handle with its effective availability."""
+    lookup = _lookup_knowledge_for_base(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
+    if lookup is not None and availability is KnowledgeAvailability.READY:
+        availability = _ready_index_effective_availability(lookup, config)
+    knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
+    if knowledge is not None:
+        _apply_knowledge_metadata(base_id, knowledge, config)
+    if refresh_scheduler is not None:
+        availability = _schedule_refresh_for_availability(
+            refresh_scheduler,
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            lookup=lookup,
+            availability=availability,
+        )
+    return knowledge, availability
+
+
 def resolve_agent_knowledge_access(
     agent_name: str,
     config: Config,
@@ -381,37 +414,6 @@ def resolve_agent_knowledge_access(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> _KnowledgeResolution:
     """Resolve configured knowledge base(s) with diagnostics for one agent."""
-    resolved_knowledge: dict[str, tuple[Knowledge | None, KnowledgeAvailability]] = {}
-
-    def _resolve(base_id: str) -> tuple[Knowledge | None, KnowledgeAvailability]:
-        if base_id in resolved_knowledge:
-            return resolved_knowledge[base_id]
-
-        lookup = _lookup_knowledge_for_base(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        )
-        availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
-        if lookup is not None and availability is KnowledgeAvailability.READY:
-            availability = _ready_index_effective_availability(lookup, config)
-        knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
-        if knowledge is not None:
-            _apply_knowledge_metadata(base_id, knowledge, config)
-        if refresh_scheduler is not None:
-            availability = _schedule_refresh_for_availability(
-                refresh_scheduler,
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-                lookup=lookup,
-                availability=availability,
-            )
-        resolved_knowledge[base_id] = (knowledge, availability)
-        return resolved_knowledge[base_id]
-
     base_ids = _semantic_agent_knowledge_base_ids(agent_name, config)
     if not base_ids:
         return _KnowledgeResolution(knowledge=None)
@@ -420,7 +422,13 @@ def resolve_agent_knowledge_access(
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     knowledges: list[Knowledge] = []
     for base_id in base_ids:
-        knowledge, availability = _resolve(base_id)
+        knowledge, availability = _resolve_base_knowledge(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            refresh_scheduler=refresh_scheduler,
+            execution_identity=execution_identity,
+        )
         if availability is not KnowledgeAvailability.READY:
             unavailable_bases[base_id] = KnowledgeAvailabilityDetail(
                 availability=availability,
@@ -431,6 +439,12 @@ def resolve_agent_knowledge_access(
             continue
         knowledges.append(knowledge)
 
+    if missing_base_ids:
+        logger.warning(
+            "Knowledge bases not available for agent",
+            agent_name=agent_name,
+            knowledge_bases=missing_base_ids,
+        )
     return _KnowledgeResolution(
         knowledge=_merge_knowledge(agent_name, knowledges),
         missing=tuple(missing_base_ids),
@@ -522,7 +536,6 @@ class KnowledgeAccessSupport:
     """Resolve live knowledge access for one runtime without routing through AgentBot."""
 
     runtime: SupportsConfigOrchestrator
-    logger: BoundLogger
     runtime_paths: RuntimePaths
 
     def for_agent(
@@ -544,20 +557,13 @@ class KnowledgeAccessSupport:
         orchestrator = self.runtime.orchestrator
         refresh_scheduler = orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
 
-        resolution = resolve_agent_knowledge_access(
+        return resolve_agent_knowledge_access(
             agent_name,
             self.runtime.config,
             self.runtime_paths,
             refresh_scheduler=refresh_scheduler,
             execution_identity=execution_identity,
         )
-        if resolution.missing:
-            self.logger.warning(
-                "Knowledge bases not available for agent",
-                agent_name=agent_name,
-                knowledge_bases=list(resolution.missing),
-            )
-        return resolution
 
 
 @dataclass

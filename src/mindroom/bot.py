@@ -388,7 +388,6 @@ class AgentBot:
         )
         self._knowledge_access_support = KnowledgeAccessSupport(
             runtime=self._runtime_view,
-            logger=self.logger,
             runtime_paths=self.runtime_paths,
         )
         self._conversation_cache = MatrixConversationCache(

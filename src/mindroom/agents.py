@@ -1444,32 +1444,16 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         update_cultural_knowledge = culture_settings.update_cultural_knowledge
         enable_agentic_culture = culture_settings.enable_agentic_culture
 
-    # Resolve history settings: per-agent override → defaults.
-    # When agent sets one knob, force the other to None to avoid Agno
-    # receiving both (it warns and drops num_history_messages).
-    if agent_config.num_history_messages is not None:
-        num_history_runs = None
-        num_history_messages = agent_config.num_history_messages
-    elif agent_config.num_history_runs is not None:
-        num_history_runs = agent_config.num_history_runs
-        num_history_messages = None
-    else:
-        num_history_runs = defaults.num_history_runs
-        num_history_messages = defaults.num_history_messages
-
-    # Track whether we want "all history" to bypass Agno's default after construction
-    include_all_history = num_history_runs is None and num_history_messages is None
+    # Shared history-policy source of truth with the team replay path.
+    history_settings = config.get_entity_history_settings(agent_name)
+    history_policy = history_settings.policy
+    num_history_runs = history_policy.limit if history_policy.mode == "runs" else None
+    num_history_messages = history_policy.limit if history_policy.mode == "messages" else None
 
     compress_tool_results = (
         agent_config.compress_tool_results
         if agent_config.compress_tool_results is not None
         else defaults.compress_tool_results
-    )
-
-    max_tool_calls_from_history = (
-        agent_config.max_tool_calls_from_history
-        if agent_config.max_tool_calls_from_history is not None
-        else defaults.max_tool_calls_from_history
     )
 
     agent = _initialize_agent_instance(
@@ -1497,10 +1481,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
         compress_tool_results=compress_tool_results,
-        max_tool_calls_from_history=max_tool_calls_from_history,
+        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
         telemetry=False,
     )
-    if include_all_history:
+    if history_policy.mode == "all":
         _enable_all_history_replay(agent)
 
     logger.info(
