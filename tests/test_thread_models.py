@@ -17,6 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.thread_models import (
+    _load_cache,
     _store_path,
     clear_thread_model_override,
     get_thread_model_override,
@@ -73,6 +74,8 @@ def test_store_ignores_corrupt_file(tmp_path: Path) -> None:
     path.write_text("not json", encoding="utf-8")
 
     assert get_thread_model_override(runtime_paths, THREAD_ID) is None
+    # The corrupt parse result is cached so repeat reads skip re-parsing.
+    assert _load_cache[path] == (path.stat().st_mtime_ns, {})
 
     set_thread_model_override(
         runtime_paths,

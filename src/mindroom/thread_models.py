@@ -37,9 +37,9 @@ def _load_overrides(path: Path) -> dict[str, dict[str, str]]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return {}
+        data = {}
     if not isinstance(data, dict):
-        return {}
+        data = {}
     # Records must keep the shape the store guarantees: a string model name
     # and a string set_at so prune sorting cannot fail on mixed types.
     overrides = {
