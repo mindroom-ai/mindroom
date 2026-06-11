@@ -221,6 +221,7 @@ def _payload_preparation(target: MessageTarget) -> ResponsePayloadPreparation:
             envelope=_envelope(source_event_id="$event", target=target),
         ),
         prompt="hello",
+        action_kind="individual",
         message_attachment_ids=(),
         trusted_attachment_ids=(),
         media_events=(),

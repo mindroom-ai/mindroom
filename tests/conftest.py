@@ -841,8 +841,6 @@ def _sync_request_payload_preparer(bot: RuntimeBot) -> None:
     The preparer captures the normalizer and ingress hook runner; tests swap
     those for proxies after construction, so rebuild the preparer to track them.
     """
-    if getattr(bot, "_request_payload_preparer", None) is None:
-        return
     runner = unwrap_extracted_collaborator(bot._response_runner)
     preparer = ResponsePayloadPreparer(
         normalizer=bot._inbound_turn_normalizer,

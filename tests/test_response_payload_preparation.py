@@ -102,6 +102,7 @@ def _preparation(
     target: _MessageTarget,
     *,
     prompt: str = "raw prompt",
+    action_kind: str = "individual",
     message_attachment_ids: tuple[str, ...] = (),
     media_events: tuple[object, ...] = (),
 ) -> ResponsePayloadPreparation:
@@ -121,6 +122,7 @@ def _preparation(
             envelope=_envelope(target),
         ),
         prompt=prompt,
+        action_kind=action_kind,
         message_attachment_ids=message_attachment_ids,
         trusted_attachment_ids=(),
         media_events=cast("tuple", media_events),
@@ -197,13 +199,16 @@ async def test_prepare_logs_startup_latency_fields(tmp_path: Path) -> None:
         "build_dispatch_payload_with_attachments",
         new=AsyncMock(return_value=DispatchPayload(prompt="built")),
     ):
-        await preparer.prepare(_request(target, _preparation(target), thread_history=refreshed_history))
+        await preparer.prepare(
+            _request(target, _preparation(target, action_kind="team"), thread_history=refreshed_history),
+        )
 
     latency_logs = [
         call for call in preparer.logger.info.call_args_list if call.args and call.args[0] == "Response startup latency"
     ]
     assert len(latency_logs) == 1
     kwargs = latency_logs[0].kwargs
+    assert kwargs["action_kind"] == "team"
     assert kwargs["cache_read_ms"] == 11.0
     assert kwargs["resolution_ms"] == 33.0
     assert kwargs["context_hydration_ms"] == 1000.0  # (2.0 - 1.0) seconds in ms

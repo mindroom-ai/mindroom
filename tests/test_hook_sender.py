@@ -1249,6 +1249,7 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
             payload_preparation=ResponsePayloadPreparation(
                 dispatch=resolved_dispatch,
                 prompt=resolved_event.body,
+                action_kind="individual",
                 message_attachment_ids=payload_inputs.message_attachment_ids,
                 trusted_attachment_ids=payload_inputs.trusted_attachment_ids,
                 media_events=payload_inputs.media_events,

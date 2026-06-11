@@ -119,6 +119,7 @@ async def _prepare_payload_via_seam(bot: AgentBot, execute_args: tuple[object, .
             payload_preparation=ResponsePayloadPreparation(
                 dispatch=dispatch,
                 prompt=event.body,
+                action_kind="individual",
                 message_attachment_ids=payload_inputs.message_attachment_ids,
                 trusted_attachment_ids=payload_inputs.trusted_attachment_ids,
                 media_events=payload_inputs.media_events,

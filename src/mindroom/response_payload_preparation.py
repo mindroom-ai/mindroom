@@ -58,6 +58,7 @@ class ResponsePayloadPreparation:
 
     dispatch: PreparedDispatch
     prompt: str
+    action_kind: str
     message_attachment_ids: tuple[str, ...]
     trusted_attachment_ids: tuple[str, ...]
     media_events: tuple[MediaDispatchEvent, ...]
@@ -190,6 +191,7 @@ class ResponsePayloadPreparer:
         """Emit startup latency metrics for one dispatch that will respond."""
         latency_event_data: dict[str, str | float | int | bool] = {
             "event_id": preparation.dispatch.envelope.source_event_id,
+            "action_kind": preparation.action_kind,
             "context_hydration_ms": elapsed_ms_between(
                 preparation.dispatch_started_at,
                 preparation.context_ready_monotonic,
