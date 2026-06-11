@@ -182,6 +182,13 @@ class AgentVaultAccessTools(Toolkit):
         # 409 means this actor is already a vault member, fine for an idempotent grant.
         if response.status_code in {200, 201, 409}:
             return
+        if response.status_code == 403:
+            msg = (
+                "the configured Agent Vault admin token cannot join this vault: "
+                "/join is owner-only, so the token must belong to an instance-owner "
+                "agent or session, not a plain admin/member one."
+            )
+            raise _AgentVaultAccessError(msg)
         response.raise_for_status()
 
     async def _grant_member(self, vault: str, email: str, token: str) -> bool:

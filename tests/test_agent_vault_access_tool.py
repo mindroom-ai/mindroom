@@ -178,6 +178,24 @@ async def test_request_vault_access_joins_worker_created_vault(
 
 
 @pytest.mark.asyncio
+async def test_request_vault_access_reports_non_owner_token_on_join(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-owner token cannot use the owner-only /join; say so instead of a bare 403."""
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 403, "/users": 201})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=_worker_target())
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "error"
+    assert "owner-only" in payload["error"]
+    # The grant must not be attempted after the failed join.
+    assert not [path for path, _ in api.calls if path.endswith("/users")]
+
+
+@pytest.mark.asyncio
 async def test_request_vault_access_reports_unregistered_account(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
