@@ -88,9 +88,7 @@ def _event(content: dict[str, Any], *, event_id: str = _EVENT_ID) -> nio.RoomMes
         "room_id": _ROOM_ID,
         "type": "m.room.message",
     }
-    event = nio.RoomMessageText.from_dict(source)
-    event.source = source
-    return event
+    return nio.RoomMessageText.from_dict(source)
 
 
 def _threaded_event(body: str = "in thread") -> nio.RoomMessageText:

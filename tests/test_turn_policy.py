@@ -113,19 +113,19 @@ def _context(
     )
 
 
-def _dispatch(context: MessageContext, *, agent_name: str, sender: str = _SENDER) -> PreparedDispatch:
+def _dispatch(context: MessageContext, *, agent_name: str) -> PreparedDispatch:
     target = MessageTarget.resolve(_ROOM_ID, context.thread_id, _EVENT_ID)
     envelope = request_envelope(
         room_id=_ROOM_ID,
         reply_to_event_id=_EVENT_ID,
         thread_id=context.thread_id,
         prompt="hello agents",
-        user_id=sender,
+        user_id=_SENDER,
         target=target,
         agent_name=agent_name,
     )
     return PreparedDispatch(
-        requester_user_id=sender,
+        requester_user_id=_SENDER,
         context=context,
         target=target,
         correlation_id="corr-test",
