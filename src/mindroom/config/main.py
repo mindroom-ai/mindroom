@@ -1837,7 +1837,10 @@ class Config(BaseModel):
         override, then the room override, then the entity's authored model.
         """
         resolved_model_name = active_model_name
-        if resolved_model_name is None and thread_id is not None and runtime_paths is not None:
+        if resolved_model_name is None and thread_id is not None:
+            if runtime_paths is None:
+                msg = "runtime_paths are required to resolve a thread-specific runtime model"
+                raise ValueError(msg)
             thread_override = get_thread_model_override(runtime_paths, thread_id)
             if thread_override is not None and thread_override in self.models:
                 resolved_model_name = thread_override

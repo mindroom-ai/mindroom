@@ -544,5 +544,6 @@ def test_docs_index_chat_commands_summary_lists_all_supported_commands() -> None
     doc_link = next(line for line in contents.splitlines() if line.startswith("- [Chat Commands]("))
 
     for syntax, _description in _COMMAND_DOCS.values():
-        assert syntax in table_row
+        # Table cells escape literal pipes in command syntax as "\|".
+        assert syntax in table_row.replace("\\|", "|")
         assert syntax in doc_link

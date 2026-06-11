@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-_RESET_ARGUMENTS = frozenset({"reset", "clear", "default"})
+_RESET_ARGUMENTS = frozenset({"reset", "clear"})
 
 
 def _available_models_text(config: Config) -> str:
@@ -48,12 +48,14 @@ def handle_model_command(
     if not requested:
         return _show_thread_model(config, runtime_paths, thread_id)
     if thread_id is None:
-        return "❌ `!model <name>` only works inside a thread. Start a thread (or reply in one) and run it there."
-    if requested.lower() in _RESET_ARGUMENTS:
-        if clear_thread_model_override(runtime_paths, thread_id):
-            return "✅ Thread model override removed. Agents use their configured models again."
-        return "This thread has no model override."
+        return "❌ `!model` overrides only work inside a thread. Start a thread (or reply in one) and run it there."
+    # Configured model names win over reset aliases, so a model named "reset"
+    # or "clear" stays reachable and "default" sets the default model.
     if requested not in config.models:
+        if requested.lower() in _RESET_ARGUMENTS:
+            if clear_thread_model_override(runtime_paths, thread_id):
+                return "✅ Thread model override removed. Agents use their configured models again."
+            return "This thread has no model override."
         return f"❌ Unknown model `{requested}`. Available models:\n{_available_models_text(config)}"
     set_thread_model_override(
         runtime_paths,

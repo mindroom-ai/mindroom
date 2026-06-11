@@ -350,8 +350,56 @@ def test_model_command_requires_thread_for_set(tmp_path: Path) -> None:
         thread_id=None,
         requester_user_id="@user:localhost",
     )
-    assert "only works inside a thread" in response
+    assert "only work inside a thread" in response
     assert get_thread_model_override(runtime_paths, THREAD_ID) is None
+
+
+def test_model_command_default_sets_model_instead_of_resetting(tmp_path: Path) -> None:
+    """A configured model named "default" must be settable, not treated as a reset alias."""
+    config = _config_with_models(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+
+    response = handle_model_command(
+        "default",
+        config=config,
+        runtime_paths=runtime_paths,
+        room_id=ROOM_ID,
+        thread_id=THREAD_ID,
+        requester_user_id="@user:localhost",
+    )
+    assert "✅" in response
+    assert "`default`" in response
+    assert get_thread_model_override(runtime_paths, THREAD_ID) == "default"
+
+
+def test_resolve_runtime_model_requires_runtime_paths_for_thread_id(tmp_path: Path) -> None:
+    """Passing thread_id without runtime_paths must fail loudly, mirroring the room branch."""
+    config = _config_with_models(tmp_path)
+
+    with pytest.raises(ValueError, match="thread-specific runtime model"):
+        config.resolve_runtime_model(entity_name="test_agent", thread_id=THREAD_ID)
+
+
+def test_store_drops_records_with_corrupt_set_at(tmp_path: Path) -> None:
+    """Records with a non-string set_at must be dropped so prune sorting cannot fail."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    path = _store_path(runtime_paths)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"$bad:localhost": {"model": "large", "set_at": 12345}}),
+        encoding="utf-8",
+    )
+
+    assert get_thread_model_override(runtime_paths, "$bad:localhost") is None
+
+    set_thread_model_override(
+        runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="large",
+        room_id=ROOM_ID,
+        set_by="@user:localhost",
+    )
+    assert get_thread_model_override(runtime_paths, THREAD_ID) == "large"
 
 
 def _make_tool_context(*, thread_id: str | None = THREAD_ID) -> ToolRuntimeContext:

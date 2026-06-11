@@ -125,7 +125,7 @@ mindroom run
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
 | **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
-| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!model [name|reset]`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands handled by the router |
+| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!model [name\|reset]`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands handled by the router |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
