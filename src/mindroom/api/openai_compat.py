@@ -799,15 +799,6 @@ def _request_knowledge_refresh_scheduler(request: Request) -> KnowledgeRefreshSc
     return config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
 
 
-def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]:
-    """Build a missing-knowledge callback for one agent name."""
-    return lambda missing_base_ids: logger.warning(
-        "Knowledge bases not available for agent",
-        agent=agent_name,
-        knowledge_bases=missing_base_ids,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -978,8 +969,6 @@ async def chat_completions(  # noqa: C901, PLR0912
                 knowledge = None
                 unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
             else:
-                if knowledge_resolution.missing:
-                    _log_missing_knowledge_bases(agent_name)(list(knowledge_resolution.missing))
                 knowledge = knowledge_resolution.knowledge
                 unavailable_bases = dict(knowledge_resolution.unavailable)
             prompt = prepend_knowledge_availability_notice(prompt, unavailable_bases)
@@ -1381,6 +1370,7 @@ def _build_team(
             model_name=model_name,
             configured_team_name=team_name,
             scope_context=scope_context,
+            execution_identity=execution_identity,
         )
     except Exception:
         close_team_runtime_state_dbs(

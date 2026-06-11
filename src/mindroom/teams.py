@@ -1204,12 +1204,6 @@ def materialize_exact_team_members(
             refresh_scheduler=refresh_scheduler,
             execution_identity=execution_identity,
         )
-        if knowledge_resolution.missing:
-            logger.warning(
-                "Knowledge bases not available for team agent",
-                agent_name=agent_name,
-                knowledge_bases=list(knowledge_resolution.missing),
-            )
         if unavailable_bases is not None:
             unavailable_bases.update(knowledge_resolution.unavailable)
         return create_agent(
@@ -1284,6 +1278,7 @@ def _create_team_instance(
     runtime_paths: RuntimePaths,
     team_display_name: str,
     fallback_team_id: str,
+    execution_identity: ToolExecutionIdentity | None = None,
     model_name: str | None = None,
     configured_team_name: str | None = None,
     history_storage: BaseDb | None = None,
@@ -1297,6 +1292,8 @@ def _create_team_instance(
         runtime_paths: Active runtime paths
         team_display_name: Human-readable Team name passed to Agno
         fallback_team_id: Stable fallback id when no team scope storage is available
+        execution_identity: Request execution identity used for provider-specific
+            model behavior such as codex prompt-cache keying
         model_name: Optional model name override
         configured_team_name: Optional configured team id for stable team-scope history
         history_storage: Optional already-open shared team history storage
@@ -1306,7 +1303,12 @@ def _create_team_instance(
         Configured Team instance
 
     """
-    model = model_loading.get_model_instance(config, runtime_paths, model_name or "default")
+    model = model_loading.get_model_instance(
+        config,
+        runtime_paths,
+        model_name or "default",
+        execution_identity=execution_identity,
+    )
     # Coordinate-mode tool calls run through the shared team model in v1.
     # Member-agent models are intentionally not wrapped here.
     ai_runtime.install_queued_message_notice_hook(
@@ -1402,6 +1404,7 @@ def build_materialized_team_instance(
     scope_context: ScopeSessionContext | None,
     model_name: str | None,
     configured_team_name: str | None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Team:
     """Build one agno.Team instance for already-materialized members."""
     resolved_team_runtime_model = config.resolve_runtime_model(
@@ -1417,6 +1420,7 @@ def build_materialized_team_instance(
         runtime_paths=runtime_paths,
         team_display_name=team_label,
         fallback_team_id=team_label,
+        execution_identity=execution_identity,
         model_name=resolved_team_model_name,
         configured_team_name=configured_team_name,
         history_storage=scope_context.storage if scope_context is not None else None,
@@ -1590,6 +1594,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 scope_context=scope_context,
                 model_name=model_name,
                 configured_team_name=configured_team_name,
+                execution_identity=execution_identity,
             )
             prepared_execution = await prepare_materialized_team_execution(
                 scope_context=scope_context,
@@ -2012,6 +2017,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 scope_context=scope_context,
                 model_name=model_name,
                 configured_team_name=configured_team_name,
+                execution_identity=execution_identity,
             )
             prepared_execution = await prepare_materialized_team_execution(
                 scope_context=scope_context,
