@@ -12,7 +12,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from itertools import count
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -42,7 +42,11 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
-from mindroom.response_payload_preparation import ResponsePayloadPreparer
+from mindroom.response_payload_preparation import (
+    DispatchPayloadInputs,
+    ResponsePayloadPreparation,
+    ResponsePayloadPreparer,
+)
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.thread_utils import decide_agent_response
@@ -53,6 +57,7 @@ from mindroom.turn_store import TurnStore
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
+    from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.matrix.cache import ConversationEventCache
 
 __all__ = [
@@ -88,6 +93,7 @@ __all__ = [
     "patch_response_runner_module",
     "postgres_event_cache_url",
     "prepare_history_for_run_for_test",
+    "prepare_payload_via_seam",
     "prepared_dispatch_result",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
@@ -850,6 +856,29 @@ def _sync_request_payload_preparer(bot: RuntimeBot) -> None:
     )
     bot._request_payload_preparer = preparer
     runner.deps = replace(runner.deps, request_preparer=preparer)
+
+
+async def prepare_payload_via_seam(bot: RuntimeBot, execute_args: tuple[object, ...]) -> None:
+    """Drive the execution-side payload preparation from captured dispatch args."""
+    event = cast("DispatchEvent", execute_args[1])
+    dispatch = cast("PreparedDispatch", execute_args[2])
+    payload_inputs = cast("DispatchPayloadInputs", execute_args[4])
+    await bot._request_payload_preparer.prepare(
+        ResponseRequest(
+            thread_history=dispatch.context.thread_history,
+            prompt=event.body,
+            response_envelope=dispatch.envelope,
+            payload_preparation=ResponsePayloadPreparation(
+                dispatch=dispatch,
+                prompt=event.body,
+                action_kind="individual",
+                payload_inputs=payload_inputs,
+                target_member_names=None,
+                dispatch_started_at=0.0,
+                context_ready_monotonic=0.0,
+            ),
+        ),
+    )
 
 
 def sync_bot_runtime_state(bot: RuntimeBot) -> None:

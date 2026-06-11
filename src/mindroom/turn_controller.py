@@ -1703,7 +1703,7 @@ class TurnController:
             ),
         )
 
-    async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
+    async def _execute_response_action(  # noqa: C901, PLR0912
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
@@ -1763,20 +1763,7 @@ class TurnController:
                     for member in action.form_team.eligible_members
                 )
 
-            try:
-                context_ready_monotonic = time.monotonic()
-            except Exception as error:
-                response_event_id = await self._finalize_dispatch_failure(
-                    target=dispatch.target,
-                    error=error,
-                )
-                if response_event_id is not None:
-                    self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
-                    if dispatch_timing is not None:
-                        dispatch_timing.mark_first_visible_reply("final")
-                        dispatch_timing.mark("response_complete")
-                        dispatch_timing.emit_summary(self.deps.logger, outcome="dispatch_failure")
-                return
+            context_ready_monotonic = time.monotonic()
 
             if dispatch_timing is not None and isinstance(dispatch.context.thread_history, ThreadHistoryResult):
                 dispatch_timing.note(**dispatch.context.thread_history.diagnostics)
@@ -1786,9 +1773,7 @@ class TurnController:
                 dispatch=dispatch,
                 prompt=event.body,
                 action_kind=action.kind,
-                message_attachment_ids=payload_inputs.message_attachment_ids,
-                trusted_attachment_ids=payload_inputs.trusted_attachment_ids,
-                media_events=payload_inputs.media_events,
+                payload_inputs=payload_inputs,
                 target_member_names=target_member_names,
                 dispatch_started_at=dispatch_started_at,
                 context_ready_monotonic=context_ready_monotonic,

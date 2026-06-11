@@ -73,12 +73,7 @@ from mindroom.matrix.thread_diagnostics import (
 )
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_payload_preparation import (
-    DispatchPayloadInputs,
-    ResponsePayloadPreparation,
-    ResponsePayloadPreparer,
-)
-from mindroom.response_runner import ResponseRequest
+from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.conftest import (
@@ -89,6 +84,7 @@ from tests.conftest import (
     install_send_response_mock,
     make_matrix_client_mock,
     message_origin,
+    prepare_payload_via_seam,
     prepared_dispatch_result,
     replace_turn_controller_deps,
     runtime_paths_for,
@@ -104,31 +100,6 @@ if TYPE_CHECKING:
 
 def _coalescing_gate_is_idle(gate: CoalescingGate) -> bool:
     return not gate._gates
-
-
-async def _prepare_payload_via_seam(bot: AgentBot, execute_args: tuple[object, ...]) -> None:
-    """Drive the execution-side payload preparation from captured dispatch args."""
-    event = cast("PreparedTextEvent", execute_args[1])
-    dispatch = cast("PreparedDispatch", execute_args[2])
-    payload_inputs = cast("DispatchPayloadInputs", execute_args[4])
-    await bot._request_payload_preparer.prepare(
-        ResponseRequest(
-            thread_history=dispatch.context.thread_history,
-            prompt=event.body,
-            response_envelope=dispatch.envelope,
-            payload_preparation=ResponsePayloadPreparation(
-                dispatch=dispatch,
-                prompt=event.body,
-                action_kind="individual",
-                message_attachment_ids=payload_inputs.message_attachment_ids,
-                trusted_attachment_ids=payload_inputs.trusted_attachment_ids,
-                media_events=payload_inputs.media_events,
-                target_member_names=None,
-                dispatch_started_at=0.0,
-                context_ready_monotonic=0.0,
-            ),
-        ),
-    )
 
 
 def _make_config(
@@ -6243,7 +6214,7 @@ async def _capture_gate_dispatches(
         return _respond_dispatch_plan()
 
     async def record_response(*args: object, **_kwargs: object) -> None:
-        await _prepare_payload_via_seam(bot, args)
+        await prepare_payload_via_seam(bot, args)
 
     async def record_payload_request(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
         payload_requests.append(request)
@@ -6954,7 +6925,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         return DispatchPayload(prompt=request.prompt, attachment_ids=list(request.current_attachment_ids))
 
     async def record_response(*args: object, **_kwargs: object) -> None:
-        await _prepare_payload_via_seam(bot, args)
+        await prepare_payload_via_seam(bot, args)
 
     async def extract_dispatch_context(
         _room: nio.MatrixRoom,
@@ -7045,7 +7016,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
         return DispatchPayload(prompt=request.prompt, attachment_ids=list(request.current_attachment_ids))
 
     async def record_response(*args: object, **_kwargs: object) -> None:
-        await _prepare_payload_via_seam(bot, args)
+        await prepare_payload_via_seam(bot, args)
 
     with (
         patch.object(

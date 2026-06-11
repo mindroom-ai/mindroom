@@ -25,7 +25,7 @@ from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_payload_preparation import ResponsePayloadPreparation
+from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest
 from mindroom.turn_policy import PreparedDispatch
 from tests.conftest import (
@@ -123,9 +123,11 @@ def _preparation(
         ),
         prompt=prompt,
         action_kind=action_kind,
-        message_attachment_ids=message_attachment_ids,
-        trusted_attachment_ids=(),
-        media_events=cast("tuple", media_events),
+        payload_inputs=DispatchPayloadInputs(
+            message_attachment_ids=message_attachment_ids,
+            trusted_attachment_ids=(),
+            media_events=cast("tuple", media_events),
+        ),
         target_member_names=None,
         dispatch_started_at=1.0,
         context_ready_monotonic=2.0,

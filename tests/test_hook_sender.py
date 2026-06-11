@@ -49,8 +49,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest
+from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
@@ -62,6 +61,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     message_origin,
     orchestrator_runtime_paths,
+    prepare_payload_via_seam,
     replace_turn_controller_deps,
     replace_turn_policy_deps,
     runtime_paths_for,
@@ -1239,26 +1239,8 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
     assert captured_bodies == ["@mindroom_code:localhost what is 99+1?"]
     assert bot._turn_policy.plan_turn.await_args.args[1].body == "@mindroom_code:localhost what is 99+1?"
     execute_args = bot._turn_controller._execute_response_action.await_args.args
-    resolved_event, resolved_dispatch, payload_inputs = execute_args[1], execute_args[2], execute_args[4]
-    assert isinstance(payload_inputs, DispatchPayloadInputs)
-    await bot._request_payload_preparer.prepare(
-        ResponseRequest(
-            thread_history=[],
-            prompt=resolved_event.body,
-            response_envelope=resolved_dispatch.envelope,
-            payload_preparation=ResponsePayloadPreparation(
-                dispatch=resolved_dispatch,
-                prompt=resolved_event.body,
-                action_kind="individual",
-                message_attachment_ids=payload_inputs.message_attachment_ids,
-                trusted_attachment_ids=payload_inputs.trusted_attachment_ids,
-                media_events=payload_inputs.media_events,
-                target_member_names=None,
-                dispatch_started_at=0.0,
-                context_ready_monotonic=0.0,
-            ),
-        ),
-    )
+    assert isinstance(execute_args[4], DispatchPayloadInputs)
+    await prepare_payload_via_seam(bot, execute_args)
     payload_request = bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments.await_args.args[0]
     assert payload_request.prompt == "@mindroom_code:localhost what is 99+1?"
 

@@ -67,7 +67,7 @@ from mindroom.post_response_effects import (
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_lifecycle import _QueuedMessageState
-from mindroom.response_payload_preparation import ResponsePayloadPreparation
+from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
@@ -222,9 +222,7 @@ def _payload_preparation(target: MessageTarget) -> ResponsePayloadPreparation:
         ),
         prompt="hello",
         action_kind="individual",
-        message_attachment_ids=(),
-        trusted_attachment_ids=(),
-        media_events=(),
+        payload_inputs=DispatchPayloadInputs((), (), ()),
         target_member_names=None,
         dispatch_started_at=0.0,
         context_ready_monotonic=0.0,

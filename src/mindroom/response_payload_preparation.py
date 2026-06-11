@@ -59,9 +59,7 @@ class ResponsePayloadPreparation:
     dispatch: PreparedDispatch
     prompt: str
     action_kind: str
-    message_attachment_ids: tuple[str, ...]
-    trusted_attachment_ids: tuple[str, ...]
-    media_events: tuple[MediaDispatchEvent, ...]
+    payload_inputs: DispatchPayloadInputs
     target_member_names: tuple[str, ...] | None
     dispatch_started_at: float
     context_ready_monotonic: float
@@ -119,7 +117,6 @@ class ResponsePayloadPreparer:
         )
         return replace(
             request,
-            thread_history=request.thread_history,
             prompt=prepared_payload.payload.prompt,
             model_prompt=prepared_payload.payload.model_prompt,
             media=prepared_payload.payload.media,
@@ -138,6 +135,7 @@ class ResponsePayloadPreparer:
     ) -> DispatchPayload:
         """Register batch media and merge attachment context into one payload."""
         dispatch = preparation.dispatch
+        payload_inputs = preparation.payload_inputs
         room_id = dispatch.target.room_id
         media_thread_id = dispatch.target.resolved_thread_id
         payload_builder_started = time.monotonic()
@@ -145,12 +143,12 @@ class ResponsePayloadPreparer:
         try:
             media_attachment_ids: list[str] = []
             fallback_images = None
-            if preparation.media_events:
+            if payload_inputs.media_events:
                 media_result = await self.normalizer.register_batch_media_attachments(
                     BatchMediaAttachmentRequest(
                         room_id=room_id,
                         thread_id=media_thread_id,
-                        media_events=list(preparation.media_events),
+                        media_events=list(payload_inputs.media_events),
                     ),
                 )
                 media_attachment_ids = media_result.attachment_ids
@@ -160,10 +158,10 @@ class ResponsePayloadPreparer:
                     room_id=room_id,
                     prompt=preparation.prompt,
                     current_attachment_ids=merge_attachment_ids(
-                        list(preparation.message_attachment_ids),
+                        list(payload_inputs.message_attachment_ids),
                         media_attachment_ids,
                     ),
-                    trusted_current_attachment_ids=list(preparation.trusted_attachment_ids),
+                    trusted_current_attachment_ids=list(payload_inputs.trusted_attachment_ids),
                     thread_id=dispatch.context.thread_id,
                     media_thread_id=media_thread_id,
                     thread_history=thread_history,
