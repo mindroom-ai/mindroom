@@ -53,11 +53,49 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 - **Agents**: Single-specialty actors defined under `agents:` in `config.yaml`
 - **Teams**: Collaborative bundles of agents that coordinate or parallelize work
 
+**Inbound turn pipeline** (the path from a Matrix message to a delivered response; see `docs/architecture/bot-runtime.md`):
+
+```text
+Matrix sync callback
+  -> bot.py (AgentBot/TeamBot runtime shell)
+  -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
+       -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
+       -> coalescing.py                                          (debounced batching per room/thread)
+       -> text_ingress_dispatch.py + turn_policy.py              (commands; ignore / route / respond decision)
+       -> response_runner.py -> ai.py                            (lifecycle lock, Agno agent/team run)
+       -> streaming.py + streaming_delivery.py -> delivery_gateway.py  (progressive edits, Matrix send)
+       -> turn_store.py / handled_turns.py                       (durable dedup so restarts don't double-reply)
+```
+
 **Key modules**:
 | Module | Purpose |
 |--------|---------|
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
-| `bot.py` | AgentBot and TeamBot runtime for Matrix event handling, responses, and room behavior |
+| `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
+| `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
+| `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
+| `team_exact_members.py` | Runtime resolution for exact team member materialization |
+| `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle, sync callbacks, and room behavior |
+| `turn_controller.py` | TurnController - owns one inbound turn from ingress to recorded outcome |
+| `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
+| `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
+| `coalescing.py` | Live message coalescing gate (debounced batching per room/thread) |
+| `coalescing_batch.py` | Coalesced dispatch batch construction |
+| `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
+| `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
+| `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
+| `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
+| `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
+| `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation) |
+| `response_attempt.py` | Runs one visible response attempt with placeholder and stop tracking |
+| `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
+| `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
+| `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
+| `streaming_delivery.py` | Internal delivery and supervision helpers for streaming responses |
+| `post_response_effects.py` | Shared post-response effects after Matrix delivery |
+| `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
+| `approval_manager.py` | Matrix-backed tool approval runtime state |
+| `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
@@ -122,7 +160,6 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 | `cli/local_stack.py` | Local stack setup command |
 | `credentials_sync.py` | Shared provider/bootstrap env to credentials sync |
 | `logging_config.py` | Structured logging setup |
-| `response_tracker.py` | Duplicate response prevention |
 | `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
 
 **Persistent state** lives under `mindroom_data/` (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
@@ -130,7 +167,7 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 - `learning/` – Per-agent Agno Learning preference data
 - `chroma/` – ChromaDB storage backing the memory system
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG
-- `tracking/` – Response tracking to avoid duplicate replies
+- `tracking/` – Durable handled-turn ledger to avoid duplicate replies
 - `credentials/` – JSON secrets synchronized from `.env`
 - `encryption_keys/` – Matrix E2E encryption keys
 - `culture/` – Shared culture state
