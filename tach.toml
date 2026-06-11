@@ -930,6 +930,8 @@ depends_on = [
 path = "mindroom.orchestration.config_lifecycle"
 depends_on = [
     "mindroom.config.main",
+    "mindroom.logging_config",
+    "mindroom.orchestration.config_updates",
     "mindroom.orchestration.runtime",
 ]
 
