@@ -2158,15 +2158,8 @@ depends_on = [
     "mindroom.matrix.mentions",
     "mindroom.message_target",
     "mindroom.orchestration.runtime",
-    "mindroom.streaming_delivery",
     "mindroom.streaming_warmup",
-    "mindroom.tool_system.runtime_context",
-]
-
-[[modules]]
-path = "mindroom.streaming_delivery"
-depends_on = [
-    "mindroom.logging_config",
+    "mindroom.timing",
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
 ]
