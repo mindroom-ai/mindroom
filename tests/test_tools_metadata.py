@@ -864,19 +864,23 @@ def test_get_tool_by_name_rejects_invalid_mcp_assignment_overrides(tmp_path: Pat
     )
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
     config = load_config(runtime_paths)
-    ensure_tool_registry_loaded(runtime_paths, config)
+    try:
+        ensure_tool_registry_loaded(runtime_paths, config)
 
-    with pytest.raises(ToolConfigOverrideError, match="include_tools and exclude_tools overlap"):
-        get_tool_by_name(
-            "mcp_demo",
-            runtime_paths,
-            tool_config_overrides={
-                "include_tools": ["echo"],
-                "exclude_tools": ["echo"],
-            },
-            disable_sandbox_proxy=True,
-            worker_target=None,
-        )
+        with pytest.raises(ToolConfigOverrideError, match="include_tools and exclude_tools overlap"):
+            get_tool_by_name(
+                "mcp_demo",
+                runtime_paths,
+                tool_config_overrides={
+                    "include_tools": ["echo"],
+                    "exclude_tools": ["echo"],
+                },
+                disable_sandbox_proxy=True,
+                worker_target=None,
+            )
+    finally:
+        TOOL_REGISTRY.pop("mcp_demo", None)
+        TOOL_METADATA.pop("mcp_demo", None)
 
 
 def test_secret_like_config_fields_are_marked_password() -> None:

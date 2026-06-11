@@ -679,6 +679,13 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.thread_model"
+depends_on = [
+    "mindroom.thread_models",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.subagents"
 depends_on = [
     "mindroom.agent_descriptions",
@@ -1120,6 +1127,7 @@ depends_on = [
     "mindroom.mcp.config",
     "mindroom.prompt_templates",
     "mindroom.prompts",
+    "mindroom.thread_models",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.worker_routing",
@@ -1686,6 +1694,12 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.thread_models"
+depends_on = [
+    "mindroom.constants",
+]
+
+[[modules]]
 path = "mindroom.matrix.thread_projection"
 depends_on = ["mindroom.matrix.event_info", "mindroom.matrix.thread_membership"]
 
@@ -1944,6 +1958,12 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.commands.model_commands"
+depends_on = [
+    "mindroom.thread_models",
+]
+
+[[modules]]
 path = "mindroom.commands.parsing"
 depends_on = [
     "mindroom.constants",
@@ -1956,6 +1976,7 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.commands.config_commands",
     "mindroom.commands.config_confirmation",
+    "mindroom.commands.model_commands",
     "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.entity_resolution",

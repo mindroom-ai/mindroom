@@ -1373,19 +1373,23 @@ def select_model_for_team(
     room_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    thread_id: str | None = None,
 ) -> str:
     """Get the appropriate model for a team in a specific room.
 
     Priority:
-    1. Room-specific model from room_models
-    2. Team's configured model
-    3. Global default model
+    1. Thread-specific model override
+    2. Room-specific model from room_models
+    3. Team's configured model
+    4. Global default model
 
     Args:
         team_name: Name of the team
         room_id: Matrix room ID
         config: Application configuration
         runtime_paths: Explicit runtime context for room alias resolution
+        thread_id: Optional resolved Matrix thread root for thread model overrides
 
     Returns:
         Model name to use
@@ -1394,6 +1398,7 @@ def select_model_for_team(
     model_name = config.resolve_runtime_model(
         entity_name=team_name,
         room_id=room_id,
+        thread_id=thread_id,
         runtime_paths=runtime_paths,
     ).model_name
     room_alias = get_room_alias_from_id(room_id, runtime_paths)

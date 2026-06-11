@@ -23,6 +23,7 @@ class CommandType(Enum):
     CANCEL_SCHEDULE = "cancel_schedule"
     EDIT_SCHEDULE = "edit_schedule"
     CONFIG = "config"  # Configuration command
+    MODEL = "model"  # Per-thread model override command
     HI = "hi"  # Welcome message command
     UNKNOWN = "unknown"  # Special type for unrecognized commands
 
@@ -36,6 +37,7 @@ _COMMAND_DOCS = {
     CommandType.HELP: ("!help [topic]", "Get help"),
     CommandType.RELOAD_PLUGINS: ("!reload-plugins", "Reload configured plugins (admin only)"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
+    CommandType.MODEL: ("!model [name|reset]", "Show or switch the model used in the current thread"),
     CommandType.HI: ("!hi", "Show welcome message"),
 }
 _WELCOME_COMMAND_TYPES = (CommandType.HI, CommandType.SCHEDULE, CommandType.HELP)
@@ -103,9 +105,10 @@ class _CommandParser:
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
     EDIT_SCHEDULE_PATTERN = re.compile(r"^!edit[_-]?schedule\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
+    MODEL_PATTERN = re.compile(r"^!model(?:\s+(.+))?$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
 
-    def parse(self, message: str) -> Command | None:  # noqa: PLR0911
+    def parse(self, message: str) -> Command | None:  # noqa: C901, PLR0911
         """Parse a message for commands.
 
         Args:
@@ -181,6 +184,15 @@ class _CommandParser:
             args_text = match.group(1).strip() if match.group(1) else ""
             return Command(
                 type=CommandType.CONFIG,
+                args={"args_text": args_text},
+                raw_text=message,
+            )
+
+        match = self.MODEL_PATTERN.match(message)
+        if match:
+            args_text = match.group(1).strip() if match.group(1) else ""
+            return Command(
+                type=CommandType.MODEL,
                 args={"args_text": args_text},
                 raw_text=message,
             )
@@ -315,6 +327,22 @@ Usage: `!config <operation>` - View and modify MindRoom configuration
 Set `authorization.config_command_enabled: true`; caller must also be in `authorization.global_users`.
 
 **Note:** Configuration changes are immediately saved to config.yaml and affect all new agent interactions."""
+
+    if topic == "model":
+        return """**Model Command**
+
+Usage: `!model [name|reset]` - Show or switch the model used in the current thread
+
+**Examples:**
+- `!model` - Show the current thread's model override and the available models
+- `!model opus` - Make every agent and team in this thread use the `opus` model
+- `!model reset` - Remove the override so agents use their configured models again
+
+How it works:
+- The override applies to all agents, teams, and the router from the next message in the thread
+- Model names come from the `models:` section of config.yaml
+- The override is scoped to one thread and survives restarts; other threads and rooms are unaffected
+- Room-wide overrides are configured separately via `room_models` in config.yaml"""
 
     # General help - dynamically generated from COMMAND_DOCS
     commands_text = "\n".join(_get_command_entries(format_code=True))

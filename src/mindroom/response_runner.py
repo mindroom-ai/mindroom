@@ -859,6 +859,7 @@ class ResponseRunner:
             request.room_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+            thread_id=resolved_target.resolved_thread_id,
         )
         use_streaming = await should_use_streaming(
             self._client(),
@@ -1395,6 +1396,7 @@ class ResponseRunner:
         runtime_model = self.deps.runtime.config.resolve_runtime_model(
             entity_name=self.deps.agent_name,
             room_id=resolved_target.room_id,
+            thread_id=response_thread_id,
             runtime_paths=self.deps.runtime_paths,
         )
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(

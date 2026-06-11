@@ -764,6 +764,7 @@ async def prepare_agent_execution_context(
     runtime_paths: RuntimePaths,
     config: Config,
     room_id: str | None,
+    thread_id: str | None,
     reply_to_event_id: str | None,
     active_event_ids: Collection[str],
     compaction_outcomes_collector: list[CompactionOutcome] | None,
@@ -781,6 +782,7 @@ async def prepare_agent_execution_context(
     runtime_model = config.resolve_runtime_model(
         entity_name=agent_name,
         room_id=room_id,
+        thread_id=thread_id,
         runtime_paths=runtime_paths,
     )
 

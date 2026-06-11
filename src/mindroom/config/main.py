@@ -75,6 +75,7 @@ from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.thread_models import get_thread_model_override
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
@@ -1826,11 +1827,20 @@ class Config(BaseModel):
         active_model_name: str | None = None,
         active_context_window: int | None = None,
         room_id: str | None = None,
+        thread_id: str | None = None,
         runtime_paths: RuntimePaths | None = None,
         default_model_name: str = "default",
     ) -> ResolvedRuntimeModel:
-        """Resolve the active runtime model plus its configured context window."""
+        """Resolve the active runtime model plus its configured context window.
+
+        Precedence: explicit `active_model_name`, then a persisted per-thread
+        override, then the room override, then the entity's authored model.
+        """
         resolved_model_name = active_model_name
+        if resolved_model_name is None and thread_id is not None and runtime_paths is not None:
+            thread_override = get_thread_model_override(runtime_paths, thread_id)
+            if thread_override is not None and thread_override in self.models:
+                resolved_model_name = thread_override
         if resolved_model_name is None:
             if entity_name is None:
                 resolved_model_name = default_model_name
