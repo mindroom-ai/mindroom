@@ -72,6 +72,7 @@ Matrix sync callback
 |--------|---------|
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
+| `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
 | `team_exact_members.py` | Runtime resolution for exact team member materialization |

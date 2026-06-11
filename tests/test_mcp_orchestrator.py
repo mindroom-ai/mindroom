@@ -220,7 +220,7 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         return set()
 
     with (
-        patch("mindroom.orchestrator.load_config", return_value=updated_config),
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
         patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=fake_stop_entities)),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(side_effect=fake_sync_mcp_manager)),
         patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
@@ -233,6 +233,6 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
     ):
-        await orchestrator.update_config()
+        await orchestrator.config_reload.update_config()
 
     assert call_order[:2] == ["stop", "sync"]

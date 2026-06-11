@@ -1033,8 +1033,8 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
             replayed.append((bots, config, startup_cutoff_ms))
 
         with (
-            patch("mindroom.orchestrator.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
             patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
@@ -1048,7 +1048,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
                 new=AsyncMock(),
             ) as mark_startup_runtime_support_ready,
         ):
-            updated = await orchestrator.update_config()
+            updated = await orchestrator.config_reload.update_config()
 
         assert updated is False
         assert old_maintenance_task.cancelled()
@@ -1088,7 +1088,7 @@ def test_running_startup_maintenance_bots_returns_router_first(tmp_path: Path) -
 async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> None:
     """Test that update_config properly cancels old sync tasks."""
     with (
-        patch("mindroom.orchestrator.load_config") as mock_load_config,
+        patch("mindroom.orchestration.config_lifecycle.load_config") as mock_load_config,
         patch("mindroom.orchestration.config_updates._identify_entities_to_restart") as mock_identify,
         patch("mindroom.orchestrator.stop_entities") as mock_stop_entities,
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
@@ -1157,7 +1157,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         mock_create_bot.return_value = mock_new_bot
 
         # Run update_config
-        await orchestrator.update_config()
+        await orchestrator.config_reload.update_config()
 
         # Verify stop_entities was called with sync_tasks dict
         mock_stop_entities.assert_called_once_with(
@@ -1268,7 +1268,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 
         # --- act ---
         try:
-            await orchestrator.update_config()
+            await orchestrator.config_reload.update_config()
         finally:
             for task in list(orchestrator._sync_tasks.values()):
                 task.cancel()

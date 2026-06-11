@@ -927,6 +927,13 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.config_lifecycle"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.orchestration.runtime",
+]
+
+[[modules]]
 path = "mindroom.orchestration.runtime"
 depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants", "mindroom.matrix.users"]
 
@@ -955,6 +962,7 @@ depends_on = [
     "mindroom.mcp.manager",
     "mindroom.mcp.registry",
     "mindroom.mcp.toolkit",
+    "mindroom.orchestration.config_lifecycle",
     "mindroom.orchestration.runtime",
     "mindroom.runtime_support",
     "mindroom.scheduling",
