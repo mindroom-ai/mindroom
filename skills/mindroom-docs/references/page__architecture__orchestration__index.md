@@ -77,9 +77,9 @@ main() entry
 
 Config changes are detected via polling (`watch_file()` checks `st_mtime` every second):
 
-1. On change, `update_config()` is called
-2. `_identify_entities_to_restart()` computes diff using `model_dump(exclude_none=True)`
-3. Affected entities are stopped, recreated, and restarted
+1. On change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload that first drains in-flight responses (forcing through after a timeout)
+2. `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`
+3. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted
 4. Removed entities run `cleanup()` (leave rooms, stop bot)
 5. New/restarted bots go through room setup
 
@@ -90,7 +90,9 @@ Skills are watched separately via `_watch_skills_task()` with cache invalidation
 The `src/mindroom/orchestration/` subpackage contains helpers extracted from the monolithic orchestrator:
 
 - **`runtime.py`** — Sync loop helpers: `sync_forever_with_restart()` with linear backoff (capped at 60s), `cancel_task()`, and `create_logged_task()` for safe asyncio task creation.
+- **`config_lifecycle.py`** — Debounced config-reload lifecycle: `ConfigReloadLifecycle` owns reload queueing, response draining, and the load → diff → plan sequencing, dispatching the plan back to the orchestrator to apply.
 - **`config_updates.py`** — Config diffing and reload planning: `build_config_update_plan()` computes a `ConfigUpdatePlan` by calling `_identify_entities_to_restart()`, which diffs old and new configs using `model_dump(exclude_none=True)`.
+- **`plugin_watch.py`** — Plugin hot-reload watcher: `watch_plugins_task()` polls configured plugin roots, with `PluginWatchState` owning the watcher baselines and dirty-state revision.
 - **`rooms.py`** — Room invitation helpers: `get_authorized_user_ids_to_invite()` and `get_root_space_user_ids_to_invite()` compute which users should be invited to managed rooms and the root Matrix space.
 
 ### Runtime Resolution

@@ -12,6 +12,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, _ConfigReloadDrainState
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
+from mindroom.orchestration.runtime import create_logged_task
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -232,6 +233,105 @@ async def test_new_request_during_drain_restarts_drain_window(
     assert update_called_at is not None
     assert update_called_at - started_at >= 0.16
     lifecycle.update_config.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_update_does_not_strand_queued_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed update must not prevent a subsequently queued reload from running."""
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+    lifecycle = _make_lifecycle(tmp_path)
+
+    call_count = 0
+
+    async def failing_then_succeeding_update() -> bool:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call fails; queue a new reload during the failure
+            lifecycle.request_reload()
+            msg = "Simulated config update failure"
+            raise RuntimeError(msg)
+        return True
+
+    lifecycle.update_config = AsyncMock(side_effect=failing_then_succeeding_update)
+    lifecycle.request_reload()
+    task = lifecycle._reload_task
+    assert task is not None
+
+    await asyncio.wait_for(task, timeout=2)
+
+    assert lifecycle.update_config.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_config_change_during_update_triggers_second_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A config change arriving while an update runs should cause a second reload."""
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+    lifecycle = _make_lifecycle(tmp_path)
+
+    call_count = 0
+
+    async def update_config_with_second_change() -> bool:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            lifecycle.request_reload()
+        return True
+
+    lifecycle.update_config = AsyncMock(side_effect=update_config_with_second_change)
+    lifecycle.request_reload()
+    task = lifecycle._reload_task
+    assert task is not None
+
+    await asyncio.wait_for(task, timeout=2)
+
+    assert lifecycle.update_config.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_logs_exception_instead_of_suppressing_silently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reload-task cancellation should log unexpected failures and keep shutdown moving."""
+    logger_mock = MagicMock()
+    monkeypatch.setattr("mindroom.orchestration.runtime.logger", logger_mock)
+    lifecycle = _make_lifecycle(tmp_path)
+    started = asyncio.Event()
+
+    async def fail_during_cancel() -> None:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError as err:
+            msg = "boom"
+            raise RuntimeError(msg) from err
+
+    lifecycle._reload_task = create_logged_task(
+        fail_during_cancel(),
+        name="config_reload",
+        failure_message="config_reload failed",
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await lifecycle.cancel()
+
+    assert lifecycle._reload_task is None
+    assert any(
+        call.args
+        and call.args[0] == "Detached task failed while being cancelled"
+        and call.kwargs.get("task_name") == "config_reload"
+        for call in logger_mock.debug.call_args_list
+    )
+    logger_mock.exception.assert_not_called()
 
 
 @pytest.mark.asyncio
