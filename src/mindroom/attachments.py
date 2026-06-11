@@ -71,6 +71,7 @@ class AttachmentRecord:
     thread_id: str | None = None
     source_event_id: str | None = None
     sender: str | None = None
+    event_timestamp: int | None = None
     size_bytes: int | None = None
     content_sha256: str | None = None
     created_at: str | None = None
@@ -87,6 +88,7 @@ class AttachmentRecord:
             "thread_id": self.thread_id,
             "source_event_id": self.source_event_id,
             "sender": self.sender,
+            "event_timestamp": self.event_timestamp,
             "size_bytes": self.size_bytes,
             "content_sha256": self.content_sha256,
             "created_at": self.created_at,
@@ -152,11 +154,38 @@ def merge_attachment_ids(*attachment_id_lists: list[str]) -> list[str]:
     )
 
 
-def format_attachment_ids_prompt(attachment_ids: list[str]) -> str | None:
-    """Return attachment guidance prompt text when attachment IDs are available."""
-    if not attachment_ids:
+def _attachment_provenance_line(record: AttachmentRecord) -> str:
+    details: list[str] = [record.kind]
+    if record.filename:
+        details.append(f'"{record.filename}"')
+    if record.sender:
+        details.append(f"from {record.sender}")
+    if record.event_timestamp is not None:
+        timestamp = datetime.fromtimestamp(record.event_timestamp / 1000, UTC)
+        details.append(f"sent {timestamp.strftime('%Y-%m-%d %H:%M UTC')}")
+    if record.source_event_id:
+        details.append(f"event {record.source_event_id}")
+    return f"- {record.attachment_id} ({', '.join(details)})"
+
+
+def format_attachments_prompt(
+    attachment_records: list[AttachmentRecord],
+    *,
+    current_attachment_ids: set[str],
+) -> str | None:
+    """Render attachment guidance with provenance, split by current turn vs earlier in the conversation."""
+    if not attachment_records:
         return None
-    return f"Available attachment IDs: {', '.join(attachment_ids)}. Use tool calls to inspect or process them."
+    current_records = [record for record in attachment_records if record.attachment_id in current_attachment_ids]
+    earlier_records = [record for record in attachment_records if record.attachment_id not in current_attachment_ids]
+    lines = ["Available attachments (use tool calls to inspect or process them by ID):"]
+    if current_records:
+        lines.append("Sent with the current message:")
+        lines.extend(_attachment_provenance_line(record) for record in current_records)
+    if earlier_records:
+        lines.append("From earlier in this conversation (NOT sent with the current message):")
+        lines.extend(_attachment_provenance_line(record) for record in earlier_records)
+    return "\n".join(lines)
 
 
 def _attachments_dir(storage_path: Path) -> Path:
@@ -410,6 +439,7 @@ def register_local_attachment(
     thread_id: str | None = None,
     source_event_id: str | None = None,
     sender: str | None = None,
+    event_timestamp: int | None = None,
 ) -> AttachmentRecord | None:
     """Register a local file as an attachment and persist metadata."""
     if not local_path.is_file():
@@ -444,6 +474,7 @@ def register_local_attachment(
         thread_id=thread_id,
         source_event_id=source_event_id,
         sender=sender,
+        event_timestamp=event_timestamp,
         size_bytes=size_bytes,
         content_sha256=content_sha256,
         created_at=datetime.now(UTC).isoformat(),
@@ -484,6 +515,7 @@ async def _register_media_attachment(
     room_id: str,
     thread_id: str | None,
     sender: str,
+    event_timestamp: int | None,
     filename: str | None,
     kind: _AttachmentKind,
 ) -> AttachmentRecord | None:
@@ -516,6 +548,7 @@ async def _register_media_attachment(
         thread_id=thread_id,
         source_event_id=event_id,
         sender=sender,
+        event_timestamp=event_timestamp,
     )
 
 
@@ -538,6 +571,7 @@ async def _register_file_or_video_attachment(
         room_id=room_id,
         thread_id=thread_id,
         sender=event.sender,
+        event_timestamp=event.server_timestamp,
         filename=_filename_for_media_event(event),
         kind=kind,
     )
@@ -570,6 +604,7 @@ async def _register_image_attachment(
         room_id=room_id,
         thread_id=thread_id,
         sender=event.sender,
+        event_timestamp=event.server_timestamp,
         filename=_filename_for_media_event(event),
         kind="image",
     )
@@ -584,6 +619,7 @@ async def register_audio_attachment(
     room_id: str,
     thread_id: str | None,
     sender: str,
+    event_timestamp: int | None = None,
     filename: str | None = None,
 ) -> AttachmentRecord | None:
     """Persist raw audio bytes and register them as an attachment record."""
@@ -595,6 +631,7 @@ async def register_audio_attachment(
         room_id=room_id,
         thread_id=thread_id,
         sender=sender,
+        event_timestamp=event_timestamp,
         filename=filename,
         kind="audio",
     )
@@ -629,6 +666,7 @@ def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord 
     thread_id = raw_payload.get("thread_id")
     source_event_id = raw_payload.get("source_event_id")
     sender = raw_payload.get("sender")
+    event_timestamp = raw_payload.get("event_timestamp")
     size_bytes = raw_payload.get("size_bytes")
     content_sha256 = raw_payload.get("content_sha256")
     created_at = raw_payload.get("created_at")
@@ -643,6 +681,7 @@ def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord 
         thread_id=thread_id if isinstance(thread_id, str) else None,
         source_event_id=source_event_id if isinstance(source_event_id, str) else None,
         sender=sender if isinstance(sender, str) else None,
+        event_timestamp=event_timestamp if isinstance(event_timestamp, int) else None,
         size_bytes=size_bytes if isinstance(size_bytes, int) else None,
         content_sha256=content_sha256 if isinstance(content_sha256, str) else None,
         created_at=created_at if isinstance(created_at, str) else None,

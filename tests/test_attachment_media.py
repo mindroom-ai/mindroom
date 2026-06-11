@@ -74,13 +74,16 @@ def test_resolve_attachment_media_caches_records_before_partition(tmp_path: Path
     assert old_record is not None
     assert new_record is not None
 
-    resolved_ids, _, images, _, _ = resolve_attachment_media(
+    resolved_records, _, images, _, _ = resolve_attachment_media(
         tmp_path,
         [old_record.attachment_id, new_record.attachment_id],
         current_attachment_ids={new_record.attachment_id},
     )
 
-    assert resolved_ids == [old_record.attachment_id, new_record.attachment_id]
+    assert [record.attachment_id for record in resolved_records] == [
+        old_record.attachment_id,
+        new_record.attachment_id,
+    ]
     assert [image.id for image in images] == [new_record.attachment_id]
     assert _INLINE_MEDIA_RECORDS_BY_ID[old_record.attachment_id].local_path == old_record.local_path
     assert _INLINE_MEDIA_RECORDS_BY_ID[new_record.attachment_id].local_path == new_record.local_path

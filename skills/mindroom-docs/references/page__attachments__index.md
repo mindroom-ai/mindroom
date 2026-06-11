@@ -43,10 +43,14 @@ Attachments work in both direct messages and threads, and with both individual a
 ## Attachment IDs
 
 Each uploaded file or video is assigned a stable attachment ID (e.g., `att_abc123`).
-The agent's prompt is augmented with the available IDs:
+The agent's prompt is augmented with the available attachments, including per-attachment provenance (kind, filename, sender, send time, and originating event ID) and a split between attachments sent with the current message and ones from earlier in the conversation:
 
 ```
-Available attachment IDs: att_abc123. Use tool calls to inspect or process them.
+Available attachments (use tool calls to inspect or process them by ID):
+Sent with the current message:
+- att_abc123 (image, "car.jpg", from @user:example.org, sent 2026-06-06 09:00 UTC, event $abc)
+From earlier in this conversation (NOT sent with the current message):
+- att_def456 (file, "report.pdf", from @user:example.org, sent 2026-06-05 09:00 UTC, event $def)
 ```
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
@@ -72,7 +76,7 @@ agents:
 
 | Operation | Description |
 |-----------|-------------|
-| `list_attachments(target?)` | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, created_at) |
+| `list_attachments(target?)` | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, event_timestamp, created_at) |
 | `get_attachment(attachment_id, mindroom_output_path?)` | Return one context attachment record, or save its bytes to a workspace-relative path and return a save receipt |
 | `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`) |
 

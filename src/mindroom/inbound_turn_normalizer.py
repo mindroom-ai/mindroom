@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.attachment_media import resolve_attachment_media
 from mindroom.attachments import (
-    format_attachment_ids_prompt,
+    format_attachments_prompt,
     merge_attachment_ids,
     parse_attachment_ids_from_thread_history,
     register_matrix_media_attachment,
@@ -378,7 +378,7 @@ class InboundTurnNormalizer:
         scoped_attachment_ids = [
             attachment_id for attachment_id in attachment_ids if attachment_id not in trusted_current_attachment_ids
         ]
-        resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
+        resolved_records, attachment_audio, attachment_images, attachment_files, attachment_videos = (
             resolve_attachment_media(
                 self.deps.storage_path,
                 scoped_attachment_ids,
@@ -389,7 +389,7 @@ class InboundTurnNormalizer:
         )
         if trusted_current_attachment_ids:
             (
-                trusted_resolved_attachment_ids,
+                trusted_records,
                 trusted_audio,
                 trusted_images,
                 trusted_files,
@@ -398,14 +398,22 @@ class InboundTurnNormalizer:
                 self.deps.storage_path,
                 trusted_current_attachment_ids,
             )
-            resolved_attachment_ids = merge_attachment_ids(trusted_resolved_attachment_ids, resolved_attachment_ids)
+            trusted_record_ids = {record.attachment_id for record in trusted_records}
+            resolved_records = [
+                *trusted_records,
+                *[record for record in resolved_records if record.attachment_id not in trusted_record_ids],
+            ]
             attachment_audio = [*trusted_audio, *attachment_audio]
             attachment_images = [*trusted_images, *attachment_images]
             attachment_files = [*trusted_files, *attachment_files]
             attachment_videos = [*trusted_videos, *attachment_videos]
         if request.fallback_images:
             attachment_images = [*attachment_images, *request.fallback_images]
-        attachment_prompt = format_attachment_ids_prompt(resolved_attachment_ids)
+        attachment_prompt = format_attachments_prompt(
+            resolved_records,
+            current_attachment_ids={*trusted_current_attachment_ids, *request.current_attachment_ids},
+        )
+        resolved_attachment_ids = [record.attachment_id for record in resolved_records]
         return DispatchPayload(
             prompt=request.prompt,
             model_prompt=attachment_prompt,

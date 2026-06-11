@@ -3941,7 +3941,10 @@ async def test_dispatch_payload_registers_unregistered_image_from_thread_history
     attachment_id = _attachment_id_for_event("$img-history")
     assert payload.attachment_ids == [attachment_id]
     assert payload.model_prompt == (
-        f"Available attachment IDs: {attachment_id}. Use tool calls to inspect or process them."
+        "Available attachments (use tool calls to inspect or process them by ID):\n"
+        "From earlier in this conversation (NOT sent with the current message):\n"
+        f'- {attachment_id} (image, "photo.jpg", from @user:localhost, sent 1970-01-01 00:00 UTC, '
+        "event $img-history)"
     )
     assert len(payload.media.images) == 1
     assert payload.media.audio == ()

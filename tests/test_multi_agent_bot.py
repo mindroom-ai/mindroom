@@ -11,6 +11,7 @@ import sys
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
@@ -38,7 +39,7 @@ from mindroom.approval_manager import (
     get_approval_store,
     initialize_approval_store,
 )
-from mindroom.attachments import _attachment_id_for_event, register_local_attachment
+from mindroom.attachments import AttachmentRecord, _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingGate, IngressOrderReservation, ReadyPendingEvent
@@ -174,7 +175,6 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
-    from pathlib import Path
 
     from mindroom.post_response_effects import ResponseOutcome
     from mindroom.turn_store import TurnStore
@@ -803,6 +803,16 @@ def _visible_message(
         event_id=event_id,
         timestamp=timestamp,
         content=content,
+    )
+
+
+def _attachment_record_stub(attachment_id: str, *, sender: str = "@user:localhost") -> AttachmentRecord:
+    """Create a minimal attachment record for mocked media resolution."""
+    return AttachmentRecord(
+        attachment_id=attachment_id,
+        local_path=Path(f"media/{attachment_id}.bin"),
+        kind="image",
+        sender=sender,
     )
 
 
@@ -7466,7 +7476,7 @@ class TestAgentBot:
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.resolve_attachment_media",
-                return_value=([attachment_id], [], [image], [], []),
+                return_value=([_attachment_record_stub(attachment_id)], [], [image], [], []),
             ),
         ):
             await bot._on_media_message(room, event)
@@ -7476,9 +7486,9 @@ class TestAgentBot:
         generate_kwargs = bot._generate_response.await_args.kwargs
         response_target = generate_kwargs["response_envelope"].target
         assert response_target.room_id == "!test:localhost"
-        assert "Available attachment IDs" not in generate_kwargs["prompt"]
+        assert "Available attachments" not in generate_kwargs["prompt"]
         assert generate_kwargs["model_prompt"] is not None
-        assert "Available attachment IDs" in generate_kwargs["model_prompt"]
+        assert "Available attachments" in generate_kwargs["model_prompt"]
         assert attachment_id in generate_kwargs["model_prompt"]
         assert response_target.reply_to_event_id == "$img_event"
         assert response_target.resolved_thread_id == "$img_event"
@@ -8010,7 +8020,16 @@ class TestAgentBot:
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.resolve_attachment_media",
-                return_value=([current_attachment_id, history_attachment_id], [], [image], [], []),
+                return_value=(
+                    [
+                        _attachment_record_stub(current_attachment_id),
+                        _attachment_record_stub(history_attachment_id),
+                    ],
+                    [],
+                    [image],
+                    [],
+                    [],
+                ),
             ) as mock_resolve_media,
         ):
             await bot._on_media_message(room, event)
@@ -8032,8 +8051,13 @@ class TestAgentBot:
         assert current_attachment_id not in generate_kwargs["prompt"]
         assert history_attachment_id not in generate_kwargs["prompt"]
         assert generate_kwargs["model_prompt"] is not None
-        assert current_attachment_id in generate_kwargs["model_prompt"]
-        assert history_attachment_id in generate_kwargs["model_prompt"]
+        model_prompt = generate_kwargs["model_prompt"]
+        current_section, _, earlier_section = model_prompt.partition("From earlier in this conversation")
+        assert current_section.startswith("Available attachments")
+        assert "Sent with the current message:" in current_section
+        assert current_attachment_id in current_section
+        assert history_attachment_id not in current_section
+        assert history_attachment_id in earlier_section
         tracker.record_handled_turn.assert_called_once_with(
             _agent_response_handled_turn(
                 agent_name=mock_agent_user.agent_name,
@@ -8300,7 +8324,7 @@ class TestAgentBot:
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.resolve_attachment_media",
-                return_value=(["att_image"], [], [stored_image], [], []),
+                return_value=([_attachment_record_stub("att_image")], [], [stored_image], [], []),
             ),
         ):
             payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
@@ -8318,7 +8342,7 @@ class TestAgentBot:
         assert payload.attachment_ids == ["att_image"]
         assert payload.prompt == "describe this"
         assert payload.model_prompt is not None
-        assert "Available attachment IDs" in payload.model_prompt
+        assert "Available attachments" in payload.model_prompt
         assert "att_image" in payload.model_prompt
         assert list(payload.media.images) == [stored_image, fallback_image]
 
@@ -8342,7 +8366,7 @@ class TestAgentBot:
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.resolve_attachment_media",
-                return_value=(["att_image"], [], [stored_image], [], []),
+                return_value=([_attachment_record_stub("att_image")], [], [stored_image], [], []),
             ),
         ):
             payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
@@ -8358,7 +8382,7 @@ class TestAgentBot:
 
         assert payload.prompt == "describe this"
         assert payload.model_prompt is not None
-        assert "Available attachment IDs" in payload.model_prompt
+        assert "Available attachments" in payload.model_prompt
         assert "att_image" in payload.model_prompt
 
     @pytest.mark.asyncio
@@ -8545,9 +8569,9 @@ class TestAgentBot:
         assert response_target.source_thread_id is None
         assert generate_kwargs["user_id"] == "@user:localhost"
         assert generate_kwargs["attachment_ids"] == [attachment_id]
-        assert "Available attachment IDs" not in generate_kwargs["prompt"]
+        assert "Available attachments" not in generate_kwargs["prompt"]
         assert generate_kwargs["model_prompt"] is not None
-        assert "Available attachment IDs" in generate_kwargs["model_prompt"]
+        assert "Available attachments" in generate_kwargs["model_prompt"]
         assert attachment_id in generate_kwargs["model_prompt"]
         media = generate_kwargs["media"]
         assert len(media.files) == 1
@@ -9437,7 +9461,7 @@ class TestAgentBot:
             ) as mock_resolve_attachment_ids,
             patch(
                 "mindroom.inbound_turn_normalizer.resolve_attachment_media",
-                return_value=(["att_img_root"], [], [fake_image], [], []),
+                return_value=([_attachment_record_stub("att_img_root")], [], [fake_image], [], []),
             ),
             patch(
                 "mindroom.turn_policy.decide_team_formation",

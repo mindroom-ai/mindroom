@@ -123,8 +123,8 @@ def resolve_attachment_media(
     room_id: str | None = None,
     thread_id: str | None = None,
     current_attachment_ids: set[str] | None = None,
-) -> tuple[list[str], list[Audio], list[Image], list[File], list[Video]]:
-    """Resolve attachment IDs into Agno media objects.
+) -> tuple[list[AttachmentRecord], list[Audio], list[Image], list[File], list[Video]]:
+    """Resolve attachment IDs into records and Agno media objects.
 
     When *room_id* is provided, only attachments registered for the current
     room/thread context are included. Mismatched records are dropped with a
@@ -147,7 +147,6 @@ def resolve_attachment_media(
                 room_id=room_id,
                 thread_id=thread_id,
             )
-    resolved_attachment_ids = [record.attachment_id for record in attachment_records]
     for record in attachment_records:
         _remember_attachment_record(record)
     media_records = (
@@ -171,4 +170,4 @@ def resolve_attachment_media(
         file_count=len(attachment_files),
         video_count=len(attachment_videos),
     )
-    return resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos
+    return attachment_records, attachment_audio, attachment_images, attachment_files, attachment_videos

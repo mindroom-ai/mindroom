@@ -157,6 +157,7 @@ async def _compute_normalized_voice_message(
         room_id=room.room_id,
         thread_id=thread_id,
         sender=event.sender,
+        event_timestamp=event.server_timestamp,
         filename=event.body if isinstance(event.body, str) else None,
     )
 
@@ -275,6 +276,7 @@ async def prepare_raw_voice_fallback_message(
             room_id=room.room_id,
             thread_id=thread_id,
             sender=event.sender,
+            event_timestamp=event.server_timestamp,
             filename=event.body if isinstance(event.body, str) else None,
         )
         attachment_id = attachment_record.attachment_id if attachment_record is not None else None
