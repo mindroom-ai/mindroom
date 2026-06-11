@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -257,22 +256,23 @@ async def test_thread_with_two_participating_agents_forms_implicit_team_for_owne
     ]
     context = _context(thread_id="$thread:localhost", thread_history=history)
 
-    with patch("mindroom.teams._select_team_mode", new=AsyncMock(return_value=TeamMode.COLLABORATE)):
-        owner_plan = await _plan(
-            _policy_for(config, "general"),
-            room,
-            _dispatch(context, agent_name="general"),
-        )
-        other_plan = await _plan(
-            _policy_for(config, "research"),
-            room,
-            _dispatch(context, agent_name="research"),
-        )
+    owner_plan = await _plan(
+        _policy_for(config, "general"),
+        room,
+        _dispatch(context, agent_name="general"),
+    )
+    other_plan = await _plan(
+        _policy_for(config, "research"),
+        room,
+        _dispatch(context, agent_name="research"),
+    )
 
     assert owner_plan.kind == "respond"
     assert owner_plan.response_action.kind == "team"
     assert owner_plan.response_action.form_team.outcome is TeamOutcome.TEAM
     assert owner_plan.response_action.form_team.intent is TeamIntent.IMPLICIT_THREAD_TEAM
+    # Formation is pure: thread-history teams carry the COLLABORATE provisional mode.
+    assert owner_plan.response_action.form_team.mode is TeamMode.COLLABORATE
     assert other_plan.kind == "ignore"
 
 
@@ -282,21 +282,22 @@ async def test_mentioning_two_agents_forms_explicit_team_for_owner_only(config: 
     room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
     mentioned = [_entity_id(config, "general"), _entity_id(config, "research")]
 
-    with patch("mindroom.teams._select_team_mode", new=AsyncMock(return_value=TeamMode.COORDINATE)):
-        owner_plan = await _plan(
-            _policy_for(config, "general"),
-            room,
-            _dispatch(_context(mentioned=mentioned, am_i_mentioned=True), agent_name="general"),
-        )
-        other_plan = await _plan(
-            _policy_for(config, "research"),
-            room,
-            _dispatch(_context(mentioned=mentioned, am_i_mentioned=True), agent_name="research"),
-        )
+    owner_plan = await _plan(
+        _policy_for(config, "general"),
+        room,
+        _dispatch(_context(mentioned=mentioned, am_i_mentioned=True), agent_name="general"),
+    )
+    other_plan = await _plan(
+        _policy_for(config, "research"),
+        room,
+        _dispatch(_context(mentioned=mentioned, am_i_mentioned=True), agent_name="research"),
+    )
 
     assert owner_plan.kind == "respond"
     assert owner_plan.response_action.kind == "team"
     assert owner_plan.response_action.form_team.intent is TeamIntent.EXPLICIT_MEMBERS
+    # Formation is pure: explicitly tagged teams carry the COORDINATE provisional mode.
+    assert owner_plan.response_action.form_team.mode is TeamMode.COORDINATE
     assert other_plan.kind == "ignore"
 
 
@@ -305,17 +306,17 @@ async def test_dm_room_with_multiple_agents_forms_auto_team(config: Config) -> N
     """Untagged DM-room messages auto-team all visible agents."""
     room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
 
-    with patch("mindroom.teams._select_team_mode", new=AsyncMock(return_value=TeamMode.COLLABORATE)):
-        plan = await _plan(
-            _policy_for(config, "general"),
-            room,
-            _dispatch(_context(), agent_name="general"),
-            is_dm=True,
-        )
+    plan = await _plan(
+        _policy_for(config, "general"),
+        room,
+        _dispatch(_context(), agent_name="general"),
+        is_dm=True,
+    )
 
     assert plan.kind == "respond"
     assert plan.response_action.kind == "team"
     assert plan.response_action.form_team.intent is TeamIntent.DM_AUTO_TEAM
+    assert plan.response_action.form_team.mode is TeamMode.COLLABORATE
 
 
 @pytest.mark.asyncio

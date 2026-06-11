@@ -1079,6 +1079,7 @@ visibility = [
     "mindroom.bot",
     "mindroom.responder_availability",
     "mindroom.response_runner",
+    "mindroom.turn_controller",
     "mindroom.turn_policy",
 ]
 
@@ -2250,6 +2251,7 @@ depends_on = [
     "mindroom.response_lifecycle",
     "mindroom.response_runner",
     "mindroom.routing",
+    "mindroom.teams",
     "mindroom.text_ingress_dispatch",
     "mindroom.turn_store",
     "mindroom.turn_policy",
@@ -2449,6 +2451,7 @@ expose = [
     "TeamResolutionMember",
     "resolve_configured_team",
     "decide_team_formation",
+    "select_ad_hoc_team_mode",
     "materialize_exact_team_members",
     "prepare_materialized_team_execution",
     "build_materialized_team_instance",

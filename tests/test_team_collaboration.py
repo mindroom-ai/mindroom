@@ -485,17 +485,14 @@ class TestRouterTeamFormation:
         room = _matrix_room("!dm:localhost", [ids["agent1"].full_id, ids["agent2"].full_id])
 
         # Test DM room with multiple agents and no mentions
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["agent1"],
+        result = decide_team_formation(
             tagged_agents=[],  # No agents mentioned
             agents_in_thread=[],  # No agents have spoken yet
             all_mentioned_in_thread=[],  # No mentions in thread
             runtime_paths=runtime_paths_for(config),
-            message="Hello",
             config=config,
             is_dm_room=True,  # This is a DM room
             room=room,
-            use_ai_decision=False,  # Don't use AI for this test
         )
 
         # Should form a team with both agents
@@ -506,17 +503,14 @@ class TestRouterTeamFormation:
 
         # Test DM room with single agent (should not form team)
         room = _matrix_room("!dm:localhost", [ids["agent1"].full_id])
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["agent1"],
+        result = decide_team_formation(
             tagged_agents=[],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="Hello",
             config=config,
             is_dm_room=True,
             room=room,
-            use_ai_decision=False,  # Don't use AI for this test
         )
 
         # Should not form a team with single agent
@@ -553,18 +547,15 @@ class TestRouterTeamFormation:
         agents_in_thread = [entity_ids(config, runtime_paths_for(config))["calculator"]]
 
         # Should NOT form a team inside a thread with a single agent
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
+        result = decide_team_formation(
             tagged_agents=[],
             agents_in_thread=agents_in_thread,
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="Follow-up without mentions",
             config=config,
             is_dm_room=True,
             is_thread=True,
             room=room,
-            use_ai_decision=False,
         )
 
         assert result.outcome is TeamOutcome.NONE
@@ -596,17 +587,14 @@ class TestRouterTeamFormation:
             ],
         )
 
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
+        result = decide_team_formation(
             tagged_agents=[],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="Hello",
             config=config,
             is_dm_room=True,
             room=room,
-            use_ai_decision=False,
         )
 
         assert result.outcome is TeamOutcome.INDIVIDUAL
@@ -633,8 +621,7 @@ class TestRouterTeamFormation:
             [entity_ids(config, runtime_paths_for(config))["calculator"].full_id],
         )
 
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
+        result = decide_team_formation(
             tagged_agents=[],
             agents_in_thread=[
                 entity_ids(config, runtime_paths_for(config))["calculator"],
@@ -642,11 +629,9 @@ class TestRouterTeamFormation:
             ],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="continue the thread",
             config=config,
             room=room,
             is_thread=True,
-            use_ai_decision=False,
         )
 
         assert result.outcome is TeamOutcome.INDIVIDUAL
@@ -687,8 +672,7 @@ class TestRouterTeamFormation:
             ],
         )
 
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["agent_gamma"],
+        result = decide_team_formation(
             tagged_agents=[],
             agents_in_thread=[
                 entity_ids(config, runtime_paths_for(config))["meta_team"],
@@ -698,11 +682,9 @@ class TestRouterTeamFormation:
             ],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="continue the thread",
             config=config,
             room=room,
             is_thread=True,
-            use_ai_decision=False,
         )
 
         assert result.outcome is TeamOutcome.TEAM
@@ -738,8 +720,7 @@ class TestRouterTeamFormation:
             [entity_ids(config, runtime_paths_for(config))["calculator"].full_id],
         )
 
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
+        result = decide_team_formation(
             tagged_agents=[],
             agents_in_thread=[],
             all_mentioned_in_thread=[
@@ -747,11 +728,9 @@ class TestRouterTeamFormation:
                 entity_ids(config, runtime_paths_for(config))["general"],
             ],
             runtime_paths=runtime_paths_for(config),
-            message="continue the thread",
             config=config,
             room=room,
             is_thread=True,
-            use_ai_decision=False,
         )
 
         assert result.outcome is TeamOutcome.INDIVIDUAL
@@ -778,8 +757,7 @@ class TestRouterTeamFormation:
             [entity_ids(config, runtime_paths_for(config))["calculator"].full_id],
         )
 
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
+        result = decide_team_formation(
             tagged_agents=[
                 entity_ids(config, runtime_paths_for(config))["calculator"],
                 entity_ids(config, runtime_paths_for(config))["general"],
@@ -787,10 +765,8 @@ class TestRouterTeamFormation:
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="calculator and general, help",
             config=config,
             room=room,
-            use_ai_decision=False,
         )
 
         assert result.outcome is TeamOutcome.REJECT
@@ -825,8 +801,7 @@ class TestRouterTeamFormation:
             ],
         )
 
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
+        result = decide_team_formation(
             tagged_agents=[
                 entity_ids(config, runtime_paths_for(config))["calculator"],
                 entity_ids(config, runtime_paths_for(config))["general"],
@@ -834,10 +809,8 @@ class TestRouterTeamFormation:
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="calculator and general, help",
             config=config,
             room=room,
-            use_ai_decision=False,
             available_responders_in_room=[],
         )
 
@@ -865,8 +838,7 @@ class TestRouterTeamFormation:
 
         room = _matrix_room("!room:localhost", [entity_ids(config, runtime_paths)["calculator"].full_id])
 
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths)["calculator"],
+        result = decide_team_formation(
             tagged_agents=[
                 entity_ids(config, runtime_paths)["calculator"],
                 entity_ids(config, runtime_paths)["general"],
@@ -874,10 +846,8 @@ class TestRouterTeamFormation:
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths,
-            message="calculator and general, help",
             config=config,
             room=room,
-            use_ai_decision=False,
             available_responders_in_room=[
                 entity_ids(config, runtime_paths)["calculator"],
                 entity_ids(config, runtime_paths)["general"],
@@ -910,8 +880,7 @@ class TestRouterTeamFormation:
             [entity_ids(config, runtime_paths_for(config))["calculator"].full_id],
         )
 
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
+        result = decide_team_formation(
             tagged_agents=[
                 entity_ids(config, runtime_paths_for(config))["general"],
                 entity_ids(config, runtime_paths_for(config))["research"],
@@ -919,10 +888,8 @@ class TestRouterTeamFormation:
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="general and research, help",
             config=config,
             room=room,
-            use_ai_decision=False,
             available_responders_in_room=[entity_ids(config, runtime_paths_for(config))["calculator"]],
             materializable_agent_names={"calculator"},
         )
@@ -964,8 +931,7 @@ class TestRouterTeamFormation:
                 entity_ids(config, runtime_paths_for(config))["mind"].full_id,
             ],
         )
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
+        result = decide_team_formation(
             tagged_agents=[
                 entity_ids(config, runtime_paths_for(config))["calculator"],
                 entity_ids(config, runtime_paths_for(config))["general"],
@@ -974,10 +940,8 @@ class TestRouterTeamFormation:
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="calculator, general, and mind, help",
             config=config,
             room=room,
-            use_ai_decision=False,
         )
 
         assert result.outcome is TeamOutcome.REJECT
@@ -1009,8 +973,7 @@ class TestRouterTeamFormation:
             ],
         )
 
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
+        result = decide_team_formation(
             tagged_agents=[
                 entity_ids(config, runtime_paths_for(config))["alpha"],
                 entity_ids(config, runtime_paths_for(config))["calculator"],
@@ -1018,10 +981,8 @@ class TestRouterTeamFormation:
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="alpha and calculator, help",
             config=config,
             room=room,
-            use_ai_decision=False,
             available_responders_in_room=[
                 entity_ids(config, runtime_paths_for(config))["alpha"],
                 entity_ids(config, runtime_paths_for(config))["calculator"],
@@ -1065,8 +1026,7 @@ class TestRouterTeamFormation:
             ],
         )
 
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
+        result = decide_team_formation(
             tagged_agents=[
                 entity_ids(config, runtime_paths_for(config))["alpha"],
                 entity_ids(config, runtime_paths_for(config))["general"],
@@ -1074,10 +1034,8 @@ class TestRouterTeamFormation:
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="alpha and general, help",
             config=config,
             room=room,
-            use_ai_decision=False,
             available_responders_in_room=[
                 entity_ids(config, runtime_paths_for(config))["alpha"],
                 entity_ids(config, runtime_paths_for(config))["general"],
@@ -1129,8 +1087,7 @@ class TestRouterTeamFormation:
                 entity_ids(config, runtime_paths_for(config))["research"].full_id,
             ],
         )
-        result = await decide_team_formation(
-            agent=entity_ids(config, runtime_paths_for(config))["general"],
+        result = decide_team_formation(
             tagged_agents=[
                 entity_ids(config, runtime_paths_for(config))["general"],
                 entity_ids(config, runtime_paths_for(config))["code"],
@@ -1139,10 +1096,8 @@ class TestRouterTeamFormation:
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="general, code, and analyst, help",
             config=config,
             room=room,
-            use_ai_decision=False,
         )
 
         assert result.outcome is TeamOutcome.REJECT

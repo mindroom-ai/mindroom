@@ -29,7 +29,7 @@ from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTI
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamOutcome, TeamResolution
 from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, is_router_only_agent_mention
-from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps
+from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps, _ResponderAvailability
 from tests.conftest import (
     agent_response_should_respond,
     bind_runtime_paths,
@@ -171,7 +171,10 @@ class TestAgentResponseLogic:
             ),
         )
 
-        responder_pool = policy.filter_materializable_responders([team_id], {"alpha", "beta"})
+        responder_pool = policy.filter_materializable_responders(
+            [team_id],
+            _ResponderAvailability(materializable_agent_names={"alpha", "beta"}, live_entity_names=None),
+        )
         action = policy.team_response_action(
             TeamResolution(
                 intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -247,7 +250,6 @@ class TestAgentResponseLogic:
             multiple_visible_action = await policy.resolve_response_action(
                 dispatch,
                 room,
-                "continue",
                 False,
                 has_active_response_for_target=lambda _target: False,
             )
@@ -261,7 +263,6 @@ class TestAgentResponseLogic:
             single_visible_action = await policy.resolve_response_action(
                 dispatch,
                 room,
-                "continue",
                 False,
                 has_active_response_for_target=lambda _target: False,
             )
@@ -326,13 +327,12 @@ class TestAgentResponseLogic:
             ),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new=AsyncMock(return_value=TeamResolution.none()),
+                new=MagicMock(return_value=TeamResolution.none()),
             ),
         ):
             action = await policy.resolve_response_action(
                 dispatch,
                 room,
-                "continue",
                 False,
                 has_active_response_for_target=lambda _target: False,
             )
@@ -410,7 +410,6 @@ class TestAgentResponseLogic:
             action = await policy.resolve_response_action(
                 dispatch,
                 room,
-                "continue",
                 False,
                 has_active_response_for_target=lambda _target: False,
             )
@@ -489,13 +488,12 @@ class TestAgentResponseLogic:
             ),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new=AsyncMock(return_value=TeamResolution.none()),
+                new=MagicMock(return_value=TeamResolution.none()),
             ),
         ):
             action = await policy.resolve_response_action(
                 dispatch,
                 room,
-                "continue",
                 False,
                 has_active_response_for_target=lambda _target: False,
             )

@@ -92,6 +92,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_responder_for_message
+from mindroom.teams import TeamIntent, select_ad_hoc_team_mode
 from mindroom.text_ingress_dispatch import dispatch_text_message
 from mindroom.thread_utils import (
     check_agent_mentioned,
@@ -899,16 +900,21 @@ class TurnController:
             return False
         if thread_history is None:
             return False
-        available_responders = await self.deps.turn_policy.responder_candidates_for_room(
-            room,
-            requester_user_id,
-        )
+        available_responders = await self._responder_candidates_for_room(room, requester_user_id)
         return thread_requires_explicit_agent_targeting(
             thread_history,
             sender_id=requester_user_id,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             available_responders_in_room=available_responders,
+        )
+
+    async def _responder_candidates_for_room(self, room: nio.MatrixRoom, sender_id: str) -> list[MatrixID]:
+        """Return live-filtered responder candidates with fresh availability state."""
+        return await self.deps.turn_policy.responder_candidates_for_room(
+            room,
+            sender_id,
+            self.deps.turn_policy.responder_availability(),
         )
 
     async def _coalescing_key_for_event(
@@ -1394,7 +1400,7 @@ class TurnController:
             record_handled_turn=self.deps.turn_store.record_turn,
             send_response=send_response,
             reload_plugins=reload_plugins,
-            responder_candidates_for_room=self.deps.turn_policy.responder_candidates_for_room,
+            responder_candidates_for_room=self._responder_candidates_for_room,
         )
         await handle_command(
             context=context,
@@ -1556,10 +1562,7 @@ class TurnController:
         assert self.deps.agent_name == ROUTER_AGENT_NAME
 
         permission_sender_id = requester_user_id
-        responder_candidates = await self.deps.turn_policy.responder_candidates_for_room(
-            room,
-            permission_sender_id,
-        )
+        responder_candidates = await self._responder_candidates_for_room(room, permission_sender_id)
         if not responder_candidates:
             self.deps.logger.debug(
                 "No responders to route to in this room for sender",
@@ -1883,6 +1886,14 @@ class TurnController:
                 if action.kind == "team":
                     assert action.form_team is not None
                     assert action.form_team.mode is not None
+                    team_mode = action.form_team.mode
+                    if action.form_team.intent is not TeamIntent.CONFIGURED_TEAM and event.body:
+                        team_mode = await select_ad_hoc_team_mode(
+                            event.body,
+                            action.form_team.eligible_members,
+                            self.deps.runtime.config,
+                            self.deps.runtime_paths,
+                        )
                     response_event_id = await self.deps.response_runner.generate_team_response_helper(
                         ResponseRequest(
                             thread_history=dispatch.context.thread_history,
@@ -1897,7 +1908,7 @@ class TurnController:
                             queued_notice_reservation=queued_notice_reservation,
                         ),
                         team_agents=action.form_team.eligible_members,
-                        team_mode=action.form_team.mode.value,
+                        team_mode=team_mode.value,
                     )
                 else:
                     response_event_id = await self.deps.response_runner.generate_response(

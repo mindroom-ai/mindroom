@@ -31,7 +31,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
-from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps
+from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps, _ResponderAvailability
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -322,7 +322,7 @@ def test_team_request_responder_filtering_uses_actual_member_ids(tmp_path: Path)
             ids["squad"],
             MatrixID.from_username("mindroom_missing", "localhost"),
         ],
-        materializable_agent_names={"worker"},
+        _ResponderAvailability(materializable_agent_names={"worker"}, live_entity_names=None),
     )
 
     assert filtered == [ids["worker"], ids["squad"]]
@@ -1007,7 +1007,7 @@ class TestRoutingRegression:
         with (
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new=AsyncMock(return_value=TeamResolution.none()),
+                new=MagicMock(return_value=TeamResolution.none()),
             ),
             patch(
                 "mindroom.turn_policy.decide_agent_response",
@@ -1023,7 +1023,6 @@ class TestRoutingRegression:
                     body="can anyone help?",
                 ),
                 room,
-                "can anyone help?",
                 False,
                 has_active_response_for_target=alpha_bot._response_runner.has_active_response_for_target,
             )
@@ -1105,7 +1104,6 @@ class TestRoutingRegression:
                 body="ops, help",
             ),
             room,
-            "ops, help",
             False,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )

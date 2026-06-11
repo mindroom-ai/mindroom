@@ -582,16 +582,15 @@ async def _select_team_mode(
         agent_names=", ".join(agent_names),
     )
 
-    model = model_loading.get_model_instance(config, runtime_paths, "default")
-    agent = Agent(
-        name="TeamModeDecider",
-        role="Determine team mode",
-        model=model,
-        output_schema=_TeamModeDecision,
-        telemetry=False,
-    )
-
     try:
+        model = model_loading.get_model_instance(config, runtime_paths, "default")
+        agent = Agent(
+            name="TeamModeDecider",
+            role="Determine team mode",
+            model=model,
+            output_schema=_TeamModeDecision,
+            telemetry=False,
+        )
         response = await agent.arun(prompt, session_id="team_mode_decision")
         decision = response.content
         if isinstance(decision, _TeamModeDecision):
@@ -608,33 +607,32 @@ async def _select_team_mode(
         return TeamMode.COLLABORATE
 
 
-async def decide_team_formation(
-    agent: MatrixID,
+def decide_team_formation(
     tagged_agents: list[MatrixID],
     agents_in_thread: list[MatrixID],
     all_mentioned_in_thread: list[MatrixID],
     room: nio.MatrixRoom | None,
     runtime_paths: RuntimePaths,
-    message: str | None = None,
     config: Config | None = None,
-    use_ai_decision: bool = True,
     is_dm_room: bool = False,
     is_thread: bool = False,
     available_responders_in_room: list[MatrixID] | None = None,
     materializable_agent_names: set[str] | None = None,
 ) -> TeamResolution:
-    """Determine if a team should form and with which mode.
+    """Determine if a team should form, purely from mention, thread, and room context.
+
+    Team resolutions carry a heuristic provisional mode: COORDINATE when agents
+    are explicitly tagged (they likely have different roles), COLLABORATE when
+    agents come from thread history (likely discussing the same topic). The
+    execution layer may refine it with ``select_ad_hoc_team_mode``.
 
     Args:
-        agent: The agent calling this function
         tagged_agents: Raw agents explicitly mentioned in the current message
         agents_in_thread: Agents that have participated in the thread
         all_mentioned_in_thread: All agents ever mentioned in the thread
         room: The Matrix room object when room-membership visibility is available
         runtime_paths: Explicit runtime context for permissions and identity resolution
-        message: The user's message (for AI decision context)
-        config: Application configuration (for AI model access)
-        use_ai_decision: Whether to use AI for mode selection
+        config: Application configuration
         is_dm_room: Whether this is a DM room
         is_thread: Whether the current message is in a thread
         available_responders_in_room: Optional pre-filtered room responders for sender-visible availability
@@ -676,21 +674,23 @@ async def decide_team_formation(
     if resolution.outcome is not TeamOutcome.TEAM:
         return resolution
 
-    team_agents = resolution.eligible_members
-
-    is_first_agent = min(team_agents, key=lambda x: x.username) == agent
-    # Only do this AI call for the first agent to avoid duplication
-    if use_ai_decision and message and config and is_first_agent:
-        agent_names = [_team_member_name(mid, config, runtime_paths) for mid in team_agents]
-        mode = await _select_team_mode(message, agent_names, config, runtime_paths)
-    else:
-        # Fallback to hardcoded logic when AI decision is disabled or unavailable
-        # Use COORDINATE when agents are explicitly tagged (they likely have different roles)
-        # Use COLLABORATE when agents are from thread history (likely discussing same topic)
-        mode = TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE
-        logger.info("team_mode_selected_hardcoded", mode=mode.value)
-
+    mode = TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE
     return replace(resolution, mode=mode)
+
+
+async def select_ad_hoc_team_mode(
+    message: str,
+    team_agents: list[MatrixID],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> TeamMode:
+    """Select the collaboration mode for one ad-hoc team at execution time.
+
+    Team formation itself is pure; this AI refinement must run only where the
+    team response actually executes.
+    """
+    agent_names = [_team_member_name(agent_id, config, runtime_paths) for agent_id in team_agents]
+    return await _select_team_mode(message, agent_names, config, runtime_paths)
 
 
 def _team_member_name(
@@ -2488,6 +2488,7 @@ __all__ = [
     "prepare_materialized_team_execution",
     "resolve_configured_team",
     "resolve_live_shared_agent_names",
+    "select_ad_hoc_team_mode",
     "select_model_for_team",
     "team_response",
     "team_response_stream",

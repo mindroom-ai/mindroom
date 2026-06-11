@@ -140,7 +140,7 @@ from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from mindroom.turn_controller import TurnController, _IngressAdmissionOutcome, _PrecheckedEvent
-from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _DispatchPlan
+from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _DispatchPlan, _ResponderAvailability
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import (
     TEST_PASSWORD,
@@ -3877,7 +3877,11 @@ class TestAgentBot:
         bot._delivery_gateway.deps.response_hooks.emit_cancelled_response = AsyncMock()
 
         with (
-            patch.object(bot._turn_policy, "materializable_agent_names", return_value={"general"}),
+            patch.object(
+                bot._turn_policy,
+                "responder_availability",
+                return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
+            ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
         ):
             delivery_resolution = await bot._generate_response(
@@ -3968,7 +3972,11 @@ class TestAgentBot:
         bot._send_response = AsyncMock(return_value="$reject")
 
         with (
-            patch.object(bot._turn_policy, "materializable_agent_names", return_value={"general"}),
+            patch.object(
+                bot._turn_policy,
+                "responder_availability",
+                return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
+            ),
             patch("mindroom.bot.resolve_configured_team", side_effect=capture_resolve_configured_team),
         ):
             result = await bot._generate_response(
@@ -6512,7 +6520,11 @@ class TestAgentBot:
         )
 
         with (
-            patch.object(bot._turn_policy, "materializable_agent_names", return_value={"general"}),
+            patch.object(
+                bot._turn_policy,
+                "responder_availability",
+                return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
+            ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
             patch.object(bot, "_generate_team_response_helper", new=AsyncMock(side_effect=fail_helper)),
             patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
@@ -6609,7 +6621,11 @@ class TestAgentBot:
         )
 
         with (
-            patch.object(bot._turn_policy, "materializable_agent_names", return_value={"general"}),
+            patch.object(
+                bot._turn_policy,
+                "responder_availability",
+                return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
+            ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
             patch.object(
                 bot,
@@ -6720,7 +6736,11 @@ class TestAgentBot:
                 typing_indicator=_noop_typing_indicator,
                 team_response_stream=lambda *_args, **_kwargs: fake_team_response_stream(),
             ),
-            patch.object(bot._turn_policy, "materializable_agent_names", return_value={"general"}),
+            patch.object(
+                bot._turn_policy,
+                "responder_availability",
+                return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
+            ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
             patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch(
@@ -7454,7 +7474,7 @@ class TestAgentBot:
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new_callable=AsyncMock,
+                new_callable=MagicMock,
                 return_value=TeamResolution.none(),
             ),
             patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
@@ -7993,7 +8013,7 @@ class TestAgentBot:
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new_callable=AsyncMock,
+                new_callable=MagicMock,
                 return_value=TeamResolution.none(),
             ),
             patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
@@ -8451,7 +8471,7 @@ class TestAgentBot:
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new_callable=AsyncMock,
+                new_callable=MagicMock,
                 return_value=TeamResolution.none(),
             ),
             patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
@@ -8521,7 +8541,7 @@ class TestAgentBot:
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new_callable=AsyncMock,
+                new_callable=MagicMock,
                 return_value=TeamResolution.none(),
             ),
             patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
@@ -8614,7 +8634,7 @@ class TestAgentBot:
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new_callable=AsyncMock,
+                new_callable=MagicMock,
                 return_value=TeamResolution.none(),
             ),
             patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
@@ -9128,7 +9148,7 @@ class TestAgentBot:
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new_callable=AsyncMock,
+                new_callable=MagicMock,
                 return_value=TeamResolution.none(),
             ),
             patch(
@@ -9441,7 +9461,7 @@ class TestAgentBot:
             ),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new_callable=AsyncMock,
+                new_callable=MagicMock,
                 return_value=TeamResolution.none(),
             ),
             patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
@@ -9497,7 +9517,7 @@ class TestAgentBot:
             ],
         )
 
-        with patch("mindroom.turn_policy.decide_team_formation", new_callable=AsyncMock) as mock_decide:
+        with patch("mindroom.turn_policy.decide_team_formation", new_callable=MagicMock) as mock_decide:
             mock_decide.return_value = TeamResolution.none()
             bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
             bot.orchestrator = MagicMock()
@@ -9508,11 +9528,11 @@ class TestAgentBot:
                 context=context,
                 room=room,
                 requester_user_id="@alice:localhost",
-                message="help me",
                 is_dm=True,
+                availability=bot._turn_policy.responder_availability(),
             )
 
-        assert mock_decide.await_count == 1
+        assert mock_decide.call_count == 1
         assert mock_decide.call_args.kwargs["available_responders_in_room"] == [
             entity_ids(config, runtime_paths_for(config))["calculator"],
         ]
@@ -9572,7 +9592,6 @@ class TestAgentBot:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
-                "help me",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -9631,7 +9650,6 @@ class TestAgentBot:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
-                "calculator and general, help",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -9690,7 +9708,6 @@ class TestAgentBot:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "general and research, help"),
                 room,
-                "general and research, help",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -9750,7 +9767,6 @@ class TestAgentBot:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                "alpha and calculator, help",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -9811,7 +9827,6 @@ class TestAgentBot:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
-                "calculator and general, help",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -9859,11 +9874,10 @@ class TestAgentBot:
             has_non_agent_mentions=False,
         )
 
-        with patch("mindroom.turn_policy.decide_team_formation", new=AsyncMock(return_value=TeamResolution.none())):
+        with patch("mindroom.turn_policy.decide_team_formation", new=MagicMock(return_value=TeamResolution.none())):
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bob:localhost", "can someone help?"),
                 room,
-                "can someone help?",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -9908,7 +9922,6 @@ class TestAgentBot:
         action = await bot._turn_policy.resolve_response_action(
             _policy_dispatch(bot, room, context, "@bob:localhost", "calculator, help"),
             room,
-            "calculator, help",
             False,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
@@ -9971,7 +9984,6 @@ class TestAgentBot:
         action = await bot._turn_policy.resolve_response_action(
             _policy_dispatch(bot, room, context, "@bob:localhost", "ops, help"),
             room,
-            "ops, help",
             False,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
@@ -10050,7 +10062,6 @@ class TestAgentBot:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                "alpha and calculator, help",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -10131,7 +10142,6 @@ class TestAgentBot:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                "alpha and calculator, help",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -10189,7 +10199,6 @@ class TestAgentBot:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                "alpha and calculator, help",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -10246,7 +10255,6 @@ class TestAgentBot:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
-                "help me",
                 True,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -10329,7 +10337,7 @@ class TestAgentBot:
         with (
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new=AsyncMock(return_value=TeamResolution.none()),
+                new=MagicMock(return_value=TeamResolution.none()),
             ),
             patch(
                 "mindroom.turn_policy.decide_agent_response",
@@ -10350,7 +10358,6 @@ class TestAgentBot:
                     envelope=envelope,
                 ),
                 room,
-                "stop if you see this",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -10423,7 +10430,7 @@ class TestAgentBot:
         )
 
         with (
-            patch("mindroom.turn_policy.decide_team_formation", new=AsyncMock(return_value=TeamResolution.none())),
+            patch("mindroom.turn_policy.decide_team_formation", new=MagicMock(return_value=TeamResolution.none())),
             patch.object(bot._response_runner, "has_active_response_for_target", return_value=True),
         ):
             action = await bot._turn_policy.resolve_response_action(
@@ -10435,7 +10442,6 @@ class TestAgentBot:
                     envelope=envelope,
                 ),
                 room,
-                "continue",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -10502,7 +10508,6 @@ class TestAgentBot:
                     envelope=envelope,
                 ),
                 room,
-                "continue",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -10567,7 +10572,7 @@ class TestAgentBot:
         with (
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new=AsyncMock(return_value=TeamResolution.none()),
+                new=MagicMock(return_value=TeamResolution.none()),
             ),
             patch(
                 "mindroom.turn_policy.decide_agent_response",
@@ -10588,7 +10593,6 @@ class TestAgentBot:
                     envelope=envelope,
                 ),
                 room,
-                "stop if you see this",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -10655,7 +10659,7 @@ class TestAgentBot:
         with (
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new=AsyncMock(return_value=TeamResolution.none()),
+                new=MagicMock(return_value=TeamResolution.none()),
             ),
             patch(
                 "mindroom.turn_policy.decide_agent_response",
@@ -10676,7 +10680,6 @@ class TestAgentBot:
                     envelope=envelope,
                 ),
                 room,
-                "stop if you see this",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -10924,7 +10927,7 @@ class TestAgentBot:
         with (
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new=AsyncMock(side_effect=AssertionError("team formation should be skipped")),
+                new=MagicMock(side_effect=AssertionError("team formation should be skipped")),
             ) as mock_decide_team_formation,
             patch(
                 "mindroom.turn_policy.decide_agent_response",
@@ -10934,13 +10937,12 @@ class TestAgentBot:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "I fixed two issues"),
                 room,
-                "I fixed two issues",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
-        mock_decide_team_formation.assert_not_awaited()
+        mock_decide_team_formation.assert_not_called()
         mock_decide_agent_response.assert_called_once()
 
     @pytest.mark.asyncio
@@ -11000,7 +11002,6 @@ class TestAgentBot:
         action = await bot._turn_policy.resolve_response_action(
             _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
             room,
-            "Follow-up",
             False,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
@@ -11069,7 +11070,6 @@ class TestAgentBot:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
-                "Follow-up",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -11137,7 +11137,6 @@ class TestAgentBot:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
-                "Follow-up",
                 False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
@@ -12904,7 +12903,7 @@ class TestAgentBot:
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new_callable=AsyncMock,
+                new_callable=MagicMock,
                 return_value=TeamResolution.none(),
             ),
             patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),

@@ -2121,14 +2121,14 @@ class TeamBot(AgentBot):
         )
 
         configured_mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
-        materializable_agent_names = self._turn_policy.materializable_agent_names()
+        availability = self._turn_policy.responder_availability()
         team_resolution = resolve_configured_team(
             self.agent_name,
             self.current_configured_team_agents(),
             configured_mode,
             self.config,
             self.runtime_paths,
-            materializable_agent_names=materializable_agent_names,
+            materializable_agent_names=availability.materializable_agent_names,
         )
         if team_resolution.outcome is not TeamOutcome.TEAM:
             assert team_resolution.reason is not None

@@ -262,16 +262,13 @@ class TestIntegrationWithTeamFormation:
             entity_ids(mock_config, runtime_paths)["research"],
         ]  # User tagged in this order
 
-        result = await decide_team_formation(
-            agent=entity_ids(mock_config, runtime_paths)["email"],  # The agent calling this function
+        result = decide_team_formation(
             tagged_agents=tagged_agents,
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=None,
             runtime_paths=runtime_paths,
-            message="Call me, then email the details, then research more info",
             config=mock_config,
-            use_ai_decision=False,  # Use hardcoded logic for predictable test
         )
 
         # Agents should be in the same order as tagged
