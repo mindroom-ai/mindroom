@@ -75,6 +75,7 @@ __all__ = [
     "build_restart_interrupted_body",
     "cancel_failure_reason",
     "clean_partial_reply_text",
+    "interactive_response_for_visible_body",
     "is_interrupted_partial_reply",
     "send_streaming_response",
     "strip_visible_tool_markers",
@@ -298,6 +299,33 @@ def build_cancelled_response_update(
     if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
         return note, stream_status
     return f"{stripped_text}\n\n{note}", stream_status
+
+
+def interactive_response_for_visible_body(
+    visible_body: str,
+    *,
+    canonical_body_candidate: str | None,
+    stream_interactive_metadata: interactive.InteractiveMetadata | None = None,
+) -> interactive._InteractiveResponse:
+    """Return interactive metadata only when it belongs to the visible body."""
+    if stream_interactive_metadata is not None:
+        return interactive._InteractiveResponse(visible_body, stream_interactive_metadata)
+
+    visible_response = interactive.parse_and_format_interactive(visible_body, extract_mapping=True)
+    if visible_response.interactive_metadata is not None:
+        return visible_response
+
+    if canonical_body_candidate is None or canonical_body_candidate == visible_body:
+        return visible_response
+
+    canonical_response = interactive.parse_and_format_interactive(
+        canonical_body_candidate,
+        extract_mapping=True,
+    )
+    if canonical_response.interactive_metadata is not None and canonical_response.formatted_text == visible_body:
+        return canonical_response
+
+    return visible_response
 
 
 @dataclass(frozen=True)
