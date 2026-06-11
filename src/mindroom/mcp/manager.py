@@ -46,8 +46,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# The cap matches STARTUP_RETRY_MAX_DELAY_SECONDS so a recovered required server
+# unblocks its dependent agents no slower than the bot-start retry loop did.
 _DISCOVERY_RETRY_INITIAL_DELAY_SECONDS = 5.0
-_DISCOVERY_RETRY_MAX_DELAY_SECONDS = 300.0
+_DISCOVERY_RETRY_MAX_DELAY_SECONDS = 60.0
 
 
 def _discovery_retry_delay_seconds(consecutive_failures: int) -> float:

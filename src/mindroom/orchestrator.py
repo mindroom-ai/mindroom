@@ -609,7 +609,11 @@ class _MultiAgentOrchestrator:
             )
 
     async def _retry_blocked_mcp_entities(self, entity_names: set[str], config: Config) -> set[str]:
-        """Retry failed MCP discovery once before deferring dependent entity startup."""
+        """Re-sync the MCP manager before deferring dependent entity startup.
+
+        The sync retries failed discovery immediately unless the manager already
+        has a background backoff retry in flight for that server.
+        """
         blocked_entities = self._entities_blocked_by_failed_mcp_servers(entity_names, config)
         if not blocked_entities:
             return set()

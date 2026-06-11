@@ -11,6 +11,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -77,7 +78,7 @@ def test_config_update_plan_restarts_only_entities_using_changed_mcp_server(tmp_
 
 
 def _manager_with_failed_server(*, required: bool) -> MagicMock:
-    manager = MagicMock()
+    manager = MagicMock(spec=MCPServerManager)
     manager.failed_server_ids.return_value = {"demo"}
     manager.failed_required_server_ids.return_value = {"demo"} if required else set()
     return manager
