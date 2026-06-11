@@ -102,6 +102,7 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
+from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
@@ -541,6 +542,12 @@ def _build_response_runner(
             delivery_gateway=delivery_gateway,
             post_response_effects=post_response_effects,
             state_writer=bot._conversation_state_writer,
+            request_preparer=ResponsePayloadPreparer(
+                normalizer=MagicMock(),
+                ingress_hook_runner=MagicMock(),
+                agent_name=bot.agent_name,
+                logger=bot.logger,
+            ),
         ),
     )
 

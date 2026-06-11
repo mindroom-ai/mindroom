@@ -1795,6 +1795,7 @@ depends_on = [
     "mindroom.matrix.users",
     "mindroom.matrix.visible_body",
     "mindroom.post_response_effects",
+    "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.scheduling",
     "mindroom.teams",
@@ -2238,6 +2239,21 @@ depends_on = ["mindroom.coalescing"]
 visibility = ["mindroom.turn_controller"]
 
 [[modules]]
+path = "mindroom.response_payload_preparation"
+depends_on = [
+    "mindroom.attachments",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.matrix.cache",
+    "mindroom.timing",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.response_runner",
+    "mindroom.text_ingress_dispatch",
+    "mindroom.turn_controller",
+]
+
+[[modules]]
 path = "mindroom.text_ingress_dispatch"
 depends_on = [
     "mindroom.attachments",
@@ -2250,6 +2266,7 @@ depends_on = [
     "mindroom.matrix.media",
     "mindroom.matrix.rooms",
     "mindroom.response_lifecycle",
+    "mindroom.response_payload_preparation",
     "mindroom.timing",
 ]
 visibility = ["mindroom.turn_controller"]
@@ -2275,6 +2292,7 @@ depends_on = [
     "mindroom.metadata_merge",
     "mindroom.prompt_ingress_reservation",
     "mindroom.response_lifecycle",
+    "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.routing",
     "mindroom.teams",

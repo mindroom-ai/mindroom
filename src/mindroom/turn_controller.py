@@ -69,7 +69,6 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import MessageEnvelope, build_hook_matrix_admin, hook_ingress_policy
 from mindroom.inbound_turn_normalizer import (
-    DispatchPayload,
     InboundTurnNormalizer,
     TextNormalizationRequest,
     VoiceNormalizationRequest,
@@ -90,6 +89,10 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
+from mindroom.response_payload_preparation import (
+    DispatchPayloadInputs,
+    ResponsePayloadPreparation,
+)
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamIntent, select_ad_hoc_team_mode
@@ -103,7 +106,6 @@ from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
     create_dispatch_pipeline_timing,
-    elapsed_ms_between,
     emit_elapsed_timing,
     event_timing_scope,
     get_dispatch_pipeline_timing,
@@ -117,13 +119,13 @@ from mindroom.turn_origin import (
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Sequence
 
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.commands.parsing import Command
-    from mindroom.conversation_resolver import ConversationResolver, MessageContext
+    from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -134,7 +136,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
 
-type _DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 
@@ -1702,38 +1703,13 @@ class TurnController:
             ),
         )
 
-    def _log_dispatch_latency(
-        self,
-        *,
-        event_id: str,
-        action_kind: str,
-        dispatch_started_at: float,
-        context_ready_monotonic: float,
-        payload_ready_monotonic: float,
-        thread_history: Sequence[ResolvedVisibleMessage],
-    ) -> None:
-        """Emit startup latency metrics for dispatch decisions that will respond."""
-        latency_event_data: dict[str, str | float | int | bool] = {
-            "event_id": event_id,
-            "action_kind": action_kind,
-            "context_hydration_ms": elapsed_ms_between(dispatch_started_at, context_ready_monotonic),
-            "payload_hydration_ms": elapsed_ms_between(context_ready_monotonic, payload_ready_monotonic),
-            "startup_total_ms": elapsed_ms_between(dispatch_started_at, payload_ready_monotonic),
-        }
-        if isinstance(thread_history, ThreadHistoryResult):
-            latency_event_data.update(thread_history.diagnostics)
-        self.deps.logger.info(
-            "Response startup latency",
-            **latency_event_data,
-        )
-
     async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
         dispatch: PreparedDispatch,
         action: ResponseAction,
-        payload_builder: _DispatchPayloadBuilder,
+        payload_inputs: DispatchPayloadInputs,
         *,
         processing_log: str,
         dispatch_started_at: float,
@@ -1789,7 +1765,6 @@ class TurnController:
 
             try:
                 context_ready_monotonic = time.monotonic()
-                payload_ready_monotonic = context_ready_monotonic
             except Exception as error:
                 response_event_id = await self._finalize_dispatch_failure(
                     target=dispatch.target,
@@ -1807,82 +1782,17 @@ class TurnController:
                 dispatch_timing.note(**dispatch.context.thread_history.diagnostics)
 
             self.deps.logger.info(processing_log, event_id=event.event_id)
+            payload_preparation = ResponsePayloadPreparation(
+                dispatch=dispatch,
+                prompt=event.body,
+                message_attachment_ids=payload_inputs.message_attachment_ids,
+                trusted_attachment_ids=payload_inputs.trusted_attachment_ids,
+                media_events=payload_inputs.media_events,
+                target_member_names=target_member_names,
+                dispatch_started_at=dispatch_started_at,
+                context_ready_monotonic=context_ready_monotonic,
+            )
             try:
-
-                async def prepare_request_after_lock(request: ResponseRequest) -> ResponseRequest:
-                    nonlocal dispatch
-                    nonlocal payload_ready_monotonic
-                    if dispatch_timing is not None:
-                        dispatch_timing.mark("response_payload_start")
-                    dispatch = replace(
-                        dispatch,
-                        context=replace(
-                            dispatch.context,
-                            thread_history=request.thread_history,
-                            requires_model_history_refresh=request.requires_model_history_refresh,
-                        ),
-                    )
-                    payload_builder_started = time.monotonic()
-                    payload_builder_outcome = "failed"
-                    try:
-                        payload = await payload_builder(dispatch.context)
-                        payload_builder_outcome = "success"
-                    finally:
-                        emit_elapsed_timing(
-                            "response_payload.builder",
-                            payload_builder_started,
-                            room_id=request.room_id,
-                            thread_id=request.thread_id,
-                            outcome=payload_builder_outcome,
-                        )
-                    prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
-                        dispatch,
-                        payload,
-                        target_entity_name=self.deps.agent_name,
-                        target_member_names=target_member_names,
-                    )
-                    system_enrichment_items = await self.deps.ingress_hook_runner.apply_system_enrichment(
-                        dispatch,
-                        prepared_payload.envelope,
-                        target_entity_name=self.deps.agent_name,
-                        target_member_names=target_member_names,
-                    )
-                    if system_enrichment_items:
-                        prepared_payload = type(prepared_payload)(
-                            payload=prepared_payload.payload,
-                            envelope=prepared_payload.envelope,
-                            system_enrichment_items=tuple(system_enrichment_items),
-                        )
-                    payload_ready_monotonic = time.monotonic()
-                    if dispatch_timing is not None:
-                        dispatch_timing.mark("response_payload_ready")
-                    self._log_dispatch_latency(
-                        event_id=event.event_id,
-                        action_kind=action.kind,
-                        dispatch_started_at=dispatch_started_at,
-                        context_ready_monotonic=context_ready_monotonic,
-                        payload_ready_monotonic=payload_ready_monotonic,
-                        thread_history=request.thread_history,
-                    )
-                    return ResponseRequest(
-                        thread_history=request.thread_history,
-                        prompt=prepared_payload.payload.prompt,
-                        model_prompt=prepared_payload.payload.model_prompt,
-                        existing_event_id=request.existing_event_id,
-                        existing_event_is_placeholder=request.existing_event_is_placeholder,
-                        user_id=request.user_id,
-                        media=prepared_payload.payload.media,
-                        attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
-                        response_envelope=prepared_payload.envelope,
-                        correlation_id=request.correlation_id,
-                        matrix_run_metadata=matrix_run_metadata,
-                        system_enrichment_items=prepared_payload.system_enrichment_items,
-                        requires_model_history_refresh=False,
-                        on_lifecycle_lock_acquired=request.on_lifecycle_lock_acquired,
-                        pipeline_timing=request.pipeline_timing,
-                        queued_notice_reservation=request.queued_notice_reservation,
-                    )
-
                 if action.kind == "team":
                     assert action.form_team is not None
                     assert action.form_team.mode is not None
@@ -1903,7 +1813,7 @@ class TurnController:
                             correlation_id=dispatch.correlation_id,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
-                            prepare_after_lock=prepare_request_after_lock,
+                            payload_preparation=payload_preparation,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                         ),
@@ -1920,7 +1830,7 @@ class TurnController:
                             correlation_id=dispatch.correlation_id,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
-                            prepare_after_lock=prepare_request_after_lock,
+                            payload_preparation=payload_preparation,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                         ),

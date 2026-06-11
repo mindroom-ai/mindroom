@@ -42,6 +42,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
+from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.thread_utils import decide_agent_response
@@ -830,7 +831,27 @@ def wrap_extracted_collaborators(bot: RuntimeBot, *names: str) -> RuntimeBot:
         if isinstance(collaborator, MagicMock | _ExtractedCollaboratorProxy):
             continue
         setattr(bot, name, _ExtractedCollaboratorProxy(collaborator))
+    _sync_request_payload_preparer(bot)
     return bot
+
+
+def _sync_request_payload_preparer(bot: RuntimeBot) -> None:
+    """Repoint the response runner's payload preparer at the current collaborators.
+
+    The preparer captures the normalizer and ingress hook runner; tests swap
+    those for proxies after construction, so rebuild the preparer to track them.
+    """
+    if getattr(bot, "_request_payload_preparer", None) is None:
+        return
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    preparer = ResponsePayloadPreparer(
+        normalizer=bot._inbound_turn_normalizer,
+        ingress_hook_runner=bot._ingress_hook_runner,
+        agent_name=runner.deps.agent_name,
+        logger=runner.deps.logger,
+    )
+    bot._request_payload_preparer = preparer
+    runner.deps = replace(runner.deps, request_preparer=preparer)
 
 
 def sync_bot_runtime_state(bot: RuntimeBot) -> None:
@@ -1043,9 +1064,9 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
         return result
 
     async def _generate(request: ResponseRequest) -> str | None:
-        if request.prepare_after_lock is not None:
+        if request.payload_preparation is not None:
             try:
-                request = await request.prepare_after_lock(request)
+                request = await bot._request_payload_preparer.prepare(request)
             except Exception as exc:
                 raise PostLockRequestPreparationError from exc
         attachment_ids = list(request.attachment_ids) if request.attachment_ids is not None else None

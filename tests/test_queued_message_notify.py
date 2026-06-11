@@ -67,6 +67,7 @@ from mindroom.post_response_effects import (
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_lifecycle import _QueuedMessageState
+from mindroom.response_payload_preparation import ResponsePayloadPreparation
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
@@ -206,6 +207,26 @@ def _message_context() -> MessageContext:
         thread_history=[],
         mentioned_agents=[],
         has_non_agent_mentions=False,
+    )
+
+
+def _payload_preparation(target: MessageTarget) -> ResponsePayloadPreparation:
+    """Build a minimal under-lock preparation carrier bound to ``target``."""
+    return ResponsePayloadPreparation(
+        dispatch=PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=_message_context(),
+            target=target,
+            correlation_id="$event",
+            envelope=_envelope(source_event_id="$event", target=target),
+        ),
+        prompt="hello",
+        message_attachment_ids=(),
+        trusted_attachment_ids=(),
+        media_events=(),
+        target_member_names=None,
+        dispatch_started_at=0.0,
+        context_ready_monotonic=0.0,
     )
 
 
@@ -1207,10 +1228,11 @@ async def test_generate_response_keeps_locked_target_when_prepare_after_lock_ret
     observed_delivery_targets: list[MessageTarget | None] = []
     observed_lifecycle_targets: list[MessageTarget] = []
 
-    async def prepare_after_lock(request: ResponseRequest) -> ResponseRequest:
+    async def fake_prepare(request: ResponseRequest) -> ResponseRequest:
         return replace(
             request,
             response_envelope=_envelope(source_event_id="$event", target=retarget),
+            payload_preparation=None,
         )
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
@@ -1246,6 +1268,11 @@ async def test_generate_response_keeps_locked_target_when_prepare_after_lock_ret
     with (
         patch.object(coordinator, "_build_lifecycle", MagicMock(side_effect=fake_build_lifecycle)),
         patch.object(
+            coordinator.deps.request_preparer,
+            "prepare",
+            new=AsyncMock(side_effect=fake_prepare),
+        ),
+        patch.object(
             coordinator,
             "run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
@@ -1263,7 +1290,7 @@ async def test_generate_response_keeps_locked_target_when_prepare_after_lock_ret
                 prompt="hello",
                 user_id="@user:localhost",
                 response_envelope=_envelope(source_event_id="$event", target=stable_target),
-                prepare_after_lock=prepare_after_lock,
+                payload_preparation=_payload_preparation(stable_target),
             ),
         )
 
@@ -1357,10 +1384,11 @@ async def test_generate_team_response_keeps_locked_target_when_prepare_after_loc
     observed_run_targets: list[MessageTarget] = []
     observed_delivery_targets: list[MessageTarget] = []
 
-    async def prepare_after_lock(request: ResponseRequest) -> ResponseRequest:
+    async def fake_prepare(request: ResponseRequest) -> ResponseRequest:
         return replace(
             request,
             response_envelope=_envelope(source_event_id="$event", target=retarget),
+            payload_preparation=None,
         )
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
@@ -1387,6 +1415,11 @@ async def test_generate_team_response_keeps_locked_target_when_prepare_after_loc
     with (
         patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=lifecycle)),
         patch.object(
+            coordinator.deps.request_preparer,
+            "prepare",
+            new=AsyncMock(side_effect=fake_prepare),
+        ),
+        patch.object(
             coordinator,
             "run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
@@ -1401,7 +1434,7 @@ async def test_generate_team_response_keeps_locked_target_when_prepare_after_loc
                 prompt="hello",
                 user_id="@user:localhost",
                 response_envelope=_envelope(source_event_id="$event", target=stable_target),
-                prepare_after_lock=prepare_after_lock,
+                payload_preparation=_payload_preparation(stable_target),
             ),
             team_agents=[],
             team_mode="coordinate",

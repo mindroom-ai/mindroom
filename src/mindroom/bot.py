@@ -98,6 +98,7 @@ from .matrix.room_member_joins import (
     room_member_joins_from_sync_timeline,
 )
 from .media_inputs import MediaInputs
+from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
@@ -288,6 +289,7 @@ class AgentBot:
     _tool_runtime_support: ToolRuntimeSupport
     _post_response_effects_support: PostResponseEffectsSupport
     _ingress_hook_runner: IngressHookRunner
+    _request_payload_preparer: ResponsePayloadPreparer
     _hook_context_support: HookContextSupport
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
@@ -459,6 +461,15 @@ class AgentBot:
             delivery_gateway=self._delivery_gateway,
             conversation_cache=self._conversation_cache,
         )
+        self._ingress_hook_runner = IngressHookRunner(
+            hook_context=self._hook_context_support,
+        )
+        self._request_payload_preparer = ResponsePayloadPreparer(
+            normalizer=self._inbound_turn_normalizer,
+            ingress_hook_runner=self._ingress_hook_runner,
+            agent_name=self.agent_name,
+            logger=self.logger,
+        )
         self._response_runner = ResponseRunner(
             ResponseRunnerDeps(
                 runtime=self._runtime_view,
@@ -474,10 +485,8 @@ class AgentBot:
                 delivery_gateway=self._delivery_gateway,
                 post_response_effects=self._post_response_effects_support,
                 state_writer=self._conversation_state_writer,
+                request_preparer=self._request_payload_preparer,
             ),
-        )
-        self._ingress_hook_runner = IngressHookRunner(
-            hook_context=self._hook_context_support,
         )
         self._edit_regenerator = EditRegenerator(
             EditRegeneratorDeps(

@@ -31,6 +31,7 @@ from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
@@ -356,7 +357,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
         event,
         dispatch,
         ResponseAction(kind="individual"),
-        AsyncMock(),
+        DispatchPayloadInputs((), (), ()),
         processing_log="Processing",
         dispatch_started_at=time.monotonic(),
         handled_turn=HandledTurnState.from_source_event_id(

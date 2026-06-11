@@ -97,6 +97,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+    from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.stop import StopManager
     from mindroom.streaming import StreamInputChunk
     from mindroom.tool_system.events import ToolTraceEntry
@@ -274,7 +275,7 @@ class ResponseRequest:
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     requires_model_history_refresh: bool = False
-    prepare_after_lock: Callable[[ResponseRequest], Awaitable[ResponseRequest]] | None = None
+    payload_preparation: ResponsePayloadPreparation | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
@@ -326,6 +327,7 @@ class ResponseRunnerDeps:
     delivery_gateway: DeliveryGateway
     post_response_effects: PostResponseEffectsSupport
     state_writer: ConversationStateWriter
+    request_preparer: ResponsePayloadPreparer
 
 
 @dataclass(frozen=True)
@@ -713,9 +715,9 @@ class ResponseRunner:
         """Refresh thread history and rebuild any history-derived payload once locked."""
         try:
             request = await self._refresh_model_history_after_lock(request)
-            if request.prepare_after_lock is None:
+            if request.payload_preparation is None:
                 return request
-            return await request.prepare_after_lock(request)
+            return await self.deps.request_preparer.prepare(request)
         except Exception as exc:
             raise PostLockRequestPreparationError from exc
 

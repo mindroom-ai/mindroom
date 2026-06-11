@@ -73,6 +73,12 @@ from mindroom.matrix.thread_diagnostics import (
 )
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_payload_preparation import (
+    DispatchPayloadInputs,
+    ResponsePayloadPreparation,
+    ResponsePayloadPreparer,
+)
+from mindroom.response_runner import ResponseRequest
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.conftest import (
@@ -92,12 +98,36 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
 
 def _coalescing_gate_is_idle(gate: CoalescingGate) -> bool:
     return not gate._gates
+
+
+async def _prepare_payload_via_seam(bot: AgentBot, execute_args: tuple[object, ...]) -> None:
+    """Drive the execution-side payload preparation from captured dispatch args."""
+    event = cast("PreparedTextEvent", execute_args[1])
+    dispatch = cast("PreparedDispatch", execute_args[2])
+    payload_inputs = cast("DispatchPayloadInputs", execute_args[4])
+    await bot._request_payload_preparer.prepare(
+        ResponseRequest(
+            thread_history=dispatch.context.thread_history,
+            prompt=event.body,
+            response_envelope=dispatch.envelope,
+            payload_preparation=ResponsePayloadPreparation(
+                dispatch=dispatch,
+                prompt=event.body,
+                message_attachment_ids=payload_inputs.message_attachment_ids,
+                trusted_attachment_ids=payload_inputs.trusted_attachment_ids,
+                media_events=payload_inputs.media_events,
+                target_member_names=None,
+                dispatch_started_at=0.0,
+                context_ready_monotonic=0.0,
+            ),
+        ),
+    )
 
 
 def _make_config(
@@ -1730,7 +1760,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
                 new=fake_build_payload,
             ),
             patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
-            patch.object(bot._turn_controller, "_log_dispatch_latency"),
+            patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch(
                 "mindroom.response_runner.ResponseRunner.generate_response_locked",
                 new=fake_generate_response_locked,
@@ -4488,7 +4518,7 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="combined")),
         ),
-        patch.object(bot._turn_controller, "_log_dispatch_latency"),
+        patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
         await _enqueue_for_dispatch(
             bot,
@@ -5315,7 +5345,7 @@ async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_h
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=newer_mock),
-        patch.object(bot._turn_controller, "_log_dispatch_latency"),
+        patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(
             room,
@@ -5361,7 +5391,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="hello")),
         ),
-        patch.object(bot._turn_controller, "_log_dispatch_latency"),
+        patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
 
@@ -5668,7 +5698,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="What is the project structure?")),
         ),
-        patch.object(bot._turn_controller, "_log_dispatch_latency"),
+        patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
 
@@ -5718,7 +5748,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="hello")),
         ),
-        patch.object(bot._turn_controller, "_log_dispatch_latency"),
+        patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
 
@@ -5776,7 +5806,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="scheduled task output")),
         ),
-        patch.object(bot._turn_controller, "_log_dispatch_latency"),
+        patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, scheduled_event, "@mindroom_test_agent:localhost")
 
@@ -5826,7 +5856,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="hook result")),
         ),
-        patch.object(bot._turn_controller, "_log_dispatch_latency"),
+        patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, hook_event, "@mindroom_test_agent:localhost")
 
@@ -5878,7 +5908,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="scheduled fire 1")),
         ),
-        patch.object(bot._turn_controller, "_log_dispatch_latency"),
+        patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, first_fire, "@mindroom_test_agent:localhost")
 
@@ -6212,9 +6242,7 @@ async def _capture_gate_dispatches(
         return _respond_dispatch_plan()
 
     async def record_response(*args: object, **_kwargs: object) -> None:
-        dispatch = cast("PreparedDispatch", args[2])
-        build_payload = cast("Callable[[MessageContext], Awaitable[DispatchPayload]]", args[4])
-        await build_payload(dispatch.context)
+        await _prepare_payload_via_seam(bot, args)
 
     async def record_payload_request(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
         payload_requests.append(request)
@@ -6925,9 +6953,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         return DispatchPayload(prompt=request.prompt, attachment_ids=list(request.current_attachment_ids))
 
     async def record_response(*args: object, **_kwargs: object) -> None:
-        dispatch = cast("PreparedDispatch", args[2])
-        build_payload = cast("Callable[[MessageContext], Awaitable[DispatchPayload]]", args[4])
-        await build_payload(dispatch.context)
+        await _prepare_payload_via_seam(bot, args)
 
     async def extract_dispatch_context(
         _room: nio.MatrixRoom,
@@ -7018,9 +7044,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
         return DispatchPayload(prompt=request.prompt, attachment_ids=list(request.current_attachment_ids))
 
     async def record_response(*args: object, **_kwargs: object) -> None:
-        dispatch = cast("PreparedDispatch", args[2])
-        build_payload = cast("Callable[[MessageContext], Awaitable[DispatchPayload]]", args[4])
-        await build_payload(dispatch.context)
+        await _prepare_payload_via_seam(bot, args)
 
     with (
         patch.object(

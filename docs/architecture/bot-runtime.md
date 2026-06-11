@@ -84,10 +84,16 @@ That path sends the acknowledgment, runs response generation, and records the ha
 It sends thinking placeholders, registers stop tracking, runs the cancellable response task, logs cancellation provenance, and clears stop tracking.
 `ResponseRunner` keeps the existing attempt entry point, but delegates attempt mechanics through this deeper module.
 
+The ingress-to-execution seam is now one-way.
+Ingress (`TurnController` and `text_ingress_dispatch`) builds an immutable `ResponsePayloadPreparation` value and hands it to the runner inside `ResponseRequest`.
+The runner acquires the lifecycle lock, refreshes thread history, then calls `ResponsePayloadPreparer.prepare` as a first-class execution step to assemble the final payload, run enrichment hooks, and log startup latency.
+The old `prepare_after_lock` callback that ran payload building back inside `TurnController` is deleted; data crosses the seam as values, not closures.
+
 ## Next Simplification Work
 
-Shrink `ResponseRunner`.
-It should keep locking, streaming, AI or team execution, and post-response effects, but it should stop accumulating unrelated side paths.
+Shrink `ResponseRunner` further.
+It keeps locking, streaming, AI or team execution, and post-response effects.
+The under-lock payload-assembly side path now lives in `ResponsePayloadPreparer`; the remaining follow-up is to fold `execution_preparation.py` into the execution side and move any other side paths that belong to ingress or delivery out of `ResponseRunner`.
 
 Revisit `IngressHookRunner`.
 It may stay as a helper, but it should not grow into another top-level orchestration object.

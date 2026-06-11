@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import itertools
 import os
 import signal
 import sys
@@ -122,6 +121,7 @@ from mindroom.orchestrator import (
     main,
 )
 from mindroom.response_lifecycle import _response_outcome_label
+from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparer
 from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
@@ -140,7 +140,7 @@ from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_state_root_path
-from mindroom.turn_controller import TurnController, _IngressAdmissionOutcome, _PrecheckedEvent
+from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _DispatchPlan, _ResponderAvailability
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import (
@@ -4369,23 +4369,20 @@ class TestAgentBot:
             envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
-        async def payload_builder(_context: MessageContext) -> DispatchPayload:
-            return DispatchPayload(prompt="help me")
-
         with (
             patch.object(
                 bot._response_runner,
                 "generate_response",
                 new=AsyncMock(return_value="$cancelled"),
             ),
-            patch.object(bot._turn_controller, "_log_dispatch_latency", create=True),
+            patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
         ):
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
                 dispatch,
                 ResponseAction(kind="individual"),
-                payload_builder,
+                DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
@@ -11317,16 +11314,13 @@ class TestAgentBot:
 
         bot.client = AsyncMock(spec=nio.AsyncClient)
 
-        async def unused_payload_builder(_context: MessageContext) -> DispatchPayload:
-            return DispatchPayload(prompt="help me")
-
         with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$reply")) as send_text:
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
                 dispatch,
                 action,
-                unused_payload_builder,
+                DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
@@ -11391,16 +11385,13 @@ class TestAgentBot:
         )
         bot.client = AsyncMock(spec=nio.AsyncClient)
 
-        async def unused_payload_builder(_context: MessageContext) -> DispatchPayload:
-            return DispatchPayload(prompt="help me")
-
         with patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(return_value=None)):
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
                 dispatch,
                 action,
-                unused_payload_builder,
+                DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
@@ -11683,7 +11674,7 @@ class TestAgentBot:
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
-            patch.object(bot._turn_controller, "_log_dispatch_latency"),
+            patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 prepare_memory_and_model_context=prepare_memory_and_model_context,
@@ -12732,22 +12723,18 @@ class TestAgentBot:
         )
 
         with (
-            patch.object(TurnController, "_log_dispatch_latency"),
+            patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch(
                 "mindroom.turn_controller.select_ad_hoc_team_mode",
                 new=AsyncMock(return_value=TeamMode.COORDINATE),
             ),
         ):
-
-            async def payload_builder(_context: MessageContext) -> DispatchPayload:
-                return DispatchPayload(prompt="help me")
-
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
                 dispatch,
                 action,
-                payload_builder,
+                DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
@@ -12990,17 +12977,13 @@ class TestAgentBot:
             response_runner=bot._response_runner,
         )
 
-        with patch.object(TurnController, "_log_dispatch_latency"):
-
-            async def payload_builder(_context: MessageContext) -> DispatchPayload:
-                return DispatchPayload(prompt="help me")
-
+        with patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"):
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
                 dispatch,
                 ResponseAction(kind="individual"),
-                payload_builder,
+                DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
@@ -13074,7 +13057,7 @@ class TestAgentBot:
             ),
             patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=None),
-            patch.object(bot._turn_controller, "_log_dispatch_latency"),
+            patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
         ):
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
@@ -13235,9 +13218,6 @@ class TestAgentBot:
 
         failure_message = "setup failed"
 
-        async def payload_builder(_context: MessageContext) -> DispatchPayload:
-            raise RuntimeError(failure_message)
-
         mock_edit = AsyncMock(return_value=False)
         install_edit_message_mock(bot, mock_edit)
         bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
@@ -13246,13 +13226,17 @@ class TestAgentBot:
             delivery_gateway=bot._delivery_gateway,
         )
 
-        with patch.object(TurnController, "_log_dispatch_latency"):
+        with patch.object(
+            ResponsePayloadPreparer,
+            "prepare",
+            new=AsyncMock(side_effect=RuntimeError(failure_message)),
+        ):
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
                 dispatch,
                 ResponseAction(kind="individual"),
-                payload_builder,
+                DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
@@ -13309,13 +13293,17 @@ class TestAgentBot:
 
         failure_message = "setup failed"
 
-        async def payload_builder(_context: MessageContext) -> DispatchPayload:
-            raise RuntimeError(failure_message)
-
-        with patch(
-            "mindroom.bot.TurnController._finalize_dispatch_failure",
-            new=AsyncMock(
-                return_value=None,
+        with (
+            patch.object(
+                ResponsePayloadPreparer,
+                "prepare",
+                new=AsyncMock(side_effect=RuntimeError(failure_message)),
+            ),
+            patch(
+                "mindroom.bot.TurnController._finalize_dispatch_failure",
+                new=AsyncMock(
+                    return_value=None,
+                ),
             ),
         ):
             await bot._turn_controller._execute_response_action(
@@ -13323,7 +13311,7 @@ class TestAgentBot:
                 event,
                 dispatch,
                 ResponseAction(kind="individual"),
-                payload_builder,
+                DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
@@ -13371,9 +13359,6 @@ class TestAgentBot:
             envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
-        async def payload_builder(_context: MessageContext) -> DispatchPayload:
-            return DispatchPayload(prompt="hello")
-
         async def fail_generate_response(*_args: object, **_kwargs: object) -> FinalDeliveryOutcome:
             message = "post-lock setup failed"
             error = RuntimeError(message)
@@ -13398,7 +13383,7 @@ class TestAgentBot:
                 event,
                 dispatch,
                 ResponseAction(kind="individual"),
-                payload_builder,
+                DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
@@ -13451,9 +13436,6 @@ class TestAgentBot:
             envelope=_hook_envelope(body="hello", source_event_id="$event", target=stable_target),
         )
 
-        async def payload_builder(_context: MessageContext) -> DispatchPayload:
-            return DispatchPayload(prompt="hello")
-
         async def fail_generate_response(*_args: object, **_kwargs: object) -> FinalDeliveryOutcome:
             message = "post-lock setup failed"
             error = RuntimeError(message)
@@ -13473,7 +13455,7 @@ class TestAgentBot:
             event,
             dispatch,
             ResponseAction(kind="individual"),
-            payload_builder,
+            DispatchPayloadInputs((), (), ()),
             processing_log="processing",
             dispatch_started_at=0.0,
             handled_turn=HandledTurnState.from_source_event_id(event.event_id),
@@ -13528,9 +13510,6 @@ class TestAgentBot:
             envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
-        async def payload_builder(_context: MessageContext) -> DispatchPayload:
-            return DispatchPayload(prompt="help me")
-
         with (
             patch.object(
                 bot._response_runner,
@@ -13539,14 +13518,14 @@ class TestAgentBot:
                     return_value="$thinking",
                 ),
             ),
-            patch.object(bot._turn_controller, "_log_dispatch_latency", create=True),
+            patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
         ):
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
                 dispatch,
                 ResponseAction(kind="individual"),
-                payload_builder,
+                DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
@@ -13783,9 +13762,6 @@ class TestAgentBot:
             envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
-        async def payload_builder(_context: MessageContext) -> DispatchPayload:
-            return DispatchPayload(prompt="help me")
-
         with (
             patch.object(
                 bot._response_runner,
@@ -13794,341 +13770,20 @@ class TestAgentBot:
                     return_value=None,
                 ),
             ),
-            patch.object(bot._turn_controller, "_log_dispatch_latency", create=True),
+            patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
         ):
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
                 dispatch,
                 ResponseAction(kind="individual"),
-                payload_builder,
+                DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
 
         tracker.record_handled_turn.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_execute_dispatch_action_logs_startup_latency(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Dispatch execution should log setup timing fields before coordinator handoff."""
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
-        _set_turn_store_tracker(bot, MagicMock())
-        bot.logger = MagicMock()
-        _replace_turn_policy_deps(bot, logger=bot.logger)
-
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        event = MagicMock()
-        event.event_id = "$event"
-        dispatch = PreparedDispatch(
-            requester_user_id="@user:localhost",
-            context=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=ThreadHistoryResult(
-                    [],
-                    is_full_history=True,
-                    diagnostics={
-                        "cache_read_ms": 11.0,
-                        "incremental_refresh_ms": 22.0,
-                        "resolution_ms": 33.0,
-                        "sidecar_hydration_ms": 44.0,
-                    },
-                ),
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-                requires_model_history_refresh=False,
-            ),
-            target=(
-                dispatch_target := MessageTarget.resolve(
-                    room_id=room.room_id,
-                    thread_id=None,
-                    reply_to_event_id=event.event_id,
-                )
-            ),
-            correlation_id="corr-latency-log",
-            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
-        )
-
-        monotonic_values = itertools.count(start=10.0, step=0.1)
-        mock_generate_response = AsyncMock(return_value="$response")
-        install_generate_response_mock(bot, mock_generate_response)
-        _replace_turn_policy_deps(
-            bot,
-            logger=bot.logger,
-            response_runner=bot._response_runner,
-        )
-
-        with patch("mindroom.turn_controller.time.monotonic", side_effect=lambda: next(monotonic_values)):
-
-            async def payload_builder(_context: MessageContext) -> DispatchPayload:
-                return DispatchPayload(prompt="help me")
-
-            await bot._turn_controller._execute_response_action(
-                room,
-                event,
-                dispatch,
-                ResponseAction(kind="individual"),
-                payload_builder,
-                processing_log="processing",
-                dispatch_started_at=9.5,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-            )
-
-        latency_logs = [
-            call for call in bot.logger.info.call_args_list if call.args and call.args[0] == "Response startup latency"
-        ]
-        assert latency_logs
-        latency_kwargs = latency_logs[-1].kwargs
-        assert "placeholder_event_id" not in latency_kwargs
-        assert "placeholder_visible_ms" not in latency_kwargs
-        assert latency_kwargs["context_hydration_ms"] == 500.0
-        assert latency_kwargs["cache_read_ms"] == 11.0
-        assert latency_kwargs["incremental_refresh_ms"] == 22.0
-        assert latency_kwargs["resolution_ms"] == 33.0
-        assert latency_kwargs["sidecar_hydration_ms"] == 44.0
-        assert latency_kwargs["payload_hydration_ms"] >= 0.0
-        assert latency_kwargs["startup_total_ms"] == (
-            latency_kwargs["context_hydration_ms"] + latency_kwargs["payload_hydration_ms"]
-        )
-
-    @pytest.mark.asyncio
-    async def test_execute_dispatch_action_logs_latency_after_locked_payload_preparation(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Latency logging should happen after the locked payload preparation path completes."""
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
-        _set_turn_store_tracker(bot, MagicMock())
-        bot.logger = MagicMock()
-        _replace_turn_policy_deps(bot, logger=bot.logger)
-
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        event = MagicMock()
-        event.event_id = "$event"
-        dispatch = PreparedDispatch(
-            requester_user_id="@user:localhost",
-            context=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=ThreadHistoryResult([], is_full_history=True),
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-                requires_model_history_refresh=False,
-            ),
-            target=(
-                dispatch_target := MessageTarget.resolve(
-                    room_id=room.room_id,
-                    thread_id=None,
-                    reply_to_event_id=event.event_id,
-                )
-            ),
-            correlation_id="corr-latency-order",
-            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
-        )
-
-        mock_generate_response = AsyncMock(return_value="$response")
-        install_generate_response_mock(bot, mock_generate_response)
-        _replace_turn_policy_deps(
-            bot,
-            logger=bot.logger,
-            response_runner=bot._response_runner,
-        )
-
-        payload_built = False
-
-        async def payload_builder(_context: MessageContext) -> DispatchPayload:
-            nonlocal payload_built
-            payload_built = True
-            return DispatchPayload(prompt="help me")
-
-        original_log_dispatch_latency = bot._turn_controller._log_dispatch_latency
-
-        def assert_payload_already_built(**kwargs: object) -> None:
-            assert payload_built is True
-            original_log_dispatch_latency(**kwargs)
-
-        with patch.object(
-            bot._turn_controller,
-            "_log_dispatch_latency",
-            side_effect=assert_payload_already_built,
-        ):
-            await bot._turn_controller._execute_response_action(
-                room,
-                event,
-                dispatch,
-                ResponseAction(kind="individual"),
-                payload_builder,
-                processing_log="processing",
-                dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-            )
-
-        assert payload_built is True
-
-    @pytest.mark.asyncio
-    async def test_execute_dispatch_action_emits_payload_builder_timing(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Dispatch execution should time the payload builder inside the locked preparation path."""
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
-        _set_turn_store_tracker(bot, MagicMock())
-        bot.logger = MagicMock()
-        _replace_turn_policy_deps(bot, logger=bot.logger)
-
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        event = MagicMock()
-        event.event_id = "$event"
-        dispatch = PreparedDispatch(
-            requester_user_id="@user:localhost",
-            context=MessageContext(
-                am_i_mentioned=False,
-                is_thread=True,
-                thread_id="$thread",
-                thread_history=ThreadHistoryResult([], is_full_history=True),
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-                requires_model_history_refresh=False,
-            ),
-            target=(
-                dispatch_target := MessageTarget.resolve(
-                    room_id=room.room_id,
-                    thread_id="$thread",
-                    reply_to_event_id=event.event_id,
-                )
-            ),
-            correlation_id="corr-payload-builder-timing",
-            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
-        )
-
-        mock_generate_response = AsyncMock(return_value="$response")
-        install_generate_response_mock(bot, mock_generate_response)
-        _replace_turn_policy_deps(
-            bot,
-            logger=bot.logger,
-            response_runner=bot._response_runner,
-        )
-
-        async def payload_builder(_context: MessageContext) -> DispatchPayload:
-            return DispatchPayload(prompt="help me")
-
-        with patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit:
-            await bot._turn_controller._execute_response_action(
-                room,
-                event,
-                dispatch,
-                ResponseAction(kind="individual"),
-                payload_builder,
-                processing_log="processing",
-                dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-            )
-
-        builder_calls = [
-            call for call in mock_emit.call_args_list if call.args and call.args[0] == "response_payload.builder"
-        ]
-        assert len(builder_calls) == 1
-        assert isinstance(builder_calls[0].args[1], float)
-        assert builder_calls[0].kwargs == {
-            "room_id": "!room:localhost",
-            "thread_id": "$thread",
-            "outcome": "success",
-        }
-
-    @pytest.mark.asyncio
-    async def test_execute_dispatch_action_emits_payload_builder_timing_on_failure(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Payload-builder timing should still emit when locked payload preparation fails."""
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
-        _set_turn_store_tracker(bot, MagicMock())
-        bot.logger = MagicMock()
-        _replace_turn_policy_deps(bot, logger=bot.logger)
-
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        event = MagicMock()
-        event.event_id = "$event"
-        dispatch = PreparedDispatch(
-            requester_user_id="@user:localhost",
-            context=MessageContext(
-                am_i_mentioned=False,
-                is_thread=True,
-                thread_id="$thread",
-                thread_history=ThreadHistoryResult([], is_full_history=True),
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-                requires_model_history_refresh=False,
-            ),
-            target=(
-                dispatch_target := MessageTarget.resolve(
-                    room_id=room.room_id,
-                    thread_id="$thread",
-                    reply_to_event_id=event.event_id,
-                )
-            ),
-            correlation_id="corr-payload-builder-failure-timing",
-            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
-        )
-
-        install_generate_response_mock(bot, AsyncMock(return_value="$response"))
-        _replace_turn_policy_deps(
-            bot,
-            logger=bot.logger,
-            response_runner=bot._response_runner,
-        )
-
-        async def payload_builder(_context: MessageContext) -> DispatchPayload:
-            msg = "payload failed"
-            raise RuntimeError(msg)
-
-        with (
-            patch.object(bot._turn_controller, "_finalize_dispatch_failure", new=AsyncMock(return_value="$error")),
-            patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit,
-        ):
-            await bot._turn_controller._execute_response_action(
-                room,
-                event,
-                dispatch,
-                ResponseAction(kind="individual"),
-                payload_builder,
-                processing_log="processing",
-                dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-            )
-
-        builder_calls = [
-            call for call in mock_emit.call_args_list if call.args and call.args[0] == "response_payload.builder"
-        ]
-        assert len(builder_calls) == 1
-        assert isinstance(builder_calls[0].args[1], float)
-        assert builder_calls[0].kwargs == {
-            "room_id": "!room:localhost",
-            "thread_id": "$thread",
-            "outcome": "failed",
-        }
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])

@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
+from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.dispatch_handoff import (
@@ -20,14 +20,10 @@ from mindroom.dispatch_handoff import (
 )
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
 from mindroom.handled_turns import HandledTurnState
-from mindroom.inbound_turn_normalizer import (
-    BatchMediaAttachmentRequest,
-    DispatchPayload,
-    DispatchPayloadWithAttachmentsRequest,
-    TextNormalizationRequest,
-)
+from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
+from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
@@ -42,7 +38,6 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.commands.parsing import Command
-    from mindroom.conversation_resolver import MessageContext
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_controller import TurnController
@@ -365,42 +360,18 @@ async def _apply_turn_plan(
         conversation_target=prepared.dispatch.target,
     )
 
-    async def build_payload(context: MessageContext) -> DispatchPayload:
-        effective_thread_id = prepared.dispatch.target.resolved_thread_id
-        media_attachment_ids: list[str] = []
-        fallback_images = None
-        if media_events:
-            media_result = await controller.deps.normalizer.register_batch_media_attachments(
-                BatchMediaAttachmentRequest(
-                    room_id=room.room_id,
-                    thread_id=effective_thread_id,
-                    media_events=media_events,
-                ),
-            )
-            media_attachment_ids = media_result.attachment_ids
-            fallback_images = media_result.fallback_images
-        return await controller.deps.normalizer.build_dispatch_payload_with_attachments(
-            DispatchPayloadWithAttachmentsRequest(
-                room_id=room.room_id,
-                prompt=prepared.event.body,
-                current_attachment_ids=merge_attachment_ids(
-                    message_attachment_ids,
-                    media_attachment_ids,
-                ),
-                trusted_current_attachment_ids=trusted_attachment_ids,
-                thread_id=context.thread_id,
-                media_thread_id=effective_thread_id,
-                thread_history=context.thread_history,
-                fallback_images=fallback_images,
-            ),
-        )
+    payload_inputs = DispatchPayloadInputs(
+        message_attachment_ids=tuple(message_attachment_ids),
+        trusted_attachment_ids=tuple(trusted_attachment_ids),
+        media_events=tuple(media_events or ()),
+    )
 
     await controller._execute_response_action(
         room,
         prepared.event,
         prepared.dispatch,
         plan.response_action,
-        build_payload,
+        payload_inputs,
         processing_log="Processing",
         dispatch_started_at=prepared.dispatch_started_at,
         handled_turn=handled_turn,
