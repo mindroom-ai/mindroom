@@ -226,10 +226,10 @@ def load_oauth_providers_for_snapshot(
 ) -> dict[str, OAuthProvider]:
     """Return OAuth providers cached by one API config snapshot."""
     cache_key = ("snapshot", snapshot.generation, id(snapshot), snapshot.runtime_paths, skip_broken_plugins)
-    if snapshot.runtime_config is not None:
-        config = snapshot.runtime_config
-    else:
-        config = Config.model_validate(snapshot.config_data or {}, context={"runtime_paths": snapshot.runtime_paths})
+    config = snapshot.runtime_config
+    if config is None:
+        # Only pre-first-load snapshots lack a runtime config; they expose built-in providers only.
+        config = Config.model_validate({}, context={"runtime_paths": snapshot.runtime_paths})
     return _load_oauth_provider_registry(
         config,
         snapshot.runtime_paths,

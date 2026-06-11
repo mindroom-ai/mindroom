@@ -15,7 +15,6 @@ from mindroom.agent_policy import (
 )
 from mindroom.api import config_lifecycle
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management
-from mindroom.config.main import Config
 from mindroom.credential_policy import (
     OAUTH_CREDENTIAL_FIELDS,
     credential_service_policy,
@@ -48,6 +47,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -659,15 +659,9 @@ def _request_may_target_scoped_credentials(request: Request, agent_name: str | N
     return agent_name is not None or bool(request.query_params.get("execution_scope"))
 
 
-def _oauth_providers_for_request(request: Request) -> dict[str, OAuthProvider]:
-    snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    if snapshot.runtime_config is None and not snapshot.config_data:
-        snapshot.runtime_config = Config.model_validate({})
-    return load_oauth_providers_for_snapshot(snapshot)
-
-
 def _oauth_services_for_request(request: Request) -> _OAuthCredentialServices:
-    return _OAuthCredentialServices(providers=_oauth_providers_for_request(request))
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    return _OAuthCredentialServices(providers=load_oauth_providers_for_snapshot(snapshot))
 
 
 def _oauth_service_match(request: Request, service: str) -> _OAuthCredentialServiceMatch | None:

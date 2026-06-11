@@ -119,17 +119,18 @@ def test_load_oauth_providers_uses_config_cache_key(
     assert calls == [(config, runtime_paths, ("config", id(config), runtime_paths, False), False)]
 
 
-def test_load_oauth_providers_for_snapshot_hydrates_config_before_shared_load(
+def test_load_oauth_providers_for_snapshot_uses_runtime_config_and_cache_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Snapshot loading should preserve hydration and snapshot-specific cache key shape."""
+    """Snapshot loading should pass the snapshot's runtime config and cache key shape through."""
     runtime_paths = _runtime_paths(tmp_path)
+    runtime_config = Config.validate_with_runtime({"agents": {}}, runtime_paths)
     snapshot = ApiSnapshot(
         generation=7,
         runtime_paths=runtime_paths,
         config_data={"agents": {}},
-        runtime_config=None,
+        runtime_config=runtime_config,
     )
     expected_providers = {"provider": _provider("provider")}
     calls: list[tuple[Config, RuntimePaths, tuple[object, ...], bool]] = []
@@ -149,10 +150,39 @@ def test_load_oauth_providers_for_snapshot_hydrates_config_before_shared_load(
     providers = oauth_registry.load_oauth_providers_for_snapshot(snapshot, skip_broken_plugins=False)
 
     assert providers is expected_providers
+    assert calls == [(runtime_config, runtime_paths, ("snapshot", 7, id(snapshot), runtime_paths, False), False)]
+
+
+def test_load_oauth_providers_for_pre_load_snapshot_falls_back_to_empty_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Snapshots published before the first config load should use an empty config."""
+    runtime_paths = _runtime_paths(tmp_path)
+    snapshot = ApiSnapshot(
+        generation=0,
+        runtime_paths=runtime_paths,
+        config_data={},
+        runtime_config=None,
+    )
+    expected_providers = {"provider": _provider("provider")}
+    calls: list[Config] = []
+
+    def load_registry(
+        received_config: Config,
+        received_runtime_paths: RuntimePaths,
+        cache_key: tuple[object, ...],
+        *,
+        skip_broken_plugins: bool,
+    ) -> dict[str, OAuthProvider]:
+        del received_runtime_paths, cache_key, skip_broken_plugins
+        calls.append(received_config)
+        return expected_providers
+
+    monkeypatch.setattr(oauth_registry, "_load_oauth_provider_registry", load_registry)
+
+    providers = oauth_registry.load_oauth_providers_for_snapshot(snapshot)
+
+    assert providers is expected_providers
     assert len(calls) == 1
-    received_config, received_runtime_paths, cache_key, skip_broken_plugins = calls[0]
-    assert isinstance(received_config, Config)
-    assert received_config.authored_model_dump() == {"agents": {}}
-    assert received_runtime_paths == runtime_paths
-    assert cache_key == ("snapshot", 7, id(snapshot), runtime_paths, False)
-    assert skip_broken_plugins is False
+    assert calls[0].authored_model_dump() == {}

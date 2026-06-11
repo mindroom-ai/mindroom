@@ -12,7 +12,7 @@ from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request
@@ -189,7 +189,7 @@ def _raise_for_config_load_result(result: ConfigLoadResult | None) -> None:
     )
 
 
-def _raise_missing_loaded_config() -> None:
+def _raise_missing_loaded_config() -> NoReturn:
     """Raise the shared missing-config HTTP error used by cached API reads and writes."""
     raise HTTPException(status_code=500, detail="Failed to load configuration")
 
@@ -659,12 +659,9 @@ def read_app_committed_runtime_config(
     with initial_state.config_lock:
         snapshot = require_api_state(api_app).snapshot
         _raise_for_config_load_result(snapshot.config_load_result)
-        if not snapshot.config_data:
+        if not snapshot.config_data or snapshot.runtime_config is None:
             _raise_missing_loaded_config()
-        runtime_paths = snapshot.runtime_paths
-        if snapshot.runtime_config is not None:
-            return snapshot.runtime_config, runtime_paths
-        return Config.model_validate(snapshot.config_data, context={"runtime_paths": runtime_paths}), runtime_paths
+        return snapshot.runtime_config, snapshot.runtime_paths
 
 
 def read_committed_config[T](
@@ -697,12 +694,9 @@ def read_committed_runtime_config(
     """Read one validated runtime config and runtime from one coherent request snapshot."""
     snapshot = _request_or_current_snapshot(request)
     _raise_for_config_load_result(snapshot.config_load_result)
-    if not snapshot.config_data:
+    if not snapshot.config_data or snapshot.runtime_config is None:
         _raise_missing_loaded_config()
-    runtime_paths = snapshot.runtime_paths
-    if snapshot.runtime_config is not None:
-        return snapshot.runtime_config, runtime_paths
-    return Config.model_validate(snapshot.config_data, context={"runtime_paths": runtime_paths}), runtime_paths
+    return snapshot.runtime_config, snapshot.runtime_paths
 
 
 def write_committed_config[T](
