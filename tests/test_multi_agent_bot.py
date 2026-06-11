@@ -12936,7 +12936,7 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
 
-        mock_select_team_mode.assert_not_awaited()
+        mock_select_team_mode.assert_not_called()
         assert mock_generate_team_response.await_args.kwargs["team_mode"] == "coordinate"
 
     @pytest.mark.asyncio
