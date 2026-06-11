@@ -350,12 +350,9 @@ class _ApprovedEgressTools(Toolkit):
             ),
             tools=[self.request_network_access],
         )
-        for registered in (
-            self.functions.get("request_network_access"),
-            self.async_functions.get("request_network_access"),
-        ):
-            if registered is not None:
-                registered.description = request_description
+        registered = self.async_functions.get("request_network_access")
+        if registered is not None:
+            registered.description = request_description
 
     async def request_network_access(
         self,
