@@ -332,7 +332,7 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
 
 def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_path: Path) -> None:
     """Run metadata should expose prepared estimates without mixing them into provider usage."""
-    config, runtime_paths = _make_prepare_config(tmp_path)
+    config, _runtime_paths = _make_prepare_config(tmp_path)
     prepared_history = PreparedHistoryState(
         compaction_decision=classify_compaction_decision(
             plan=_make_execution_plan(),
@@ -349,9 +349,8 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
     )
 
     metadata = build_ai_run_metadata_content(
-        agent_name="test_agent",
         config=config,
-        runtime_paths=runtime_paths,
+        model_name="default",
         run_id="run-1",
         session_id="session-1",
         status="completed",
@@ -382,12 +381,11 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
 
 def test_ai_run_metadata_fallback_usage_only_backfills_missing_fields(tmp_path: Path) -> None:
     """Fallback request metrics should not replace provider-reported final usage."""
-    config, runtime_paths = _make_prepare_config(tmp_path)
+    config, _runtime_paths = _make_prepare_config(tmp_path)
 
     metadata = build_ai_run_metadata_content(
-        agent_name="test_agent",
         config=config,
-        runtime_paths=runtime_paths,
+        model_name="default",
         run_id="run-1",
         session_id="session-1",
         status="completed",
@@ -429,9 +427,8 @@ def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_pat
     )
 
     metadata = build_ai_run_metadata_content(
-        agent_name="test_agent",
         config=config,
-        runtime_paths=runtime_paths,
+        model_name="default",
         run_id="run-1",
         session_id="session-1",
         status="completed",

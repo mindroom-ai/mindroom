@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from agno.models.metrics import Metrics
 from agno.run.base import RunStatus
 
-from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.constants import AI_RUN_METADATA_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -29,26 +29,6 @@ def empty_request_metric_totals() -> dict[str, int]:
         "cache_read_tokens": 0,
         "cache_write_tokens": 0,
     }
-
-
-def _get_model_config(
-    config: Config,
-    agent_name: str,
-    *,
-    runtime_paths: RuntimePaths,
-    room_id: str | None = None,
-    thread_id: str | None = None,
-) -> tuple[str | None, ModelConfig | None]:
-    """Return configured model name/config for an agent when available."""
-    if agent_name not in config.agents and agent_name not in config.teams and agent_name != ROUTER_AGENT_NAME:
-        return None, None
-    model_name = config.resolve_runtime_model(
-        entity_name=agent_name,
-        room_id=room_id,
-        thread_id=thread_id,
-        runtime_paths=runtime_paths,
-    ).model_name
-    return model_name, config.models.get(model_name)
 
 
 def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
@@ -233,16 +213,13 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
 
 def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     *,
-    agent_name: str,
     config: Config,
-    runtime_paths: RuntimePaths,
+    model_name: str | None,
     run_id: str | None,
     session_id: str | None,
     status: RunStatus | str | None,
     model: str | None,
     model_provider: str | None,
-    room_id: str | None = None,
-    thread_id: str | None = None,
     metrics: Metrics | dict[str, Any] | None = None,
     metrics_fallback: dict[str, Any] | None = None,
     context_raw_input_tokens: int | None = None,
@@ -252,14 +229,14 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     tool_count: int | None = None,
     prepared_history: PreparedHistoryState | None = None,
 ) -> dict[str, Any] | None:
-    """Build the Matrix event content fragment for one AI run."""
-    model_name, model_config = _get_model_config(
-        config,
-        agent_name,
-        runtime_paths=runtime_paths,
-        room_id=room_id,
-        thread_id=thread_id,
-    )
+    """Build the Matrix event content fragment for one AI run.
+
+    `model_name` is the configured model name resolved at run preparation time.
+    It must not be re-resolved here: the per-thread override store can change
+    mid-run (for example via `switch_thread_model`), and this metadata must
+    describe the model that actually produced the response.
+    """
+    model_config = config.models.get(model_name) if model_name is not None else None
     model_id = model or (model_config.id if model_config is not None else None)
     provider = model_provider or (model_config.provider if model_config is not None else None)
 

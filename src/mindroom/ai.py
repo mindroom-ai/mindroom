@@ -146,6 +146,10 @@ class _PreparedAgentRun:
     messages: tuple[Message, ...]
     unseen_event_ids: list[str]
     prepared_history: PreparedHistoryState
+    # Configured model name resolved at preparation time. Run metadata must use
+    # this snapshot instead of re-resolving, because the per-thread override
+    # store can change mid-run (for example via the thread_model tool).
+    runtime_model_name: str
 
     @property
     def prompt_text(self) -> str:
@@ -839,6 +843,7 @@ async def _prepare_agent_and_prompt(
         messages=run_messages,
         unseen_event_ids=unseen_event_ids,
         prepared_history=prepared_history,
+        runtime_model_name=runtime_model.model_name,
     )
 
 
@@ -1153,16 +1158,13 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 tool_trace_collector.extend(_extract_tool_trace(response))
             if run_metadata_collector is not None:
                 run_metadata = build_ai_run_metadata_content(
-                    agent_name=agent_name,
                     config=config,
-                    runtime_paths=runtime_paths,
+                    model_name=prepared_run.runtime_model_name,
                     run_id=response.run_id,
                     session_id=response.session_id or session_id,
                     status=response.status,
                     model=response.model,
                     model_provider=response.model_provider,
-                    room_id=room_id,
-                    thread_id=thread_id,
                     metrics=response.metrics,
                     context_input_tokens=prepared_run.prepared_history.estimated_context_tokens,
                     tool_count=len(response.tools) if response.tools is not None else 0,
@@ -1731,16 +1733,13 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 state.observed_request_metric_fields,
                             )
                             cancelled_metadata = build_ai_run_metadata_content(
-                                agent_name=agent_name,
                                 config=config,
-                                runtime_paths=runtime_paths,
+                                model_name=prepared_run.runtime_model_name,
                                 run_id=state.cancelled_run_event.run_id,
                                 session_id=state.cancelled_run_event.session_id or session_id,
                                 status=RunStatus.cancelled,
                                 model=state.latest_model_id,
                                 model_provider=state.latest_model_provider,
-                                room_id=room_id,
-                                thread_id=thread_id,
                                 metrics=fallback_metrics,
                                 context_input_tokens=prepared_context_input_tokens,
                                 context_raw_input_tokens=state.latest_request_input_tokens,
@@ -1782,9 +1781,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         fallback_metrics,
                     )
                     run_metadata = build_ai_run_metadata_content(
-                        agent_name=agent_name,
                         config=config,
-                        runtime_paths=runtime_paths,
+                        model_name=prepared_run.runtime_model_name,
                         run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
                         session_id=(
                             state.completed_run_event.session_id
@@ -1795,8 +1793,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         status=final_status,
                         model=state.latest_model_id,
                         model_provider=state.latest_model_provider,
-                        room_id=room_id,
-                        thread_id=thread_id,
                         metrics=usage_metrics,
                         metrics_fallback=usage_metrics_fallback,
                         context_input_tokens=prepared_context_input_tokens,

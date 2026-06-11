@@ -42,6 +42,18 @@ class ThreadModelTools(Toolkit):
             return resolved
         context, thread_id = resolved
         override = get_thread_model_override(context.runtime_paths, thread_id)
+        # Runtime resolution ignores an override whose model name no longer
+        # exists in config.models, so report it as stale instead of active.
+        if override is not None and override not in context.config.models:
+            return self._payload(
+                "ok",
+                action="get",
+                thread_id=thread_id,
+                override=None,
+                stale_override=override,
+                note="The stored override names a model that is no longer configured, so agents use their configured models.",
+                available_models=sorted(context.config.models),
+            )
         return self._payload(
             "ok",
             action="get",

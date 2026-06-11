@@ -217,6 +217,7 @@ def _prepared_prompt_result(agent: object, *, prompt: str = "expanded prompt") -
         messages=(Message(role="user", content=prompt),),
         unseen_event_ids=[],
         prepared_history=PreparedHistoryState(),
+        runtime_model_name="default",
     )
 
 

@@ -194,6 +194,7 @@ def _prepared_run(agent: object, *, prompt: str = "prompt") -> _PreparedAgentRun
         messages=(Message(role="user", content=prompt),),
         unseen_event_ids=[],
         prepared_history=MagicMock(),
+        runtime_model_name="default",
     )
 
 

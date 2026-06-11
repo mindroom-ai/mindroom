@@ -10,11 +10,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 import mindroom.tools  # noqa: F401
+from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.thread_models import (
     _store_path,
@@ -502,3 +504,63 @@ async def test_thread_model_tool_rejects_unknown_model() -> None:
     assert payload["status"] == "error"
     assert payload["available_models"] == ["default", "large"]
     assert get_thread_model_override(context.runtime_paths, THREAD_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_thread_model_tool_reports_stale_override_as_inactive() -> None:
+    """An override naming a removed model must not be reported as active."""
+    context = _make_tool_context()
+    set_thread_model_override(
+        context.runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="removed-model",
+        room_id=ROOM_ID,
+        set_by="@user:localhost",
+    )
+
+    with tool_runtime_context(context):
+        payload = json.loads(await ThreadModelTools().get_thread_model())
+
+    assert payload["status"] == "ok"
+    assert payload["override"] is None
+    assert payload["stale_override"] == "removed-model"
+    assert "no longer configured" in payload["note"]
+
+
+def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path) -> None:
+    """Run metadata must describe the model that produced the response, not the next override."""
+    config = _config_with_models(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    prepared_model_name = config.resolve_runtime_model(
+        entity_name="test_agent",
+        room_id=ROOM_ID,
+        thread_id=THREAD_ID,
+        runtime_paths=runtime_paths,
+    ).model_name
+
+    # A mid-run switch_thread_model call persists a new override before the
+    # metadata for the current response is built.
+    set_thread_model_override(
+        runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="large",
+        room_id=ROOM_ID,
+        set_by="@user:localhost",
+    )
+
+    metadata = build_ai_run_metadata_content(
+        config=config,
+        model_name=prepared_model_name,
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        model="default-model",
+        model_provider="openai",
+    )
+
+    assert metadata is not None
+    assert metadata[AI_RUN_METADATA_KEY]["model"] == {
+        "config": "default",
+        "id": "default-model",
+        "provider": "openai",
+    }
