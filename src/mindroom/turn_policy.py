@@ -262,7 +262,7 @@ class TurnPolicyDeps:
 
 @dataclass(frozen=True)
 class _ResponderAvailability:
-    """Live responder availability computed once per turn.
+    """Point-in-time responder availability threaded through one decision flow.
 
     ``None`` values mean live runtime state is unknown, so availability
     filtering must not narrow responder candidates.
@@ -288,7 +288,12 @@ class TurnPolicy:
         )
 
     def responder_availability(self) -> _ResponderAvailability:
-        """Compute live responder availability once for one turn."""
+        """Snapshot in-memory responder liveness for one decision flow.
+
+        Each decision flow takes a fresh snapshot on entry and passes it down
+        instead of recomputing; snapshots are deliberately not cached on this
+        long-lived policy object because liveness changes between turns.
+        """
         materializable_agent_names = materializable_agent_names_for_orchestrator(
             self.deps.runtime.orchestrator,
             self.deps.runtime.config,
