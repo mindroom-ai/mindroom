@@ -581,17 +581,32 @@ class _MultiAgentOrchestrator:
         return await manager.sync_servers(config)
 
     def _entities_blocked_by_failed_mcp_servers(self, entity_names: set[str], config: Config) -> set[str]:
-        """Return entities whose required MCP servers are currently unavailable."""
+        """Return entities blocked because a required MCP server is currently unavailable."""
         manager = self._mcp_manager
         if manager is None:
             return set()
-        failed_server_ids = manager.failed_server_ids()
+        failed_server_ids = manager.failed_required_server_ids()
         if not failed_server_ids:
             return set()
         blocked_entities = config.get_entities_referencing_tools(
             {mcp_tool_name(server_id) for server_id in failed_server_ids},
         )
         return blocked_entities & entity_names
+
+    def _log_mcp_degraded_entities(self, config: Config) -> None:
+        """Warn once per unavailable optional MCP server about entities running without its tools."""
+        manager = self._mcp_manager
+        if manager is None:
+            return
+        for server_id in sorted(manager.failed_server_ids() - manager.failed_required_server_ids()):
+            degraded_entities = config.get_entities_referencing_tools({mcp_tool_name(server_id)})
+            if not degraded_entities:
+                continue
+            logger.warning(
+                "Entities running without tools from unavailable MCP server",
+                server_id=server_id,
+                degraded_entities=sorted(degraded_entities),
+            )
 
     async def _retry_blocked_mcp_entities(self, entity_names: set[str], config: Config) -> set[str]:
         """Retry failed MCP discovery once before deferring dependent entity startup."""
@@ -1048,6 +1063,7 @@ class _MultiAgentOrchestrator:
         )
 
         config = self._require_config()
+        self._log_mcp_degraded_entities(config)
         self._resolve_bot_room_aliases(started_bots, config)
         phase_started = log_startup_phase_started("bind_runtime_support")
         self._bind_started_runtime_support_services(started_bots)

@@ -9494,6 +9494,7 @@ Use the OAuth `auth` block for remote MCP servers that need a different bearer t
 | Option | Type | Default | Notes |
 |--------|------|---------|-------|
 | `enabled` | bool | `true` | Set to `false` to disable one server without removing its config |
+| `required` | bool | `false` | Block dependent agent startup while this server is unavailable instead of degrading |
 | `transport` | string | *required* | One of `stdio`, `sse`, or `streamable-http` |
 | `command` | string | `null` | Required for `stdio` |
 | `args` | list[string] | `[]` | Optional `stdio` arguments |
@@ -9803,8 +9804,9 @@ The palace enforces deduplication at a 0.9 similarity threshold.
 MindRoom connects to MCP servers during startup and whenever `config.yaml` changes.
 If a server fails to start, initialize, or publish a valid tool catalog, MindRoom marks that server as failed and logs a warning.
 
-Agents and teams that reference `mcp_<server_id>` are blocked from starting while that server is failed.
-MindRoom retries failed MCP discovery during later syncs and config reloads.
+By default a failed server degrades gracefully: agents and teams that reference `mcp_<server_id>` still start, with that server's tools omitted from their tool schema.
+MindRoom keeps retrying failed MCP discovery in the background with exponential backoff, and restarts the affected agents and teams once the server recovers so they pick up its tools.
+Set `required: true` on a server to restore hard-fail behavior, where dependent agents and teams stay blocked from starting until the server is available.
 
 During tool execution, explicit MCP tool failures are surfaced as tool errors.
 Those explicit server-side errors are not retried automatically.

@@ -26,13 +26,14 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
 
 
-def _config(tmp_path: Path, *, tool_name: str = "mcp_demo", command: str = "npx") -> Config:
+def _config(tmp_path: Path, *, tool_name: str = "mcp_demo", command: str = "npx", required: bool = False) -> Config:
     return Config.validate_with_runtime(
         {
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
                     "command": command,
+                    "required": required,
                 },
             },
             "agents": {
@@ -75,11 +76,52 @@ def test_config_update_plan_restarts_only_entities_using_changed_mcp_server(tmp_
     assert "plain" not in plan.entities_to_restart
 
 
+def _manager_with_failed_server(*, required: bool) -> MagicMock:
+    manager = MagicMock()
+    manager.failed_server_ids.return_value = {"demo"}
+    manager.failed_required_server_ids.return_value = {"demo"} if required else set()
+    return manager
+
+
+def test_entities_blocked_only_by_failed_required_mcp_servers(tmp_path: Path) -> None:
+    """A failed optional MCP server must not block dependent entity startup."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    entity_names = {"code", "dev_team", "plain"}
+
+    config = _config(tmp_path)
+    orchestrator._mcp_manager = _manager_with_failed_server(required=False)
+    assert orchestrator._entities_blocked_by_failed_mcp_servers(entity_names, config) == set()
+
+    required_config = _config(tmp_path, required=True)
+    orchestrator._mcp_manager = _manager_with_failed_server(required=True)
+    assert orchestrator._entities_blocked_by_failed_mcp_servers(entity_names, required_config) == {
+        "code",
+        "dev_team",
+    }
+
+
 @pytest.mark.asyncio
-async def test_start_entities_marks_mcp_blocked_entities_retryable(tmp_path: Path) -> None:
-    """Treat MCP discovery outages as retryable startup failures, not permanent disablement."""
+async def test_start_entities_proceed_when_optional_mcp_server_failed(tmp_path: Path) -> None:
+    """Bots referencing a failed optional MCP server start normally in degraded mode."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     orchestrator.config = _config(tmp_path)
+    bot = MagicMock(spec=AgentBot)
+    orchestrator.agent_bots = {"code": bot}
+    orchestrator._mcp_manager = _manager_with_failed_server(required=False)
+
+    with patch.object(orchestrator, "_try_start_bot_once", new=AsyncMock(return_value=True)) as mock_try_start:
+        results = await orchestrator._start_entities_once(["code"], start_sync_tasks=False)
+
+    assert results.started_bots == [bot]
+    assert results.retryable_entities == []
+    mock_try_start.assert_awaited_once_with("code", bot)
+
+
+@pytest.mark.asyncio
+async def test_start_entities_marks_mcp_blocked_entities_retryable(tmp_path: Path) -> None:
+    """Treat required MCP discovery outages as retryable startup failures, not permanent disablement."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    orchestrator.config = _config(tmp_path, required=True)
     orchestrator.agent_bots = {"code": MagicMock(spec=AgentBot)}
 
     with (
@@ -93,6 +135,21 @@ async def test_start_entities_marks_mcp_blocked_entities_retryable(tmp_path: Pat
     assert results.permanently_failed_entities == []
     mock_sync.assert_awaited_once()
     mock_try_start.assert_not_awaited()
+
+
+def test_log_mcp_degraded_entities_warns_per_failed_optional_server(tmp_path: Path) -> None:
+    """Report entities running without tools from an unavailable optional MCP server."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    config = _config(tmp_path)
+    orchestrator._mcp_manager = _manager_with_failed_server(required=False)
+
+    with patch("mindroom.orchestrator.logger") as mock_logger:
+        orchestrator._log_mcp_degraded_entities(config)
+
+    mock_logger.warning.assert_called_once()
+    kwargs = mock_logger.warning.call_args.kwargs
+    assert kwargs["server_id"] == "demo"
+    assert kwargs["degraded_entities"] == ["code", "dev_team"]
 
 
 @pytest.mark.asyncio
