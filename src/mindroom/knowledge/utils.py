@@ -421,7 +421,7 @@ def resolve_agent_knowledge_access(
     missing_base_ids: list[str] = []
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     knowledges: list[Knowledge] = []
-    for base_id in dict.fromkeys(base_ids):
+    for base_id in base_ids:
         knowledge, availability = _resolve_base_knowledge(
             base_id,
             config=config,

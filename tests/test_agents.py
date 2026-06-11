@@ -44,11 +44,13 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
+from mindroom.history import close_team_runtime_state_dbs
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.matrix.state import MatrixState
 from mindroom.prompts import HIDDEN_TOOL_CALLS_PROMPT, OPENAI_COMPAT_HISTORY_GUIDANCE
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -4389,8 +4391,6 @@ def test_private_user_agent_agents_share_culture_manager_within_same_requester_s
 
 def test_team_member_matches_solo_agent_construction() -> None:
     """A team-materialized member must equal the same agent built solo, modulo explicit deltas."""
-    from mindroom.history import close_team_runtime_state_dbs  # noqa: PLC0415
-    from mindroom.teams import materialize_exact_team_members  # noqa: PLC0415
     from tests.conftest import runtime_paths_for  # noqa: PLC0415
 
     config = _test_config()
