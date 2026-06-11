@@ -1971,3 +1971,120 @@ async def test_root_in_flight_child_followup_reservations_obey_debounce() -> Non
     await gate.drain_all()
 
     assert batches == [["$root:localhost"], ["$follow1:localhost"], ["$follow2:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_batch_order_follows_ingress_reservation_order_not_admission_order() -> None:
+    """One coalesced batch must keep receive order even when admissions resolve out of order."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.5,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    first_reservation = gate.reserve_order(
+        room_id=key.room_id,
+        requester_user_id=key.requester_user_id,
+        receipt_time=1.0,
+    )
+    second_reservation = gate.reserve_order(
+        room_id=key.room_id,
+        requester_user_id=key.requester_user_id,
+        receipt_time=1.2,
+    )
+
+    await gate.admit(
+        key,
+        ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$second:localhost", "second", 1_000_200))),
+        order_reservation=second_reservation,
+    )
+    await gate.admit(
+        key,
+        ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$first:localhost", "first", 1_000_000))),
+        order_reservation=first_reservation,
+    )
+
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$first:localhost", "$second:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_messages_in_different_rooms_do_not_coalesce() -> None:
+    """Same-user messages in different rooms stay independent batches."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 1.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    first_key = CoalescingKey("!room-a:localhost", "$thread:localhost", "@user:localhost")
+    second_key = CoalescingKey("!room-b:localhost", "$thread:localhost", "@user:localhost")
+
+    await _admit_ready(gate, first_key, _pending(_text_event("$a:localhost", "room a", 1_000_000)))
+    await _admit_ready(gate, second_key, _pending(_text_event("$b:localhost", "room b", 1_000_100)))
+
+    await gate.drain_all()
+
+    assert sorted(batch.source_event_ids for batch in batches) == [["$a:localhost"], ["$b:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_messages_in_different_threads_do_not_coalesce() -> None:
+    """Same-room messages in different threads stay independent batches."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 1.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    first_key = CoalescingKey("!room:localhost", "$thread-a:localhost", "@user:localhost")
+    second_key = CoalescingKey("!room:localhost", "$thread-b:localhost", "@user:localhost")
+
+    await _admit_ready(gate, first_key, _pending(_text_event("$a:localhost", "thread a", 1_000_000)))
+    await _admit_ready(gate, second_key, _pending(_text_event("$b:localhost", "thread b", 1_000_100)))
+
+    await gate.drain_all()
+
+    assert sorted(batch.source_event_ids for batch in batches) == [["$a:localhost"], ["$b:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_drain_all_flushes_pending_debounced_work_and_idles_gate() -> None:
+    """Shutdown drain dispatches queued work without waiting out the debounce window."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    await _admit_ready(gate, key, _pending(_text_event("$pending:localhost", "pending", 1_000_000)))
+    assert batches == []
+
+    result = await gate.drain_all()
+
+    assert result.completed is True
+    assert [batch.source_event_ids for batch in batches] == [["$pending:localhost"]]
+    assert _coalescing_gate_is_idle(gate)
