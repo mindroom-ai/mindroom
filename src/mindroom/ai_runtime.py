@@ -17,8 +17,8 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.logging_config import get_logger
-from mindroom.media_fallback import MediaKind, append_inline_media_fallback_prompt
-from mindroom.media_inputs import MediaInputs
+from mindroom.media_fallback import append_inline_media_fallback_prompt
+from mindroom.media_inputs import MediaInputs, MediaKind
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -40,7 +40,6 @@ __all__ = [
     "next_retry_run_id",
     "note_attempt_run_id",
     "queued_message_signal_context",
-    "run_input_media_kinds",
     "scrub_queued_notice_session_context",
 ]
 
@@ -78,26 +77,6 @@ def attach_media_to_run_input(
     return run_messages
 
 
-_ALL_MEDIA_KINDS: frozenset[MediaKind] = frozenset({"audio", "file", "image", "video"})
-
-
-def run_input_media_kinds(run_input: ModelRunInput) -> frozenset[MediaKind]:
-    """Return media kinds attached to canonical run-input messages."""
-    if isinstance(run_input, str):
-        return frozenset()
-    kinds: set[MediaKind] = set()
-    for message in run_input:
-        if message.audio:
-            kinds.add("audio")
-        if message.images:
-            kinds.add("image")
-        if message.files:
-            kinds.add("file")
-        if message.videos:
-            kinds.add("video")
-    return frozenset(kinds)
-
-
 def media_inputs_from_run_input(run_input: ModelRunInput) -> MediaInputs:
     """Collect media attached to canonical run-input messages.
 
@@ -122,19 +101,18 @@ def append_inline_media_fallback_to_run_input(
     run_input: ModelRunInput,
     *,
     fallback_prompt: str,
-    removed_kinds: frozenset[MediaKind] | None = None,
+    removed_kinds: frozenset[MediaKind],
 ) -> list[Message]:
     """Strip rejected media kinds from all run-input messages and append the fallback note."""
     run_messages = copy_run_input(run_input)
-    kinds = _ALL_MEDIA_KINDS if removed_kinds is None else removed_kinds
     for message in run_messages:
-        if "audio" in kinds:
+        if "audio" in removed_kinds:
             message.audio = None
-        if "image" in kinds:
+        if "image" in removed_kinds:
             message.images = None
-        if "file" in kinds:
+        if "file" in removed_kinds:
             message.files = None
-        if "video" in kinds:
+        if "video" in removed_kinds:
             message.videos = None
     current_message = run_messages[-1]
     current_text = current_message.content if isinstance(current_message.content, str) else ""

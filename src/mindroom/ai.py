@@ -67,14 +67,13 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import (
-    MediaKind,
     ModelMediaRoute,
     build_model_media_route,
     filter_media_inputs_for_route,
     retry_media_inputs_after_failure,
     unsupported_media_kinds_for_route,
 )
-from mindroom.media_inputs import MediaInputs
+from mindroom.media_inputs import MediaInputs, MediaKind
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed
@@ -447,7 +446,7 @@ def _request_stream_retry(
     retried_after_media_fallback: bool,
     media_route: ModelMediaRoute | None,
     media_inputs: MediaInputs,
-    context_media_kinds: frozenset[MediaKind] = frozenset(),
+    context_media_kinds: frozenset[MediaKind],
     error: Exception | str,
     log_message: str,
     agent_name: str,
@@ -1029,7 +1028,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 turn_recorder.set_run_metadata(metadata)
 
             response: RunOutput | None = None
-            context_media_kinds = ai_runtime.run_input_media_kinds(run_input)
+            context_media_kinds = ai_runtime.media_inputs_from_run_input(run_input).kinds()
             media_route = (
                 build_model_media_route(agent.model) if media_inputs.has_any() or context_media_kinds else None
             )
@@ -1268,7 +1267,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     retried_after_media_fallback: bool,
     timing_scope: str,
     media_route: ModelMediaRoute | None = None,
-    context_media_kinds: frozenset[MediaKind] = frozenset(),
+    context_media_kinds: frozenset[MediaKind],
     state_updated: Callable[[], None] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
@@ -1566,7 +1565,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             if turn_recorder is not None:
                 turn_recorder.set_run_metadata(metadata)
 
-            context_media_kinds = ai_runtime.run_input_media_kinds(run_input)
+            context_media_kinds = ai_runtime.media_inputs_from_run_input(run_input).kinds()
             media_route = (
                 build_model_media_route(agent.model) if media_inputs.has_any() or context_media_kinds else None
             )
