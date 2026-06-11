@@ -483,7 +483,10 @@ class _MultiAgentOrchestrator:
                     return
 
                 config = self.config
-                if config is not None and entity_name in await self._retry_blocked_mcp_entities({entity_name}, config):
+                if config is not None and entity_name in self._entities_blocked_by_failed_mcp_servers(
+                    {entity_name},
+                    config,
+                ):
                     start_status = False
                 else:
                     start_status = await self._try_start_bot_once(entity_name, bot)
@@ -607,18 +610,6 @@ class _MultiAgentOrchestrator:
                 server_id=server_id,
                 degraded_entities=sorted(degraded_entities),
             )
-
-    async def _retry_blocked_mcp_entities(self, entity_names: set[str], config: Config) -> set[str]:
-        """Re-sync the MCP manager before deferring dependent entity startup.
-
-        The sync retries failed discovery immediately unless the manager already
-        has a background backoff retry in flight for that server.
-        """
-        blocked_entities = self._entities_blocked_by_failed_mcp_servers(entity_names, config)
-        if not blocked_entities:
-            return set()
-        await self._sync_mcp_manager(config)
-        return self._entities_blocked_by_failed_mcp_servers(entity_names, config)
 
     @staticmethod
     def _entity_display_name(config: Config, entity_name: str) -> str:
@@ -821,7 +812,7 @@ class _MultiAgentOrchestrator:
 
         config = self.config
         blocked_entities = (
-            await self._retry_blocked_mcp_entities({entity_name for entity_name, _ in entity_bots}, config)
+            self._entities_blocked_by_failed_mcp_servers({entity_name for entity_name, _ in entity_bots}, config)
             if config is not None
             else set()
         )

@@ -124,17 +124,13 @@ async def test_start_entities_marks_mcp_blocked_entities_retryable(tmp_path: Pat
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     orchestrator.config = _config(tmp_path, required=True)
     orchestrator.agent_bots = {"code": MagicMock(spec=AgentBot)}
+    orchestrator._mcp_manager = _manager_with_failed_server(required=True)
 
-    with (
-        patch.object(orchestrator, "_entities_blocked_by_failed_mcp_servers", side_effect=[{"code"}, {"code"}]),
-        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())) as mock_sync,
-        patch.object(orchestrator, "_try_start_bot_once", new=AsyncMock()) as mock_try_start,
-    ):
+    with patch.object(orchestrator, "_try_start_bot_once", new=AsyncMock()) as mock_try_start:
         results = await orchestrator._start_entities_once(["code"], start_sync_tasks=False)
 
     assert results.retryable_entities == ["code"]
     assert results.permanently_failed_entities == []
-    mock_sync.assert_awaited_once()
     mock_try_start.assert_not_awaited()
 
 
