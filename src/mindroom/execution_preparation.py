@@ -11,11 +11,7 @@ from agno.models.message import Message
 
 from mindroom import ai_runtime
 from mindroom.attachment_media import attachment_records_to_media
-from mindroom.attachments import (
-    attachment_ids_for_visible_message,
-    format_attachment_annotation,
-    resolve_attachments,
-)
+from mindroom.attachments import attachment_records_for_visible_message, format_attachment_annotation
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
     ORIGINAL_SENDER_KEY,
@@ -128,25 +124,13 @@ class ThreadHistoryRenderLimits:
 
 @dataclass(frozen=True)
 class _ThreadAttachmentContext:
-    """Resolve per-message attachment records for thread-history rendering."""
+    """Bind attachment-record resolution to one room for thread-history rendering."""
 
     storage_path: Path
     room_id: str | None
 
     def records_for(self, message: ResolvedVisibleMessage) -> list[AttachmentRecord]:
-        attachment_ids = attachment_ids_for_visible_message(message)
-        if not attachment_ids:
-            return []
-        records = resolve_attachments(self.storage_path, attachment_ids)
-        return [record for record in records if self._record_in_scope(record, message)]
-
-    def _record_in_scope(self, record: AttachmentRecord, message: ResolvedVisibleMessage) -> bool:
-        if self.room_id is not None and record.room_id != self.room_id:
-            return False
-        # A record belongs to the thread of the message that references it:
-        # thread members match by thread ID, thread roots by their own event ID,
-        # and room-level messages only see room-level (thread-less) records.
-        return record.thread_id in (message.thread_id, message.event_id)
+        return attachment_records_for_visible_message(self.storage_path, message, room_id=self.room_id)
 
 
 def _wrap_msg_body(sender: str, body: str) -> str:

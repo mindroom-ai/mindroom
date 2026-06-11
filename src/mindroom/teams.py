@@ -183,18 +183,6 @@ class _PreparedMaterializedTeamExecution:
         return self.messages[:-1]
 
 
-def _merge_media_inputs(first: MediaInputs, second: MediaInputs) -> MediaInputs:
-    """Concatenate two media-input sets preserving chronological order."""
-    if not first.has_any():
-        return second
-    return MediaInputs(
-        audio=(*first.audio, *second.audio),
-        images=(*first.images, *second.images),
-        files=(*first.files, *second.files),
-        videos=(*first.videos, *second.videos),
-    )
-
-
 class _TeamModeDecision(BaseModel):
     """AI decision for team collaboration mode."""
 
@@ -1641,7 +1629,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             # Team runs flatten context messages to text, so media pinned to
             # thread-history messages is re-collected onto the current turn.
             context_media_inputs = ai_runtime.media_inputs_from_run_input(prepared_execution.messages)
-            media_inputs = _merge_media_inputs(context_media_inputs, media_inputs)
+            media_inputs = context_media_inputs.merge(media_inputs)
             logger.info("executing_team_response", agent_count=len(agents), mode=mode.value)
             logger.info("team_prompt_preview", agents=agent_list, prompt_preview=prompt[:500])
 
@@ -2069,7 +2057,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             # Team runs flatten context messages to text, so media pinned to
             # thread-history messages is re-collected onto the current turn.
             context_media_inputs = ai_runtime.media_inputs_from_run_input(prepared_execution.messages)
-            media_inputs = _merge_media_inputs(context_media_inputs, media or MediaInputs())
+            media_inputs = context_media_inputs.merge(media or MediaInputs())
             inline_media_fallback_prompt = orchestrator.config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
             media_route = build_model_media_route(team.model) if media_inputs.has_any() else None
             media_filter = filter_media_inputs_for_route(media_route, media_inputs)

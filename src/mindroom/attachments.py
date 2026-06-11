@@ -139,7 +139,7 @@ def _thread_history_message_in_scope(message: ResolvedVisibleMessage, thread_id:
 _MEDIA_MSGTYPES = frozenset({"m.audio", "m.file", "m.image", "m.video"})
 
 
-def attachment_ids_for_visible_message(message: ResolvedVisibleMessage) -> list[str]:
+def _attachment_ids_for_visible_message(message: ResolvedVisibleMessage) -> list[str]:
     """Return attachment IDs carried by one visible message.
 
     MindRoom-sent messages reference attachments via content metadata; raw
@@ -152,6 +152,34 @@ def attachment_ids_for_visible_message(message: ResolvedVisibleMessage) -> list[
     if message.content.get("msgtype") in _MEDIA_MSGTYPES and message.event_id:
         return [_attachment_id_for_event(message.event_id)]
     return []
+
+
+def _attachment_record_in_message_scope(
+    record: AttachmentRecord,
+    message: ResolvedVisibleMessage,
+    *,
+    room_id: str | None,
+) -> bool:
+    if room_id is not None and record.room_id != room_id:
+        return False
+    # A record belongs to the thread of the message that references it:
+    # thread members match by thread ID, thread roots by their own event ID,
+    # and room-level messages only see room-level (thread-less) records.
+    return record.thread_id in (message.thread_id, message.event_id)
+
+
+def attachment_records_for_visible_message(
+    storage_path: Path,
+    message: ResolvedVisibleMessage,
+    *,
+    room_id: str | None,
+) -> list[AttachmentRecord]:
+    """Resolve attachment records carried by one visible message, scoped to its room and thread."""
+    attachment_ids = _attachment_ids_for_visible_message(message)
+    if not attachment_ids:
+        return []
+    records = resolve_attachments(storage_path, attachment_ids)
+    return [record for record in records if _attachment_record_in_message_scope(record, message, room_id=room_id)]
 
 
 def unique_attachment_ids(attachment_ids: Iterable[str]) -> list[str]:

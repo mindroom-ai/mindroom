@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from agno.models.anthropic import Claude
 from agno.models.azure.openai_chat import AzureOpenAI
@@ -17,7 +17,7 @@ from agno.models.openai import OpenAIChat, OpenAIResponses
 from agno.models.openrouter import OpenRouter
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 
-from mindroom.media_inputs import MediaInputs
+from mindroom.media_inputs import MediaInputs, MediaKind
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from agno.models.base import Model
 
 __all__ = [
-    "MediaKind",
     "ModelMediaRoute",
     "append_inline_media_fallback_prompt",
     "build_model_media_route",
@@ -49,8 +48,6 @@ _INLINE_MEDIA_UNSUPPORTED_PATTERNS = (
     re.compile(rf"support input (?P<kind>{_MEDIA_KIND_PATTERN})"),
     re.compile(rf"at most 0 (?P<kind>{_MEDIA_KIND_PATTERN})\(s\) may be provided"),
 )
-
-type MediaKind = Literal["audio", "image", "file", "video"]
 
 # Provider error vocabulary -> our MediaInputs kind (providers say "document" for files).
 _PROVIDER_MEDIA_KINDS: dict[str, MediaKind] = {
@@ -118,7 +115,7 @@ def filter_media_inputs_for_route(
     media_inputs: MediaInputs,
 ) -> _MediaFilterResult:
     """Omit learned-unsupported media kinds before a model request."""
-    removed_kinds = unsupported_media_kinds_for_route(route) & _media_kinds_present(media_inputs)
+    removed_kinds = unsupported_media_kinds_for_route(route) & media_inputs.kinds()
     if not removed_kinds:
         return _MediaFilterResult(media_inputs=media_inputs, removed_kinds=frozenset())
     return _MediaFilterResult(
@@ -142,7 +139,7 @@ def retry_media_inputs_after_failure(
     actually present in ``media_inputs`` or ``extra_present_kinds`` (media
     pinned to thread-history messages in the run input).
     """
-    present_kinds = _media_kinds_present(media_inputs) | extra_present_kinds
+    present_kinds = media_inputs.kinds() | extra_present_kinds
     if not present_kinds:
         return _no_media_retry_decision(media_inputs)
 
@@ -243,19 +240,6 @@ def _is_ambiguous_media_error(error_text: str) -> bool:
 
 def _canonical_media_kind(provider_kind: str) -> MediaKind | None:
     return _PROVIDER_MEDIA_KINDS.get(provider_kind)
-
-
-def _media_kinds_present(media_inputs: MediaInputs) -> frozenset[MediaKind]:
-    kinds: set[MediaKind] = set()
-    if media_inputs.audio:
-        kinds.add("audio")
-    if media_inputs.images:
-        kinds.add("image")
-    if media_inputs.files:
-        kinds.add("file")
-    if media_inputs.videos:
-        kinds.add("video")
-    return frozenset(kinds)
 
 
 def _without_media_kinds(media_inputs: MediaInputs, kinds: frozenset[MediaKind]) -> MediaInputs:

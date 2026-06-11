@@ -18,10 +18,10 @@ from mindroom.attachment_media import attachment_records_to_media, resolve_scope
 from mindroom.attachments import (
     AttachmentRecord,
     _attachment_id_for_event,
+    _attachment_ids_for_visible_message,
     _AttachmentKind,
     _register_image_attachment,
     _register_media_attachment,
-    attachment_ids_for_visible_message,
     filter_attachments_for_context,
     format_attachment_annotation,
     format_attachments_prompt,
@@ -443,16 +443,16 @@ def test_attachment_rendering_sanitizes_malicious_filenames() -> None:
     assert long_annotation == f'[attachments: att_2 (file, "{"a" * 79}…")]'
 
 
-def test_attachment_ids_for_visible_message_prefers_metadata() -> None:
+def test__attachment_ids_for_visible_message_prefers_metadata() -> None:
     """Metadata IDs win; raw media events map to the deterministic event ID."""
     metadata_message = make_visible_message(content={"com.mindroom.attachment_ids": ["att_meta"]})
-    assert attachment_ids_for_visible_message(metadata_message) == ["att_meta"]
+    assert _attachment_ids_for_visible_message(metadata_message) == ["att_meta"]
 
     media_message = make_visible_message(event_id="$img", content={"msgtype": "m.image", "body": "photo.jpg"})
-    assert attachment_ids_for_visible_message(media_message) == [_attachment_id_for_event("$img")]
+    assert _attachment_ids_for_visible_message(media_message) == [_attachment_id_for_event("$img")]
 
     text_message = make_visible_message(body="plain text", content={"msgtype": "m.text", "body": "plain text"})
-    assert attachment_ids_for_visible_message(text_message) == []
+    assert _attachment_ids_for_visible_message(text_message) == []
 
 
 def test_filter_attachments_for_context_enforces_room_and_thread(tmp_path: Path) -> None:
