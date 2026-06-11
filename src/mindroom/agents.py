@@ -833,7 +833,7 @@ def _build_dynamic_tooling_state_suffix(
     )
 
 
-def _enable_all_history_replay(entity: Agent | Team) -> None:
+def enable_all_history_replay(entity: Agent | Team) -> None:
     """Undo Agno's default three-run history fallback."""
     entity.num_history_runs = None
 
@@ -1447,8 +1447,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     # Shared history-policy source of truth with the team replay path.
     history_settings = config.get_entity_history_settings(agent_name)
     history_policy = history_settings.policy
-    num_history_runs = history_policy.limit if history_policy.mode == "runs" else None
-    num_history_messages = history_policy.limit if history_policy.mode == "messages" else None
 
     compress_tool_results = (
         agent_config.compress_tool_results
@@ -1472,8 +1470,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,
         add_session_summary_to_context=persist_runtime_state,
-        num_history_runs=num_history_runs,
-        num_history_messages=num_history_messages,
+        num_history_runs=history_policy.num_history_runs,
+        num_history_messages=history_policy.num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.
         store_history_messages=False,
         culture_manager=culture_manager,
@@ -1485,7 +1483,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         telemetry=False,
     )
     if history_policy.mode == "all":
-        _enable_all_history_replay(agent)
+        enable_all_history_replay(agent)
 
     logger.info(
         "Created agent",
@@ -1528,6 +1526,7 @@ __all__ = [
     "build_agent_toolkit",
     "create_agent",
     "describe_agent",
+    "enable_all_history_replay",
     "ensure_default_agent_workspaces",
     "get_agent_toolkit_names",
     "get_rooms_for_entity",

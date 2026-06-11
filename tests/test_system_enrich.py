@@ -423,6 +423,7 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
             scope_context=None,
             model_name=None,
             configured_team_name=None,
+            execution_identity=None,
         )
         await prepare_materialized_team_execution(
             scope_context=None,
@@ -502,6 +503,7 @@ async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_pa
             scope_context=None,
             model_name=None,
             configured_team_name=None,
+            execution_identity=None,
         )
         prepared_execution = await prepare_materialized_team_execution(
             scope_context=None,

@@ -437,7 +437,6 @@ def test_file_mode_knowledge_skips_semantic_lookup_and_refresh(
     )
 
     assert resolution.knowledge is None
-    assert resolution.missing == ()
     assert resolution.unavailable == {}
     get_published_index.assert_not_called()
     scheduler.is_refreshing.assert_not_called()

@@ -4225,6 +4225,7 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
             runtime_paths=runtime_paths,
             team_display_name="Team-alpha-zeta",
             fallback_team_id="Team-alpha-zeta",
+            execution_identity=None,
             configured_team_name="pair",
         )
 
@@ -4272,6 +4273,7 @@ def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None
             runtime_paths=runtime_paths,
             team_display_name="Team-alpha-zeta",
             fallback_team_id="Team-alpha-zeta",
+            execution_identity=None,
             configured_team_name="pair",
         )
 

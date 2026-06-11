@@ -1078,13 +1078,14 @@ class _MultiAgentOrchestrator:
     async def _load_initial_config(self, new_config: Config) -> bool:
         """Handle config loading before the runtime has an active config."""
         hook_registry = self._build_hook_registry(new_config)
+        entity_names = configured_entity_names(new_config)
         self._preflight_account_provisioning(
             new_config,
-            entity_names=configured_entity_names(new_config),
+            entity_names=entity_names,
             include_internal_user=True,
         )
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
-        await self._prepare_entity_accounts(new_config, configured_entity_names(new_config))
+        await self._prepare_entity_accounts(new_config, entity_names)
         self.config = new_config
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(new_config)

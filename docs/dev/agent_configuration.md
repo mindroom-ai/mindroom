@@ -478,6 +478,7 @@ Below is a representative selection:
 - **discord** - Discord messaging (requires bot token)
 - **matrix_message** - Send messages to other Matrix rooms
 - **thread_summary** - Write or update a one-line Matrix thread summary with `set_thread_summary`
+- **thread_model** - Show, switch, or reset the model override for the current Matrix thread (applies from the next message)
 
 ### AI & Generation Tools
 - **dalle** - Generate images with DALL-E

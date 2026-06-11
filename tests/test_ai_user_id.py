@@ -250,6 +250,7 @@ def _prepared_prompt_result(
     prompt: str = "test prompt",
     estimated_context_tokens: int | None = None,
     prepared_context_tokens: int | None = None,
+    runtime_model_name: str = "default",
 ) -> _PreparedAgentRun:
     return _PreparedAgentRun(
         agent=agent,
@@ -259,6 +260,7 @@ def _prepared_prompt_result(
             estimated_context_tokens=estimated_context_tokens,
             prepared_context_tokens=prepared_context_tokens,
         ),
+        runtime_model_name=runtime_model_name,
     )
 
 
@@ -2517,6 +2519,7 @@ async def test_generate_response_preserves_model_prompt_in_persisted_session(
             ),
             unseen_event_ids=[],
             prepared_history=PreparedHistoryState(),
+            runtime_model_name="default",
         )
 
     async def fake_cached_agent_run(
@@ -6631,7 +6634,7 @@ class TestUserIdPassthrough:
             patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
             patch("mindroom.matrix.state.get_room_alias_from_id", return_value="lobby"),
         ):
-            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, runtime_model_name="large")
             run_metadata: dict[str, object] = {}
             await ai_response(
                 agent_name="general",
@@ -6697,7 +6700,7 @@ class TestUserIdPassthrough:
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
             patch("mindroom.matrix.state.get_room_alias_from_id", return_value="lobby"),
         ):
-            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, runtime_model_name="large")
             run_metadata: dict[str, object] = {}
             async for _chunk in stream_agent_response(
                 agent_name="general",

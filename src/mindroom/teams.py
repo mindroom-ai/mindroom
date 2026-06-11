@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from mindroom import ai_runtime, model_loading
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import get_team_session
-from mindroom.agents import create_agent
+from mindroom.agents import create_agent, enable_all_history_replay
 from mindroom.ai import build_matrix_run_metadata, resolve_run_correlation_id
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.authorization import get_available_responders_in_room
@@ -62,7 +62,6 @@ from mindroom.llm_request_logging import (
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.state import get_room_alias_from_id
 from mindroom.media_fallback import (
     append_inline_media_fallback_prompt,
     build_model_media_route,
@@ -1278,7 +1277,7 @@ def _create_team_instance(
     runtime_paths: RuntimePaths,
     team_display_name: str,
     fallback_team_id: str,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
     model_name: str | None = None,
     configured_team_name: str | None = None,
     history_storage: BaseDb | None = None,
@@ -1342,8 +1341,8 @@ def _create_team_instance(
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
         add_history_to_context=True,
         add_session_summary_to_context=True,
-        num_history_runs=history_settings.policy.limit if history_settings.policy.mode == "runs" else None,
-        num_history_messages=history_settings.policy.limit if history_settings.policy.mode == "messages" else None,
+        num_history_runs=history_settings.policy.num_history_runs,
+        num_history_messages=history_settings.policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
         store_history_messages=False,
         show_members_responses=True,
@@ -1352,7 +1351,7 @@ def _create_team_instance(
         # Agno will automatically list members with their names, roles, and tools
     )
     if history_settings.policy.mode == "all":
-        team.num_history_runs = None
+        enable_all_history_replay(team)
     return team
 
 
@@ -1389,13 +1388,7 @@ def select_model_for_team(
         thread_id=thread_id,
         runtime_paths=runtime_paths,
     ).model_name
-    room_alias = get_room_alias_from_id(room_id, runtime_paths)
-    if room_alias and room_alias in config.room_models:
-        logger.info("using_room_specific_team_model", team_name=team_name, room_alias=room_alias, model_name=model_name)
-    elif team_name in config.teams and config.teams[team_name].model:
-        logger.info("using_team_specific_model", team_name=team_name, model_name=model_name)
-    else:
-        logger.info("using_default_team_model", team_name=team_name)
+    logger.info("selected_team_model", team_name=team_name, model_name=model_name)
     return model_name
 
 
@@ -1409,7 +1402,7 @@ def build_materialized_team_instance(
     scope_context: ScopeSessionContext | None,
     model_name: str | None,
     configured_team_name: str | None,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> Team:
     """Build one agno.Team instance for already-materialized members."""
     resolved_team_runtime_model = config.resolve_runtime_model(

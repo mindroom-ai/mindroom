@@ -157,13 +157,16 @@ class AgentVaultAccessTools(Toolkit):
     def _headers(self, token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    async def _ensure_vault(self, vault: str, token: str) -> None:
+    async def _post(self, path: str, token: str, payload: dict | None = None) -> httpx.Response:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                urljoin(self._api_url.rstrip("/") + "/", "v1/vaults"),
+            return await client.post(
+                urljoin(self._api_url.rstrip("/") + "/", path),
                 headers=self._headers(token),
-                json={"name": vault},
+                json=payload,
             )
+
+    async def _ensure_vault(self, vault: str, token: str) -> None:
+        response = await self._post("v1/vaults", token, {"name": vault})
         # 409/422 mean the vault already exists, which is fine for an idempotent grant.
         if response.status_code in {200, 201, 409, 422}:
             return
@@ -174,11 +177,7 @@ class AgentVaultAccessTools(Toolkit):
         # instance owners are not vault admins implicitly. Vaults created by
         # the worker token-mint flow do not include this admin actor, so join
         # (owner-only, grants vault-admin) before granting.
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                urljoin(self._api_url.rstrip("/") + "/", f"v1/vaults/{quote(vault, safe='')}/join"),
-                headers=self._headers(token),
-            )
+        response = await self._post(f"v1/vaults/{quote(vault, safe='')}/join", token)
         # 409 means this actor is already a vault member, fine for an idempotent grant.
         if response.status_code in {200, 201, 409}:
             return
@@ -192,12 +191,11 @@ class AgentVaultAccessTools(Toolkit):
         response.raise_for_status()
 
     async def _grant_member(self, vault: str, email: str, token: str) -> bool:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                urljoin(self._api_url.rstrip("/") + "/", f"v1/vaults/{quote(vault, safe='')}/users"),
-                headers=self._headers(token),
-                json={"email": email, "role": "member"},
-            )
+        response = await self._post(
+            f"v1/vaults/{quote(vault, safe='')}/users",
+            token,
+            {"email": email, "role": "member"},
+        )
         if response.status_code in {200, 201}:
             return True
         if response.status_code in {409, 422}:

@@ -12679,6 +12679,7 @@ class TestAgentBot:
         room.room_id = "!room:localhost"
         event = MagicMock()
         event.event_id = "$event"
+        event.body = "hello"
         dispatch = PreparedDispatch(
             requester_user_id="@user:localhost",
             context=MessageContext(
@@ -12730,7 +12731,13 @@ class TestAgentBot:
             response_runner=bot._response_runner,
         )
 
-        with patch.object(TurnController, "_log_dispatch_latency"):
+        with (
+            patch.object(TurnController, "_log_dispatch_latency"),
+            patch(
+                "mindroom.turn_controller.select_ad_hoc_team_mode",
+                new=AsyncMock(return_value=TeamMode.COORDINATE),
+            ),
+        ):
 
             async def payload_builder(_context: MessageContext) -> DispatchPayload:
                 return DispatchPayload(prompt="help me")
@@ -12756,6 +12763,181 @@ class TestAgentBot:
                 response_event_id="$team-response",
             ),
         )
+
+    @pytest.mark.asyncio
+    async def test_execute_dispatch_action_team_explicit_members_uses_ai_team_mode(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Ad-hoc team dispatch should ask the AI selector for the team mode."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        _set_turn_store_tracker(bot, MagicMock())
+        bot.logger = MagicMock()
+        _replace_turn_policy_deps(bot, logger=bot.logger)
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$event"
+        event.body = "hello"
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id="$thread_root",
+                thread_history=[],
+                mentioned_agents=[bot.matrix_id],
+                has_non_agent_mentions=False,
+                requires_model_history_refresh=False,
+            ),
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id="$thread_root",
+                    reply_to_event_id=event.event_id,
+                )
+            ),
+            correlation_id="corr-team-dispatch",
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
+        )
+        action = ResponseAction(
+            kind="team",
+            form_team=TeamResolution.team(
+                intent=TeamIntent.EXPLICIT_MEMBERS,
+                requested_members=[bot.matrix_id],
+                member_statuses=[],
+                eligible_members=[bot.matrix_id],
+                mode=TeamMode.COLLABORATE,
+            ),
+        )
+
+        mock_generate_team_response = AsyncMock(return_value="$team-response")
+        install_send_response_mock(bot, AsyncMock())
+        bot._response_runner.generate_team_response_helper = mock_generate_team_response
+        _replace_turn_policy_deps(
+            bot,
+            delivery_gateway=bot._delivery_gateway,
+            response_runner=bot._response_runner,
+        )
+
+        mock_select_team_mode = AsyncMock(return_value=TeamMode.COORDINATE)
+        with (
+            patch.object(TurnController, "_log_dispatch_latency"),
+            patch("mindroom.turn_controller.select_ad_hoc_team_mode", new=mock_select_team_mode),
+        ):
+
+            async def payload_builder(_context: MessageContext) -> DispatchPayload:
+                return DispatchPayload(prompt="help me")
+
+            await bot._turn_controller._execute_response_action(
+                room,
+                event,
+                dispatch,
+                action,
+                payload_builder,
+                processing_log="processing",
+                dispatch_started_at=0.0,
+                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+            )
+
+        assert action.form_team is not None
+        mock_select_team_mode.assert_awaited_once_with(
+            event.body,
+            action.form_team.eligible_members,
+            bot._turn_controller.deps.runtime.config,
+            bot._turn_controller.deps.runtime_paths,
+        )
+        assert mock_generate_team_response.await_args.kwargs["team_mode"] == "coordinate"
+        assert mock_generate_team_response.await_args.kwargs["team_agents"] == action.form_team.eligible_members
+
+    @pytest.mark.asyncio
+    async def test_execute_dispatch_action_team_configured_team_skips_ai_team_mode(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Configured-team dispatch should pass the configured mode through without an AI call."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        _set_turn_store_tracker(bot, MagicMock())
+        bot.logger = MagicMock()
+        _replace_turn_policy_deps(bot, logger=bot.logger)
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$event"
+        event.body = "hello"
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id="$thread_root",
+                thread_history=[],
+                mentioned_agents=[bot.matrix_id],
+                has_non_agent_mentions=False,
+                requires_model_history_refresh=False,
+            ),
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id="$thread_root",
+                    reply_to_event_id=event.event_id,
+                )
+            ),
+            correlation_id="corr-team-dispatch",
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
+        )
+        action = ResponseAction(
+            kind="team",
+            form_team=TeamResolution.team(
+                intent=TeamIntent.CONFIGURED_TEAM,
+                requested_members=[bot.matrix_id],
+                member_statuses=[],
+                eligible_members=[bot.matrix_id],
+                mode=TeamMode.COORDINATE,
+            ),
+        )
+
+        mock_generate_team_response = AsyncMock(return_value="$team-response")
+        install_send_response_mock(bot, AsyncMock())
+        bot._response_runner.generate_team_response_helper = mock_generate_team_response
+        _replace_turn_policy_deps(
+            bot,
+            delivery_gateway=bot._delivery_gateway,
+            response_runner=bot._response_runner,
+        )
+
+        mock_select_team_mode = AsyncMock(return_value=TeamMode.COLLABORATE)
+        with (
+            patch.object(TurnController, "_log_dispatch_latency"),
+            patch("mindroom.turn_controller.select_ad_hoc_team_mode", new=mock_select_team_mode),
+        ):
+
+            async def payload_builder(_context: MessageContext) -> DispatchPayload:
+                return DispatchPayload(prompt="help me")
+
+            await bot._turn_controller._execute_response_action(
+                room,
+                event,
+                dispatch,
+                action,
+                payload_builder,
+                processing_log="processing",
+                dispatch_started_at=0.0,
+                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+            )
+
+        mock_select_team_mode.assert_not_called()
+        assert mock_generate_team_response.await_args.kwargs["team_mode"] == "coordinate"
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_send_placeholder_before_response_runner(

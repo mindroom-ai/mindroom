@@ -50,7 +50,6 @@ async def test_stream_processing_marks_tool_call_started() -> None:
     with patch(
         "mindroom.ai.emit_timing_event",
         side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
-        create=True,
     ):
         chunks = [
             chunk
@@ -62,6 +61,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
                 media_inputs=MediaInputs(),
                 retried_after_media_fallback=False,
                 timing_scope="test",
+                media_route=None,
                 context_media_kinds=frozenset(),
             )
         ]
@@ -90,7 +90,6 @@ async def test_queue_delivery_request_marks_enqueued_delivery() -> None:
     with patch(
         "mindroom.streaming.emit_timing_event",
         side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
-        create=True,
     ):
         capture_completion = _queue_delivery_request(
             delivery_queue,
@@ -136,7 +135,6 @@ async def test_send_message_result_marks_prepare_and_send_phases() -> None:
         patch(
             "mindroom.matrix.client_delivery.emit_timing_event",
             side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
-            create=True,
         ),
     ):
         result = await send_message_result(
@@ -284,7 +282,6 @@ async def test_tool_hook_bridge_marks_hook_and_tool_entry() -> None:
     with patch(
         "mindroom.tool_system.tool_hooks.emit_timing_event",
         side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
-        create=True,
     ):
         result = await bridge("echo", echo, {"text": "hello"})
 

@@ -2441,6 +2441,7 @@ depends_on = [
 expose = [
     "create_agent",
     "describe_agent",
+    "enable_all_history_replay",
     "ensure_default_agent_workspaces",
     "get_rooms_for_entity",
     "show_tool_calls_for_agent",
