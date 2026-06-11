@@ -6,9 +6,8 @@ response runner inside the :class:`~mindroom.response_runner.ResponseRequest`.
 Once the runner owns the lifecycle lock and has refreshed thread history, it
 calls :meth:`ResponsePayloadPreparer.prepare` to finish assembling the request.
 
-This is the execution-side counterpart of what used to be a ``prepare_after_lock``
-callback into the caller: the data crosses the seam as values, and the work runs
-here as a first-class named step rather than as a closure back into ingress.
+Data crosses the seam as values, and the work runs here as a first-class named
+step rather than as a closure back into ingress.
 """
 
 from __future__ import annotations

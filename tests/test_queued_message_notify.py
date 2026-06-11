@@ -1217,7 +1217,7 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_generate_response_keeps_locked_target_when_prepare_after_lock_retargets(tmp_path: Path) -> None:
+async def test_generate_response_keeps_locked_target_when_payload_preparation_retargets(tmp_path: Path) -> None:
     """Post-lock request preparation may refresh context, but it must not retarget delivery."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -1369,7 +1369,7 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_keeps_locked_target_when_prepare_after_lock_retargets(tmp_path: Path) -> None:
+async def test_generate_team_response_keeps_locked_target_when_payload_preparation_retargets(tmp_path: Path) -> None:
     """Team response setup and delivery should keep the target selected before lock acquisition."""
     bot = _bot(tmp_path)
     bot.client = MagicMock()
