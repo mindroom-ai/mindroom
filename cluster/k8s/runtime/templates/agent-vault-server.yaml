@@ -55,7 +55,7 @@ spec:
       {{- end }}
       containers:
         - name: agent-vault
-          image: {{ required "workers.kubernetes.agentVault.server.image is required when the Agent Vault server is enabled" $server.image | quote }}
+          image: {{ include "mindroom-runtime.agentVaultServerImage" . | quote }}
           imagePullPolicy: {{ $server.imagePullPolicy }}
           command:
             - agent-vault

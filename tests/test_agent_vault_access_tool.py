@@ -63,11 +63,13 @@ class _FakeVaultAPI:
     def __init__(self, responses: dict[str, int]) -> None:
         self.responses = responses
         self.calls: list[tuple[str, dict]] = []
+        self.auth_headers: list[str] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         body = json.loads(request.content.decode()) if request.content else {}
         self.calls.append((path, body))
+        self.auth_headers.append(request.headers.get("authorization", ""))
         for suffix, status in self.responses.items():
             if path.endswith(suffix):
                 payload = {"name": body.get("name", "")} if status < 300 else {"error": "scripted"}
@@ -180,3 +182,49 @@ async def test_request_vault_access_without_requester(tmp_path: Path) -> None:
     )
     payload = json.loads(await tool.request_vault_access())
     assert payload["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_admin_token_file_is_reread_per_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rotated token file takes effect on the next call without a restart."""
+    token_file = tmp_path / "token"
+    token_file.write_text("first-token\n", encoding="utf-8")
+    env = {k: v for k, v in _ENV.items() if k != "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN"}
+    env["MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE"] = str(token_file)
+    api = _FakeVaultAPI({"/v1/vaults": 201, "/users": 201})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=_worker_target())
+    assert json.loads(await tool.request_vault_access())["status"] == "ok"
+    token_file.write_text("second-token\n", encoding="utf-8")
+    assert json.loads(await tool.request_vault_access())["status"] == "ok"
+
+    assert "Bearer first-token" in api.auth_headers
+    assert "Bearer second-token" in api.auth_headers
+
+
+@pytest.mark.asyncio
+async def test_admin_token_file_missing_is_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable token file fails the call with a clear error, not a crash."""
+    env = {k: v for k, v in _ENV.items() if k != "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN"}
+    env["MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE"] = str(tmp_path / "missing-token")
+    _patch_client(monkeypatch, _FakeVaultAPI({"/v1/vaults": 201, "/users": 201}))
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=_worker_target())
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "error"
+    assert "admin token file" in payload["error"]
+
+
+def test_tool_requires_some_admin_token(tmp_path: Path) -> None:
+    """Construction fails when neither the inline token nor the token file is set."""
+    env = {k: v for k, v in _ENV.items() if k != "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN"}
+    with pytest.raises(_AgentVaultAccessError, match="ADMIN_TOKEN"):
+        AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=_worker_target())

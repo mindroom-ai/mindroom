@@ -159,3 +159,15 @@
 {{- fail "approvedEgress.persistence.size is required when chart-managed approved egress persistence is enabled" -}}
 {{- end -}}
 {{- end -}}
+{{- $agentVault := .Values.workers.kubernetes.agentVault -}}
+{{- if $agentVault.accessTool.enabled -}}
+{{- if not $agentVault.enabled -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.enabled requires workers.kubernetes.agentVault.enabled=true" -}}
+{{- end -}}
+{{- if not (trim (default "" $agentVault.accessTool.adminAgentName)) -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.adminAgentName must not be empty" -}}
+{{- end -}}
+{{- if not (and (trim (default "" $agentVault.accessTool.adminTokenSecret.name)) (trim (default "" $agentVault.accessTool.adminTokenSecret.key))) -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.adminTokenSecret.name and .key must not be empty" -}}
+{{- end -}}
+{{- end -}}

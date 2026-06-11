@@ -6721,13 +6721,25 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Owner/admin session or agent token used to create vaults and grant membership.",
+          "description": "Owner/admin session or agent token used to create vaults and grant membership. Provide this or the admin token file.",
           "label": "Agent Vault Admin Token",
           "name": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN",
           "options": null,
           "placeholder": null,
-          "required": true,
+          "required": false,
           "type": "password",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Path to a file holding the admin token, re-read on every call so an in-place Secret rotation takes effect without a restart. Takes precedence over the inline token.",
+          "label": "Agent Vault Admin Token File",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE",
+          "options": null,
+          "placeholder": "/etc/agent-vault-access/token",
+          "required": false,
+          "type": "text",
           "validation": null
         },
         {
