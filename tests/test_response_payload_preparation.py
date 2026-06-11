@@ -40,10 +40,11 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
-    from mindroom.message_target import MessageTarget as _MessageTarget
+    from mindroom.dispatch_handoff import MediaDispatchEvent
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 def _config(tmp_path: Path) -> Config:
@@ -73,7 +74,7 @@ def _bot(tmp_path: Path) -> AgentBot:
     return bot
 
 
-def _target(thread_id: str | None = None) -> _MessageTarget:
+def _target(thread_id: str | None = None) -> MessageTarget:
     return MessageTarget.resolve(
         room_id="!room:localhost",
         thread_id=thread_id,
@@ -82,7 +83,7 @@ def _target(thread_id: str | None = None) -> _MessageTarget:
     )
 
 
-def _envelope(target: _MessageTarget) -> MessageEnvelope:
+def _envelope(target: MessageTarget) -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$event",
         room_id="!room:localhost",
@@ -99,12 +100,12 @@ def _envelope(target: _MessageTarget) -> MessageEnvelope:
 
 
 def _preparation(
-    target: _MessageTarget,
+    target: MessageTarget,
     *,
     prompt: str = "raw prompt",
     action_kind: str = "individual",
     message_attachment_ids: tuple[str, ...] = (),
-    media_events: tuple[object, ...] = (),
+    media_events: tuple[MediaDispatchEvent, ...] = (),
 ) -> ResponsePayloadPreparation:
     return ResponsePayloadPreparation(
         dispatch=PreparedDispatch(
@@ -126,7 +127,7 @@ def _preparation(
         payload_inputs=DispatchPayloadInputs(
             message_attachment_ids=message_attachment_ids,
             trusted_attachment_ids=(),
-            media_events=cast("tuple", media_events),
+            media_events=media_events,
         ),
         target_member_names=None,
         dispatch_started_at=1.0,
@@ -135,13 +136,13 @@ def _preparation(
 
 
 def _request(
-    target: _MessageTarget,
+    target: MessageTarget,
     preparation: ResponsePayloadPreparation,
     *,
-    thread_history: object,
+    thread_history: Sequence[ResolvedVisibleMessage],
 ) -> ResponseRequest:
     return ResponseRequest(
-        thread_history=cast("list", thread_history),
+        thread_history=thread_history,
         prompt=preparation.prompt,
         user_id="@user:localhost",
         response_envelope=_envelope(target),
@@ -288,7 +289,7 @@ async def test_prepare_registers_batch_media_when_media_events_present(tmp_path:
         await bot._request_payload_preparer.prepare(
             _request(
                 target,
-                _preparation(target, media_events=(object(),)),
+                _preparation(target, media_events=(MagicMock(),)),
                 thread_history=ThreadHistoryResult([], is_full_history=True),
             ),
         )
