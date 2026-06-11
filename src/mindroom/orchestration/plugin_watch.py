@@ -56,7 +56,7 @@ class PluginWatchState:
         """Replace watcher baselines and clear any stale pending dirty state."""
         _drop_unconfigured_plugin_root_snapshots(configured_roots, self.last_snapshot_by_root)
         for root in configured_roots:
-            self.last_snapshot_by_root[root] = root_snapshots.get(root, {}).copy()
+            self.last_snapshot_by_root[root] = root_snapshots[root]
         self.revision += 1
 
     def refresh(self, config: Config | None) -> tuple[Path, ...]:
