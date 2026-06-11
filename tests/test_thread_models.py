@@ -558,7 +558,6 @@ def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path) -> None:
         model_provider="openai",
     )
 
-    assert metadata is not None
     assert metadata[AI_RUN_METADATA_KEY]["model"] == {
         "config": "default",
         "id": "default-model",

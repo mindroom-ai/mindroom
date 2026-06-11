@@ -360,7 +360,6 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
         prepared_history=prepared_history,
     )
 
-    assert metadata is not None
     payload = metadata[AI_RUN_METADATA_KEY]
     assert payload["usage"]["input_tokens"] == 123
     assert payload["prepared_context"]["tokens"] == 20_000
@@ -400,7 +399,6 @@ def test_ai_run_metadata_fallback_usage_only_backfills_missing_fields(tmp_path: 
         },
     )
 
-    assert metadata is not None
     usage = metadata[AI_RUN_METADATA_KEY]["usage"]
     assert usage["input_tokens"] == 100
     assert usage["output_tokens"] == 25
@@ -440,7 +438,6 @@ def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_pat
         context_cache_write_tokens=500,
     )
 
-    assert metadata is not None
     context = metadata[AI_RUN_METADATA_KEY]["context"]
     assert context["input_tokens"] == 153_294
     assert context["window_tokens"] == 200_000
