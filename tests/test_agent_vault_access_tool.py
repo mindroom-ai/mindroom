@@ -116,7 +116,7 @@ async def test_request_vault_access_grants_and_returns_link(
     """A first request resolves the vault, grants membership, and returns the link."""
     target = _worker_target()
     expected_vault = worker_id_for_key(target.worker_key, prefix="agent-vault")
-    api = _FakeVaultAPI({"/v1/vaults": 201, "/users": 201})
+    api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 409, "/users": 201})
     _patch_client(monkeypatch, api)
 
     tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=target)
@@ -138,7 +138,7 @@ async def test_request_vault_access_is_idempotent_when_already_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Re-requesting when already a member reports success without error."""
-    api = _FakeVaultAPI({"/v1/vaults": 409, "/users": 409})
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 409})
     _patch_client(monkeypatch, api)
 
     tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=_worker_target())
@@ -149,12 +149,41 @@ async def test_request_vault_access_is_idempotent_when_already_member(
 
 
 @pytest.mark.asyncio
+async def test_request_vault_access_joins_worker_created_vault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vaults created by the worker mint flow need an owner join before the grant.
+
+    Granting membership requires vault-admin on that vault and instance owners
+    are not vault admins implicitly, so the tool must POST /join (which grants
+    the owner actor vault-admin) before POSTing the member grant.
+    """
+    target = _worker_target()
+    expected_vault = worker_id_for_key(target.worker_key, prefix="agent-vault")
+    # Pre-existing vault (409 on create), not yet joined (200 on join).
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 201})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=target)
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "ok"
+    assert payload["access"] == "granted"
+    paths = [path for path, _ in api.calls]
+    join_path = f"/v1/vaults/{expected_vault}/join"
+    grant_path = f"/v1/vaults/{expected_vault}/users"
+    assert join_path in paths
+    assert paths.index(join_path) < paths.index(grant_path)
+
+
+@pytest.mark.asyncio
 async def test_request_vault_access_reports_unregistered_account(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unregistered account yields a clean error, not a traceback."""
-    api = _FakeVaultAPI({"/v1/vaults": 201, "/users": 404})
+    api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 409, "/users": 404})
     _patch_client(monkeypatch, api)
 
     tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=_worker_target())
@@ -194,7 +223,7 @@ async def test_admin_token_file_is_reread_per_call(
     token_file.write_text("first-token\n", encoding="utf-8")
     env = {k: v for k, v in _ENV.items() if k != "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN"}
     env["MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE"] = str(token_file)
-    api = _FakeVaultAPI({"/v1/vaults": 201, "/users": 201})
+    api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 409, "/users": 201})
     _patch_client(monkeypatch, api)
 
     tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=_worker_target())
@@ -214,7 +243,7 @@ async def test_admin_token_file_missing_is_reported(
     """An unreadable token file fails the call with a clear error, not a crash."""
     env = {k: v for k, v in _ENV.items() if k != "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN"}
     env["MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE"] = str(tmp_path / "missing-token")
-    _patch_client(monkeypatch, _FakeVaultAPI({"/v1/vaults": 201, "/users": 201}))
+    _patch_client(monkeypatch, _FakeVaultAPI({"/v1/vaults": 201, "/join": 409, "/users": 201}))
 
     tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=_worker_target())
     payload = json.loads(await tool.request_vault_access())
