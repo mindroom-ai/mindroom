@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from mindroom.api import credentials as credentials_api
+from mindroom.api import credentials_oauth_flows
 from mindroom.api.main import initialize_api_app
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
@@ -39,7 +39,7 @@ def test_client(mock_credentials_manager: CredentialsManager) -> Generator[TestC
         resolve_runtime_paths(storage_path=mock_credentials_manager.storage_root),
     )
 
-    with patch("mindroom.api.credentials.get_runtime_credentials_manager") as mock_get:
+    with patch("mindroom.api.credentials_target.get_runtime_credentials_manager") as mock_get:
         mock_get.return_value = mock_credentials_manager
         client = TestClient(app)
         # Store the mock for use in tests
@@ -326,12 +326,12 @@ def test_pending_oauth_state_binds_agent_name_and_user(tmp_path: Path) -> None:
     @app.post("/issue/{service}")
     async def issue(service: str, request: Request, user_id: str, agent_name: str | None = None) -> dict[str, str]:
         request.scope["auth_user"] = {"user_id": user_id}
-        return {"state": credentials_api.issue_pending_oauth_state(request, service, agent_name)}
+        return {"state": credentials_oauth_flows.issue_pending_oauth_state(request, service, agent_name)}
 
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
         request.scope["auth_user"] = {"user_id": user_id}
-        return {"agent_name": credentials_api._consume_pending_oauth_request(request, service, state).agent_name}
+        return {"agent_name": credentials_oauth_flows.consume_pending_oauth_request(request, service, state).agent_name}
 
     client = TestClient(app)
     issue_response = client.post("/issue/google?user_id=alice&agent_name=general")
@@ -350,12 +350,12 @@ def test_pending_oauth_state_rejects_different_user(tmp_path: Path) -> None:
     @app.post("/issue/{service}")
     async def issue(service: str, request: Request, user_id: str, agent_name: str | None = None) -> dict[str, str]:
         request.scope["auth_user"] = {"user_id": user_id}
-        return {"state": credentials_api.issue_pending_oauth_state(request, service, agent_name)}
+        return {"state": credentials_oauth_flows.issue_pending_oauth_state(request, service, agent_name)}
 
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
         request.scope["auth_user"] = {"user_id": user_id}
-        return {"agent_name": credentials_api._consume_pending_oauth_request(request, service, state).agent_name}
+        return {"agent_name": credentials_oauth_flows.consume_pending_oauth_request(request, service, state).agent_name}
 
     client = TestClient(app)
     issue_response = client.post("/issue/google?user_id=alice&agent_name=general")
@@ -378,7 +378,7 @@ def test_pending_oauth_request_preserves_payload(tmp_path: Path) -> None:
     async def issue(service: str, request: Request) -> dict[str, str]:
         request.scope["auth_user"] = {"user_id": "alice"}
         return {
-            "state": credentials_api.issue_pending_oauth_state(
+            "state": credentials_oauth_flows.issue_pending_oauth_state(
                 request,
                 service,
                 "general",
@@ -389,7 +389,7 @@ def test_pending_oauth_request_preserves_payload(tmp_path: Path) -> None:
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str) -> dict[str, str | dict[str, str] | None]:
         request.scope["auth_user"] = {"user_id": "alice"}
-        pending = credentials_api._consume_pending_oauth_request(request, service, state)
+        pending = credentials_oauth_flows.consume_pending_oauth_request(request, service, state)
         return {
             "agent_name": pending.agent_name,
             "payload": pending.payload,

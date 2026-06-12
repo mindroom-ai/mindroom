@@ -390,7 +390,8 @@ depends_on = [
 path = "mindroom.api.homeassistant_integration"
 depends_on = [
     "mindroom.api.auth",
-    "mindroom.api.credentials",
+    "mindroom.api.credentials_oauth_flows",
+    "mindroom.api.credentials_target",
     "mindroom.api.integrations",
 ]
 
@@ -398,7 +399,8 @@ depends_on = [
 path = "mindroom.api.integrations"
 depends_on = [
     "mindroom.api.auth",
-    "mindroom.api.credentials",
+    "mindroom.api.credentials_oauth_flows",
+    "mindroom.api.credentials_target",
     "mindroom.tool_system.dependencies",
 ]
 
@@ -451,7 +453,9 @@ path = "mindroom.api.oauth"
 depends_on = [
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
-    "mindroom.api.credentials",
+    "mindroom.api.credentials_oauth_flows",
+    "mindroom.api.credentials_target",
+    "mindroom.api.dashboard_credential_scope",
     "mindroom.credentials",
     "mindroom.oauth",
     "mindroom.oauth.service",
@@ -493,13 +497,56 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.credentials"
 depends_on = [
-    "mindroom.agent_policy",
-    "mindroom.api.config_lifecycle",
-    "mindroom.config.main",
+    "mindroom.api.credential_responses",
+    "mindroom.api.credentials_oauth_policy",
+    "mindroom.api.credentials_target",
     "mindroom.credential_policy",
     "mindroom.credentials",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.credential_responses"
+depends_on = [
+    "mindroom.api.credentials_oauth_policy",
+    "mindroom.credential_policy",
+]
+
+[[modules]]
+path = "mindroom.api.credentials_oauth_flows"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.dashboard_credential_scope",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.state",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.credentials_oauth_policy"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.credential_policy",
     "mindroom.oauth.registry",
-    "mindroom.oauth.service",
+]
+
+[[modules]]
+path = "mindroom.api.credentials_target"
+depends_on = [
+    "mindroom.agent_policy",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.dashboard_credential_scope",
+    "mindroom.credential_policy",
+    "mindroom.credentials",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.dashboard_credential_scope"
+depends_on = [
+    "mindroom.agent_policy",
+    "mindroom.authorization",
+    "mindroom.matrix.identity",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -508,7 +555,7 @@ path = "mindroom.api.tools"
 depends_on = [
     "mindroom.agent_policy",
     "mindroom.api.config_lifecycle",
-    "mindroom.api.credentials",
+    "mindroom.api.dashboard_credential_scope",
     "mindroom.config.main",
     "mindroom.credential_policy",
     "mindroom.credentials",
