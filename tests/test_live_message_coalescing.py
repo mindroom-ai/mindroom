@@ -1330,7 +1330,6 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
     async def record_admit(key: CoalescingKey, **kwargs: object) -> None:
         ready_result = cast("ReadyPendingEvent", kwargs["ready_result"])
         admitted.append((key, ready_result.pending_event))
-        bot._coalescing_gate.release_order_reservation(kwargs["order_reservation"])
 
     with (
         patch.object(bot._coalescing_gate, "admit", new=AsyncMock(side_effect=record_admit)),
@@ -1359,6 +1358,8 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
             finally:
                 await reservation_owner.release()
 
+        await _wait_for(lambda: len(admitted) == 2)
+
     assert len({key for key, _pending_event in admitted}) == 1
     assert [pending_event.requester_user_id for _key, pending_event in admitted] == [
         "@alice:localhost",
@@ -1368,7 +1369,7 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(tmp_path: Path) -> None:
-    """A slow older lookup received during an active turn must stay in the same active backlog."""
+    """A slow older lookup must stay before a later same-sender follow-up in the backlog."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     second = _text_event(
@@ -1381,7 +1382,7 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
     third = _text_event(
         event_id="$m3",
         body="third",
-        sender="@bob:localhost",
+        sender="@alice:localhost",
         server_timestamp=1002,
         thread_id="$thread",
     )
@@ -1455,8 +1456,8 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
 
 
 @pytest.mark.asyncio
-async def test_later_slow_thread_lookup_active_follow_up_joins_open_backlog(tmp_path: Path) -> None:
-    """A later lookup received during an active turn must not miss the active backlog freeze."""
+async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_path: Path) -> None:
+    """A follow-up still resolving when the backlog flushes lands as its own turn, never lost."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     first = _text_event(
@@ -1522,12 +1523,11 @@ async def test_later_slow_thread_lookup_active_follow_up_joins_open_backlog(tmp_
 
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
-            await asyncio.sleep(0.05)
-            assert calls == []
+            await _wait_for(lambda: calls == [["$m1"]])
 
             release_second_lookup.set()
             await asyncio.wait_for(second_task, timeout=0.5)
-            await _wait_for(lambda: calls == [["$m1", "$m2"]])
+            await _wait_for(lambda: calls == [["$m1"], ["$m2"]])
     finally:
         release_second_lookup.set()
         queued_signal.finish_response_turn()
@@ -1539,7 +1539,7 @@ async def test_later_slow_thread_lookup_active_follow_up_joins_open_backlog(tmp_
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
 
-    assert calls == [["$m1", "$m2"]]
+    assert calls == [["$m1"], ["$m2"]]
 
 
 @pytest.mark.asyncio
@@ -1740,11 +1740,13 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
 
     await _admit_ready(gate, key, PendingEvent(event=text, room=room, source_kind="message"))
     await asyncio.sleep(0.01)
-    await gate.admit(
-        key,
-        ready_task=asyncio.create_task(ready_voice()),
-        received_at=1.001,
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=key,
+        source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.07)
 
@@ -1788,21 +1790,35 @@ async def test_late_same_thread_text_does_not_join_expired_debounce_while_waitin
         is_shutting_down=lambda: False,
     )
 
-    await _admit_ready(gate, text_key, PendingEvent(event=first, room=room, source_kind="message"))
+    start = time.monotonic() - 1.0
     await gate.admit(
         text_key,
-        ready_task=asyncio.create_task(ready_voice()),
+        ready_result=ReadyPendingEvent(pending_event=PendingEvent(event=first, room=room, source_kind="message")),
+        receipt_time=start,
+        source_event_id="$typed1",
+        source_kind="message",
+    )
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost", receipt_time=start + 0.005)
+    gate.submit_lane_slot(
+        voice_slot,
+        key=text_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
-    await _wait_for(lambda: bool(gate._gates[text_key].claimed_admissions))
-    await _admit_ready(gate, text_key, PendingEvent(event=second, room=room, source_kind="message"))
+    await gate.admit(
+        text_key,
+        ready_result=ReadyPendingEvent(pending_event=PendingEvent(event=second, room=room, source_kind="message")),
+        receipt_time=start + 0.5,
+        source_event_id="$typed2",
+        source_kind="message",
+    )
+    await asyncio.sleep(0.05)
 
     assert calls == []
 
     release_voice.set()
-    await gate.drain_all()
-    assert calls == [["$typed1", "$voice"], ["$typed2"]]
+    await _wait_for(lambda: calls == [["$typed1", "$voice"], ["$typed2"]], deadline_seconds=0.5)
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -1838,7 +1854,7 @@ async def test_command_executes_immediately_despite_unresolved_ingress(tmp_path:
 
 @pytest.mark.asyncio
 async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
-    """A cancelled drain should not lose admissions already claimed from the queue."""
+    """A cancelled drain should not lose queued or still-resolving admissions."""
     room = _make_room()
     key = CoalescingKey(room.room_id, "$thread", "@user:localhost")
     first = _text_event(event_id="$first", body="first")
@@ -1863,14 +1879,22 @@ async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
     )
 
     await _admit_ready(gate, key, PendingEvent(event=first, room=room, source_kind="message"))
-    await gate.admit(key, ready_task=asyncio.create_task(ready_second()))
+    second_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        second_slot,
+        key=key,
+        source_event_id="$second",
+        source_kind="message",
+        ready_task=asyncio.create_task(ready_second()),
+    )
     [gate_entry] = gate._gates.values()
-    await _wait_for(lambda: bool(gate_entry.claimed_admissions), deadline_seconds=0.2)
+    drain_task = gate_entry.drain_task
+    assert drain_task is not None
+    await asyncio.sleep(0.02)
 
-    assert gate_entry.drain_task is not None
-    gate_entry.drain_task.cancel()
+    drain_task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await gate_entry.drain_task
+        await drain_task
 
     release_second.set()
     await gate.drain_all()
@@ -1918,10 +1942,13 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
         is_shutting_down=lambda: False,
     )
 
-    await gate.admit(
-        resolved_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=resolved_key,
+        source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.wait_for(entered_voice_dispatch.wait(), timeout=0.2)
     await _admit_ready(gate, resolved_key, PendingEvent(event=followup, room=room, source_kind="message"))
@@ -1970,11 +1997,13 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
         is_shutting_down=lambda: False,
     )
 
-    await gate.admit(
-        resolved_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=resolved_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.005)
     await _admit_ready(gate, resolved_key, PendingEvent(event=typed, room=room, source_kind="message"))
@@ -2024,75 +2053,19 @@ async def test_text_before_voice_uses_stable_admission_key() -> None:
 
     await _admit_ready(gate, resolved_key, PendingEvent(event=typed, room=room, source_kind="message"))
     await asyncio.sleep(0.005)
-    await gate.admit(
-        resolved_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=resolved_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.06)
     assert calls == []
 
     release_voice.set()
     await _wait_for(lambda: calls == [(resolved_key, ["$typed", "$voice"])], deadline_seconds=0.2)
-    assert _coalescing_gate_is_idle(gate)
-
-
-@pytest.mark.asyncio
-async def test_same_thread_followup_after_voice_claim_stays_on_admitted_gate() -> None:
-    """A follow-up queued while voice is claimed should stay on the stable admission key."""
-    room = _make_room()
-    admitted_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
-    voice = _text_event(
-        event_id="$voice",
-        body="voice transcript",
-        server_timestamp=1000,
-        thread_id="$thread-root",
-        source_kind=VOICE_SOURCE_KIND,
-    )
-    typed = _text_event(
-        event_id="$typed",
-        body="typed follow-up",
-        server_timestamp=1001,
-        thread_id="$thread-root",
-    )
-    release_voice = asyncio.Event()
-    calls: list[tuple[CoalescingKey, list[str]]] = []
-
-    async def ready_voice() -> ReadyPendingEvent:
-        await release_voice.wait()
-        return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
-        )
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append((batch.coalescing_key, list(batch.source_event_ids)))
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-
-    await gate.admit(
-        admitted_key,
-        ready_task=asyncio.create_task(ready_voice()),
-        source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
-    )
-    await asyncio.sleep(0.02)
-    await _admit_ready(gate, admitted_key, PendingEvent(event=typed, room=room, source_kind="message"))
-    await asyncio.sleep(0.02)
-    assert calls == []
-
-    release_voice.set()
-    await gate.drain_all()
-
-    assert calls == [
-        (admitted_key, ["$voice"]),
-        (admitted_key, ["$typed"]),
-    ]
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2132,11 +2105,13 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
         is_shutting_down=lambda: False,
     )
 
-    await gate.admit(
-        root_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=root_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
     await _admit_ready(gate, root_key, PendingEvent(event=typed, room=room, source_kind="message"))
     await asyncio.sleep(0.02)
@@ -2185,11 +2160,13 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
 
     await _admit_ready(gate, root_key, PendingEvent(event=typed, room=room, source_kind="message"))
     await asyncio.sleep(0.005)
-    await gate.admit(
-        root_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=root_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
 
     await asyncio.sleep(0.06)
@@ -2202,10 +2179,10 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
 
 @pytest.mark.asyncio
 async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None:
-    """A later voice in a different resolved thread must not hold earlier text."""
+    """A later voice from another sender's thread must not hold earlier text."""
     room = _make_room()
     text_key = CoalescingKey(room.room_id, "$thread-a-root", "@user:localhost")
-    voice_root_key = CoalescingKey(room.room_id, "$thread-b-root", "@user:localhost")
+    voice_root_key = CoalescingKey(room.room_id, "$thread-b-root", "@voice-sender:localhost")
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
@@ -2215,6 +2192,7 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
+        sender="@voice-sender:localhost",
         server_timestamp=1001,
         source_kind=VOICE_SOURCE_KIND,
     )
@@ -2224,7 +2202,12 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
     async def ready_voice() -> ReadyPendingEvent:
         await release_voice.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+            pending_event=PendingEvent(
+                event=voice,
+                room=room,
+                source_kind=VOICE_SOURCE_KIND,
+                requester_user_id="@voice-sender:localhost",
+            ),
         )
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
@@ -2239,11 +2222,13 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
 
     await _admit_ready(gate, text_key, PendingEvent(event=typed, room=room, source_kind="message"))
     await asyncio.sleep(0.005)
-    await gate.admit(
-        voice_root_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@voice-sender:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=voice_root_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.06)
     assert calls == [["$typed"]]
@@ -2277,11 +2262,13 @@ async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> Non
     )
 
     await _admit_ready(gate, key, PendingEvent(event=first, room=room, source_kind="message"))
-    await gate.admit(
-        key,
-        ready_task=asyncio.create_task(failed_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(failed_voice()),
     )
     await _admit_ready(gate, key, PendingEvent(event=second, room=room, source_kind="message"))
 
@@ -2328,17 +2315,21 @@ async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce()
         is_shutting_down=lambda: False,
     )
 
-    await gate.admit(
-        first_key,
-        ready_task=asyncio.create_task(ready_voice(first_voice)),
+    first_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    second_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        first_slot,
+        key=first_key,
         source_event_id="$voice1",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice(first_voice)),
     )
-    await gate.admit(
-        second_key,
-        ready_task=asyncio.create_task(ready_voice(second_voice)),
+    gate.submit_lane_slot(
+        second_slot,
+        key=second_key,
         source_event_id="$voice2",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice(second_voice)),
     )
 
     await gate.drain_all()
@@ -2352,10 +2343,10 @@ async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce()
 
 @pytest.mark.asyncio
 async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> None:
-    """A pending voice admission in one thread must not steal another thread's turn."""
+    """A pending voice admission must not steal another sender's thread turn."""
     room = _make_room()
     voice_key = CoalescingKey(room.room_id, "$thread-a-child", "@user:localhost")
-    unrelated_thread_key = CoalescingKey(room.room_id, "$thread-b-root", "@user:localhost")
+    unrelated_thread_key = CoalescingKey(room.room_id, "$thread-b-root", "@other:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -2365,6 +2356,7 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
+        sender="@other:localhost",
         server_timestamp=1001,
         thread_id="$thread-b-root",
     )
@@ -2387,13 +2379,19 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
         is_shutting_down=lambda: False,
     )
 
-    await gate.admit(
-        voice_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=voice_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
-    await _admit_ready(gate, unrelated_thread_key, PendingEvent(event=typed, room=room, source_kind="message"))
+    await _admit_ready(
+        gate,
+        unrelated_thread_key,
+        PendingEvent(event=typed, room=room, source_kind="message", requester_user_id="@other:localhost"),
+    )
     await _wait_for(lambda: calls == [(unrelated_thread_key, ["$typed"])])
 
     release_voice.set()
@@ -2481,17 +2479,21 @@ async def test_deferred_room_scope_voice_burst_stays_one_turn_under_null_thread_
         is_shutting_down=lambda: False,
     )
 
-    await gate.admit(
-        key,
-        ready_task=asyncio.create_task(ready_voice(first_voice)),
+    first_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    second_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        first_slot,
+        key=key,
         source_event_id="$voice1",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice(first_voice)),
     )
-    await gate.admit(
-        key,
-        ready_task=asyncio.create_task(ready_voice(second_voice)),
+    gate.submit_lane_slot(
+        second_slot,
+        key=key,
         source_event_id="$voice2",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice(second_voice)),
     )
     await gate.drain_all()
 
@@ -2550,14 +2552,13 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
             timeout=0.05,
         )
 
-        canonical_key = CoalescingKey("!room:localhost", "$m1", "@user:localhost")
-        assert [queued.pending_event.event.event_id for queued in bot._coalescing_gate._gates[canonical_key].queue] == [
-            "$m2",
-        ]
+        await _wait_for(lambda: calls == [["$m1"], ["$m2"]])
+        assert not release_first_dispatch.is_set()
 
         release_first_dispatch.set()
-        await _wait_for(lambda: calls == [["$m1"], ["$m2"]])
+        await bot._coalescing_gate.drain_all()
 
+    assert calls == [["$m1"], ["$m2"]]
     assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
@@ -3026,8 +3027,8 @@ async def test_shutdown_during_in_flight_dispatch_does_not_start_grace(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_thread_followups_wait_behind_first_turn_root_in_flight(tmp_path: Path) -> None:
-    """Threaded follow-ups should not overtake their room-root parent while it dispatches."""
+async def test_thread_followups_dispatch_while_first_turn_root_in_flight(tmp_path: Path) -> None:
+    """Thread replies dispatch as their own turn without waiting on the root's in-flight dispatch."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first")
@@ -3075,12 +3076,13 @@ async def test_thread_followups_wait_behind_first_turn_root_in_flight(tmp_path: 
                 requester_user_id="@user:localhost",
             )
 
-        await asyncio.sleep(0.01)
-        assert calls == [["$m1"]]
+        await _wait_for(lambda: ["$m2", "$m3"] in calls)
+        assert not release_first_dispatch.is_set()
+        assert calls == [["$m1"], ["$m2", "$m3"]]
 
         release_first_dispatch.set()
         await first_task
-        await _wait_for(lambda: calls == [["$m1"], ["$m2", "$m3"]])
+        await bot._coalescing_gate.drain_all()
 
     assert calls == [["$m1"], ["$m2", "$m3"]]
     assert _coalescing_gate_is_idle(bot._coalescing_gate)
@@ -4139,7 +4141,7 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        assert not _coalescing_gate_is_idle(bot._coalescing_gate)
+        await _wait_for(lambda: not _coalescing_gate_is_idle(bot._coalescing_gate))
 
         await bot.cleanup()
 

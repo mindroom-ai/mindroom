@@ -12,7 +12,7 @@ import pytest
 
 from mindroom import interactive
 from mindroom.bot import AgentBot
-from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, IngressOrderReservation, ReadyPendingEvent
+from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, LaneSlot, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -106,21 +106,20 @@ async def test_late_admit_rejection_closes_completed_ready_task_metadata_once() 
         return ReadyPendingEvent(pending_event=pending_event)
 
     class RejectingGate:
-        async def admit(self, *_args: object, **_kwargs: object) -> None:
+        def submit_lane_slot(self, *_args: object, **_kwargs: object) -> None:
             msg = "closed"
             raise IngressAdmissionClosedError(msg)
 
-        def release_order_reservation(self, reservation: IngressOrderReservation) -> None:
-            reservation.released = True
-            reservation.settled.set()
+        def release_lane_slot(self, slot: LaneSlot) -> None:
+            slot.released = True
+            slot.settled.set()
 
-    reservation = IngressOrderReservation(
+    slot = LaneSlot(
         room_id="!room:localhost",
-        requester_user_id="@user:localhost",
-        received_order=1,
+        sender_id="@user:localhost",
         receipt_time=1.0,
     )
-    owner = PromptIngressReservationOwner(gate=RejectingGate(), reservation=reservation)
+    owner = PromptIngressReservationOwner(gate=RejectingGate(), slot=slot)
     ready_task = asyncio.create_task(ready())
     await ready_task
 
@@ -134,6 +133,8 @@ async def test_late_admit_rejection_closes_completed_ready_task_metadata_once() 
 
     await owner.release()
 
+    assert slot.released is True
+    assert slot.settled.is_set()
     assert close_count == 1
 
 
@@ -170,8 +171,8 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
-    owner = PromptIngressReservationOwner(gate=gate, reservation=reservation)
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    owner = PromptIngressReservationOwner(gate=gate, slot=slot)
     owner.ready_task = asyncio.create_task(ready())
     await asyncio.sleep(0)
 
@@ -182,9 +183,12 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
     await owner.cancel_ready_task()
     assert close_count == 1
 
+    await owner.release()
+    await asyncio.wait_for(slot.settled.wait(), timeout=1.0)
+
 
 @pytest.mark.asyncio
-async def test_owner_release_settles_reservation_when_cancelled_during_ready_task_cleanup() -> None:
+async def test_owner_release_settles_lane_slot_when_cancelled_during_ready_task_cleanup() -> None:
     """Owner release must not orphan its ready task when callback cancellation interrupts cleanup."""
 
     async def never_ready() -> ReadyPendingEvent | None:
@@ -197,8 +201,8 @@ async def test_owner_release_settles_reservation_when_cancelled_during_ready_tas
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
-    owner = PromptIngressReservationOwner(gate=gate, reservation=reservation)
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    owner = PromptIngressReservationOwner(gate=gate, slot=slot)
     ready_task = asyncio.create_task(never_ready())
     owner.ready_task = ready_task
 
@@ -209,8 +213,8 @@ async def test_owner_release_settles_reservation_when_cancelled_during_ready_tas
         with suppress(asyncio.CancelledError):
             await release_task
 
-        assert reservation.released
-        assert reservation.settled.is_set()
+        assert slot.released
+        await asyncio.wait_for(slot.settled.wait(), timeout=1.0)
         assert ready_task.done()
         assert ready_task.cancelled()
         assert owner.ready_task is None

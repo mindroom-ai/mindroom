@@ -41,7 +41,7 @@ from mindroom.approval_manager import (
 from mindroom.attachments import AttachmentRecord, _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
-from mindroom.coalescing import CoalescingGate, IngressOrderReservation, ReadyPendingEvent
+from mindroom.coalescing import CoalescingGate, LaneSlot, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, active_follow_up_coalescing_key
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -4672,7 +4672,7 @@ class TestAgentBot:
 
         async def handle_selection(*_args: object, **_kwargs: object) -> None:
             selection_started.set()
-            assert bot._coalescing_gate._order_book.unsettled()
+            assert bot._coalescing_gate.lanes.unsettled_slots()
 
         with (
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
@@ -4681,7 +4681,8 @@ class TestAgentBot:
             await bot._on_reaction(room, event)
 
         await asyncio.wait_for(selection_started.wait(), timeout=0.5)
-        assert bot._coalescing_gate._order_book.all_settled()
+        await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
+        assert bot._coalescing_gate.lanes.all_settled()
 
     @pytest.mark.asyncio
     async def test_checkmark_interactive_reaction_reserves_before_tool_approval_lookup(
@@ -4723,18 +4724,19 @@ class TestAgentBot:
             reaction_task = asyncio.create_task(bot._on_reaction(room, event))
             await asyncio.wait_for(approval_started.wait(), timeout=0.5)
             try:
-                reaction_reservations = bot._coalescing_gate._order_book.unsettled()
-                assert reaction_reservations
+                reaction_slots = bot._coalescing_gate.lanes.unsettled_slots()
+                assert reaction_slots
                 later_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
                 try:
-                    assert reaction_reservations[0].received_order < later_owner.reservation.received_order
+                    assert reaction_slots[0].receipt_time < later_owner.slot.receipt_time
                 finally:
                     await later_owner.release()
             finally:
                 release_approval.set()
                 await reaction_task
 
-        assert bot._coalescing_gate._order_book.all_settled()
+        await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
+        assert bot._coalescing_gate.lanes.all_settled()
 
     @pytest.mark.asyncio
     async def test_checkmark_tool_approval_bypasses_conversation_reply_permission(
@@ -4764,7 +4766,8 @@ class TestAgentBot:
 
         approval_handler.assert_awaited_once()
         interactive_handler.assert_not_awaited()
-        assert bot._coalescing_gate._order_book.all_settled()
+        await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
+        assert bot._coalescing_gate.lanes.all_settled()
 
     @pytest.mark.asyncio
     async def test_unknown_tool_approval_response_with_approval_id_and_denial_reason_resolves_live_waiter(
@@ -7595,38 +7598,33 @@ class TestAgentBot:
             call_order.append("coalescing_thread")
             return "$thread_root"
 
-        original_reserve_order = bot._coalescing_gate.reserve_order
+        original_enter_lane = bot._coalescing_gate.enter_lane
 
-        def record_reserve_order(
+        def record_enter_lane(
             *,
             room_id: str,
-            requester_user_id: str,
+            sender_id: str,
             receipt_time: float | None = None,
-        ) -> IngressOrderReservation:
+        ) -> LaneSlot:
             call_order.append("reserve")
-            return original_reserve_order(
-                room_id=room_id,
-                requester_user_id=requester_user_id,
-                receipt_time=receipt_time,
-            )
+            return original_enter_lane(room_id=room_id, sender_id=sender_id, receipt_time=receipt_time)
 
-        async def record_admit(
-            key: CoalescingKey,
+        def record_submit(
+            slot: LaneSlot,
             *,
-            ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
-            source_event_id: str,
+            key: CoalescingKey,
+            source_event_id: str | None,
             source_kind: str,
-            order_reservation: IngressOrderReservation,
+            ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
             **_ignored: object,
         ) -> None:
             assert ready_task is not None
             nonlocal admitted_ready_task
             call_order.append("admit")
-            assert call_order == ["reserve", "append", "coalescing_thread", "admit"]
             assert key == CoalescingKey("!test:localhost", "$thread_root", "@user:localhost")
             assert source_event_id == "$voice_event"
             assert source_kind == VOICE_SOURCE_KIND
-            assert order_reservation.released is False
+            assert slot.released is False
             admitted_ready_task = ready_task
 
         async def record_voice_normalization(*_args: object, **_kwargs: object) -> None:
@@ -7640,20 +7638,22 @@ class TestAgentBot:
         )
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
-        bot._coalescing_gate.reserve_order = MagicMock(side_effect=record_reserve_order)
-        mock_admit = AsyncMock(side_effect=record_admit)
-        bot._coalescing_gate.admit = mock_admit
+        bot._coalescing_gate.enter_lane = MagicMock(side_effect=record_enter_lane)
+        bot._coalescing_gate.submit_lane_slot = mock_submit = MagicMock(side_effect=record_submit)
 
         with patch(
             "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_voice_event",
             new=AsyncMock(side_effect=record_voice_normalization),
         ):
             await bot._turn_controller._handle_media_message_inner(room, event)
-            mock_admit.assert_awaited_once()
+            mock_submit.assert_called_once()
             assert call_order == ["reserve", "append", "coalescing_thread", "admit"]
             assert admitted_ready_task is not None
             release_stt.set()
             ready_event = await admitted_ready_task
+        admitted_slot = mock_submit.call_args.args[0]
+        bot._coalescing_gate.release_lane_slot(admitted_slot)
+        await asyncio.wait_for(admitted_slot.settled.wait(), timeout=1.0)
         _assert_ready_voice_text_fallback(ready_event)
         assert call_order == ["reserve", "append", "coalescing_thread", "admit", "normalize"]
         bot._conversation_cache.append_live_event.assert_awaited_once()
@@ -7685,7 +7685,8 @@ class TestAgentBot:
         with pytest.raises(asyncio.CancelledError):
             await bot._turn_controller._handle_media_message_inner(room, event)
 
-        assert bot._coalescing_gate._order_book.all_settled()
+        await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
+        assert bot._coalescing_gate.lanes.all_settled()
 
     @pytest.mark.asyncio
     async def test_text_reserves_receive_order_before_thread_lookup(
@@ -12158,6 +12159,7 @@ class TestAgentBot:
                 requester_user_id="@user:localhost",
                 reservation_owner=reservation_owner,
             )
+            await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
 
         mock_dispatch.assert_not_awaited()
         mock_admit.assert_awaited_once()
@@ -12262,6 +12264,7 @@ class TestAgentBot:
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
+            await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
 
         mock_active_thread_ids.assert_called_once_with(room.room_id)
         mock_reserve_waiting_human_message.assert_called_once()
@@ -12345,6 +12348,7 @@ class TestAgentBot:
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
+            await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
 
         mock_dispatch.assert_not_awaited()
         mock_admit.assert_awaited_once()
@@ -12401,11 +12405,6 @@ class TestAgentBot:
             ) as mock_reserve_waiting_human_message,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-
-            async def admit_spy(*_args: object, **kwargs: object) -> None:
-                bot._coalescing_gate.release_order_reservation(kwargs["order_reservation"])
-
-            mock_admit.side_effect = admit_spy
             reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
             await bot._turn_controller._on_audio_media_message(
                 room,
@@ -12414,10 +12413,11 @@ class TestAgentBot:
                 dispatch_timing=None,
                 reservation_owner=reservation_owner,
             )
+            await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
             mock_admit.assert_awaited_once()
             key = mock_admit.await_args.args[0]
             assert key == active_follow_up_coalescing_key(room.room_id, "$thread_root")
-            ready_event = await mock_admit.await_args.kwargs["ready_task"]
+            ready_event = mock_admit.await_args.kwargs["ready_result"]
 
         assert isinstance(ready_event, ReadyPendingEvent)
         mock_echo.assert_awaited_once()
@@ -12522,6 +12522,7 @@ class TestAgentBot:
                 reservation_owner=reservation_owner,
                 coalescing_thread_id="$thread_root",
             )
+            await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
 
         assert handled is _IngressAdmissionOutcome.ADMITTED
         mock_dispatch.assert_not_awaited()
@@ -12630,6 +12631,7 @@ class TestAgentBot:
                 reservation_owner=reservation_owner,
                 coalescing_thread_id="$thread_root",
             )
+            await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
 
         assert handled is _IngressAdmissionOutcome.ADMITTED
         mock_dispatch.assert_not_awaited()

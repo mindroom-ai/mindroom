@@ -35,7 +35,7 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.coalescing import IngressOrderReservation, _GateEntry
+    from mindroom.coalescing import LaneSlot, _GateEntry
 
 
 def _config(tmp_path: Path) -> Config:
@@ -615,7 +615,14 @@ async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
         is_shutting_down=lambda: True,
     )
 
-    await gate.admit(key, ready_task=asyncio.create_task(ready_event()))
+    slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
+    gate.submit_lane_slot(
+        slot,
+        key=key,
+        source_event_id="$waiting",
+        source_kind="message",
+        ready_task=asyncio.create_task(ready_event()),
+    )
     shutdown_task = asyncio.create_task(gate.drain_all())
     await asyncio.sleep(0)
 
@@ -669,7 +676,14 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
             pending_event=PendingEvent(event=text_event("$waiting", "waiting"), room=room, source_kind="message"),
         )
 
-    await gate.admit(key, ready_task=asyncio.create_task(waiting_ready()))
+    waiting_slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
+    gate.submit_lane_slot(
+        waiting_slot,
+        key=key,
+        source_event_id="$waiting",
+        source_kind="message",
+        ready_task=asyncio.create_task(waiting_ready()),
+    )
     drain_task = asyncio.create_task(gate.drain_all())
     await asyncio.sleep(0)
     waiting_release.set()
@@ -682,7 +696,14 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
             pending_event=PendingEvent(event=text_event("$next", "next"), room=room, source_kind="message"),
         )
 
-    await gate.admit(key, ready_task=asyncio.create_task(next_ready()))
+    next_slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
+    gate.submit_lane_slot(
+        next_slot,
+        key=key,
+        source_event_id="$next",
+        source_kind="message",
+        ready_task=asyncio.create_task(next_ready()),
+    )
     await gate.drain_all()
 
     assert dispatched == [["$waiting"], ["$next"]]
@@ -705,23 +726,27 @@ async def test_shutdown_drain_cancels_stuck_ready_task_without_cancelling_dispat
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
-    await gate.admit(
-        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
-        ready_task=asyncio.create_task(stuck_ready()),
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
+    gate.submit_lane_slot(
+        slot,
+        key=key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(stuck_ready()),
     )
 
     result = await gate.drain_all(ready_timeout_seconds=0.01)
 
     assert result.completed is False
+    assert result.released_reservation_count == 1
     assert result.cancelled_unready_count == 1
     assert cancelled.is_set()
 
 
 @pytest.mark.asyncio
 async def test_shutdown_drain_counts_self_cancelled_ready_task_as_incomplete() -> None:
-    """Ready work that cancels itself still means admitted ingress was not dispatched."""
+    """Undelivered ready work that cancelled itself still means ingress was not dispatched."""
 
     async def cancelled_ready() -> ReadyPendingEvent | None:
         raise asyncio.CancelledError
@@ -732,42 +757,53 @@ async def test_shutdown_drain_counts_self_cancelled_ready_task_as_incomplete() -
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
-    await gate.admit(
-        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
-        ready_task=asyncio.create_task(cancelled_ready()),
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    unresolved_front_slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
+    ready_task = asyncio.create_task(cancelled_ready())
+    await asyncio.gather(ready_task, return_exceptions=True)
+    assert ready_task.cancelled()
+    slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
+    gate.submit_lane_slot(
+        slot,
+        key=key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=ready_task,
     )
 
     result = await gate.drain_all(ready_timeout_seconds=0.01)
 
+    assert unresolved_front_slot.released is True
     assert result.completed is False
+    assert result.released_reservation_count == 2
     assert result.cancelled_unready_count == 1
 
 
 @pytest.mark.asyncio
-async def test_shutdown_drain_releases_stuck_pre_admission_reservation() -> None:
-    """Bounded drains should release unresolved reservations and reject late admission."""
+async def test_shutdown_drain_releases_stuck_pre_admission_lane_slot() -> None:
+    """Bounded drains should release unresolved lane slots and reject late admission."""
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
-    reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
 
     result = await gate.drain_all(ready_timeout_seconds=0.01)
 
     assert result.completed is False
     assert result.released_reservation_count == 1
-    assert reservation.released is True
+    assert slot.released is True
     with pytest.raises(IngressAdmissionClosedError):
-        await gate.admit(
-            CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+        gate.submit_lane_slot(
+            slot,
+            key=CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+            source_event_id="$late:localhost",
+            source_kind="message",
             ready_result=ReadyPendingEvent(
                 pending_event=_pending(_text_event("$late:localhost", "late", 1000)),
             ),
-            order_reservation=reservation,
         )
 
 
@@ -804,11 +840,14 @@ async def test_shutdown_ready_timeout_closes_ready_result_returned_during_cancel
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
-    await gate.admit(
-        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
-        ready_task=asyncio.create_task(ready()),
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
+    gate.submit_lane_slot(
+        slot,
+        key=key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready()),
     )
 
     result = await gate.drain_all(ready_timeout_seconds=0.01)
@@ -840,23 +879,20 @@ async def test_shutdown_timeout_reaches_already_running_ready_wait() -> None:
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
-    await gate.admit(
-        key,
-        ready_task=asyncio.create_task(stuck_ready()),
+    slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
+    gate.submit_lane_slot(
+        slot,
+        key=key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(stuck_ready()),
     )
     await started.wait()
-    for _ in range(100):
-        if gate._gates[key].claimed_admissions:
-            break
-        await asyncio.sleep(0)
-    else:
-        pytest.fail("gate did not claim admission before shutdown drain")
 
     result = await gate.drain_all(ready_timeout_seconds=0.01)
 
     assert result.completed is False
+    assert result.released_reservation_count == 1
     assert result.cancelled_unready_count == 1
     assert cancelled.is_set()
 
@@ -879,21 +915,25 @@ async def test_ready_task_self_cancellation_finishes_no_ready() -> None:
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    await gate.admit(
-        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
-        ready_task=asyncio.create_task(cancelled_ready()),
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
+    gate.submit_lane_slot(
+        slot,
+        key=key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(cancelled_ready()),
     )
 
     await gate.drain_all()
 
+    assert slot.settled.is_set()
     assert batches == []
 
 
 @pytest.mark.asyncio
-async def test_reserve_order_during_active_bounded_shutdown_returns_released_counted_reservation() -> None:
-    """New reservations during bounded shutdown should be pre-released and counted."""
+async def test_enter_lane_during_active_bounded_shutdown_returns_released_counted_slot() -> None:
+    """New lane slots during bounded shutdown should be pre-released and counted."""
     shutting_down = False
 
     gate = CoalescingGate(
@@ -902,35 +942,38 @@ async def test_reserve_order_during_active_bounded_shutdown_returns_released_cou
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: shutting_down,
     )
-    old_reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+    old_slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
     shutting_down = True
     drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=0.05))
     await asyncio.sleep(0)
 
-    reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
 
-    assert reservation.released is True
-    assert reservation.settled.is_set()
+    assert slot.closed is True
+    assert slot.released is True
+    assert slot.settled.is_set()
 
     with pytest.raises(IngressAdmissionClosedError):
-        await gate.admit(
-            CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+        gate.submit_lane_slot(
+            slot,
+            key=CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+            source_event_id="$late:localhost",
+            source_kind="message",
             ready_result=ReadyPendingEvent(
                 pending_event=_pending(_text_event("$late:localhost", "late", 1000)),
             ),
-            order_reservation=reservation,
         )
 
     result = await drain_task
 
-    assert old_reservation.released is True
+    assert old_slot.released is True
     assert result.completed is False
     assert result.released_reservation_count == 2
 
 
 @pytest.mark.asyncio
-async def test_shutdown_timeout_reaches_already_running_same_window_reservation_wait() -> None:
-    """Bounded shutdown should interrupt same-window reservation waits already in progress."""
+async def test_shutdown_timeout_reaches_already_running_same_window_lane_slot_wait() -> None:
+    """Bounded shutdown should interrupt same-window lane-slot waits already in progress."""
     shutting_down = False
     wait_entered = asyncio.Event()
     gate = CoalescingGate(
@@ -940,32 +983,32 @@ async def test_shutdown_timeout_reaches_already_running_same_window_reservation_
         is_shutting_down=lambda: shutting_down,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
-    front_reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
-    target_reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
+    target_slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
 
-    original_wait_for_reservations = gate._wait_for_reservations
+    original_wait_for_lane_slots = gate._wait_for_lane_slots
 
-    async def spy_wait_for_reservations(
+    async def spy_wait_for_lane_slots(
         wait_gate: _GateEntry,
-        reservations: list[IngressOrderReservation],
+        slots: list[LaneSlot],
     ) -> None:
-        if target_reservation in reservations:
+        if target_slot in slots:
             wait_entered.set()
-        await original_wait_for_reservations(wait_gate, reservations)
+        await original_wait_for_lane_slots(wait_gate, slots)
 
-    gate._wait_for_reservations = spy_wait_for_reservations
+    gate._wait_for_lane_slots = spy_wait_for_lane_slots
 
     await gate.admit(
         key,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$text:localhost", "typed", 1000))),
-        order_reservation=front_reservation,
+        source_event_id="$text:localhost",
+        source_kind="message",
     )
     await asyncio.wait_for(wait_entered.wait(), timeout=5.0)
 
     shutting_down = True
     result = await gate.drain_all(ready_timeout_seconds=0.05)
 
-    assert target_reservation.released is True
+    assert target_slot.released is True
     assert result.completed is False
     assert result.released_reservation_count == 1
 

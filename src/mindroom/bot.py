@@ -379,6 +379,8 @@ class AgentBot:
             upload_grace_seconds=lambda: self.config.defaults.coalescing.upload_grace_ms / 1000,
             is_shutting_down=lambda: self._sync_shutting_down,
             wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
+            room_scope_is_single_conversation=self._room_scope_is_single_conversation,
+            dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
@@ -546,6 +548,21 @@ class AgentBot:
         if not is_active_follow_up_coalescing_key(key):
             return
         await self._response_runner.wait_for_thread_response_idle(key.room_id, key.thread_id)
+
+    def _coalesced_dispatch_allowed_now(self, key: CoalescingKey) -> bool:
+        """Return whether one coalescing key's target has no active response right now."""
+        return key.thread_id not in self._response_runner.active_thread_ids_for_room(key.room_id)
+
+    def _room_scope_is_single_conversation(self, room_id: str) -> bool:
+        """Return whether this agent treats the whole room as one conversation."""
+        return (
+            self.config.get_entity_thread_mode(
+                self.agent_name,
+                self.runtime_paths,
+                room_id=room_id,
+            )
+            == "room"
+        )
 
     def _rebuild_runtime_components_after_login_if_identity_changed(self, matrix_id_before_login: MatrixID) -> None:
         """Refresh startup collaborators when Matrix login authenticates as a different user."""

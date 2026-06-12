@@ -82,6 +82,7 @@ from mindroom.matrix.media import (
     is_matrix_media_dispatch_event,
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
+from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -315,12 +316,12 @@ class TurnController:
         *,
         receipt_time: float | None = None,
     ) -> _PromptIngressReservationOwner:
-        """Reserve receive order for one prompt-like Matrix ingress item."""
+        """Reserve receipt order for one prompt-like Matrix ingress item."""
         return _PromptIngressReservationOwner(
             gate=self.deps.coalescing_gate,
-            reservation=self.deps.coalescing_gate.reserve_order(
+            slot=self.deps.coalescing_gate.enter_lane(
                 room_id=room.room_id,
-                requester_user_id=requester_user_id,
+                sender_id=requester_user_id,
                 receipt_time=receipt_time,
             ),
             active_response_thread_ids_at_receipt=self.deps.response_runner.active_thread_ids_for_room(room.room_id),
@@ -502,7 +503,6 @@ class TurnController:
                 target=target,
                 response_envelope=envelope,
             )
-        reservation_owner.retarget(coalescing_key.requester_user_id)
         try:
             await self._enqueue_for_dispatch(
                 event,
@@ -837,6 +837,60 @@ class TurnController:
             requester_user_id=requester_user_id,
             reservation_owner=reservation_owner,
         )
+
+    async def _handle_edit_event(
+        self,
+        room: nio.MatrixRoom,
+        prechecked_event: _PrecheckedEvent[nio.RoomMessageText],
+        event_info: EventInfo,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> None:
+        """Hand one edited user turn to the edit regenerator."""
+        await self._append_live_event_with_timing(
+            room.room_id,
+            prechecked_event.event,
+            event_info=event_info,
+            dispatch_timing=dispatch_timing,
+        )
+        await self.deps.edit_regenerator.handle_message_edit(
+            room,
+            prechecked_event.event,
+            event_info,
+            prechecked_event.requester_user_id,
+        )
+
+    async def _notify_command_target_not_ready(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+    ) -> bool:
+        """Fail one command visibly when its conversation cannot be resolved yet."""
+        if command_parser.parse(event.body.strip()) is None:
+            return False
+        self.deps.logger.warning(
+            "command_target_not_ready",
+            event_id=event.event_id,
+            room_id=room.room_id,
+            sender=event.sender,
+        )
+        if self.deps.agent_name == ROUTER_AGENT_NAME:
+            target = self.deps.resolver.build_message_target(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=event.event_id,
+                event_source=event.source,
+            )
+            await self.deps.delivery_gateway.send_text(
+                SendTextRequest(
+                    target=target,
+                    response_text=(
+                        "I could not run that command yet: the conversation it targets "
+                        "is still being resolved. Please resend it in a moment."
+                    ),
+                ),
+            )
+        self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
+        return True
 
     async def _dispatch_command_control_input(
         self,
@@ -1803,59 +1857,14 @@ class TurnController:
             )
         try:
             if event_info.is_edit:
-                await self._append_live_event_with_timing(
-                    room.room_id,
-                    event,
-                    event_info=event_info,
-                    dispatch_timing=dispatch_timing,
-                )
-                await self.deps.edit_regenerator.handle_message_edit(
-                    room,
-                    prechecked_event.event,
-                    event_info,
-                    prechecked_event.requester_user_id,
-                )
+                await self._handle_edit_event(room, prechecked_event, event_info, dispatch_timing)
                 return
-
-            ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
-            if await self._should_skip_router_before_shared_ingress_work(
+            await self._ingest_live_text_event(
                 room,
-                prechecked_event.event,
-                requester_user_id=prechecked_event.requester_user_id,
-                thread_id=ingress_thread_id,
-            ):
-                self.deps.logger.debug(
-                    "skip_router_shared_ingress_work",
-                    event_id=event.event_id,
-                    room_id=room.room_id,
-                    thread_id=ingress_thread_id,
-                )
-                return
-
-            self.deps.logger.info(
-                "Received message",
-                event_id=event.event_id,
-                room_id=room.room_id,
-                sender=event.sender,
-                thread_id=ingress_thread_id,
-            )
-            await self._append_live_event_with_timing(
-                room.room_id,
-                event,
+                prechecked_event,
                 event_info=event_info,
                 dispatch_timing=dispatch_timing,
-            )
-            prepared_event = await self._resolve_text_event_with_ingress_timing(
-                prechecked_event.event,
-                dispatch_timing=dispatch_timing,
-            )
-            await self._dispatch_prepared_text_like_ingress(
-                room=room,
-                prepared_event=prepared_event,
-                dispatch_event=prechecked_event.event,
-                requester_user_id=prechecked_event.requester_user_id,
                 reservation_owner=reservation_owner,
-                coalescing_thread_id=ingress_thread_id,
             )
         except IngressAdmissionClosedError:
             self.deps.logger.debug(
@@ -1866,6 +1875,63 @@ class TurnController:
         finally:
             if owns_reservation:
                 await reservation_owner.release()
+
+    async def _ingest_live_text_event(
+        self,
+        room: nio.MatrixRoom,
+        prechecked_event: _PrecheckedEvent[nio.RoomMessageText],
+        *,
+        event_info: EventInfo,
+        dispatch_timing: DispatchPipelineTiming | None,
+        reservation_owner: _PromptIngressReservationOwner,
+    ) -> None:
+        """Resolve, normalize, and admit one live (non-edit) text event."""
+        event = prechecked_event.event
+        try:
+            ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
+        except ThreadMembershipLookupError:
+            if await self._notify_command_target_not_ready(room, event):
+                return
+            raise
+        if await self._should_skip_router_before_shared_ingress_work(
+            room,
+            event,
+            requester_user_id=prechecked_event.requester_user_id,
+            thread_id=ingress_thread_id,
+        ):
+            self.deps.logger.debug(
+                "skip_router_shared_ingress_work",
+                event_id=event.event_id,
+                room_id=room.room_id,
+                thread_id=ingress_thread_id,
+            )
+            return
+
+        self.deps.logger.info(
+            "Received message",
+            event_id=event.event_id,
+            room_id=room.room_id,
+            sender=event.sender,
+            thread_id=ingress_thread_id,
+        )
+        await self._append_live_event_with_timing(
+            room.room_id,
+            event,
+            event_info=event_info,
+            dispatch_timing=dispatch_timing,
+        )
+        prepared_event = await self._resolve_text_event_with_ingress_timing(
+            event,
+            dispatch_timing=dispatch_timing,
+        )
+        await self._dispatch_prepared_text_like_ingress(
+            room=room,
+            prepared_event=prepared_event,
+            dispatch_event=event,
+            requester_user_id=prechecked_event.requester_user_id,
+            reservation_owner=reservation_owner,
+            coalescing_thread_id=ingress_thread_id,
+        )
 
     async def _dispatch_text_message(
         self,
@@ -2051,7 +2117,6 @@ class TurnController:
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
-        reservation_owner.retarget(admission_key.requester_user_id)
         await reservation_owner.admit(
             admission_key,
             ready_task=ready_task,

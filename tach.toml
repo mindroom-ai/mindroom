@@ -2289,6 +2289,7 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.rooms",
+    "mindroom.matrix.thread_membership",
     "mindroom.metadata_merge",
     "mindroom.prompt_ingress_reservation",
     "mindroom.response_lifecycle",

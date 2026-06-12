@@ -63,14 +63,14 @@ def pending_has_room_scope_source(pending_events: list[PendingEvent]) -> bool:
     return any(_pending_event_allows_room_scope_batching(pending_event) for pending_event in pending_events)
 
 
-def pending_event_requires_solo_batch(pending_event: PendingEvent) -> bool:
+def _pending_event_requires_solo_batch(pending_event: PendingEvent) -> bool:
     """Return whether a pending event must dispatch without neighbors."""
     return any(item.requires_solo_batch for item in pending_event.dispatch_metadata)
 
 
 def pending_events_require_solo_batch(pending_events: list[PendingEvent]) -> bool:
     """Return whether any pending event in a group requires solo dispatch."""
-    return any(pending_event_requires_solo_batch(pending_event) for pending_event in pending_events)
+    return any(_pending_event_requires_solo_batch(pending_event) for pending_event in pending_events)
 
 
 def _pending_event_allows_room_scope_batching(pending_event: PendingEvent) -> bool:
@@ -87,7 +87,7 @@ def source_or_event_allows_room_scope_batching(
 
 def queue_kind(pending_event: PendingEvent) -> QueueKind:
     """Return the dispatch behavior for one resolved pending event."""
-    if pending_event_requires_solo_batch(pending_event):
+    if _pending_event_requires_solo_batch(pending_event):
         return QueueKind.BYPASS
     if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
         return QueueKind.BYPASS
