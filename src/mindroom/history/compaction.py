@@ -886,7 +886,6 @@ async def _generate_compaction_summary_with_retry(
     timing_scope: str | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, shrinking the input per the retry policy when safe."""
-    del timing_scope
     summary_input = initial_summary_input
     included_runs = initial_included_runs
     budget = summary_input_budget
@@ -911,6 +910,7 @@ async def _generate_compaction_summary_with_retry(
                 model=model,
                 summary_input=summary_input,
                 summary_prompt=summary_prompt,
+                timing_scope=timing_scope,
             )
         except Exception as exc:
             duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
