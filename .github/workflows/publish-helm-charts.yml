@@ -38,11 +38,13 @@ jobs:
 
       - name: Set chart version
         id: vars
+        env:
+          RELEASE_REF: ${{ inputs.release_ref }}
         run: |
           set -euo pipefail
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            release_ref="${{ inputs.release_ref }}"
+            release_ref="$RELEASE_REF"
             if [[ "$release_ref" != v* ]]; then
               echo "release_ref must be a tag starting with 'v', got '$release_ref'" >&2
               exit 1
@@ -139,11 +141,13 @@ jobs:
 
       - name: Set chart version
         id: vars
+        env:
+          RELEASE_REF: ${{ inputs.release_ref }}
         run: |
           set -euo pipefail
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            release_ref="${{ inputs.release_ref }}"
+            release_ref="$RELEASE_REF"
             if [[ "$release_ref" != v* ]]; then
               echo "release_ref must be a tag starting with 'v', got '$release_ref'" >&2
               exit 1

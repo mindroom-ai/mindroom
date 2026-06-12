@@ -27,7 +27,7 @@ spec:
       {{- if or $rendersConfig .Values.podAnnotations }}
       annotations:
         {{- if $rendersConfig }}
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/config: {{ include "mindroom-tuwunel.config" . | sha256sum }}
         {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}

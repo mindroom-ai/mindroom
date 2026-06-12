@@ -111,6 +111,7 @@ The chart defaults `tuwunel.wellKnown.client` to the effective `clientBaseUrl` a
 ## Notes
 
 - The Deployment is pinned to one replica with a `Recreate` strategy because Tuwunel does not support horizontal scaling against one database.
+- The image defaults to the fork's `latest` tag with `pullPolicy: Always`; pin `image.tag` or `image.digest` for reproducible production deployments.
 - The MindRoom fork's compact-edit collapsing for streaming responses is enabled by default; set `tuwunel.compactEdits: false` to disable it.
 - The release image runs Tuwunel as root, so the chart sets no restrictive container security context by default; tighten `podSecurityContext` and `securityContext` to match your policy.
 - Any Tuwunel option without a dedicated value can be set through `tuwunel.extraConfig` (raw TOML in `[global]`) or `TUWUNEL_*` environment overrides in `env.extra`.

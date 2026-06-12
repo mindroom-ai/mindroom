@@ -29,3 +29,6 @@
 {{- if and (not .Values.storage.create) (not .Values.storage.existingClaim) -}}
 {{- fail "storage.existingClaim or storage.create=true is required" -}}
 {{- end -}}
+{{- if and (not .Values.config.create) (not .Values.config.existingConfigMap) -}}
+{{- fail "config.existingConfigMap or config.create=true is required" -}}
+{{- end -}}

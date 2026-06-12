@@ -7,9 +7,10 @@ fullnameOverride: ""
 
 image:
   repository: ghcr.io/mindroom-ai/mindroom-tuwunel
+  # Pin a release tag or digest for reproducible production deployments.
   tag: latest
   digest: ""
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 imagePullSecrets: []
 
