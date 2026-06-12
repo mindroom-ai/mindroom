@@ -19,9 +19,9 @@ if TYPE_CHECKING:
 _OWNED_INSTANCE_COLUMNS = "id,instance_id,subscription_id,account_id"
 
 
-def get_instance(sb: Client, instance_id: int | str) -> dict[str, Any] | None:
+def get_instance(sb: Client, instance_id: int | str, columns: str = "*") -> dict[str, Any] | None:
     """Return one instance row by instance_id, or None when absent."""
-    result = sb.table("instances").select("*").eq("instance_id", str(instance_id)).execute()
+    result = sb.table("instances").select(columns).eq("instance_id", str(instance_id)).execute()
     return result.data[0] if result.data else None
 
 

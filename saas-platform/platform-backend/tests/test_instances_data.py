@@ -91,6 +91,11 @@ class TestGetInstance:
     def test_returns_none_when_absent(self):
         assert instances_data.get_instance(StubSupabase([]), "123") is None
 
+    def test_selects_requested_columns(self):
+        sb = StubSupabase([{"status": "running"}])
+        assert instances_data.get_instance(sb, 123, columns="status") == {"status": "running"}
+        assert ("select", "status") in sb.calls
+
 
 class TestGetOwnedInstance:
     def test_filters_by_instance_and_account(self):

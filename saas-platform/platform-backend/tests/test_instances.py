@@ -582,6 +582,20 @@ class TestInstancesEndpoints:
         update_call = mock_supabase.table().update.call_args[0][0]
         assert update_call["status"] == "error"
 
+    def test_background_sync_task_instance_row_missing(
+        self, mock_supabase: MagicMock, mock_check_deployment: AsyncMock
+    ):
+        """Background sync returns early when the instance row vanished from the database."""
+        import asyncio
+        from backend.routes.instances import _background_sync_instance_status
+
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
+
+        asyncio.run(_background_sync_instance_status("123"))
+
+        mock_check_deployment.assert_not_called()
+        mock_supabase.table().update.assert_not_called()
+
     def test_background_sync_prevents_duplicate(self):
         """Test that background sync prevents duplicate syncs."""
         import asyncio

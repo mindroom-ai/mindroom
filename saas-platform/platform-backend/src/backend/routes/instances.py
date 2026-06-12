@@ -33,8 +33,11 @@ async def _background_sync_instance_status(instance_id: str) -> None:
         sb = ensure_supabase()
 
         # Get current status from DB
-        instance_row = instances_data.get_instance(sb, instance_id)
-        current_status = instance_row.get("status") if instance_row else None
+        instance_row = instances_data.get_instance(sb, instance_id, columns="status")
+        if instance_row is None:
+            logger.warning("Background sync: instance %s not found in database, skipping sync", instance_id)
+            return
+        current_status = instance_row.get("status")
 
         # Check if deployment exists
         k8s_start = time.perf_counter()
