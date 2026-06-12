@@ -218,7 +218,7 @@ networkPolicy:
 The API port follows `runtime.apiPort`, so the policy stays aligned with the Deployment without a separate port value.
 When `apiIngressFrom` is empty, the policy allows the API port from all sources while still denying other ingress to the pod.
 Use `networkPolicy.extraIngress` and `networkPolicy.extraEgress` for raw Kubernetes rules beyond the API rule.
-Setting any `extraEgress` entry adds `Egress` to `policyTypes`, so those rules must then cover every egress flow the runtime needs, such as DNS, the Matrix homeserver, model APIs, the event cache, and workers.
+Setting any `extraEgress` entry adds `Egress` to `policyTypes`, so those rules must then cover every egress flow the runtime needs, such as DNS, the Matrix homeserver, model APIs, the event cache, workers, and the Kubernetes API server when `workers.backend` is `kubernetes`.
 
 ## Worker Egress Proxy
 
