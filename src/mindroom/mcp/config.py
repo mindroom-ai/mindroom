@@ -112,7 +112,7 @@ class MCPServerConfig(BaseModel):
     enabled: bool = Field(default=True, description="Whether the server is active")
     description: str | None = Field(
         default=None,
-        description="What the server provides; appended to the OAuth bridge tool descriptions shown to the model",
+        description="What the server provides; appended to the OAuth bridge tool descriptions shown to the model. Requires auth.",
     )
     required: bool = Field(
         default=False,
@@ -202,6 +202,10 @@ class MCPServerConfig(BaseModel):
             self._validate_stdio_transport()
         else:
             self._validate_remote_transport()
+
+        if self.description is not None and self.auth is None:
+            msg = "MCP description requires OAuth auth; it is only surfaced in OAuth bridge tool descriptions"
+            raise ValueError(msg)
 
         if self.auth is not None and self.auth.discovery == "manual":
             if not self.auth.authorization_url or not self.auth.authorization_url.strip():

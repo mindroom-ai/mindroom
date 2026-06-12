@@ -9494,7 +9494,7 @@ Use the OAuth `auth` block for remote MCP servers that need a different bearer t
 | Option | Type | Default | Notes |
 |--------|------|---------|-------|
 | `enabled` | bool | `true` | Set to `false` to disable one server without removing its config |
-| `description` | string | `null` | What the server provides; appended to the OAuth bridge tool descriptions shown to the model |
+| `description` | string | `null` | What the server provides; appended to the OAuth bridge tool descriptions shown to the model; requires `auth` |
 | `required` | bool | `false` | Block dependent agent startup while this server is unavailable instead of degrading |
 | `transport` | string | *required* | One of `stdio`, `sse`, or `streamable-http` |
 | `command` | string | `null` | Required for `stdio` |

@@ -62,11 +62,35 @@ def test_mcp_server_config_normalizes_tool_filters() -> None:
 
 def test_mcp_server_config_normalizes_description() -> None:
     """Trim the server description and collapse blank values to None."""
-    config = MCPServerConfig(transport="stdio", command="npx", description="  Demo workspace tools.  ")
+    auth = {
+        "type": "oauth",
+        "discovery": "manual",
+        "authorization_url": "https://auth.example.test/authorize",
+        "token_url": "https://auth.example.test/token",
+    }
+    config = MCPServerConfig(
+        transport="streamable-http",
+        url="https://mcp.example.test/mcp",
+        description="  Demo workspace tools.  ",
+        auth=auth,
+    )
     assert config.description == "Demo workspace tools."
 
     blank = MCPServerConfig(transport="stdio", command="npx", description="   ")
     assert blank.description is None
+
+
+def test_mcp_server_config_rejects_description_without_auth() -> None:
+    """A description only surfaces in OAuth bridge tool descriptions, so it requires auth."""
+    with pytest.raises(ValueError, match="MCP description requires OAuth auth"):
+        MCPServerConfig(transport="stdio", command="npx", description="Demo workspace tools.")
+
+    with pytest.raises(ValueError, match="MCP description requires OAuth auth"):
+        MCPServerConfig(
+            transport="streamable-http",
+            url="https://mcp.example.test/mcp",
+            description="Demo workspace tools.",
+        )
 
 
 def test_mcp_server_config_accepts_oauth_auth_for_remote_servers() -> None:
