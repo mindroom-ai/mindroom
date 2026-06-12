@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from mindroom.memory.config import create_memory_instance
 
@@ -30,7 +30,7 @@ class MemoryBackend(Protocol):
     resolve a backend once and never branch on backend type again.
     """
 
-    context_label: str
+    context_label: ClassVar[str]
 
     async def add(
         self,
