@@ -5,13 +5,16 @@ no ``AgentBot``/orchestrator boot — with real ``TurnPolicy``, ``ConversationRe
 ``TurnStore`` (disk-backed ledger), and ``CoalescingGate`` collaborators, and typed
 recording fakes only at the execution and delivery seams (``ResponseRunner``,
 ``DeliveryGateway``). They pin the turn contract from
-``docs/architecture/bot-runtime.md``: precheck filtering, replay-guard rejection,
-policy decision routing, command terminal outcomes, durable dedup across restarts,
-and the controller-owned interactive selection path.
+``docs/architecture/bot-runtime.md``: precheck filtering (via ``IngressValidator``),
+replay-guard rejection, policy decision routing, ingress-level command dispatch
+with terminal TurnStore outcomes (commands are control inputs that never enter
+the coalescing gate), durable dedup across restarts, and the controller-owned
+interactive selection path.
 """
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
@@ -31,6 +34,7 @@ from mindroom.conversation_state_writer import ConversationStateWriter, Conversa
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookContextSupport, HookRegistry, HookRegistryState
 from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
+from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
@@ -49,7 +53,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Coroutine
     from pathlib import Path
     from unittest.mock import AsyncMock
 
@@ -72,11 +76,20 @@ _THREAD_ROOT = "$root:localhost"
 
 @dataclass
 class _RecordingResponseRunner:
-    """Typed ResponseRunner stand-in that records the execution-seam requests."""
+    """Typed ResponseRunner stand-in that records the execution-seam requests.
+
+    Mirrors the two runner seams the controller depends on: the request entry
+    points (``generate_response`` / ``generate_team_response_helper``) and the
+    runner-owned inbox-task ownership (``track_inbox_response``) added by the
+    coalescing redesign, where the dispatch handoff completes once the request
+    signals ``on_lifecycle_lock_acquired`` and the response keeps running on a
+    runner-owned task.
+    """
 
     response_event_id: str | None = "$response:localhost"
     requests: list[ResponseRequest] = field(default_factory=list)
     team_requests: list[ResponseRequest] = field(default_factory=list)
+    inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
         return frozenset()
@@ -93,8 +106,20 @@ class _RecordingResponseRunner:
         msg = "Queued-notice reservations are not part of these focused turn tests"
         raise AssertionError(msg)
 
+    def track_inbox_response(self, response: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+        task = asyncio.get_running_loop().create_task(response, name=name)
+        self.inbox_tasks.append(task)
+        return task
+
+    async def settle_inbox_responses(self) -> None:
+        """Await every runner-owned response task, surfacing its failures."""
+        for task in self.inbox_tasks:
+            await task
+
     async def generate_response(self, request: ResponseRequest) -> str | None:
         self.requests.append(request)
+        if request.on_lifecycle_lock_acquired is not None:
+            request.on_lifecycle_lock_acquired()
         return self.response_event_id
 
     async def generate_team_response_helper(
@@ -105,6 +130,8 @@ class _RecordingResponseRunner:
         team_mode: str,  # noqa: ARG002
     ) -> str | None:
         self.team_requests.append(request)
+        if request.on_lifecycle_lock_acquired is not None:
+            request.on_lifecycle_lock_acquired()
         return self.response_event_id
 
 
@@ -178,12 +205,18 @@ class _Harness:
     gateway: _RecordingDeliveryGateway
     turn_store: TurnStore
     gate: CoalescingGate
+    gate_batches: list[CoalescedBatch]
     conversation_cache: AsyncMock
 
     async def deliver(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        """Run one inbound text turn end-to-end through ingress and coalescing."""
+        """Run one inbound text turn end-to-end, settling runner-owned responses.
+
+        Conversational responses keep running on runner-owned inbox tasks after
+        the gate handoff completes, so assertions must wait for those tasks too.
+        """
         await self.controller.handle_text_event(room, event)
         await self.gate.drain_all()
+        await self.runner.settle_inbox_responses()
 
 
 def _build_harness(
@@ -283,8 +316,10 @@ def _build_harness(
     runner = _RecordingResponseRunner()
     gateway = _RecordingDeliveryGateway()
     controller_ref: list[TurnController] = []
+    gate_batches: list[CoalescedBatch] = []
 
     async def _dispatch_batch(batch: CoalescedBatch) -> None:
+        gate_batches.append(batch)
         await controller_ref[0].handle_coalesced_batch(batch)
 
     gate = CoalescingGate(
@@ -292,6 +327,15 @@ def _build_harness(
         debounce_seconds=lambda: 0.0,
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
+    )
+    ingress_validator = IngressValidator(
+        IngressValidatorDeps(
+            runtime=runtime,
+            runtime_paths=runtime_paths,
+            matrix_id=matrix_id,
+            turn_store=turn_store,
+            turn_policy=policy,
+        ),
     )
     controller = TurnController(
         TurnControllerDeps(
@@ -311,6 +355,7 @@ def _build_harness(
             turn_store=turn_store,
             coalescing_gate=gate,
             edit_regenerator=_UnusedEditRegenerator(),
+            ingress=ingress_validator,
         ),
     )
     controller_ref.append(controller)
@@ -321,6 +366,7 @@ def _build_harness(
         gateway=gateway,
         turn_store=turn_store,
         gate=gate,
+        gate_batches=gate_batches,
         conversation_cache=conversation_cache,
     )
 
@@ -460,6 +506,8 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
 
     await harness.deliver(room, event)
 
+    # Conversational turns flow through the coalescing gate, unlike commands.
+    assert len(harness.gate_batches) == 1
     assert harness.policy.plan_turn_calls == 1
     assert len(harness.runner.requests) == 1
     request = harness.runner.requests[0]
@@ -485,11 +533,13 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     # The envelope crosses the seam as the same value the dispatch was planned with.
     assert request.response_envelope is preparation.dispatch.envelope
 
-    # Data crosses the seam as values, not closures: the old prepare-after-lock
-    # callback is gone and nothing callable rides inside the preparation value.
+    # Payload data crosses the seam as values, not closures: the old
+    # prepare-after-lock callback is gone and nothing callable rides inside the
+    # preparation value. The only callback on the request is the redesign's
+    # inbox handoff signal, fired by the runner when it takes the lifecycle lock.
     request_field_names = {request_field.name for request_field in fields(ResponseRequest)}
     assert "prepare_after_lock" not in request_field_names
-    assert request.on_lifecycle_lock_acquired is None
+    assert request.on_lifecycle_lock_acquired is not None
     assert not any(callable(getattr(preparation, preparation_field.name)) for preparation_field in fields(preparation))
 
     metadata = request.matrix_run_metadata
@@ -500,16 +550,21 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
 
 @pytest.mark.asyncio
 async def test_command_turn_records_terminal_outcome_through_turn_store(config: Config, tmp_path: Path) -> None:
-    """A ``!command`` turn executes on the router and records a terminal TurnStore outcome."""
+    """A ``!command`` turn executes on the router and records a terminal TurnStore outcome.
+
+    Since the coalescing redesign, command-shaped human text is a control input:
+    it dispatches directly at ingress and must never enter the coalescing gate.
+    """
     harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
     event = _text_event("!help", event_id="$command:localhost")
 
     await harness.deliver(room, event)
 
-    # Commands bypass turn-policy planning and AI execution entirely.
+    # Commands bypass turn-policy planning, AI execution, and the coalescing gate.
     assert harness.policy.plan_turn_calls == 0
     assert harness.runner.requests == []
+    assert harness.gate_batches == []
     assert len(harness.gateway.sent) == 1
     assert "command" in harness.gateway.sent[0].response_text.lower()
     assert harness.turn_store.is_handled(event.event_id) is True
@@ -531,6 +586,8 @@ async def test_non_router_agent_consumes_command_without_responding(config: Conf
     assert harness.policy.plan_turn_calls == 0
     assert harness.runner.requests == []
     assert harness.gateway.sent == []
+    # Commands are control inputs: even a silently consumed one never enters the gate.
+    assert harness.gate_batches == []
     # The non-router agent does not claim the command turn; the router owns its
     # terminal record, so this agent's ledger must stay untouched.
     assert harness.turn_store.is_handled(event.event_id) is False
