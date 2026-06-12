@@ -51,9 +51,10 @@ def test_release_workflow_dispatches_homebrew_tap_update(release_workflow: str) 
     """The main release workflow should notify the dedicated Homebrew tap repo."""
     assert "update_homebrew_tap:" in release_workflow
     assert "needs: build_macos_app" in release_workflow
-    assert "HOMEBREW_TAP_DISPATCH_TOKEN" in release_workflow
-    assert "Token needs write access to mindroom-ai/homebrew-tap." in release_workflow
-    assert "Fine-grained tokens need Contents: write on that repo." in release_workflow
+    assert "actions/create-github-app-token@v3" in release_workflow
+    assert "owner: mindroom-ai" in release_workflow
+    assert "repositories: homebrew-tap" in release_workflow
+    assert "GH_TOKEN: ${{ steps.release-bot.outputs.token }}" in release_workflow
     assert "repos/mindroom-ai/homebrew-tap/dispatches" in release_workflow
     assert "-f event_type=mindroom-release" in release_workflow
     assert '-F "client_payload[tag_name]=$TAG_NAME"' in release_workflow
