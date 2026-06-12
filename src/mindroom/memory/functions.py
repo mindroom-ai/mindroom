@@ -40,7 +40,7 @@ from ._policy import (
     use_disabled_memory_backend,
     use_file_memory_backend,
 )
-from ._prompting import build_memory_messages, format_memories_as_context
+from ._prompting import build_memory_messages, format_file_memory_entrypoint_context, format_memories_as_context
 from ._shared import MemoryResult, new_memory_id
 
 if TYPE_CHECKING:
@@ -407,7 +407,10 @@ async def build_memory_prompt_parts(
             timing_scope,
         )
         if agent_entrypoint:
-            session_preamble = f"{config.get_prompt('FILE_MEMORY_ENTRYPOINT_HEADER')}\n{agent_entrypoint}"
+            session_preamble = format_file_memory_entrypoint_context(
+                header=config.get_prompt("FILE_MEMORY_ENTRYPOINT_HEADER"),
+                entrypoint=agent_entrypoint,
+            )
         context_type = "agent file"
 
     turn_context = (
