@@ -42,23 +42,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Verify release metadata token
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_METADATA_PAT || secrets.PAT }}
-        run: |
-          if [[ -z "$GH_TOKEN" ]]; then
-            echo "::error::RELEASE_METADATA_PAT or PAT secret is required to open the release metadata PR."
-            exit 1
-          fi
-          if ! CAN_PUSH=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .permissions.push); then
-            echo "::error::The release metadata token (RELEASE_METADATA_PAT or PAT secret) was rejected by the GitHub API, most likely because it expired or was revoked. Rotate it in Settings -> Secrets and variables -> Actions, then re-run this workflow."
-            exit 1
-          fi
-          if [[ "$CAN_PUSH" != "true" ]]; then
-            echo "::error::The release metadata token cannot push to ${GITHUB_REPOSITORY}, so the release metadata PR steps would fail. Grant the token contents and pull-requests write access, then re-run this workflow."
-            exit 1
-          fi
-          echo "Release metadata token has push access to ${GITHUB_REPOSITORY}."
+      # Short-lived token from the mindroom-release-bot GitHub App; minted first
+      # so a misconfigured app fails the job before the expensive notarized build.
+      - name: Mint release bot token
+        id: release-bot
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.release_ref }}
@@ -148,7 +139,7 @@ jobs:
           cp "$APPCAST_DIR/appcast.xml" macos/appcast.xml
       - name: Update Sparkle appcast metadata
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_METADATA_PAT || secrets.PAT }}
+          GH_TOKEN: ${{ steps.release-bot.outputs.token }}
           TAG_NAME: ${{ inputs.release_ref }}
         run: |
           python3 .github/scripts/normalize_appcast.py macos/appcast.xml
@@ -224,18 +215,21 @@ jobs:
     permissions:
       contents: read
     steps:
+      # repository_dispatch needs contents write on mindroom-ai/homebrew-tap,
+      # which the mindroom-release-bot app installation grants.
+      - name: Mint release bot token
+        id: release-bot
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: mindroom-ai
+          repositories: homebrew-tap
       - name: Dispatch tap workflow
         env:
-          # Token needs write access to mindroom-ai/homebrew-tap.
-          # Fine-grained tokens need Contents: write on that repo.
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN || secrets.PAT }}
+          GH_TOKEN: ${{ steps.release-bot.outputs.token }}
           TAG_NAME: ${{ inputs.release_ref }}
         run: |
-          if [[ -z "$GH_TOKEN" ]]; then
-            echo "HOMEBREW_TAP_DISPATCH_TOKEN or PAT is required to update mindroom-ai/homebrew-tap." >&2
-            exit 1
-          fi
-
           gh api repos/mindroom-ai/homebrew-tap/dispatches \
             -f event_type=mindroom-release \
             -F "client_payload[tag_name]=$TAG_NAME" \
