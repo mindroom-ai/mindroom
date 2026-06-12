@@ -529,7 +529,6 @@ depends_on = [
     "mindroom.api.dashboard_credential_scope",
     "mindroom.oauth.providers",
     "mindroom.oauth.state",
-    "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]
@@ -2072,7 +2071,6 @@ path = "mindroom.scheduling"
 depends_on = [
     "mindroom.entity_resolution",
     "mindroom.hooks",
-    "mindroom.matrix.client_delivery",
     "mindroom.model_loading",
     "mindroom.scheduling_executor",
 ]
