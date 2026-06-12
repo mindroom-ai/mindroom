@@ -113,6 +113,8 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
+            # /usr/share/nginx/html is a symlink to /app in the client image,
+            # so the nginx aliases under html/ resolve to these mounts.
             - name: config
               mountPath: /app/config.json
               subPath: {{ .Values.config.key }}

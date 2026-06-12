@@ -11,7 +11,7 @@ image:
   repository: ghcr.io/mindroom-ai/mindroom-cinny
   tag: latest
   digest: ""
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 imagePullSecrets: []
 
@@ -92,6 +92,9 @@ config:
 nginx:
   # Container port nginx listens on. Ports below 1024 require extra privileges.
   port: 8080
+  # Also listen on IPv6. Disable on nodes without an IPv6 stack, for example
+  # kernels booted with ipv6.disable=1, where binding [::] fails at startup.
+  ipv6: true
   create: true
   existingConfigMap: ""
   key: default.conf

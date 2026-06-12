@@ -81,7 +81,8 @@ When `rootServiceWorkerCleanup.enabled` is true, the same ConfigMap must also pr
 ## Notes
 
 - The chart does not create ingress, TLS, or a Matrix homeserver.
-- The container runs as the unprivileged nginx user with a read-only root filesystem, so `nginx.port` must stay at 1024 or higher unless you grant extra privileges through `securityContext`.
+- The container runs as the unprivileged nginx user with a read-only root filesystem, so `nginx.port` must stay at 1024 or higher unless you grant extra privileges through `securityContext` or lower `net.ipv4.ip_unprivileged_port_start`.
+- Set `nginx.ipv6: false` on nodes without an IPv6 stack, where binding `[::]` makes nginx fail at startup.
 - Use `nodeSelector`, `affinity`, `tolerations`, and `topologySpreadConstraints` for cluster-specific scheduling policy.
 - Set `selectorLabels` when adopting an existing Deployment with an immutable selector.
 - Override `probes.*.custom` when a deployment needs custom Kubernetes readiness or liveness probes.

@@ -109,7 +109,9 @@ runtime-config.js straight from nginx and the Deployment bypasses the entrypoint
 {{- $runtimeConfig := printf "window.__APP_BASE_PATH__ = \"%s\"; window.__ENABLE_SERVICE_WORKER__ = %t;" $base .Values.serviceWorker.enabled -}}
 server {
   listen {{ .Values.nginx.port }};
+{{- if .Values.nginx.ipv6 }}
   listen [::]:{{ .Values.nginx.port }};
+{{- end }}
   absolute_redirect off;
 {{- if ne $base "/" }}
 
