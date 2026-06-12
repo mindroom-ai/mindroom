@@ -59,9 +59,10 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 Matrix sync callback
   -> bot.py (AgentBot/TeamBot runtime shell)
   -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
+       -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
        -> coalescing.py                                          (debounced batching per room/thread)
-       -> text_ingress_dispatch.py + turn_policy.py              (commands; ignore / route / respond decision)
+       -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py                            (lifecycle lock, Agno agent/team run)
        -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
        -> turn_store.py / handled_turns.py                       (durable dedup so restarts don't double-reply)
@@ -78,6 +79,7 @@ Matrix sync callback
 | `team_exact_members.py` | Runtime resolution for exact team member materialization |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle, sync callbacks, and room behavior |
 | `turn_controller.py` | TurnController - owns one inbound turn from ingress to recorded outcome |
+| `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
 | `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
 | `coalescing.py` | Live message coalescing gate (debounced batching per room/thread) |

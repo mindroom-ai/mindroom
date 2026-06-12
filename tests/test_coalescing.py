@@ -304,65 +304,6 @@ async def test_reservation_receipt_time_bounds_debounce_claim_window() -> None:
     await gate.drain_all()
 
 
-@pytest.mark.asyncio
-async def test_command_barrier_does_not_widen_receive_time_debounce_window() -> None:
-    """A late barrier should not make old same-thread prompts coalesce."""
-    batches: list[CoalescedBatch] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch)
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.3,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
-    first_reservation = gate.reserve_order(
-        room_id=key.room_id,
-        requester_user_id=key.requester_user_id,
-        receipt_time=1.0,
-    )
-    second_reservation = gate.reserve_order(
-        room_id=key.room_id,
-        requester_user_id=key.requester_user_id,
-        receipt_time=1.5,
-    )
-    command_reservation = gate.reserve_order(
-        room_id=key.room_id,
-        requester_user_id=key.requester_user_id,
-        receipt_time=1.6,
-    )
-
-    await gate.admit(
-        key,
-        ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$second:localhost", "second", 1_000_500))),
-        order_reservation=second_reservation,
-    )
-    await gate.admit(
-        key,
-        ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$command:localhost", "!help", 1_000_600))),
-        order_reservation=command_reservation,
-    )
-    await asyncio.sleep(0)
-    assert batches == []
-
-    await gate.admit(
-        key,
-        ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$first:localhost", "first", 1_000_000))),
-        order_reservation=first_reservation,
-    )
-
-    await _wait_for(
-        lambda: (
-            [batch.source_event_ids for batch in batches]
-            == [["$first:localhost"], ["$second:localhost"], ["$command:localhost"]]
-        ),
-    )
-    await gate.drain_all()
-
-
 def test_active_follow_up_source_kind_is_not_coalescing_exempt() -> None:
     """Active-follow-up is dispatch policy, not a source-kind bypass."""
     event = _text_event("$active:localhost", "follow-up", 1_000_000)
@@ -540,9 +481,8 @@ async def test_upload_grace_waits_for_same_window_unresolved_media_reservation()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("barrier_kind", ["command", "bypass"])
-async def test_upload_grace_barrier_does_not_wait_for_later_unresolved_reservation(barrier_kind: str) -> None:
-    """A command/bypass after upload-grace text must not wait for later unresolved ingress."""
+async def test_upload_grace_barrier_does_not_wait_for_later_unresolved_reservation() -> None:
+    """A bypass after upload-grace text must not wait for later unresolved ingress."""
     batches: list[CoalescedBatch] = []
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
@@ -560,13 +500,10 @@ async def test_upload_grace_barrier_does_not_wait_for_later_unresolved_reservati
     gate_entry = gate._gates[key]
     await _wait_for(lambda: gate_entry.phase is GatePhase.GRACE)
 
-    if barrier_kind == "command":
-        barrier = _pending(_text_event("$barrier:localhost", "!help", 1_000_001))
-    else:
-        barrier = _pending(_text_event("$barrier:localhost", "solo", 1_000_001))
-        barrier.dispatch_metadata = (
-            PendingDispatchMetadata(kind="solo", payload=object(), close=lambda: None, requires_solo_batch=True),
-        )
+    barrier = _pending(_text_event("$barrier:localhost", "solo", 1_000_001))
+    barrier.dispatch_metadata = (
+        PendingDispatchMetadata(kind="solo", payload=object(), close=lambda: None, requires_solo_batch=True),
+    )
     await _admit_ready(gate, key, barrier)
     later_reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
 
@@ -1406,69 +1343,6 @@ async def test_debounce_does_not_wait_for_later_reservation_outside_window() -> 
 
 
 @pytest.mark.asyncio
-async def test_debounce_still_releases_prompt_when_command_barrier_arrives() -> None:
-    """A command barrier should still cut short a long normal debounce."""
-    batches: list[CoalescedBatch] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch)
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 60.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
-
-    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "normal", 1_000_000)))
-    await _admit_ready(gate, key, _pending(_text_event("$command:localhost", "!help", 1_000_001)))
-
-    await _wait_for(
-        lambda: [batch.source_event_ids for batch in batches] == [["$text:localhost"], ["$command:localhost"]],
-    )
-
-
-@pytest.mark.asyncio
-async def test_command_barrier_does_not_wait_for_unresolved_reservation_after_barrier() -> None:
-    """A reservation after a command barrier must not delay work before the barrier."""
-    batches: list[CoalescedBatch] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch)
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 60.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
-
-    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "normal", 1_000_000)))
-    await _admit_ready(gate, key, _pending(_text_event("$command:localhost", "!help", 1_000_001)))
-    reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
-
-    await _wait_for(
-        lambda: [batch.source_event_ids for batch in batches] == [["$text:localhost"], ["$command:localhost"]],
-    )
-
-    await gate.admit(
-        key,
-        ready_result=ReadyPendingEvent(pending_event=_voice_pending("$voice:localhost", "voice", 1_000_002)),
-        source_kind=VOICE_SOURCE_KIND,
-        order_reservation=reservation,
-    )
-    await gate.drain_all()
-
-    assert [batch.source_event_ids for batch in batches] == [
-        ["$text:localhost"],
-        ["$command:localhost"],
-        ["$voice:localhost"],
-    ]
-
-
-@pytest.mark.asyncio
 async def test_bypass_barrier_does_not_wait_for_unresolved_reservation_after_barrier() -> None:
     """A reservation after a bypass barrier must not delay work before the barrier."""
     batches: list[CoalescedBatch] = []
@@ -1509,64 +1383,6 @@ async def test_bypass_barrier_does_not_wait_for_unresolved_reservation_after_bar
         ["$bypass:localhost"],
         ["$voice:localhost"],
     ]
-
-
-@pytest.mark.asyncio
-async def test_front_command_does_not_wait_for_later_unresolved_reservation() -> None:
-    """A front command should wait for older unresolved work only."""
-    batches: list[CoalescedBatch] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch)
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 60.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
-
-    await _admit_ready(gate, key, _pending(_text_event("$command:localhost", "!help", 1_000_000)))
-    reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
-
-    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$command:localhost"]])
-
-    await gate.admit(
-        key,
-        ready_result=ReadyPendingEvent(pending_event=_voice_pending("$voice:localhost", "voice", 1_000_001)),
-        source_kind=VOICE_SOURCE_KIND,
-        order_reservation=reservation,
-    )
-    await gate.drain_all()
-
-    assert [batch.source_event_ids for batch in batches] == [["$command:localhost"], ["$voice:localhost"]]
-
-
-@pytest.mark.asyncio
-async def test_child_command_waits_for_older_queued_room_root_parent() -> None:
-    """A command replying to a queued room-root turn must not overtake that parent turn."""
-    batches: list[list[str]] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch.source_event_ids)
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.05,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    root_key = CoalescingKey("!room:localhost", None, "@user:localhost")
-    child_key = CoalescingKey("!room:localhost", "$root:localhost", "@user:localhost")
-
-    await _admit_ready(gate, root_key, _pending(_text_event("$root:localhost", "root", 1_000_000)))
-    await _admit_ready(gate, child_key, _pending(_text_event("$command:localhost", "!help", 1_000_001)))
-
-    await _wait_for(lambda: batches == [["$root:localhost"], ["$command:localhost"]])
-    await gate.drain_all()
-
-    assert batches == [["$root:localhost"], ["$command:localhost"]]
 
 
 @pytest.mark.asyncio

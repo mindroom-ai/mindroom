@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from .commands.parsing import command_parser
 from .dispatch_handoff import DispatchEvent, PreparedTextEvent, is_media_dispatch_event
 from .dispatch_source import (
     IMAGE_SOURCE_KIND,
@@ -25,7 +24,6 @@ class QueueKind(enum.Enum):
     """Dispatch behavior for one queued event."""
 
     NORMAL = "normal"
-    COMMAND = "command"
     BYPASS = "bypass"
 
 
@@ -51,21 +49,6 @@ def is_coalescing_exempt_source_kind(
 ) -> bool:
     """Return True when coalescing should be skipped for this event."""
     return source_kind_bypasses_coalescing(_effective_source_kind(event, fallback_source_kind))
-
-
-def _is_command_event(
-    event: DispatchEvent,
-    *,
-    fallback_source_kind: str | None = None,
-) -> bool:
-    """Return whether a dispatch event should bypass coalescing as a command."""
-    if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
-        return False
-    if fallback_source_kind == VOICE_SOURCE_KIND or is_voice_event(event):
-        return False
-    if _effective_source_kind(event, fallback_source_kind) in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND}:
-        return False
-    return command_parser.parse(event.body) is not None
 
 
 def pending_has_only_text(pending_events: list[PendingEvent]) -> bool:
@@ -108,6 +91,4 @@ def queue_kind(pending_event: PendingEvent) -> QueueKind:
         return QueueKind.BYPASS
     if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
         return QueueKind.BYPASS
-    if _is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
-        return QueueKind.COMMAND
     return QueueKind.NORMAL

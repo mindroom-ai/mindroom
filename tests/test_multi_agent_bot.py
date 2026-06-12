@@ -7355,7 +7355,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=False),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=False),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=False),
         ):
             await self._invoke_handler(bot, handler_name, room, event)
 
@@ -7420,7 +7420,7 @@ class TestAgentBot:
         wrap_extracted_collaborators(bot, "_turn_policy")
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch.object(bot._turn_policy, "can_reply_to_sender", return_value=False),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
         ):
@@ -7477,7 +7477,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -8020,7 +8020,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -8447,7 +8447,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -8517,7 +8517,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -8610,7 +8610,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -8688,7 +8688,7 @@ class TestAgentBot:
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
             mock_get_available.return_value = [
@@ -8832,7 +8832,7 @@ class TestAgentBot:
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch(
                 "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
@@ -9124,7 +9124,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -9217,7 +9217,7 @@ class TestAgentBot:
                     entity_ids(config, runtime_paths_for(config))["general"],
                 ],
             ),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
             patch(
@@ -9293,7 +9293,7 @@ class TestAgentBot:
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
                 return_value=[entity_ids(config, runtime_paths_for(config))["calculator"]],
             ),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
             patch(
@@ -9350,7 +9350,7 @@ class TestAgentBot:
         }
 
         with (
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_controller.interactive.handle_text_response",
@@ -9419,7 +9419,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch(
                 "mindroom.turn_controller.interactive.handle_text_response",
                 new_callable=AsyncMock,
@@ -13040,7 +13040,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",

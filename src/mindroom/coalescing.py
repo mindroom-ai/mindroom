@@ -615,8 +615,6 @@ class CoalescingGate:
     def _enqueue_path(self, kind: QueueKind) -> str:
         if kind is QueueKind.BYPASS:
             return "bypass"
-        if kind is QueueKind.COMMAND:
-            return "command_interrupt"
         if self._debounce_seconds() <= 0:
             return "zero_debounce"
         return "debounce_schedule"
@@ -1380,7 +1378,7 @@ class CoalescingGate:
         gate: _GateEntry,
         front_kind: QueueKind,
     ) -> bool:
-        if front_kind not in {QueueKind.BYPASS, QueueKind.COMMAND}:
+        if front_kind is not QueueKind.BYPASS:
             return False
         claimed_admissions = self._claim_front_events(gate, 1)
         await self._dispatch_claim(

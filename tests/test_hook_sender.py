@@ -2078,7 +2078,7 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
         },
     )
 
-    with patch("mindroom.turn_controller.is_authorized_sender", side_effect=real_is_authorized_sender):
+    with patch("mindroom.ingress_validation.is_authorized_sender", side_effect=real_is_authorized_sender):
         prechecked = bot._turn_controller._precheck_dispatch_event(room, event)
 
     assert prechecked is None

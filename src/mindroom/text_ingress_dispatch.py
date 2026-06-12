@@ -161,7 +161,7 @@ async def _prepare_text_dispatch(
     hydrated_payload_metadata = payload_metadata_from_source(
         event.source,
         trust_internal_metadata=(
-            controller._should_trust_internal_payload_metadata(event)
+            controller.deps.ingress.should_trust_internal_payload_metadata(event)
             if trust_hydrated_internal_metadata is None
             else trust_hydrated_internal_metadata
         ),
@@ -174,7 +174,7 @@ async def _prepare_text_dispatch(
             hydrated_payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata
             if trust_hydrated_internal_metadata is not None
-            else controller._should_trust_internal_payload_metadata(event),
+            else controller.deps.ingress.should_trust_internal_payload_metadata(event),
         )
     )
     attach_dispatch_pipeline_timing(event.source, dispatch_timing)
@@ -240,7 +240,7 @@ def _parsed_command_for_event(
         return None
     if is_audio_message_event(event) or is_voice_event(
         event,
-        sender_is_trusted=controller._sender_is_trusted_for_ingress_metadata,
+        sender_is_trusted=controller.deps.ingress.sender_is_trusted_for_ingress_metadata,
     ):
         return None
     return command_parser.parse(event.body)

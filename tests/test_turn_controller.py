@@ -465,7 +465,7 @@ async def test_on_message_passes_resolved_thread_id_to_interactive_text_response
     )
 
     with (
-        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         patch.object(bot._turn_policy, "can_reply_to_sender", return_value=True),
         patch.object(
             bot._conversation_resolver,
@@ -578,7 +578,7 @@ async def test_sidecar_preview_passes_resolved_thread_id_to_interactive_text_res
     )
 
     with (
-        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         patch.object(bot._turn_policy, "can_reply_to_sender", return_value=True),
         patch.object(
             bot._conversation_resolver,

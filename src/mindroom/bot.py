@@ -86,6 +86,7 @@ from .delivery_gateway import (
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, InboundTurnNormalizerDeps
+from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
@@ -509,6 +510,15 @@ class AgentBot:
                 matrix_id=runtime_matrix_id,
             ),
         )
+        self._ingress_validator = IngressValidator(
+            IngressValidatorDeps(
+                runtime=self._runtime_view,
+                runtime_paths=self.runtime_paths,
+                matrix_id=runtime_matrix_id,
+                turn_store=self._turn_store,
+                turn_policy=self._turn_policy,
+            ),
+        )
         self._turn_controller = TurnController(
             TurnControllerDeps(
                 runtime=self._runtime_view,
@@ -527,6 +537,7 @@ class AgentBot:
                 turn_store=self._turn_store,
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
+                ingress=self._ingress_validator,
             ),
         )
 
@@ -1554,7 +1565,7 @@ class AgentBot:
         early_reservation_owner = None
         approval_reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
         if approval_reply_to_event_id is not None and is_process_active_approval_card(approval_reply_to_event_id):
-            requester_user_id = self._turn_controller._requester_user_id(
+            requester_user_id = self._ingress_validator.requester_user_id(
                 sender=event.sender,
                 source=event.source,
             )
@@ -1701,7 +1712,7 @@ class AgentBot:
             self.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
             return
 
-        requester_user_id = self._turn_controller._requester_user_id(
+        requester_user_id = self._ingress_validator.requester_user_id(
             sender=event.sender,
             source=event.source,
         )

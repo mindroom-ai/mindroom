@@ -8,17 +8,15 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-import nio
-
 from mindroom import interactive
 from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
-from mindroom.authorization import get_effective_sender_id_for_reply_permissions, is_authorized_sender
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
     PendingEvent,
     active_follow_up_coalescing_key,
+    build_coalesced_batch,
     close_pending_event_metadata,
 )
 from mindroom.commands.handler import CommandHandlerContext, handle_command
@@ -53,16 +51,12 @@ from mindroom.dispatch_handoff import (
 from mindroom.dispatch_replay_guard import has_newer_unresponded_cached_thread_event, has_newer_unresponded_in_thread
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-    HOOK_DISPATCH_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
-    is_visible_router_voice_echo_content,
     source_kind_allows_internal_relay_detection,
-    source_kind_allows_trusted_original_sender,
-    source_kind_from_content,
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
@@ -114,19 +108,20 @@ from mindroom.turn_origin import (
     classify_turn_origin,
     original_sender_for_router_handoff,
     original_sender_for_router_relay,
-    requester_id_from_trusted_original_sender,
 )
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    import nio
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.identity import MatrixID
@@ -297,6 +292,7 @@ class TurnControllerDeps:
     turn_store: TurnStore
     coalescing_gate: CoalescingGate
     edit_regenerator: _EditRegenerator
+    ingress: IngressValidator
 
 
 @dataclass
@@ -311,44 +307,6 @@ class TurnController:
             msg = "Matrix client is not ready for turn execution"
             raise RuntimeError(msg)
         return client
-
-    def _requester_user_id(
-        self,
-        *,
-        sender: str,
-        source: object,
-    ) -> str:
-        """Return the effective requester for reply-permission checks."""
-        source_dict = cast("dict[str, Any] | None", source if isinstance(source, dict) else None)
-        content = source_dict.get("content") if source_dict is not None else None
-        if isinstance(content, dict):
-            original_sender = content.get(ORIGINAL_SENDER_KEY)
-            if not isinstance(original_sender, str):
-                return get_effective_sender_id_for_reply_permissions(
-                    sender,
-                    source_dict,
-                    self.deps.runtime.config,
-                    self.deps.runtime_paths,
-                )
-            source_kind = source_kind_from_content(content)
-            trusted_requester = requester_id_from_trusted_original_sender(
-                original_sender=original_sender,
-                original_sender_entity_name=self._managed_entity_name_for_sender(original_sender),
-                source_kind=source_kind,
-                sender_trusts_original_sender=self._should_trust_original_sender_metadata(
-                    sender=sender,
-                    source_kind=source_kind,
-                ),
-            )
-            if trusted_requester is not None:
-                return trusted_requester
-            return sender
-        return get_effective_sender_id_for_reply_permissions(
-            sender,
-            source_dict,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-        )
 
     def _reserve_prompt_ingress_order(
         self,
@@ -368,168 +326,6 @@ class TurnController:
             active_response_thread_ids_at_receipt=self.deps.response_runner.active_thread_ids_for_room(room.room_id),
         )
 
-    def _sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
-        """Return whether one sender may supply trusted ingress metadata overrides."""
-        return self._managed_entity_name_for_sender(sender_id) is not None
-
-    def _managed_entity_name_for_sender(self, sender_id: str, *, include_router: bool = True) -> str | None:
-        """Return the configured entity alias for an exact current Matrix user ID."""
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        return registry.current_entity_name_for_user_id(sender_id, include_router=include_router)
-
-    def _should_trust_original_sender_metadata(
-        self,
-        *,
-        sender: str,
-        source_kind: str | None,
-    ) -> bool:
-        """Return whether original-sender metadata represents a trusted relay for this event."""
-        sender_is_own_entity = sender == self.deps.matrix_id.full_id
-        sender_agent_name = self._managed_entity_name_for_sender(sender)
-        if sender_agent_name is None and not sender_is_own_entity:
-            return False
-        return source_kind_allows_trusted_original_sender(source_kind)
-
-    @staticmethod
-    def _event_source_kind(event: DispatchEvent, content: dict[str, Any]) -> str | None:
-        """Return canonical source-kind metadata for one dispatch event."""
-        source_kind = event.source_kind_override if isinstance(event, PreparedTextEvent) else None
-        return source_kind if source_kind is not None else source_kind_from_content(content)
-
-    def _trusted_human_original_sender_for_event(self, event: DispatchEvent) -> str | None:
-        """Return trusted human original-sender metadata from one dispatch event."""
-        if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
-            return None
-        if not self._sender_is_trusted_for_ingress_metadata(event.sender):
-            return None
-        content = event.source.get("content") if isinstance(event.source, dict) else None
-        if not isinstance(content, dict):
-            return None
-        source_kind = self._event_source_kind(event, content)
-        return self._trusted_human_original_sender(
-            sender=event.sender,
-            content=content,
-            source_kind=source_kind,
-        )
-
-    def _trusted_human_original_sender(
-        self,
-        *,
-        sender: str,
-        content: dict[str, Any],
-        source_kind: str | None,
-    ) -> str | None:
-        """Return trusted original-sender metadata only when it names a human requester."""
-        original_sender = content.get(ORIGINAL_SENDER_KEY)
-        if not isinstance(original_sender, str) or not original_sender:
-            return None
-        if self._managed_entity_name_for_sender(original_sender) is not None:
-            return None
-        if not self._should_trust_original_sender_metadata(
-            sender=sender,
-            source_kind=source_kind,
-        ):
-            return None
-        return original_sender
-
-    def _should_trust_internal_payload_metadata(self, event: DispatchEvent) -> bool:
-        """Return whether internal payload keys on one event should be treated as authoritative."""
-        return self._sender_is_trusted_for_ingress_metadata(event.sender)
-
-    def _is_trusted_internal_relay_event(self, event: DispatchEvent) -> bool:
-        """Return whether one agent-authored relay should bypass user-turn coalescing."""
-        if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
-            return False
-        content = event.source.get("content") if isinstance(event.source, dict) else None
-        if not isinstance(content, dict):
-            return False
-        if self._event_source_kind(event, content) != TRUSTED_INTERNAL_RELAY_SOURCE_KIND:
-            return False
-        return self._trusted_human_original_sender_for_event(event) is not None
-
-    def _is_trusted_router_relay_event(self, event: DispatchEvent) -> bool:
-        """Return whether one trusted internal relay originated from the router."""
-        if not self._is_trusted_internal_relay_event(event):
-            return False
-        sender_agent_name = self._managed_entity_name_for_sender(event.sender)
-        return sender_agent_name == ROUTER_AGENT_NAME
-
-    def _is_trusted_router_visible_voice_echo_content(self, sender: str, content: object) -> bool:
-        """Return whether replay history content is a display-only router voice echo."""
-        if self._managed_entity_name_for_sender(sender) != ROUTER_AGENT_NAME:
-            return False
-        if not is_visible_router_voice_echo_content(content) or not isinstance(content, dict):
-            return False
-        content_dict = cast("dict[str, Any]", content)
-        return (
-            self._trusted_human_original_sender(
-                sender=sender,
-                content=content_dict,
-                source_kind=source_kind_from_content(content_dict),
-            )
-            is not None
-        )
-
-    def _should_use_trusted_router_relay_context(
-        self,
-        event: DispatchEvent,
-        *,
-        ingress_metadata: DispatchIngressMetadata | None,
-        payload_metadata: DispatchPayloadMetadata | None,
-    ) -> bool:
-        """Return whether dispatch context should use trusted router relay semantics."""
-        if ingress_metadata is None:
-            return self._is_trusted_router_relay_event(event)
-        if ingress_metadata.source_kind != TRUSTED_INTERNAL_RELAY_SOURCE_KIND:
-            return False
-        sender_agent_name = self._managed_entity_name_for_sender(event.sender)
-        if sender_agent_name != ROUTER_AGENT_NAME:
-            return False
-        if payload_metadata is not None:
-            original_sender = payload_metadata.original_sender
-            return (
-                original_sender is not None
-                and original_sender != ""
-                and self._managed_entity_name_for_sender(original_sender) is None
-            )
-        return self._is_trusted_internal_relay_event(event)
-
-    def _precheck_event(
-        self,
-        room: nio.MatrixRoom,
-        event: DispatchEvent | MatrixMediaEvent,
-        *,
-        is_edit: bool = False,
-    ) -> str | None:
-        """Run shared early-exit checks for inbound text and media events."""
-        content = event.source.get("content") if isinstance(event.source, dict) else None
-        source_kind = source_kind_from_content(content) if isinstance(content, dict) else None
-        requester_user_id = self._requester_user_id(
-            sender=event.sender,
-            source=event.source,
-        )
-
-        if requester_user_id == self.deps.matrix_id.full_id and source_kind != HOOK_DISPATCH_SOURCE_KIND:
-            return None
-
-        if not is_edit and self.deps.turn_store.is_handled(event.event_id):
-            return None
-
-        if not is_authorized_sender(
-            requester_user_id,
-            self.deps.runtime.config,
-            room.room_id,
-            self.deps.runtime_paths,
-        ):
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
-            return None
-
-        if not self.deps.turn_policy.can_reply_to_sender(requester_user_id):
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
-            return None
-
-        return requester_user_id
-
     def _precheck_dispatch_event[T: DispatchEvent | MatrixMediaEvent](
         self,
         room: nio.MatrixRoom,
@@ -538,7 +334,7 @@ class TurnController:
         is_edit: bool = False,
     ) -> _PrecheckedEvent[T] | None:
         """Return a typed prechecked event for turn dispatch."""
-        requester_user_id = self._precheck_event(room, event, is_edit=is_edit)
+        requester_user_id = self.deps.ingress.precheck_event(room, event, is_edit=is_edit)
         if requester_user_id is None:
             return None
         return _PrecheckedEvent(event=event, requester_user_id=requester_user_id)
@@ -561,12 +357,12 @@ class TurnController:
             requester_user_id,
             thread_history,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
-            requester_user_id_for_event=lambda sender, source: self._requester_user_id(
+            requester_user_id_for_event=lambda sender, source: self.deps.ingress.requester_user_id(
                 sender=sender,
                 source=source,
             ),
-            is_visible_router_voice_echo=self._is_trusted_router_visible_voice_echo_content,
-            sender_is_trusted_for_ingress_metadata=self._sender_is_trusted_for_ingress_metadata,
+            is_visible_router_voice_echo=self.deps.ingress.is_trusted_router_visible_voice_echo_content,
+            sender_is_trusted_for_ingress_metadata=self.deps.ingress.sender_is_trusted_for_ingress_metadata,
             is_handled=self.deps.turn_store.is_handled,
             logger=self.deps.logger,
         )
@@ -590,12 +386,12 @@ class TurnController:
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
             get_recent_room_events=event_cache.get_recent_room_events if event_cache is not None else None,
             get_thread_id_for_event=self.deps.conversation_cache.get_thread_id_for_event,
-            requester_user_id_for_event=lambda sender, source: self._requester_user_id(
+            requester_user_id_for_event=lambda sender, source: self.deps.ingress.requester_user_id(
                 sender=sender,
                 source=source,
             ),
-            is_visible_router_voice_echo=self._is_trusted_router_visible_voice_echo_content,
-            sender_is_trusted_for_ingress_metadata=self._sender_is_trusted_for_ingress_metadata,
+            is_visible_router_voice_echo=self.deps.ingress.is_trusted_router_visible_voice_echo_content,
+            sender_is_trusted_for_ingress_metadata=self.deps.ingress.sender_is_trusted_for_ingress_metadata,
             is_handled=self.deps.turn_store.is_handled,
             logger=self.deps.logger,
         )
@@ -697,7 +493,7 @@ class TurnController:
     ) -> _IngressAdmissionOutcome:
         """Queue an active-thread follow-up while preserving its mid-turn notice."""
         resolved_trust_internal_payload_metadata = (
-            self._should_trust_internal_payload_metadata(event)
+            self.deps.ingress.should_trust_internal_payload_metadata(event)
             if trust_internal_payload_metadata is None
             else trust_internal_payload_metadata
         )
@@ -982,10 +778,12 @@ class TurnController:
             event_source=prepared_event.source,
         )
         canonical_thread_id = target.resolved_thread_id
-        original_sender = self._trusted_human_original_sender_for_event(prepared_event)
+        original_sender = self.deps.ingress.trusted_human_original_sender_for_event(prepared_event)
         content = prepared_event.source.get("content") if isinstance(prepared_event.source, dict) else None
-        prepared_source_kind = self._event_source_kind(prepared_event, content) if isinstance(content, dict) else None
-        if is_visible_router_voice_echo_content(content) and self._is_trusted_router_relay_event(prepared_event):
+        prepared_source_kind = (
+            self.deps.ingress.event_source_kind(prepared_event, content) if isinstance(content, dict) else None
+        )
+        if self.deps.ingress.is_display_only_router_voice_echo(prepared_event):
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(prepared_event.event_id))
             return _IngressAdmissionOutcome.CONSUMED
         trusted_user_relay = original_sender is not None and prepared_source_kind in {
@@ -1021,6 +819,15 @@ class TurnController:
                     source_event_id=prepared_event.event_id,
                 )
                 return _IngressAdmissionOutcome.CONSUMED
+        if self.deps.ingress.command_control_input(prepared_event, source_kind=envelope.source_kind) is not None:
+            await self._dispatch_command_control_input(
+                room=room,
+                dispatch_event=dispatch_event,
+                envelope=envelope,
+                coalescing_thread_id=coalescing_thread_id,
+                requester_user_id=requester_user_id,
+            )
+            return _IngressAdmissionOutcome.CONSUMED
         return await self._enqueue_prepared_text_for_dispatch(
             room=room,
             prepared_event=prepared_event,
@@ -1030,6 +837,49 @@ class TurnController:
             requester_user_id=requester_user_id,
             reservation_owner=reservation_owner,
         )
+
+    async def _dispatch_command_control_input(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        dispatch_event: TextDispatchEvent,
+        envelope: MessageEnvelope,
+        coalescing_thread_id: str | None,
+        requester_user_id: str,
+    ) -> None:
+        """Dispatch one command as a control input without entering the coalescing gate."""
+        pending_event = PendingEvent(
+            event=dispatch_event,
+            room=room,
+            requester_user_id=requester_user_id,
+            source_kind=envelope.source_kind,
+            dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
+            hook_source=envelope.hook_source,
+            message_received_depth=envelope.message_received_depth,
+            trust_internal_payload_metadata=self.deps.ingress.should_trust_internal_payload_metadata(dispatch_event),
+        )
+        batch = build_coalesced_batch(
+            CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
+            [pending_event],
+        )
+        handoff = build_dispatch_handoff(batch)
+        handled_turn = HandledTurnState.create(
+            handoff.source_event_ids,
+            source_event_prompts=dict(handoff.source_event_prompts),
+        )
+        try:
+            await self._dispatch_handoff(handoff, handled_turn=handled_turn)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A failed command dispatch must not propagate into the Matrix sync
+            # callback or poison later ingress, matching gate-flush containment.
+            self.deps.logger.exception(
+                "command_control_input_dispatch_failed",
+                event_id=dispatch_event.event_id,
+                room_id=room.room_id,
+                thread_id=coalescing_thread_id,
+            )
 
     async def _enqueue_for_dispatch(
         self,
@@ -1053,12 +903,16 @@ class TurnController:
             dispatch_timing.mark("gate_enter")
         enqueue_start = time.monotonic()
         timing_scope = event_timing_scope(event.event_id)
-        if source_kind_allows_internal_relay_detection(source_kind) and self._is_trusted_internal_relay_event(event):
+        if source_kind_allows_internal_relay_detection(
+            source_kind,
+        ) and self.deps.ingress.is_trusted_internal_relay_event(
+            event,
+        ):
             if dispatch_timing is not None:
                 dispatch_timing.note(coalescing_bypassed=True, coalescing_bypass_reason="trusted_internal_relay")
             source_kind = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
         resolved_trust_internal_payload_metadata = (
-            self._should_trust_internal_payload_metadata(event)
+            self.deps.ingress.should_trust_internal_payload_metadata(event)
             if trust_internal_payload_metadata is None
             else trust_internal_payload_metadata
         )
@@ -1152,10 +1006,10 @@ class TurnController:
         inherited_original_sender = payload_metadata.original_sender
         relay_original_sender = original_sender_for_router_relay(
             requester_id=requester_user_id,
-            requester_entity_name=self._managed_entity_name_for_sender(requester_user_id),
+            requester_entity_name=self.deps.ingress.managed_entity_name_for_sender(requester_user_id),
             inherited_original_sender=inherited_original_sender,
             inherited_original_sender_entity_name=(
-                self._managed_entity_name_for_sender(inherited_original_sender)
+                self.deps.ingress.managed_entity_name_for_sender(inherited_original_sender)
                 if inherited_original_sender is not None
                 else None
             ),
@@ -1206,7 +1060,7 @@ class TurnController:
                 extract_context_start,
                 path="command",
             )
-        elif use_trusted_router_relay_context := self._should_use_trusted_router_relay_context(
+        elif use_trusted_router_relay_context := self.deps.ingress.should_use_trusted_router_relay_context(
             event,
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
@@ -1532,10 +1386,10 @@ class TurnController:
         handoff_original_sender = original_sender_for_router_handoff(
             target_entity_name=suggested_entity,
             requester_id=requester_user_id,
-            requester_entity_name=self._managed_entity_name_for_sender(requester_user_id),
+            requester_entity_name=self.deps.ingress.managed_entity_name_for_sender(requester_user_id),
             inherited_original_sender=inherited_original_sender,
             inherited_original_sender_entity_name=(
-                self._managed_entity_name_for_sender(inherited_original_sender)
+                self.deps.ingress.managed_entity_name_for_sender(inherited_original_sender)
                 if inherited_original_sender is not None
                 else None
             ),
@@ -1573,7 +1427,7 @@ class TurnController:
 
         with bound_log_context(room_id=room.room_id, thread_id=thread_id):
             if len(responder_candidates) == 1:
-                suggested_entity = self._managed_entity_name_for_sender(responder_candidates[0].full_id)
+                suggested_entity = self.deps.ingress.managed_entity_name_for_sender(responder_candidates[0].full_id)
                 self.deps.logger.info("Handling deterministic routing", event_id=event.event_id)
             else:
                 self.deps.logger.info("Handling AI routing", event_id=event.event_id)
@@ -2079,7 +1933,7 @@ class TurnController:
         event_info = EventInfo.from_event(prechecked_event.event.source)
         if (
             is_audio_message_event(prechecked_event.event)
-            and self._managed_entity_name_for_sender(prechecked_event.event.sender) is not None
+            and self.deps.ingress.managed_entity_name_for_sender(prechecked_event.event.sender) is not None
         ):
             self.deps.logger.debug(
                 "Ignoring agent audio event for voice transcription",
