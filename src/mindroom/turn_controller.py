@@ -728,6 +728,10 @@ class TurnController:
                 resolved_thread_id=canonical_thread_id,
             )
             if selection is not None:
+                # A consumed interactive answer never enters the gate, and its
+                # response may wait behind this conversation's active turn; the
+                # sender's lane slot must settle now, not at response completion.
+                await reservation_owner.release()
                 await self.handle_interactive_selection(
                     room,
                     selection=selection,
@@ -1778,6 +1782,10 @@ class TurnController:
             )
         try:
             if event_info.is_edit:
+                # An edit never enters the gate, and its regeneration runs
+                # behind the conversation's response lock; the sender's lane
+                # slot must settle now, not at response completion.
+                await reservation_owner.release()
                 await self._handle_edit_event(room, prechecked_event, event_info, dispatch_timing)
                 return
             await self._ingest_live_text_event(

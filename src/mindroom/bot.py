@@ -1799,6 +1799,10 @@ class AgentBot:
                 self.runtime_paths,
             )
             if result:
+                # The selection's response may wait behind this conversation's
+                # active turn; the sender's lane slot must settle now, not at
+                # response completion.
+                await reservation_owner.release()
                 await self._turn_controller.handle_interactive_selection(
                     room,
                     selection=result,
