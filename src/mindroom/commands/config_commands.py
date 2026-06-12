@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shlex
 from typing import TYPE_CHECKING, Any
 
@@ -198,8 +199,10 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     path = runtime_paths.config_path
     load_error_footer = _CONFIG_CHANGE_REJECTED_MESSAGE if operation == "set" else None
 
-    # Load current config
-    config, load_error = load_config_or_user_error(
+    # Config loading and validation execute plugin modules and walk the
+    # filesystem; keep them off the event loop (#1260).
+    config, load_error = await asyncio.to_thread(
+        load_config_or_user_error,
         runtime_paths,
         footer=load_error_footer,
         tolerate_plugin_load_errors=True,
@@ -259,7 +262,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             _set_nested_value(test_config_dict, config_path_str, value)
 
             # Validate the modified config
-            Config.validate_with_runtime(test_config_dict, runtime_paths)
+            await asyncio.to_thread(Config.validate_with_runtime, test_config_dict, runtime_paths)
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
         except (ValidationError, ConfigRuntimeValidationError) as e:
@@ -332,8 +335,9 @@ async def apply_config_change(
     path = runtime_paths.config_path
 
     try:
-        # Load the current configuration
-        config, load_error = load_config_or_user_error(
+        # Load the current configuration off the event loop (#1260).
+        config, load_error = await asyncio.to_thread(
+            load_config_or_user_error,
             runtime_paths,
             footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
             tolerate_plugin_load_errors=True,
@@ -347,7 +351,11 @@ async def apply_config_change(
         _set_nested_value(config_dict, config_path_str, new_value)
 
         try:
-            config_lifecycle.validate_and_persist_config_payload(config_dict, runtime_paths)
+            await asyncio.to_thread(
+                config_lifecycle.validate_and_persist_config_payload,
+                config_dict,
+                runtime_paths,
+            )
         except (ValidationError, ConfigRuntimeValidationError) as ve:
             return format_invalid_config_message(ve, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
 

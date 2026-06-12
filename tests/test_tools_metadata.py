@@ -1,5 +1,6 @@
 """Test tool metadata JSON snapshot for dashboard consumption."""
 
+import gc
 import inspect
 import json
 import sys
@@ -904,3 +905,78 @@ def test_secret_like_config_fields_are_marked_password() -> None:
                 continue
             if lowered in suspicious_exact or lowered.endswith(suspicious_suffixes):
                 assert field.type == "password", f"{tool_name}.{field.name} should use type='password'"
+
+
+def test_resolved_tool_state_cached_per_config_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One config object should resolve its tool state once across all consumers."""
+    compute_calls = 0
+    dummy_state = metadata_module._ResolvedToolState({}, {}, {})
+
+    def counted_compute(*_args: object, **_kwargs: object) -> metadata_module._ResolvedToolState:
+        nonlocal compute_calls
+        compute_calls += 1
+        return dummy_state
+
+    monkeypatch.setattr(metadata_module, "_compute_resolved_tool_state_for_runtime", counted_compute)
+    metadata_module.clear_resolved_tool_state_cache()
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    config = Config.model_validate({})
+    try:
+        first = metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
+        second = metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
+        assert first is dummy_state
+        assert second is dummy_state
+        assert compute_calls == 1
+
+        # A different tolerate flag, config object, or runtime context recomputes.
+        metadata_module._resolved_tool_state_for_runtime(runtime_paths, config, tolerate_plugin_load_errors=True)
+        assert compute_calls == 2
+        metadata_module._resolved_tool_state_for_runtime(runtime_paths, Config.model_validate({}))
+        assert compute_calls == 3
+        other_runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "other" / "config.yaml",
+            storage_path=tmp_path / "other" / "storage",
+            process_env={},
+        )
+        metadata_module._resolved_tool_state_for_runtime(other_runtime_paths, config)
+        assert compute_calls == 4
+
+        metadata_module.clear_resolved_tool_state_cache()
+        metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
+        assert compute_calls == 5
+    finally:
+        metadata_module.clear_resolved_tool_state_cache()
+
+
+def test_resolved_tool_state_cache_evicts_on_config_gc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cached tool state must not outlive its config object (id-reuse safety)."""
+    monkeypatch.setattr(
+        metadata_module,
+        "_compute_resolved_tool_state_for_runtime",
+        lambda *_args, **_kwargs: metadata_module._ResolvedToolState({}, {}, {}),
+    )
+    metadata_module.clear_resolved_tool_state_cache()
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    config = Config.model_validate({})
+    try:
+        metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
+        assert metadata_module._RESOLVED_TOOL_STATE_CACHE
+        del config
+        gc.collect()
+        assert not metadata_module._RESOLVED_TOOL_STATE_CACHE
+    finally:
+        metadata_module.clear_resolved_tool_state_cache()
