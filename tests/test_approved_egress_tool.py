@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.egress import policy as egress_policy_module
 from mindroom.tools import approved_egress as approved_egress_module
 
 if TYPE_CHECKING:
@@ -34,46 +35,6 @@ def _approved_egress_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS",
     ):
         monkeypatch.delenv(name, raising=False)
-
-
-@pytest.mark.parametrize(
-    ("hostname", "expected"),
-    [
-        ("Docs.Example.COM.", "docs.example.com"),
-        ("münchen.example", "xn--mnchen-3ya.example"),
-    ],
-)
-def test_canonical_hostname_normalizes_case_trailing_dot_and_idna(hostname: str, expected: str) -> None:
-    """Hostnames should canonicalize to lowercase ASCII DNS names."""
-    assert approved_egress_module._canonical_hostname(hostname) == expected
-
-
-@pytest.mark.parametrize(
-    ("hostname", "match"),
-    [
-        ("", "must not be empty"),
-        ("https://docs.example.com", "scheme, path, query, or credentials"),
-        ("docs.example.com/path", "scheme, path, query, or credentials"),
-        ("user@docs.example.com", "scheme, path, query, or credentials"),
-        ("docs.example.com:443", "must not include a port"),
-        ("*.example.com", "wildcards are not supported"),
-        ("203.0.113.7", "IP literals are not valid"),
-        ("example", "fully-qualified external DNS name"),
-        ("localhost", "fully-qualified external DNS name"),
-        ("metadata.google.internal", "points at an internal name"),
-        ("foo.svc.cluster.local", "points at an internal name"),
-        ("api.svc", "points at an internal name"),
-        ("foo.localhost", "points at an internal name"),
-        ("bad..example.com", "not valid IDNA"),
-        (f"{'a' * 64}.example.com", "not valid IDNA"),
-        ("-bad.example.com", "not a valid DNS name"),
-        ("foo_bar.example.com", "contains unsupported characters"),
-    ],
-)
-def test_canonical_hostname_rejects_invalid_and_internal_names(hostname: str, match: str) -> None:
-    """The hostname gate should reject malformed, internal, and non-DNS inputs."""
-    with pytest.raises(ValueError, match=match):
-        approved_egress_module._canonical_hostname(hostname)
 
 
 def test_request_network_access_rejects_internal_hostname_before_grant(
@@ -181,7 +142,7 @@ def test_request_network_access_posts_worker_key_grant(
         lambda _context: object(),
     )
     monkeypatch.setattr(
-        approved_egress_module,
+        egress_policy_module,
         "resolve_worker_key",
         lambda *_args, **_kwargs: "v1:default:user_agent:@user:server:assistant",
     )

@@ -2091,6 +2091,14 @@ depends_on = [
     "mindroom.tool_system.context_bound_streams",
 ]
 
+# Local worker egress policy resolution (static allowlist + grant subjects).
+# The egress proxy enforces grants server-side; this module stays a thin,
+# routing-aware leaf so the tool layer and worker provisioning share one
+# source of truth for the grant subject.
+[[modules]]
+path = "mindroom.egress"
+depends_on = ["mindroom.tool_system.worker_routing"]
+
 [[modules]]
 path = "mindroom.tool_system.events"
 depends_on = []
