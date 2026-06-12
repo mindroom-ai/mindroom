@@ -525,7 +525,9 @@ class KubernetesWorkerBackend:
         """Recreate scaled-down worker Deployments whose pod template drifted from current config.
 
         Running workers are left untouched; the ensure-time template-hash check
-        recreates them on their next provisioning after they scale down.
+        recreates them on their next provisioning after they scale down. The
+        listed snapshot only nominates candidates; each worker is re-validated
+        against a fresh read under its provisioning lock before recreation.
         """
         if not self.config.reconcile_pod_templates:
             return []
@@ -533,25 +535,23 @@ class KubernetesWorkerBackend:
         reconciled: list[WorkerHandle] = []
         for deployment in self._resources.list_deployments():
             handle = self._handle_from_deployment(deployment, now=timestamp)
-            if handle.status != "idle" or int(deployment.spec.replicas or 0) != 0:
+            if not self._is_reconcile_candidate(deployment, handle=handle):
                 continue
             worker_lock = self._worker_lock(handle.worker_key)
             if not worker_lock.acquire(blocking=False):
                 continue
             try:
-                refreshed = self._reconcile_worker_deployment(deployment, handle=handle)
+                refreshed = self._reconcile_worker_deployment(handle, now=timestamp)
             finally:
                 worker_lock.release()
             if refreshed is not None:
                 reconciled.append(refreshed)
         return reconciled
 
-    def _reconcile_worker_deployment(
-        self,
-        deployment: resources.KubernetesDeployment,
-        *,
-        handle: WorkerHandle,
-    ) -> WorkerHandle | None:
+    def _is_reconcile_candidate(self, deployment: resources.KubernetesDeployment, *, handle: WorkerHandle) -> bool:
+        """Return whether one Deployment is a scaled-down worker with a drifted pod template."""
+        if handle.status != "idle" or int(deployment.spec.replicas or 0) != 0:
+            return False
         annotations = dict(deployment.metadata.annotations or {})
         private_agent_names = resources.parse_private_agent_names_annotation(annotations)
         if private_agent_names is None and resolved_worker_key_scope(handle.worker_key) == "user_agent":
@@ -561,32 +561,47 @@ class KubernetesWorkerBackend:
                 "Deferring pod-template reconciliation for worker %r: no persisted private-agent visibility",
                 handle.worker_key,
             )
-            return None
-        state_subpath = self._state_subpath(handle.worker_key)
+            return False
         try:
-            drifted = self._resources.deployment_template_drifted(
+            return self._resources.deployment_template_drifted(
                 deployment,
                 worker_key=handle.worker_key,
                 worker_id=handle.worker_id,
-                state_subpath=state_subpath,
-                private_agent_names=private_agent_names,
-            )
-            if not drifted:
-                return None
-            self._resources.apply_deployment(
-                worker_key=handle.worker_key,
-                worker_id=handle.worker_id,
-                state_subpath=state_subpath,
-                annotations=annotations,
-                replicas=0,
+                state_subpath=self._state_subpath(handle.worker_key),
                 private_agent_names=private_agent_names,
             )
         except WorkerBackendError:
             logger.warning("Skipping pod-template reconciliation for worker %r", handle.worker_key, exc_info=True)
+            return False
+
+    def _reconcile_worker_deployment(self, handle: WorkerHandle, *, now: float) -> WorkerHandle | None:
+        """Recreate one nominated worker after re-validating a fresh read under its lock.
+
+        The list snapshot can be stale: a worker provisioned between the snapshot
+        and the lock acquisition must not be scaled back down.
+        """
+        live = self._resources.read_deployment(handle.worker_id)
+        if live is None:
+            return None
+        live_handle = self._handle_from_deployment(live, now=now)
+        if not self._is_reconcile_candidate(live, handle=live_handle):
+            return None
+        annotations = dict(live.metadata.annotations or {})
+        try:
+            self._resources.apply_deployment(
+                worker_key=live_handle.worker_key,
+                worker_id=live_handle.worker_id,
+                state_subpath=self._state_subpath(live_handle.worker_key),
+                annotations=annotations,
+                replicas=0,
+                private_agent_names=resources.parse_private_agent_names_annotation(annotations),
+            )
+        except WorkerBackendError:
+            logger.warning("Skipping pod-template reconciliation for worker %r", live_handle.worker_key, exc_info=True)
             return None
         # The recreate keeps the lifecycle annotations and zero replicas, so the
-        # handle projected before the apply still describes the reconciled worker.
-        return handle
+        # handle projected from the live read still describes the reconciled worker.
+        return live_handle
 
     def record_failure(
         self,

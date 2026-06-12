@@ -2186,6 +2186,38 @@ def test_kubernetes_backend_reconcile_uses_persisted_private_visibility(tmp_path
     assert expected_private_root in mount_paths
 
 
+def test_kubernetes_backend_reconcile_revalidates_live_state_before_recreating(tmp_path: Path) -> None:
+    """A worker provisioned between the list snapshot and the lock must not be scaled back down."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    backend.cleanup_idle_workers(now=80.0)
+    stale_deployment = apps_api.deployments[handle.worker_id]
+
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+    updated_backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=85.0)
+
+    def _stale_snapshot() -> list[object]:
+        return [stale_deployment]
+
+    updated_backend._resources.list_deployments = _stale_snapshot
+
+    reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+
+    assert reconciled == []
+    live_deployment = apps_api.deployments[handle.worker_id]
+    assert int(live_deployment.spec.replicas) == 1
+    assert live_deployment.metadata.annotations[ANNOTATION_WORKER_KEY] == _TEST_SCOPED_WORKER_KEY_A
+    assert (
+        live_deployment.metadata.annotations[_ANNOTATION_TEMPLATE_HASH]
+        != stale_deployment.metadata.annotations[_ANNOTATION_TEMPLATE_HASH]
+    )
+
+
 def test_kubernetes_backend_reconcile_defers_user_agent_workers_without_persisted_visibility(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
