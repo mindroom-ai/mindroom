@@ -20,7 +20,10 @@ class TestProvisionerExtended:
     @pytest.fixture(autouse=True)
     def setup_auth(self):
         """Setup authentication for all tests."""
-        with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-api-key"):
+        with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-api-key"),
+            patch("backend.services.provisioner_service.PROVISIONER_API_KEY", "test-api-key"),
+        ):
             yield
 
     @pytest.fixture
@@ -34,14 +37,14 @@ class TestProvisionerExtended:
     @pytest.fixture
     def mock_kubectl(self):
         """Mock kubectl commands."""
-        with patch("backend.routes.provisioner.run_kubectl") as mock:
+        with patch("backend.services.provisioner_service.run_kubectl") as mock:
             mock.return_value = (0, "Success", "")
             yield mock
 
     @pytest.fixture
     def mock_helm(self):
         """Mock helm commands."""
-        with patch("backend.routes.provisioner.run_helm") as mock:
+        with patch("backend.services.provisioner_service.run_helm") as mock:
             mock.return_value = (0, "Success", "")
             yield mock
 
@@ -53,11 +56,11 @@ class TestProvisionerExtended:
     @pytest.mark.asyncio
     async def test_background_mark_running_when_ready_success(self):
         """Test background task marks instance as running when ready."""
-        from backend.routes.provisioner import _background_mark_running_when_ready
+        from backend.services.provisioner_service import _background_mark_running_when_ready
 
-        with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+        with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
             mock_wait.return_value = True
-            with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
+            with patch("backend.services.provisioner_service.ensure_supabase") as mock_sb:
                 mock_db = MagicMock()
                 mock_sb.return_value = mock_db
                 mock_db.table().update().eq().execute.return_value = Mock()
@@ -72,25 +75,25 @@ class TestProvisionerExtended:
     @pytest.mark.asyncio
     async def test_background_mark_running_when_ready_not_ready(self):
         """Test background task when deployment doesn't become ready."""
-        from backend.routes.provisioner import _background_mark_running_when_ready
+        from backend.services.provisioner_service import _background_mark_running_when_ready
 
-        with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+        with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
             mock_wait.return_value = False
 
             await _background_mark_running_when_ready("test-instance", "test-ns")
 
             # Should not update database when not ready
-            with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
+            with patch("backend.services.provisioner_service.ensure_supabase") as mock_sb:
                 mock_sb.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_background_mark_running_when_ready_update_failure(self):
         """Test background task handles database update failure gracefully."""
-        from backend.routes.provisioner import _background_mark_running_when_ready
+        from backend.services.provisioner_service import _background_mark_running_when_ready
 
-        with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+        with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
             mock_wait.return_value = True
-            with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
+            with patch("backend.services.provisioner_service.ensure_supabase") as mock_sb:
                 mock_db = MagicMock()
                 mock_sb.return_value = mock_db
                 # Make update fail
@@ -102,9 +105,9 @@ class TestProvisionerExtended:
     @pytest.mark.asyncio
     async def test_background_mark_running_when_ready_wait_exception(self):
         """Test background task handles wait exception gracefully."""
-        from backend.routes.provisioner import _background_mark_running_when_ready
+        from backend.services.provisioner_service import _background_mark_running_when_ready
 
-        with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+        with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
             mock_wait.side_effect = Exception("Wait failed")
 
             # Should not raise, just log exception
@@ -154,7 +157,7 @@ class TestProvisionerExtended:
                 mock_db.table().select().eq().single().execute.return_value = Mock(data=None)
                 mock_db.table().insert().execute.return_value = Mock(data=[{"instance_id": "456"}])
 
-                with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+                with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                     mock_kubectl.side_effect = FileNotFoundError("kubectl not found")
 
                     with pytest.raises(HTTPException) as exc_info:
@@ -179,7 +182,7 @@ class TestProvisionerExtended:
         # Make namespace creation fail (non-FileNotFoundError)
         mock_kubectl.side_effect = [Exception("Namespace already exists"), (0, "OK", "")]
 
-        with patch("backend.routes.provisioner.run_helm") as mock_helm:
+        with patch("backend.services.provisioner_service.run_helm") as mock_helm:
             mock_helm.return_value = (0, "Deployed", "")
 
             response = client.post(
@@ -262,7 +265,7 @@ class TestProvisionerExtended:
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "222"}])
 
         # Make helm raise unexpected exception
-        with patch("backend.routes.provisioner.run_helm") as mock_helm:
+        with patch("backend.services.provisioner_service.run_helm") as mock_helm:
             mock_helm.side_effect = RuntimeError("Unexpected error")
 
             # Make status update to error also fail
@@ -295,7 +298,7 @@ class TestProvisionerExtended:
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "333"}])
 
-        with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+        with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
             mock_wait.return_value = True  # Ready
 
             # Make final status update fail
@@ -328,7 +331,7 @@ class TestProvisionerExtended:
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "444"}])
 
-        with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+        with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
             mock_wait.return_value = False  # Not ready
 
             # Mock BackgroundTasks to raise on add_task
@@ -355,9 +358,9 @@ class TestProvisionerExtended:
 
     def test_start_instance_status_update_failure(self, client: TestClient, mock_kubectl: Mock, valid_auth: dict):
         """Test start instance handles status update failure."""
-        with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
+        with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
             mock_check.return_value = True
-            with patch("backend.routes.provisioner.update_instance_status") as mock_update:
+            with patch("backend.services.provisioner_service.update_instance_status") as mock_update:
                 mock_update.return_value = False  # Update fails
 
                 response = client.post("/system/instances/555/start", headers=valid_auth)
@@ -367,9 +370,9 @@ class TestProvisionerExtended:
 
     def test_stop_instance_status_update_failure(self, client: TestClient, mock_kubectl: Mock, valid_auth: dict):
         """Test stop instance handles status update failure."""
-        with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
+        with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
             mock_check.return_value = True
-            with patch("backend.routes.provisioner.update_instance_status") as mock_update:
+            with patch("backend.services.provisioner_service.update_instance_status") as mock_update:
                 mock_update.return_value = False  # Update fails
 
                 response = client.post("/system/instances/666/stop", headers=valid_auth)
@@ -381,7 +384,7 @@ class TestProvisionerExtended:
         """Test restart instance handles kubectl failure."""
         mock_kubectl.return_value = (1, "", "Kubectl failed")
 
-        with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
+        with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
             mock_check.return_value = True
             response = client.post("/system/instances/777/restart", headers=valid_auth)
 
@@ -390,9 +393,9 @@ class TestProvisionerExtended:
 
     def test_restart_instance_general_exception(self, client: TestClient, valid_auth: dict):
         """Test restart instance handles general exception."""
-        with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
+        with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
             mock_check.return_value = True
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                 mock_kubectl.side_effect = RuntimeError("Unexpected error")
 
                 response = client.post("/system/instances/888/restart", headers=valid_auth)
@@ -403,7 +406,7 @@ class TestProvisionerExtended:
     def test_uninstall_instance_status_update_failure(self, client: TestClient, mock_helm: Mock, valid_auth: dict):
         """Test uninstall handles status update failure."""
         with patch("backend.config.PROVISIONER_API_KEY", "test-api-key"):
-            with patch("backend.routes.provisioner.update_instance_status") as mock_update:
+            with patch("backend.services.provisioner_service.update_instance_status") as mock_update:
                 mock_update.return_value = False  # Update fails
 
                 response = client.delete("/system/instances/999/uninstall", headers=valid_auth)
@@ -413,7 +416,7 @@ class TestProvisionerExtended:
 
     def test_uninstall_instance_general_exception(self, client: TestClient, valid_auth: dict):
         """Test uninstall handles general exception."""
-        with patch("backend.routes.provisioner.run_helm") as mock_helm:
+        with patch("backend.services.provisioner_service.run_helm") as mock_helm:
             mock_helm.side_effect = RuntimeError("Helm uninstall failed")
 
             with patch("backend.config.PROVISIONER_API_KEY", "test-api-key"):
