@@ -882,7 +882,7 @@ def test_quarantines_ledger_file_with_invalid_event_entry(temp_dir: Path) -> Non
     assert json.loads(quarantined_files[0].read_text(encoding="utf-8")) == {"$event": []}
 
 
-def test_shared_reads_fail_soft_on_corrupt_file_without_quarantining(temp_dir: Path) -> None:
+def test_concurrent_reads_fail_soft_on_corrupt_file(temp_dir: Path) -> None:
     """Concurrent reads over a corrupt file should fail soft from shared memory state."""
     tracker_a = HandledTurnLedger("bad_race", base_path=temp_dir)
     tracker_b = HandledTurnLedger("bad_race", base_path=temp_dir)
