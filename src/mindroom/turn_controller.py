@@ -111,7 +111,7 @@ from mindroom.turn_origin import (
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     import nio
     import structlog
@@ -1540,6 +1540,7 @@ class TurnController:
         handled_turn: HandledTurnState,
         matrix_run_metadata: dict[str, Any] | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
+        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> None:
         """Execute one final response path for a prepared dispatch action."""
         if room.room_id != dispatch.target.room_id:
@@ -1626,6 +1627,7 @@ class TurnController:
                             payload_preparation=payload_preparation,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
+                            on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                         ),
                         team_agents=action.form_team.eligible_members,
                         team_mode=team_mode.value,
@@ -1643,6 +1645,7 @@ class TurnController:
                             payload_preparation=payload_preparation,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
+                            on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                         ),
                     )
             except PostLockRequestPreparationError as error:

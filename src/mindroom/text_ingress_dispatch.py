@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -366,18 +367,34 @@ async def _apply_turn_plan(
         media_events=tuple(media_events or ()),
     )
 
-    await controller._execute_response_action(
-        room,
-        prepared.event,
-        prepared.dispatch,
-        plan.response_action,
-        payload_inputs,
-        processing_log="Processing",
-        dispatch_started_at=prepared.dispatch_started_at,
-        handled_turn=handled_turn,
-        matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
-        queued_notice_reservation=queued_notice_reservation,
+    # The inbox handoff is complete once the runner takes the conversation's
+    # response lock; the response itself keeps running on a runner-owned task.
+    response_started = asyncio.Event()
+    response_task = controller.deps.response_runner.track_inbox_response(
+        controller._execute_response_action(
+            room,
+            prepared.event,
+            prepared.dispatch,
+            plan.response_action,
+            payload_inputs,
+            processing_log="Processing",
+            dispatch_started_at=prepared.dispatch_started_at,
+            handled_turn=handled_turn,
+            matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
+            queued_notice_reservation=queued_notice_reservation,
+            on_lifecycle_lock_acquired=response_started.set,
+        ),
+        name=f"inbox_response:{prepared.event.event_id}",
     )
+    started_wait = asyncio.ensure_future(response_started.wait())
+    try:
+        await asyncio.wait({started_wait, response_task}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        started_wait.cancel()
+    if response_task.done() and not response_task.cancelled():
+        # Surface pre-lock failures to the caller's containment; post-lock
+        # failures belong to the runner-owned task.
+        response_task.result()
 
 
 async def _execute_route_plan(

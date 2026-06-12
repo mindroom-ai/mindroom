@@ -1508,11 +1508,13 @@ class AgentBot:
             await self._cancel_deferred_overdue_task_drain()
         background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
         drain_result = await self._coalescing_gate.drain_all(ready_timeout_seconds=5.0)
+        responses_drained = await self._response_runner.drain_inbox_responses(cancel_after_seconds=5.0)
         post_drain_background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
         callback_failure_count = self._runtime_view.callback_failure_count
         if (
             background_tasks_completed
             and drain_result.completed
+            and responses_drained
             and post_drain_background_tasks_completed
             and callback_failure_count == 0
             and self._sync_trust_state is SyncTrustState.CERTIFIED
@@ -1521,6 +1523,7 @@ class AgentBot:
         elif (
             not background_tasks_completed
             or not drain_result.completed
+            or not responses_drained
             or not post_drain_background_tasks_completed
             or callback_failure_count
         ):

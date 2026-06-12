@@ -13,7 +13,15 @@ from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, Rea
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
-from tests.test_live_message_coalescing import _make_bot, _make_room, _text_event, _wait_for
+from tests.conftest import prepared_dispatch_result
+from tests.test_live_message_coalescing import (
+    _make_bot,
+    _make_room,
+    _prepared_dispatch,
+    _respond_dispatch_plan,
+    _text_event,
+    _wait_for,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -478,3 +486,62 @@ async def test_failed_lane_readiness_does_not_block_later_same_sender_work() -> 
 
     await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$text"]])
     await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp_path: Path) -> None:
+    """A multi-minute in-flight turn delays neither a new top-level turn nor another thread."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    first = _text_event(event_id="$m1", body="first")
+    second = _text_event(event_id="$m2", body="second top-level")
+    other_thread_reply = _text_event(event_id="$m3", body="reply elsewhere", thread_id="$other")
+    first_locked = asyncio.Event()
+    release_first_response = asyncio.Event()
+    generated: list[str] = []
+
+    async def fake_generate_response(request: object) -> None:
+        generated.append(request.response_envelope.source_event_id)
+        if request.on_lifecycle_lock_acquired is not None:
+            request.on_lifecycle_lock_acquired()
+        if len(generated) == 1:
+            first_locked.set()
+            await release_first_response.wait()
+
+    async def fake_prepare_dispatch(
+        _room: object,
+        event: object,
+        requester_user_id: str,
+        **_kwargs: object,
+    ) -> object:
+        thread_id = "$other" if event.event_id == "$m3" else f"{event.event_id}-thread"
+        dispatch = _prepared_dispatch(
+            event_id=event.event_id,
+            requester_user_id=requester_user_id,
+            body=event.body,
+            thread_id=thread_id,
+        )
+        return prepared_dispatch_result(dispatch)
+
+    with (
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=fake_prepare_dispatch),
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+        patch.object(
+            bot._response_runner,
+            "generate_response",
+            new=AsyncMock(side_effect=fake_generate_response),
+        ),
+    ):
+        await bot._turn_controller.handle_text_event(room, first)
+        await asyncio.wait_for(first_locked.wait(), timeout=1.0)
+
+        await bot._turn_controller.handle_text_event(room, second)
+        await bot._turn_controller.handle_text_event(room, other_thread_reply)
+
+        await _wait_for(lambda: sorted(generated) == ["$m1", "$m2", "$m3"], deadline_seconds=1.0)
+        assert not release_first_response.is_set()
+
+        release_first_response.set()
+        await bot._coalescing_gate.drain_all()
+        await bot._response_runner.drain_inbox_responses()

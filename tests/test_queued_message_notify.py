@@ -2129,7 +2129,7 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
 
 @pytest.mark.asyncio
 async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecycle(tmp_path: Path) -> None:
-    """Cancellation before response lifecycle ownership should cancel the reservation."""
+    """A response task cancelled before lifecycle ownership still cancels the reservation."""
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
@@ -2156,7 +2156,6 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
                 "_execute_response_action",
                 new=AsyncMock(side_effect=asyncio.CancelledError),
             ),
-            pytest.raises(asyncio.CancelledError),
         ):
             await bot._turn_controller._dispatch_text_message(
                 room,

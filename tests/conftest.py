@@ -238,9 +238,10 @@ def requires_linux(
 
 
 async def drain_coalescing(*bots: RuntimeBot) -> None:
-    """Run queued coalescing dispatch before asserting post-dispatch effects."""
+    """Run queued coalescing dispatch and detached responses before asserting effects."""
     for bot in bots:
         await bot._coalescing_gate.drain_all()
+        await bot._response_runner.drain_inbox_responses()
 
 
 def _wait_for_postgres_container(database_url: str) -> None:
