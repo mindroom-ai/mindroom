@@ -200,6 +200,22 @@ contentBundles: []
 #   source: file
 #   path: /app/agent_data/content-bundles/team-config/content/environments/prod/agent-config.yaml
 
+# Model-provider API keys sourced from existing Kubernetes Secrets.
+# Each entry binds one Secret key to the provider's native credential env var
+# (for example OPENAI_API_KEY); at startup the runtime syncs that value into
+# its credential service as <storage.mountPath>/credentials/<provider>_credentials.json.
+# Supported providers mirror PROVIDER_ENV_KEYS in src/mindroom/constants.py:
+# anthropic, azure, openai, google, openrouter, deepseek, cerebras, groq, ollama.
+providerCredentials: []
+# Example:
+# providerCredentials:
+#   - provider: openai
+#     existingSecret: my-llm-secret
+#     key: api-key
+#   - provider: anthropic
+#     existingSecret: my-llm-secret
+#     key: anthropic-api-key
+
 env:
   # Raw Kubernetes EnvVar entries appended to the MindRoom container.
   extra: []

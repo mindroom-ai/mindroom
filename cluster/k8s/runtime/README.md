@@ -193,6 +193,47 @@ plugins:
   - /app/agent_data/content-bundles/policy-pack/plugins/policy-tools
 ```
 
+## Provider API Keys from Kubernetes Secrets
+
+The MindRoom runtime natively honors model-provider API key env vars such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
+At startup it syncs each value into its credential service, which stores it as `<storage.mountPath>/credentials/<provider>_credentials.json`.
+Use `providerCredentials` to bind those env vars to existing Kubernetes Secrets without writing any credential files yourself:
+
+```yaml
+providerCredentials:
+  - provider: openai
+    existingSecret: my-llm-secret
+    key: api-key
+  - provider: anthropic
+    existingSecret: my-llm-secret
+    key: anthropic-api-key
+```
+
+Supported provider names are `anthropic`, `azure`, `openai`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, and `ollama` (which expects a host URL instead of an API key).
+Each entry renders only a `secretKeyRef` env var on the runtime container, so no secret material passes through ConfigMaps or appears in rendered manifests.
+Because the runtime writes the credential files itself, this path also works with encrypted credential storage (`workers.sandbox.credentialsEncryptionKey`), where externally written plaintext JSON files would be refused.
+
+Sync semantics follow the runtime's `_source` tracking:
+
+- Env-sourced credentials are refreshed on every startup, so rotating the Secret takes effect after a Deployment restart (env values from `secretKeyRef` are fixed at pod start).
+- Credentials saved through the dashboard (`_source: ui`) are never overwritten by env sync.
+- A pre-existing credential file without `_source: env`, for example one written manually or by a custom init container, is also left untouched; delete that file once when migrating to `providerCredentials`.
+
+Non-secret companion settings such as `OPENAI_BASE_URL` or `AZURE_OPENAI_ENDPOINT` are plain config and belong in `env.extra`.
+For credential services beyond the supported providers, the runtime accepts declared credential seeds through the `MINDROOM_CREDENTIAL_SEEDS_JSON` env var, whose JSON contains only env-var references while the secret values still arrive via `secretKeyRef` entries in `env.extra`:
+
+```yaml
+env:
+  extra:
+    - name: MY_GATEWAY_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: my-gateway-secret
+          key: api-key
+    - name: MINDROOM_CREDENTIAL_SEEDS_JSON
+      value: '[{"service": "my_gateway", "credentials": {"api_key": {"env": "MY_GATEWAY_API_KEY"}}}]'
+```
+
 ## Worker Egress Proxy
 
 For dedicated Kubernetes workers, the chart can either deploy the approved egress proxy or point workers at an existing HTTP proxy Service.
@@ -329,6 +370,7 @@ workers:
 - The chart does not create ingress or a Matrix homeserver.
 - The chart can create PostgreSQL for MindRoom's event cache, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
+- Use `providerCredentials` to feed model-provider API keys from existing Kubernetes Secrets into the runtime's credential service.
 - Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime and static runner sidecar receive the same Secret-backed key.
 - `workers.backend: static_runner` adds a sandbox-runner sidecar to the runtime pod.
 - `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments and Services on demand.
