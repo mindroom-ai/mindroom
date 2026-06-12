@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -15,6 +14,14 @@ from mindroom.runtime_env_policy import (
     is_worker_backend_config_env_name,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._config_helpers import (
+    read_bool_env,
+    read_env,
+    read_float_env,
+    read_int_env,
+    read_json_mapping_env,
+)
+from mindroom.workers.backends._dedicated_worker_common import stable_signature_json
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -89,56 +96,6 @@ def is_kubernetes_worker_backend_config_env_name(name: str) -> bool:
     return is_worker_backend_config_env_name(name) and name != _WORKER_BACKEND_ENV
 
 
-def _read_env(env: Mapping[str, str], name: str, default: str = "") -> str:
-    return env.get(name, default).strip()
-
-
-def _read_float_env(env: Mapping[str, str], name: str, default: float) -> float:
-    raw = _read_env(env, name, str(default))
-    try:
-        value = float(raw)
-    except ValueError:
-        value = default
-    return max(1.0, value)
-
-
-def _read_int_env(env: Mapping[str, str], name: str, default: int) -> int:
-    raw = _read_env(env, name, str(default))
-    try:
-        value = int(raw)
-    except ValueError:
-        value = default
-    return max(1, value)
-
-
-def _read_bool_env(env: Mapping[str, str], name: str, default: bool = False) -> bool:
-    raw = env.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
-    raw = _read_env(env, name)
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    cleaned: dict[str, str] = {}
-    for key, value in parsed.items():
-        if not isinstance(key, str):
-            continue
-        if isinstance(value, str):
-            cleaned[key] = value
-        elif value is not None:
-            cleaned[key] = str(value)
-    return cleaned
-
-
 @dataclass(frozen=True, slots=True)
 class KubernetesAgentVaultConfig:
     """Per-worker Agent Vault egress settings (no separate bridge pod).
@@ -162,37 +119,37 @@ class KubernetesAgentVaultConfig:
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> KubernetesAgentVaultConfig | None:
         """Parse Agent Vault egress settings, returning ``None`` when disabled."""
-        if not _read_bool_env(env, _AGENT_VAULT_ENABLED_ENV, default=False):
+        if not read_bool_env(env, _AGENT_VAULT_ENABLED_ENV, default=False):
             return None
-        cli_image = _read_env(env, _AGENT_VAULT_CLI_IMAGE_ENV)
+        cli_image = read_env(env, _AGENT_VAULT_CLI_IMAGE_ENV)
         if not cli_image:
             msg = f"{_AGENT_VAULT_CLI_IMAGE_ENV} must be set when {_AGENT_VAULT_ENABLED_ENV} is enabled."
             raise WorkerBackendError(msg)
-        owner_email = _read_env(env, _AGENT_VAULT_OWNER_EMAIL_ENV)
+        owner_email = read_env(env, _AGENT_VAULT_OWNER_EMAIL_ENV)
         if not owner_email:
             msg = f"{_AGENT_VAULT_OWNER_EMAIL_ENV} must be set when {_AGENT_VAULT_ENABLED_ENV} is enabled."
             raise WorkerBackendError(msg)
         return cls(
-            vault_name_prefix=_read_env(env, _AGENT_VAULT_VAULT_NAME_PREFIX_ENV, _DEFAULT_AGENT_VAULT_VAULT_NAME_PREFIX)
+            vault_name_prefix=read_env(env, _AGENT_VAULT_VAULT_NAME_PREFIX_ENV, _DEFAULT_AGENT_VAULT_VAULT_NAME_PREFIX)
             or _DEFAULT_AGENT_VAULT_VAULT_NAME_PREFIX,
             cli_image=cli_image,
-            api_url=_read_env(env, _AGENT_VAULT_API_URL_ENV, _DEFAULT_AGENT_VAULT_API_URL)
+            api_url=read_env(env, _AGENT_VAULT_API_URL_ENV, _DEFAULT_AGENT_VAULT_API_URL)
             or _DEFAULT_AGENT_VAULT_API_URL,
-            proxy_url=_read_env(env, _AGENT_VAULT_PROXY_URL_ENV, _DEFAULT_AGENT_VAULT_PROXY_URL)
+            proxy_url=read_env(env, _AGENT_VAULT_PROXY_URL_ENV, _DEFAULT_AGENT_VAULT_PROXY_URL)
             or _DEFAULT_AGENT_VAULT_PROXY_URL,
             owner_email=owner_email,
-            bootstrap_secret_name=_read_env(
+            bootstrap_secret_name=read_env(
                 env,
                 _AGENT_VAULT_BOOTSTRAP_SECRET_NAME_ENV,
                 _DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME,
             )
             or _DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME,
-            worker_ca_configmap_name=_read_env(env, _AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME_ENV) or None,
+            worker_ca_configmap_name=read_env(env, _AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME_ENV) or None,
         )
 
     def signature(self) -> str:
         """Return a stable signature fragment for backend cache keys."""
-        return json.dumps(
+        return stable_signature_json(
             {
                 "vault_name_prefix": self.vault_name_prefix,
                 "cli_image": self.cli_image,
@@ -202,8 +159,6 @@ class KubernetesAgentVaultConfig:
                 "bootstrap_secret_name": self.bootstrap_secret_name,
                 "worker_ca_configmap_name": self.worker_ca_configmap_name,
             },
-            sort_keys=True,
-            separators=(",", ":"),
         )
 
 
@@ -241,55 +196,55 @@ class KubernetesWorkerBackendConfig:
     def from_runtime(cls, runtime_paths: RuntimePaths) -> KubernetesWorkerBackendConfig:
         """Build Kubernetes worker configuration from one explicit runtime context."""
         env = runtime_env_values(runtime_paths)
-        namespace = _read_env(env, _NAMESPACE_ENV) or _read_env(env, _POD_NAMESPACE_ENV) or "default"
-        image = _read_env(env, _IMAGE_ENV)
+        namespace = read_env(env, _NAMESPACE_ENV) or read_env(env, _POD_NAMESPACE_ENV) or "default"
+        image = read_env(env, _IMAGE_ENV)
         if not image:
             msg = f"{_IMAGE_ENV} must be set when {_WORKER_BACKEND_ENV}=kubernetes."
             raise WorkerBackendError(msg)
 
-        storage_pvc_name = _read_env(env, _STORAGE_PVC_ENV)
+        storage_pvc_name = read_env(env, _STORAGE_PVC_ENV)
         if not storage_pvc_name:
             msg = f"{_STORAGE_PVC_ENV} must be set when {_WORKER_BACKEND_ENV}=kubernetes."
             raise WorkerBackendError(msg)
 
-        config_map_name = _read_env(env, _CONFIG_MAP_NAME_ENV) or None
+        config_map_name = read_env(env, _CONFIG_MAP_NAME_ENV) or None
         resource_requests = {
-            "memory": _read_env(env, _MEMORY_REQUEST_ENV, _DEFAULT_MEMORY_REQUEST) or _DEFAULT_MEMORY_REQUEST,
-            "cpu": _read_env(env, _CPU_REQUEST_ENV, _DEFAULT_CPU_REQUEST) or _DEFAULT_CPU_REQUEST,
+            "memory": read_env(env, _MEMORY_REQUEST_ENV, _DEFAULT_MEMORY_REQUEST) or _DEFAULT_MEMORY_REQUEST,
+            "cpu": read_env(env, _CPU_REQUEST_ENV, _DEFAULT_CPU_REQUEST) or _DEFAULT_CPU_REQUEST,
         }
         resource_limits = {
-            "memory": _read_env(env, _MEMORY_LIMIT_ENV, _DEFAULT_MEMORY_LIMIT) or _DEFAULT_MEMORY_LIMIT,
-            "cpu": _read_env(env, _CPU_LIMIT_ENV, _DEFAULT_CPU_LIMIT) or _DEFAULT_CPU_LIMIT,
+            "memory": read_env(env, _MEMORY_LIMIT_ENV, _DEFAULT_MEMORY_LIMIT) or _DEFAULT_MEMORY_LIMIT,
+            "cpu": read_env(env, _CPU_LIMIT_ENV, _DEFAULT_CPU_LIMIT) or _DEFAULT_CPU_LIMIT,
         }
         return cls(
             namespace=namespace,
             image=image,
-            image_pull_policy=_read_env(env, _IMAGE_PULL_POLICY_ENV, _DEFAULT_IMAGE_PULL_POLICY)
+            image_pull_policy=read_env(env, _IMAGE_PULL_POLICY_ENV, _DEFAULT_IMAGE_PULL_POLICY)
             or _DEFAULT_IMAGE_PULL_POLICY,
-            worker_port=_read_int_env(env, _PORT_ENV, _DEFAULT_WORKER_PORT),
-            service_account_name=_read_env(env, _SERVICE_ACCOUNT_ENV, _DEFAULT_SERVICE_ACCOUNT_NAME)
+            worker_port=read_int_env(env, _PORT_ENV, _DEFAULT_WORKER_PORT),
+            service_account_name=read_env(env, _SERVICE_ACCOUNT_ENV, _DEFAULT_SERVICE_ACCOUNT_NAME)
             or _DEFAULT_SERVICE_ACCOUNT_NAME,
             storage_pvc_name=storage_pvc_name,
-            storage_mount_path=_read_env(env, _STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH)
+            storage_mount_path=read_env(env, _STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH)
             or _DEFAULT_STORAGE_MOUNT_PATH,
-            storage_subpath_prefix=_read_env(env, _STORAGE_SUBPATH_PREFIX_ENV, _DEFAULT_STORAGE_SUBPATH_PREFIX)
+            storage_subpath_prefix=read_env(env, _STORAGE_SUBPATH_PREFIX_ENV, _DEFAULT_STORAGE_SUBPATH_PREFIX)
             or _DEFAULT_STORAGE_SUBPATH_PREFIX,
             config_map_name=config_map_name,
-            config_key=_read_env(env, _CONFIG_KEY_ENV, _DEFAULT_CONFIG_KEY) or _DEFAULT_CONFIG_KEY,
-            config_path=_read_env(env, _CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH) or _DEFAULT_CONFIG_PATH,
-            idle_timeout_seconds=_read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
-            ready_timeout_seconds=_read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
-            name_prefix=_read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
-            node_name=_read_env(env, _NODE_NAME_ENV) or None,
-            colocate_with_control_plane_node=_read_bool_env(env, _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV, default=False),
-            extra_env=_read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV),
-            extra_labels=_read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
-            extra_annotations=_read_json_mapping_env(env, _EXTRA_ANNOTATIONS_JSON_ENV),
-            owner_deployment_name=_read_env(env, _OWNER_DEPLOYMENT_NAME_ENV) or None,
+            config_key=read_env(env, _CONFIG_KEY_ENV, _DEFAULT_CONFIG_KEY) or _DEFAULT_CONFIG_KEY,
+            config_path=read_env(env, _CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH) or _DEFAULT_CONFIG_PATH,
+            idle_timeout_seconds=read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
+            ready_timeout_seconds=read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
+            name_prefix=read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
+            node_name=read_env(env, _NODE_NAME_ENV) or None,
+            colocate_with_control_plane_node=read_bool_env(env, _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV, default=False),
+            extra_env=read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV),
+            extra_labels=read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
+            extra_annotations=read_json_mapping_env(env, _EXTRA_ANNOTATIONS_JSON_ENV),
+            owner_deployment_name=read_env(env, _OWNER_DEPLOYMENT_NAME_ENV) or None,
             resource_requests=resource_requests,
             resource_limits=resource_limits,
-            enable_service_links=_read_bool_env(env, _ENABLE_SERVICE_LINKS_ENV, default=False),
-            auth_secret_name=_read_env(env, _AUTH_SECRET_NAME_ENV) or None,
+            enable_service_links=read_bool_env(env, _ENABLE_SERVICE_LINKS_ENV, default=False),
+            auth_secret_name=read_env(env, _AUTH_SECRET_NAME_ENV) or None,
             agent_vault=KubernetesAgentVaultConfig.from_env(env),
         )
 
@@ -304,11 +259,11 @@ def kubernetes_backend_config_signature(
     config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     credentials_encryption_key = runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
     credentials_encryption_key_marker = credentials_encryption_key_hash(credentials_encryption_key) or ""
-    extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
-    extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
-    extra_annotations_json = json.dumps(config.extra_annotations, sort_keys=True, separators=(",", ":"))
-    resource_requests_json = json.dumps(config.resource_requests, sort_keys=True, separators=(",", ":"))
-    resource_limits_json = json.dumps(config.resource_limits, sort_keys=True, separators=(",", ":"))
+    extra_env_json = stable_signature_json(config.extra_env)
+    extra_labels_json = stable_signature_json(config.extra_labels)
+    extra_annotations_json = stable_signature_json(config.extra_annotations)
+    resource_requests_json = stable_signature_json(config.resource_requests)
+    resource_limits_json = stable_signature_json(config.resource_limits)
     return (
         "kubernetes",
         config.namespace,
