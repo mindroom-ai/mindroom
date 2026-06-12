@@ -8,11 +8,12 @@ Deploy MindRoom on Kubernetes for production multi-tenant deployments.
 
 ## Architecture
 
-MindRoom uses three Helm charts:
+MindRoom uses four Helm charts:
 
 - **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom runtime with bundled dashboard/API plus Matrix/Synapse
 - **Platform Chart** (`cluster/k8s/platform/`) - SaaS control plane (API, frontend, provisioner)
 - **Runtime Chart** (`cluster/k8s/runtime/`) - MindRoom runtime only, for clusters that provide Matrix, storage, secrets, ingress, and platform services externally
+- **Tuwunel Chart** (`cluster/k8s/tuwunel/`) - Standalone Tuwunel homeserver (MindRoom fork) for clusters that pair the runtime chart with a chart-managed Matrix homeserver
 
 ## Prerequisites
 
@@ -95,6 +96,7 @@ The email-to-Matrix template must contain exactly one `{localpart}` placeholder 
 Use the runtime chart when you already operate the surrounding platform and only want Kubernetes to run the MindRoom runtime.
 
 The chart intentionally does not create Matrix, ingress, a model gateway, or platform services.
+For a chart-managed homeserver, deploy the Tuwunel chart (`cluster/k8s/tuwunel/`) alongside it and point `matrix.homeserverUrl`, `matrix.serverName`, and `matrix.registrationToken` at it as described in `cluster/k8s/tuwunel/README.md`.
 
 ```bash
 helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
