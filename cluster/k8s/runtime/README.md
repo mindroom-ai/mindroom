@@ -198,12 +198,16 @@ plugins:
 The chart can create an optional NetworkPolicy for the control-plane pod, so operators can restrict runtime API ingress to an edge proxy and known clients.
 The policy targets the runtime pods through the chart selector labels and allows the API port only from the configured peers.
 NetworkPolicy targets pods rather than Services, so each `apiIngressFrom` entry must match the actual client pods.
+A bare `podSelector` entry only matches pods in the release namespace, so combine `namespaceSelector` and `podSelector` in one entry for cross-namespace clients such as an ingress controller.
 
 ```yaml
 networkPolicy:
   create: true
   apiIngressFrom:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: my-ingress
+      podSelector:
         matchLabels:
           app.kubernetes.io/name: my-ingress
     - podSelector:

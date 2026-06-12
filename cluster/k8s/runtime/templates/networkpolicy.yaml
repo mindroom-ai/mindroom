@@ -138,13 +138,13 @@ spec:
     - Egress
     {{- end }}
   ingress:
-    - {{- with .Values.networkPolicy.apiIngressFrom }}
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.runtime.apiPort }}
+      {{- with .Values.networkPolicy.apiIngressFrom }}
       from:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.runtime.apiPort }}
     {{- with .Values.networkPolicy.extraIngress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

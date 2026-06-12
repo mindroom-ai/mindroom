@@ -60,6 +60,7 @@ networkPolicy:
   name: ""
   # NetworkPolicyPeer entries allowed to reach the runtime API port, for example an edge proxy and known in-cluster clients.
   # NetworkPolicy targets pods rather than Services, so selectors must match the client pods.
+  # A bare podSelector only matches pods in the release namespace; combine namespaceSelector and podSelector for cross-namespace clients.
   # Leave empty to allow the API port from all sources while still denying other ingress.
   apiIngressFrom: []
   # Example:
