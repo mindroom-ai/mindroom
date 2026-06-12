@@ -1,0 +1,15 @@
+{{- if not (hasPrefix "/" .Values.basePath) -}}
+{{- fail "basePath must start with /" -}}
+{{- end -}}
+{{- if and .Values.rootServiceWorkerCleanup.enabled (eq (include "mindroom-client.basePath" .) "/") -}}
+{{- fail "rootServiceWorkerCleanup.enabled requires a basePath other than / because /sw.js is the client service worker at the origin root" -}}
+{{- end -}}
+{{- if and .Values.config.create (not .Values.config.existingConfigMap) (not .Values.config.data) (not .Values.matrix.homeserverUrl) (not .Values.matrix.defaultServerName) -}}
+{{- fail "matrix.homeserverUrl or matrix.defaultServerName is required when the chart renders the default client config" -}}
+{{- end -}}
+{{- if and (not .Values.config.create) (not .Values.config.existingConfigMap) -}}
+{{- fail "config.existingConfigMap is required when config.create=false" -}}
+{{- end -}}
+{{- if and (not .Values.nginx.create) (not .Values.nginx.existingConfigMap) -}}
+{{- fail "nginx.existingConfigMap is required when nginx.create=false" -}}
+{{- end -}}

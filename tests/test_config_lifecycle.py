@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import mindroom.orchestration.config_lifecycle as lifecycle_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, _ConfigReloadDrainState
@@ -453,3 +455,37 @@ async def test_update_config_plugin_changes_restart_all_bots(
     _, dispatched_plan, plugin_changes = lifecycle.apply_update_plan.await_args.args
     assert dispatched_plan.entities_to_restart == {"router", "agent1", "agent2"}
     assert plugin_changes == ("plugins/demo",)
+
+
+@pytest.mark.asyncio
+async def test_update_config_loads_config_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """update_config must keep slow config loading off the loop so heartbeats keep ticking."""
+    gate = threading.Event()
+    load_started = threading.Event()
+    loaded_config = Config(agents={"general": AgentConfig(display_name="General")})
+
+    def slow_load_config(*_args: object, **_kwargs: object) -> Config:
+        load_started.set()
+        gate.wait()
+        return loaded_config
+
+    monkeypatch.setattr(lifecycle_module, "load_config", slow_load_config)
+    lifecycle = _make_lifecycle(tmp_path)
+    lifecycle.load_initial_config = AsyncMock(return_value=True)
+
+    update_task = asyncio.get_running_loop().create_task(lifecycle.update_config())
+    await asyncio.to_thread(load_started.wait, 5.0)
+
+    # The loader thread is parked on the gate; the loop must stay live.
+    heartbeats = 0
+    while heartbeats < 50:
+        await asyncio.sleep(0)
+        heartbeats += 1
+    assert not update_task.done()
+
+    gate.set()
+    assert await update_task is True
+    lifecycle.load_initial_config.assert_awaited_once_with(loaded_config)

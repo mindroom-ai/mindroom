@@ -143,6 +143,7 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "name_prefix": "MINDROOM_KUBERNETES_WORKER_NAME_PREFIX",
         "node_name": "MINDROOM_KUBERNETES_WORKER_NODE_NAME",
         "colocate_with_control_plane_node": "MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE",
+        "reconcile_pod_templates": "MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES",
         "extra_env_json": "MINDROOM_KUBERNETES_WORKER_ENV_JSON",
         "extra_labels_json": "MINDROOM_KUBERNETES_WORKER_LABELS_JSON",
         "extra_annotations_json": "MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON",

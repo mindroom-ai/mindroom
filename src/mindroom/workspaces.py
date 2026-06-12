@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,6 +17,10 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 _MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mind_data"
+
+# Agent builds now run on worker threads (#1260), so concurrent scaffolding of
+# the same workspace must not interleave template copies or link reconciliation.
+_WORKSPACE_MUTATION_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -190,20 +195,27 @@ def _copy_workspace_template(
     workspace_path.mkdir(parents=True, exist_ok=True)
     resolved_template_dir = validate_workspace_template_dir(template_dir)
 
-    for source_path, relative_path in _iter_workspace_template_entries(resolved_template_dir):
-        destination_path = resolve_relative_path_within_root(
-            workspace_path,
-            relative_path,
-            field_name="workspace template destination",
-            root_label="workspace root",
-        )
-        if source_path.is_dir():
-            destination_path.mkdir(parents=True, exist_ok=True)
-            continue
-        if destination_path.exists() and not force:
-            continue
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, destination_path)
+    with _WORKSPACE_MUTATION_LOCK:
+        for source_path, relative_path in _iter_workspace_template_entries(resolved_template_dir):
+            destination_path = resolve_relative_path_within_root(
+                workspace_path,
+                relative_path,
+                field_name="workspace template destination",
+                root_label="workspace root",
+            )
+            if source_path.is_dir():
+                destination_path.mkdir(parents=True, exist_ok=True)
+                continue
+            if destination_path.exists() and not force:
+                continue
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            # Publish atomically so concurrent readers never see partial files.
+            temp_path = destination_path.with_name(f".{destination_path.name}.tmp")
+            try:
+                shutil.copy2(source_path, temp_path)
+                temp_path.replace(destination_path)
+            finally:
+                temp_path.unlink(missing_ok=True)
 
 
 def ensure_workspace_template(
@@ -300,18 +312,19 @@ def ensure_workspace_knowledge_links(
     if not knowledge_paths and not knowledge_root.exists():
         return
     knowledge_root.mkdir(parents=True, exist_ok=True)
-    desired_links = _build_workspace_knowledge_links(
-        workspace_root=workspace_root,
-        knowledge_root=knowledge_root,
-        knowledge_paths=knowledge_paths,
-    )
-    _remove_stale_workspace_knowledge_links(
-        knowledge_root,
-        protected_paths=protected_paths,
-        workspace_root=workspace_root,
-        desired_links=desired_links,
-    )
-    _apply_workspace_knowledge_links(desired_links)
+    with _WORKSPACE_MUTATION_LOCK:
+        desired_links = _build_workspace_knowledge_links(
+            workspace_root=workspace_root,
+            knowledge_root=knowledge_root,
+            knowledge_paths=knowledge_paths,
+        )
+        _remove_stale_workspace_knowledge_links(
+            knowledge_root,
+            protected_paths=protected_paths,
+            workspace_root=workspace_root,
+            desired_links=desired_links,
+        )
+        _apply_workspace_knowledge_links(desired_links)
 
 
 def _private_root_name(agent_name: str, config: Config) -> str:

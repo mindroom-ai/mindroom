@@ -39,6 +39,7 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "ToolValidationInfo",
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
+    "clear_resolved_tool_state_cache",
     "default_worker_routed_tools",
     "deserialize_tool_validation_snapshot",
     "ensure_tool_registry_loaded",

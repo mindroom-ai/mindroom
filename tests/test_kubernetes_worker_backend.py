@@ -43,6 +43,7 @@ from mindroom.workers.backends.kubernetes import (
 from mindroom.workers.backends.kubernetes_config import KubernetesAgentVaultConfig
 from mindroom.workers.backends.kubernetes_resources import (
     _ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH,
+    _ANNOTATION_PRIVATE_AGENT_NAMES,
     _ANNOTATION_RUNNER_TOKEN_HASH,
     _ANNOTATION_STARTUP_MANIFEST_HASH,
     _ANNOTATION_TEMPLATE_HASH,
@@ -384,6 +385,7 @@ def _backend(
     extra_annotations: dict[str, str] | None = None,
     enable_service_links: bool = False,
     auth_secret_name: str | None = None,
+    reconcile_pod_templates: bool = True,
     agent_vault: KubernetesAgentVaultConfig | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = KubernetesWorkerBackendConfig(
@@ -411,6 +413,7 @@ def _backend(
         resource_limits=resource_limits if resource_limits is not None else {"memory": "1Gi", "cpu": "500m"},
         enable_service_links=enable_service_links,
         auth_secret_name=auth_secret_name,
+        reconcile_pod_templates=reconcile_pod_templates,
         agent_vault=agent_vault,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
@@ -2035,6 +2038,224 @@ def test_kubernetes_backend_cleanup_idle_deletes_service_but_keeps_deployment() 
     assert apps_api.deployments[handle.worker_id].spec.replicas == 0
     assert handle.worker_id not in core_api.services
     assert handle.worker_id not in core_api.secrets
+
+
+def _wire_fake_apis(backend: KubernetesWorkerBackend, apps_api: _FakeAppsApi, core_api: _FakeCoreApi) -> None:
+    backend._resources.apps_api = apps_api
+    backend._resources.core_api = core_api
+    backend._resources.api_exception_cls = _FakeApiError
+
+
+def test_kubernetes_backend_reconciles_drifted_idle_worker_template(tmp_path: Path) -> None:
+    """Reconciliation should recreate scaled-down workers whose pod template drifted from current config."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    backend.cleanup_idle_workers(now=80.0)
+
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+
+    reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+
+    assert [worker.worker_key for worker in reconciled] == [_TEST_SCOPED_WORKER_KEY_A]
+    assert reconciled[0].status == "idle"
+    assert apps_api.deleted_names == [handle.worker_id]
+    assert len(apps_api.created_bodies) == 2
+    recreated = apps_api.created_bodies[1]
+    assert recreated["spec"]["replicas"] == 0
+    container = recreated["spec"]["template"]["spec"]["containers"][0]
+    assert container["resources"]["limits"] == {"memory": "2Gi", "cpu": "1"}
+    assert recreated["metadata"]["annotations"]["mindroom.ai/created-at"] == "0.0"
+
+
+def test_kubernetes_backend_reconcile_defers_running_workers(tmp_path: Path) -> None:
+    """Reconciliation should leave running workers to the ensure-time template-hash check."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+
+    reconciled = updated_backend.reconcile_drifted_workers(now=10.0)
+
+    assert reconciled == []
+    assert apps_api.deleted_names == []
+    assert len(apps_api.created_bodies) == 1
+
+
+def test_kubernetes_backend_reconcile_leaves_unchanged_templates_alone(tmp_path: Path) -> None:
+    """Reconciliation should not touch scaled-down workers whose template still matches current config."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    backend.cleanup_idle_workers(now=80.0)
+    patch_count_after_cleanup = len(apps_api.patched_bodies)
+
+    unchanged_backend, _, _ = _backend(runtime_paths=runtime_paths)
+    _wire_fake_apis(unchanged_backend, apps_api, core_api)
+
+    reconciled = unchanged_backend.reconcile_drifted_workers(now=90.0)
+
+    assert reconciled == []
+    assert apps_api.deleted_names == []
+    assert len(apps_api.created_bodies) == 1
+    assert len(apps_api.patched_bodies) == patch_count_after_cleanup
+
+
+def test_kubernetes_backend_reconcile_disabled_by_config(tmp_path: Path) -> None:
+    """Disabling pod-template reconciliation should keep drifted scaled-down workers untouched."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    backend.cleanup_idle_workers(now=80.0)
+
+    updated_backend, _, _ = _backend(
+        runtime_paths=runtime_paths,
+        resource_limits={"memory": "2Gi", "cpu": "1"},
+        reconcile_pod_templates=False,
+    )
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+
+    reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+
+    assert reconciled == []
+    assert apps_api.deleted_names == []
+    assert len(apps_api.created_bodies) == 1
+
+
+def test_kubernetes_backend_reconcile_uses_persisted_private_visibility(tmp_path: Path) -> None:
+    """Reconciliation should rebuild user-agent worker templates from persisted private visibility."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="mind",
+    )
+    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=0.0)
+    backend.cleanup_idle_workers(now=80.0)
+
+    unchanged_backend, _, _ = _backend(runtime_paths=runtime_paths)
+    _wire_fake_apis(unchanged_backend, apps_api, core_api)
+    assert unchanged_backend.reconcile_drifted_workers(now=90.0) == []
+
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+
+    reconciled = updated_backend.reconcile_drifted_workers(now=100.0)
+
+    assert [worker.worker_key for worker in reconciled] == [worker_key]
+    recreated = apps_api.created_bodies[-1]
+    assert recreated["metadata"]["annotations"][_ANNOTATION_PRIVATE_AGENT_NAMES] == '["mind"]'
+    mount_paths = {
+        mount["mountPath"] for mount in recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    }
+    expected_private_root = str(
+        _private_instance_state_root_path(
+            Path("/app/worker"),
+            worker_key=worker_key,
+            agent_name="mind",
+        ),
+    )
+    assert expected_private_root in mount_paths
+
+
+def test_kubernetes_backend_reconcile_defers_user_agent_workers_without_persisted_visibility(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """User-agent workers without persisted visibility defer to ensure-time recreation without warning each pass."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="mind",
+    )
+    handle = backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=0.0)
+    backend.cleanup_idle_workers(now=80.0)
+    del apps_api.deployments[handle.worker_id].metadata.annotations[_ANNOTATION_PRIVATE_AGENT_NAMES]
+
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+
+    with caplog.at_level("WARNING", logger=kubernetes_backend_module.__name__):
+        reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+
+    assert reconciled == []
+    assert apps_api.deleted_names == []
+    assert len(apps_api.created_bodies) == 1
+    assert caplog.records == []
+
+
+def test_kubernetes_backend_config_reads_reconcile_pod_templates_from_env(tmp_path: Path) -> None:
+    """Pod-template reconciliation defaults on and is disabled through runtime env."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.5\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    base_env = (
+        "MINDROOM_WORKER_BACKEND=kubernetes\n"
+        "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
+    )
+    (config_dir / ".env").write_text(base_env, encoding="utf-8")
+
+    default_config = KubernetesWorkerBackendConfig.from_runtime(resolve_primary_runtime_paths(config_path=config_path))
+
+    assert default_config.reconcile_pod_templates is True
+
+    (config_dir / ".env").write_text(
+        base_env + "MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES=false\n",
+        encoding="utf-8",
+    )
+
+    disabled_config = KubernetesWorkerBackendConfig.from_runtime(
+        resolve_primary_runtime_paths(config_path=config_path),
+    )
+
+    assert disabled_config.reconcile_pod_templates is False
 
 
 def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
-from mindroom.tool_system.worker_routing import worker_dir_name, worker_id_for_key
+from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_id_for_key
 from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
 from mindroom.workers.backends._lifecycle import mark_worker_failed, mark_worker_idle, touch_worker_lifecycle
 from mindroom.workers.models import (
@@ -39,6 +40,8 @@ __all__ = [
 _COLD_START_GRACE_SECONDS = 1.5
 _WAITING_PROGRESS_INTERVAL_SECONDS = 5.0
 _PROGRESS_REPORTER_JOIN_TIMEOUT_SECONDS = 1.0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -517,6 +520,73 @@ class KubernetesWorkerBackend:
             deployment.metadata.annotations = annotations
             cleaned.append(self._handle_from_deployment(deployment, now=timestamp))
         return cleaned
+
+    def reconcile_drifted_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
+        """Recreate scaled-down worker Deployments whose pod template drifted from current config.
+
+        Running workers are left untouched; the ensure-time template-hash check
+        recreates them on their next provisioning after they scale down.
+        """
+        if not self.config.reconcile_pod_templates:
+            return []
+        timestamp = time.time() if now is None else now
+        reconciled: list[WorkerHandle] = []
+        for deployment in self._resources.list_deployments():
+            handle = self._handle_from_deployment(deployment, now=timestamp)
+            if handle.status != "idle" or int(deployment.spec.replicas or 0) != 0:
+                continue
+            worker_lock = self._worker_lock(handle.worker_key)
+            if not worker_lock.acquire(blocking=False):
+                continue
+            try:
+                refreshed = self._reconcile_worker_deployment(deployment, handle=handle)
+            finally:
+                worker_lock.release()
+            if refreshed is not None:
+                reconciled.append(refreshed)
+        return reconciled
+
+    def _reconcile_worker_deployment(
+        self,
+        deployment: resources.KubernetesDeployment,
+        *,
+        handle: WorkerHandle,
+    ) -> WorkerHandle | None:
+        annotations = dict(deployment.metadata.annotations or {})
+        private_agent_names = resources.parse_private_agent_names_annotation(annotations)
+        if private_agent_names is None and resolved_worker_key_scope(handle.worker_key) == "user_agent":
+            # Deployments created before visibility persistence cannot be rebuilt
+            # deterministically; the ensure-time hash check recreates them on next use.
+            logger.debug(
+                "Deferring pod-template reconciliation for worker %r: no persisted private-agent visibility",
+                handle.worker_key,
+            )
+            return None
+        state_subpath = self._state_subpath(handle.worker_key)
+        try:
+            drifted = self._resources.deployment_template_drifted(
+                deployment,
+                worker_key=handle.worker_key,
+                worker_id=handle.worker_id,
+                state_subpath=state_subpath,
+                private_agent_names=private_agent_names,
+            )
+            if not drifted:
+                return None
+            self._resources.apply_deployment(
+                worker_key=handle.worker_key,
+                worker_id=handle.worker_id,
+                state_subpath=state_subpath,
+                annotations=annotations,
+                replicas=0,
+                private_agent_names=private_agent_names,
+            )
+        except WorkerBackendError:
+            logger.warning("Skipping pod-template reconciliation for worker %r", handle.worker_key, exc_info=True)
+            return None
+        # The recreate keeps the lifecycle annotations and zero replicas, so the
+        # handle projected before the apply still describes the reconciled worker.
+        return handle
 
     def record_failure(
         self,

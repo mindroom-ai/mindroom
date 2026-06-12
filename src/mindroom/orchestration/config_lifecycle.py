@@ -132,7 +132,9 @@ class ConfigReloadLifecycle:
 
     async def update_config(self) -> bool:
         """Reload configuration from disk and dispatch the resulting update plan."""
-        new_config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
+        # Config validation executes plugin modules and walks the filesystem;
+        # keep it off the event loop (#1260).
+        new_config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
         current_config = self.current_config()
         if current_config is None:
             return await self.load_initial_config(new_config)

@@ -79,6 +79,7 @@ _ANNOTATION_STARTUP_MANIFEST_HASH = "mindroom.ai/startup-manifest-hash"
 _ANNOTATION_RUNNER_TOKEN_HASH = "mindroom.ai/runner-token-hash"  # noqa: S105
 _ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH = "mindroom.ai/credentials-encryption-key-hash"
 _ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
+_ANNOTATION_PRIVATE_AGENT_NAMES = "mindroom.ai/private-agent-names"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
 _LABEL_COMPONENT_VALUE = "worker"
@@ -371,6 +372,20 @@ def _template_hash(template: dict[str, object]) -> str:
     """Return a stable hash for one Deployment pod template."""
     payload = json.dumps(template, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def parse_private_agent_names_annotation(annotations: dict[str, str]) -> frozenset[str] | None:
+    """Parse the persisted private-agent visibility annotation, ``None`` when absent."""
+    raw = annotations.get(_ANNOTATION_PRIVATE_AGENT_NAMES)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    return frozenset(name for name in parsed if isinstance(name, str))
 
 
 def _labels(*, extra_labels: dict[str, str], worker_id: str) -> dict[str, str]:
@@ -885,22 +900,42 @@ class KubernetesResourceManager:
             secret_data[encryption_key_secret_key] = None
         return secret_data
 
-    def _deployment_manifest(
+    def deployment_template_drifted(
+        self,
+        deployment: KubernetesDeployment,
+        *,
+        worker_key: str,
+        worker_id: str,
+        state_subpath: str,
+        private_agent_names: frozenset[str] | None,
+    ) -> bool:
+        """Return whether one Deployment's recorded pod template differs from current config."""
+        startup_manifest_path, startup_manifest_hash = self._startup_manifest_path_and_hash(
+            worker_key=worker_key,
+            dedicated_root=Path(f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")),
+        )
+        template = self._pod_template(
+            worker_key=worker_key,
+            worker_id=worker_id,
+            state_subpath=state_subpath,
+            startup_manifest_path=startup_manifest_path,
+            startup_manifest_hash=startup_manifest_hash,
+            private_agent_names=private_agent_names,
+        )
+        recorded_hash = dict(deployment.metadata.annotations or {}).get(_ANNOTATION_TEMPLATE_HASH)
+        return recorded_hash != _template_hash(template)
+
+    def _pod_template(
         self,
         *,
         worker_key: str,
         worker_id: str,
         state_subpath: str,
-        annotations: dict[str, str],
-        replicas: int,
-        private_agent_names: frozenset[str] | None = None,
+        startup_manifest_path: str,
+        startup_manifest_hash: str,
+        private_agent_names: frozenset[str] | None,
     ) -> dict[str, object]:
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
-        startup_manifest_path, startup_manifest_hash = self._write_startup_manifest(
-            worker_key=worker_key,
-            dedicated_root=Path(f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")),
-            local_dedicated_root=(self.storage_root / state_subpath).resolve(),
-        )
         template_annotations = dict(self.config.extra_annotations)
         template_annotations[ANNOTATION_WORKER_KEY] = worker_key
         template_annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] = startup_manifest_hash
@@ -912,10 +947,6 @@ class KubernetesResourceManager:
         credentials_key_hash = credentials_encryption_key_hash(self._credentials_encryption_key())
         if credentials_key_hash is not None:
             template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH] = credentials_key_hash
-        template_metadata = {
-            "labels": worker_labels,
-            "annotations": template_annotations,
-        }
         template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
             "automountServiceAccountToken": False,
@@ -971,10 +1002,41 @@ class KubernetesResourceManager:
         }
         if self.config.agent_vault is not None:
             template_spec["initContainers"] = [self._agent_vault_init_container(worker_key=worker_key)]
-        template: dict[str, object] = {
-            "metadata": template_metadata,
+        node_name = self._worker_node_name_or_none()
+        if node_name is not None:
+            template_spec["nodeName"] = node_name
+        return {
+            "metadata": {
+                "labels": worker_labels,
+                "annotations": template_annotations,
+            },
             "spec": template_spec,
         }
+
+    def _deployment_manifest(
+        self,
+        *,
+        worker_key: str,
+        worker_id: str,
+        state_subpath: str,
+        annotations: dict[str, str],
+        replicas: int,
+        private_agent_names: frozenset[str] | None = None,
+    ) -> dict[str, object]:
+        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        startup_manifest_path, startup_manifest_hash = self._write_startup_manifest(
+            worker_key=worker_key,
+            dedicated_root=Path(f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")),
+            local_dedicated_root=(self.storage_root / state_subpath).resolve(),
+        )
+        template = self._pod_template(
+            worker_key=worker_key,
+            worker_id=worker_id,
+            state_subpath=state_subpath,
+            startup_manifest_path=startup_manifest_path,
+            startup_manifest_hash=startup_manifest_hash,
+            private_agent_names=private_agent_names,
+        )
         metadata: dict[str, object] = {
             "name": worker_id,
             "namespace": self.config.namespace,
@@ -983,11 +1045,13 @@ class KubernetesResourceManager:
         owner_reference = self._owner_reference_or_none()
         if owner_reference is not None:
             metadata["ownerReferences"] = [owner_reference]
-        node_name = self._worker_node_name_or_none()
-        if node_name is not None:
-            template_spec["nodeName"] = node_name
         desired_annotations = dict(annotations)
         desired_annotations[_ANNOTATION_TEMPLATE_HASH] = _template_hash(template)
+        if private_agent_names is not None:
+            desired_annotations[_ANNOTATION_PRIVATE_AGENT_NAMES] = json.dumps(
+                sorted(private_agent_names),
+                separators=(",", ":"),
+            )
         metadata["annotations"] = desired_annotations
 
         return {
@@ -1084,22 +1148,11 @@ class KubernetesResourceManager:
             raise WorkerBackendError(msg)
         return worker_token
 
-    def _write_startup_manifest(
-        self,
-        *,
-        worker_key: str,
-        dedicated_root: Path,
-        local_dedicated_root: Path,
-    ) -> tuple[str, str]:
+    def _startup_manifest_path_and_hash(self, *, worker_key: str, dedicated_root: Path) -> tuple[str, str]:
+        """Return the worker-visible startup manifest path and content hash without writing."""
         startup_runtime_paths = self._worker_runtime_paths(
             worker_key=worker_key,
             dedicated_root=dedicated_root,
-        )
-        constants.write_startup_manifest(
-            local_dedicated_root,
-            startup_runtime_paths,
-            tool_validation_snapshot=self.tool_validation_snapshot,
-            public_runtime=True,
         )
         return (
             str(constants.sandbox_startup_manifest_path(dedicated_root)),
@@ -1109,6 +1162,21 @@ class KubernetesResourceManager:
                 public_runtime=True,
             ),
         )
+
+    def _write_startup_manifest(
+        self,
+        *,
+        worker_key: str,
+        dedicated_root: Path,
+        local_dedicated_root: Path,
+    ) -> tuple[str, str]:
+        constants.write_startup_manifest(
+            local_dedicated_root,
+            self._worker_runtime_paths(worker_key=worker_key, dedicated_root=dedicated_root),
+            tool_validation_snapshot=self.tool_validation_snapshot,
+            public_runtime=True,
+        )
+        return self._startup_manifest_path_and_hash(worker_key=worker_key, dedicated_root=dedicated_root)
 
     def _worker_runtime_paths(
         self,

@@ -1549,7 +1549,10 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         matrix_run_metadata=matrix_run_metadata,
     )
     try:
-        team_members = _materialize_team_members(
+        # Member agent builds walk the filesystem (workspace scaffolding,
+        # context files, session storage); keep them off the event loop (#1260).
+        team_members = await asyncio.to_thread(
+            _materialize_team_members,
             agent_names,
             orchestrator,
             execution_identity,
@@ -1967,7 +1970,10 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         matrix_run_metadata=matrix_run_metadata,
     )
     try:
-        team_members = _materialize_team_members(
+        # Member agent builds walk the filesystem (workspace scaffolding,
+        # context files, session storage); keep them off the event loop (#1260).
+        team_members = await asyncio.to_thread(
+            _materialize_team_members,
             requested_agent_names,
             orchestrator,
             execution_identity,
