@@ -3,28 +3,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, MessageCircle, Globe } from 'lucide-react'
-import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance } from '@/lib/api'
+import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
 import { cache } from '@/lib/cache'
 import { buildCinnyLoginUrl } from '@/lib/cinny'
 import { getRuntimeConfig } from '@/lib/runtime-config'
 import { logger } from '@/lib/logger'
 import { Card, CardHeader, CardSection } from '@/components/ui/Card'
 
-type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'error' | 'deprovisioned' | 'restarting'
-
-type Instance = {
-  id: string
-  instance_id: number | string
-  subscription_id: string
-  subdomain: string
-  status: InstanceStatus
-  backend_url: string | null
-  frontend_url: string | null
-  matrix_server_url: string | null
-  config: any
-  created_at: string
-  updated_at: string
-}
+type InstanceStatus = Instance['status']
 
 export default function InstancePage() {
   const router = useRouter()
@@ -342,11 +328,11 @@ export default function InstancePage() {
             </div>
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400">Created</p>
-              <p className="text-sm">{new Date(instance.created_at).toLocaleString()}</p>
+              <p className="text-sm">{instance.created_at ? new Date(instance.created_at).toLocaleString() : '—'}</p>
             </div>
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400">Last Updated</p>
-              <p className="text-sm">{new Date(instance.updated_at).toLocaleString()}</p>
+              <p className="text-sm">{instance.updated_at ? new Date(instance.updated_at).toLocaleString() : '—'}</p>
             </div>
           </div>
         </CardSection>
@@ -421,19 +407,6 @@ export default function InstancePage() {
         </Card>
       )}
 
-      {/* Configuration (collapsible) */}
-      <Card className="overflow-hidden p-0">
-        <details>
-        <summary className="p-8 cursor-pointer hover:bg-gray-50/50 dark:hover:bg-gray-700/50 transition-colors">
-          <CardHeader>Instance Configuration</CardHeader>
-        </summary>
-        <div className="px-8 pb-8">
-          <pre className="bg-gray-50 dark:bg-gray-900/50 p-6 rounded-2xl overflow-x-auto text-sm dark:text-gray-300 font-mono border border-gray-200 dark:border-gray-700">
-            {JSON.stringify(instance.config, null, 2)}
-          </pre>
-        </div>
-      </details>
-      </Card>
     </div>
   )
 }

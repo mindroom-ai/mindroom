@@ -54,6 +54,12 @@ public/              # Static assets
 
 Runs on port 3000 by default with hot module replacement.
 
+### Typed API client
+
+`src/lib/api.ts` is a thin typed fetch wrapper whose request and response types come from `src/lib/api.generated.ts`, generated with `openapi-typescript` from the backend's OpenAPI schema (`../platform-backend/openapi.json`).
+After changing backend routes or response models, regenerate both files with `just saas-openapi` from the repo root (exports the schema, then runs `bun run generate:api` here) and commit the result.
+`bun run check:api` fails when `api.generated.ts` is stale relative to the committed schema; run it in CI or before pushing backend-facing changes.
+
 ## Environment Variables
 
 Required for runtime:

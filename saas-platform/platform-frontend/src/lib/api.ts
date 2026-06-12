@@ -1,8 +1,30 @@
 import { getRuntimeConfig } from '@/lib/runtime-config'
 import { createClient } from '@/lib/supabase/client'
 import { logger } from './logger'
+import type { paths } from './api.generated'
 
 const resolveApiUrl = () => getRuntimeConfig().apiUrl
+
+// Extract the 200 application/json payload (or request body) of a generated route.
+type SuccessJson<Path extends keyof paths, Method extends keyof paths[Path]> =
+  paths[Path][Method] extends { responses: { 200: { content: { 'application/json': infer R } } } } ? R : never
+
+type RequestJson<Path extends keyof paths, Method extends keyof paths[Path]> =
+  paths[Path][Method] extends { requestBody: { content: { 'application/json': infer B } } } ? B : never
+
+export type Account = SuccessJson<'/my/account', 'get'>
+export type AccountSetup = SuccessJson<'/my/account/setup', 'post'>
+export type GdprExport = SuccessJson<'/my/gdpr/export-data', 'get'>
+export type GdprDeletion = SuccessJson<'/my/gdpr/request-deletion', 'post'>
+export type GdprCancelDeletion = SuccessJson<'/my/gdpr/cancel-deletion', 'post'>
+export type GdprConsent = SuccessJson<'/my/gdpr/consent', 'post'>
+export type Instances = SuccessJson<'/my/instances', 'get'>
+export type Instance = Instances['instances'][number]
+export type Provision = SuccessJson<'/my/instances/provision', 'post'>
+export type InstanceAction = SuccessJson<'/my/instances/{instance_id}/start', 'post'>
+export type PricingConfig = SuccessJson<'/pricing/config', 'get'>
+export type PricingPlan = PricingConfig['plans'][string]
+export type UrlResponse = SuccessJson<'/stripe/checkout', 'post'>
 
 export async function apiCall(
   endpoint: string,
@@ -38,152 +60,96 @@ export async function apiCall(
   }
 }
 
-// Account Management
-export async function getAccount() {
-  const response = await apiCall('/my/account')
+async function request<T>(
+  endpoint: string,
+  fallbackError: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const response = await apiCall(endpoint, options)
   if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to fetch account')
+    let detail = ''
+    try {
+      detail = await response.text()
+    } catch {
+      // If we can't read the response (e.g., connection aborted), use the fallback
+      detail = ''
+    }
+    throw new Error(detail || fallbackError)
   }
   return response.json()
 }
 
-export async function setupAccount() {
-  const response = await apiCall('/my/account/setup', { method: 'POST' })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to setup account')
-  }
-  return response.json()
+// Account Management
+export async function getAccount(): Promise<Account> {
+  return request('/my/account', 'Failed to fetch account')
+}
+
+export async function setupAccount(): Promise<AccountSetup> {
+  return request('/my/account/setup', 'Failed to setup account', { method: 'POST' })
 }
 
 // GDPR Endpoints
-export async function exportUserData() {
-  const response = await apiCall('/my/gdpr/export-data')
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to export data')
-  }
-  return response.json()
+export async function exportUserData(): Promise<GdprExport> {
+  return request('/my/gdpr/export-data', 'Failed to export data')
 }
 
-export async function requestAccountDeletion(confirmation: boolean = false) {
-  const response = await apiCall('/my/gdpr/request-deletion', {
+export async function requestAccountDeletion(confirmation: boolean = false): Promise<GdprDeletion> {
+  const body: RequestJson<'/my/gdpr/request-deletion', 'post'> = { confirmation }
+  return request('/my/gdpr/request-deletion', 'Failed to request deletion', {
     method: 'POST',
-    body: JSON.stringify({ confirmation })
+    body: JSON.stringify(body),
   })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to request deletion')
-  }
-  return response.json()
 }
 
-export async function cancelAccountDeletion() {
-  const response = await apiCall('/my/gdpr/cancel-deletion', { method: 'POST' })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to cancel deletion')
-  }
-  return response.json()
+export async function cancelAccountDeletion(): Promise<GdprCancelDeletion> {
+  return request('/my/gdpr/cancel-deletion', 'Failed to cancel deletion', { method: 'POST' })
 }
 
-export async function updateConsent(marketing: boolean, analytics: boolean) {
-  const response = await apiCall('/my/gdpr/consent', {
+export async function updateConsent(marketing: boolean, analytics: boolean): Promise<GdprConsent> {
+  const body: RequestJson<'/my/gdpr/consent', 'post'> = { marketing, analytics }
+  return request('/my/gdpr/consent', 'Failed to update consent', {
     method: 'POST',
-    body: JSON.stringify({ marketing, analytics })
+    body: JSON.stringify(body),
   })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to update consent')
-  }
-  return response.json()
 }
 
 // Instance Management
-export async function listInstances() {
-  const response = await apiCall('/my/instances')
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to fetch instances')
-  }
-  return response.json()
+export async function listInstances(): Promise<Instances> {
+  return request('/my/instances', 'Failed to fetch instances')
 }
 
-export async function provisionInstance() {
-  const response = await apiCall('/my/instances/provision', { method: 'POST' })
-  if (!response.ok) {
-    let errorText = ''
-    try {
-      errorText = await response.text()
-    } catch {
-      // If we can't read the response (e.g., connection aborted), use generic message
-      errorText = ''
-    }
-    throw new Error(errorText || 'Failed to provision instance')
-  }
-  return response.json()
+export async function provisionInstance(): Promise<Provision> {
+  return request('/my/instances/provision', 'Failed to provision instance', { method: 'POST' })
 }
 
-export async function startInstance(instanceId: string | number) {
-  const response = await apiCall(`/my/instances/${String(instanceId)}/start`, { method: 'POST' })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to start instance')
-  }
-  return response.json()
+export async function startInstance(instanceId: string | number): Promise<InstanceAction> {
+  return request(`/my/instances/${String(instanceId)}/start`, 'Failed to start instance', { method: 'POST' })
 }
 
-export async function stopInstance(instanceId: string | number) {
-  const response = await apiCall(`/my/instances/${String(instanceId)}/stop`, { method: 'POST' })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to stop instance')
-  }
-  return response.json()
+export async function stopInstance(instanceId: string | number): Promise<InstanceAction> {
+  return request(`/my/instances/${String(instanceId)}/stop`, 'Failed to stop instance', { method: 'POST' })
 }
 
-export async function restartInstance(instanceId: string | number) {
-  const response = await apiCall(`/my/instances/${String(instanceId)}/restart`, { method: 'POST' })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to restart instance')
-  }
-  return response.json()
+export async function restartInstance(instanceId: string | number): Promise<InstanceAction> {
+  return request(`/my/instances/${String(instanceId)}/restart`, 'Failed to restart instance', { method: 'POST' })
 }
 
 // Pricing
-export async function getPricingConfig() {
-  const response = await apiCall('/pricing/config')
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to fetch pricing configuration')
-  }
-  return response.json()
+export async function getPricingConfig(): Promise<PricingConfig> {
+  return request('/pricing/config', 'Failed to fetch pricing configuration')
 }
 
 // Stripe Integration
-export async function createCheckoutSession(tier: string, billingCycle: 'monthly' | 'yearly' = 'monthly') {
-  const response = await apiCall('/stripe/checkout', {
+export async function createCheckoutSession(tier: string, billingCycle: 'monthly' | 'yearly' = 'monthly'): Promise<UrlResponse> {
+  const body: RequestJson<'/stripe/checkout', 'post'> = { tier, billing_cycle: billingCycle }
+  return request('/stripe/checkout', 'Failed to create checkout session', {
     method: 'POST',
-    body: JSON.stringify({ tier, billing_cycle: billingCycle })
+    body: JSON.stringify(body),
   })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to create checkout session')
-  }
-  return response.json()
 }
 
-export async function createPortalSession() {
-  const response = await apiCall('/stripe/portal', {
-    method: 'POST'
-  })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to create portal session')
-  }
-  return response.json()
+export async function createPortalSession(): Promise<UrlResponse> {
+  return request('/stripe/portal', 'Failed to create portal session', { method: 'POST' })
 }
 
 // SSO cookie setup
