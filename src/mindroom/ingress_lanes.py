@@ -208,11 +208,28 @@ class IngressLanes:
         try:
             while lane:
                 slot = lane[0]
-                await slot.loaded.wait()
+                # The finally must cover the whole slot lifecycle, including the
+                # loaded wait: a head slot that never settles poisons its sender's
+                # lane and hangs unbounded drains.
+                completed = False
                 try:
+                    await slot.loaded.wait()
                     if not slot.released:
                         await self._deliver_slot(slot)
+                    completed = True
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "ingress_lane_slot_failed",
+                        room_id=slot.room_id,
+                        sender_id=slot.sender_id,
+                    )
                 finally:
+                    if not completed:
+                        # A late submit into an abandoned slot must raise instead
+                        # of loading work that no worker will ever deliver.
+                        slot.released = True
                     if lane and lane[0] is slot:
                         lane.popleft()
                     slot.settled.set()
@@ -228,6 +245,11 @@ class IngressLanes:
         ready = delivery.ready_result
         if ready is None:
             assert delivery.ready_task is not None
+            # Shield the readiness task so cancelling this lane worker does not
+            # cancel STT work another drain may still want to settle. A raised
+            # CancelledError is therefore ambiguous and must be split by source
+            # BEFORE the ready-is-None check below: the task cancelling itself
+            # skips this slot, while a cancelled worker re-raises to its owner.
             try:
                 ready = await asyncio.shield(delivery.ready_task)
             except asyncio.CancelledError:
@@ -252,6 +274,8 @@ class IngressLanes:
                     error_message=str(error),
                 )
                 return
+        # Only after the exception split: a None result is a normalization skip
+        # (for example voice STT producing nothing), settled without delivery.
         if ready is None:
             return
         ready.pending_event.enqueue_time = delivery.received_at

@@ -13,8 +13,10 @@ from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, Rea
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
-from tests.conftest import prepared_dispatch_result
+from mindroom.message_target import MessageTarget
+from tests.conftest import prepared_dispatch_result, unwrap_extracted_collaborator
 from tests.test_live_message_coalescing import (
+    _enqueue_for_dispatch,
     _make_bot,
     _make_room,
     _prepared_dispatch,
@@ -545,3 +547,169 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
         release_first_response.set()
         await bot._coalescing_gate.drain_all()
         await bot._response_runner.drain_inbox_responses()
+
+
+@pytest.mark.asyncio
+async def test_lane_worker_failure_at_wait_phase_does_not_poison_lane() -> None:
+    """A failure while waiting on the head slot settles it and keeps the lane serving."""
+    gate, batches = _gate(debounce_seconds=0.0)
+    poisoned_slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+
+    async def failing_wait() -> None:
+        msg = "wait phase failed"
+        raise RuntimeError(msg)
+
+    with patch.object(poisoned_slot.loaded, "wait", new=failing_wait):
+        await asyncio.wait_for(poisoned_slot.settled.wait(), timeout=1.0)
+
+    assert poisoned_slot.released
+    with pytest.raises(IngressAdmissionClosedError):
+        gate.submit_lane_slot(
+            poisoned_slot,
+            key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+            source_event_id="$poisoned",
+            source_kind="message",
+            ready_result=_ready(_plain_event("$poisoned", "lost", 1_000_000)),
+        )
+
+    next_slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        next_slot,
+        key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+        source_event_id="$next",
+        source_kind="message",
+        ready_result=_ready(_plain_event("$next", "still works", 1_000_100)),
+    )
+
+    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$next"]])
+    result = await gate.drain_all()
+    assert result.completed is True
+
+
+@pytest.mark.asyncio
+async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
+    """Follow-ups queued behind a response that fails still dispatch as the follow-up turn."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    target = MessageTarget.resolve(room.room_id, "$thread", "$m0")
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = runner._lifecycle_coordinator
+    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    calls: list[CoalescedBatch] = []
+
+    async def record_dispatch(batch: CoalescedBatch) -> None:
+        calls.append(batch)
+
+    await lifecycle_lock.acquire()
+    queued_signal.begin_response_turn()
+    with patch.object(bot._turn_controller, "handle_coalesced_batch", new=AsyncMock(side_effect=record_dispatch)):
+        for event_id, sender in (("$f1", "@alice:localhost"), ("$f2", "@bob:localhost")):
+            await _enqueue_for_dispatch(
+                bot,
+                _text_event(event_id=event_id, body="follow-up", sender=sender, thread_id="$thread"),
+                room,
+                source_kind="message",
+                requester_user_id=sender,
+                coalescing_key=CoalescingKey(room.room_id, "$thread", sender),
+            )
+        await _wait_for(
+            lambda: sum(len(entry.queue) for entry in bot._coalescing_gate._gates.values()) == 2,
+        )
+        assert calls == []
+
+        # A failing response releases its lifecycle exactly like a clean one;
+        # the queued follow-ups must survive the failure and flush together.
+        queued_signal.finish_response_turn()
+        lifecycle_lock.release()
+
+        await _wait_for(lambda: [list(batch.source_event_ids) for batch in calls] == [["$f1", "$f2"]])
+    assert calls[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+
+
+@pytest.mark.asyncio
+async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> None:
+    """Follow-ups queued behind a cancelled detached response still dispatch together."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    target = MessageTarget.resolve(room.room_id, "$thread", "$m0")
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = runner._lifecycle_coordinator
+    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    response_running = asyncio.Event()
+    calls: list[CoalescedBatch] = []
+
+    async def record_dispatch(batch: CoalescedBatch) -> None:
+        calls.append(batch)
+
+    async def blocked_response() -> None:
+        await lifecycle_lock.acquire()
+        queued_signal.begin_response_turn()
+        response_running.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            queued_signal.finish_response_turn()
+            lifecycle_lock.release()
+
+    response_task = runner.track_inbox_response(blocked_response(), name="test_blocked_response")
+    await asyncio.wait_for(response_running.wait(), timeout=1.0)
+    with patch.object(bot._turn_controller, "handle_coalesced_batch", new=AsyncMock(side_effect=record_dispatch)):
+        for event_id, sender in (("$f1", "@alice:localhost"), ("$f2", "@bob:localhost")):
+            await _enqueue_for_dispatch(
+                bot,
+                _text_event(event_id=event_id, body="follow-up", sender=sender, thread_id="$thread"),
+                room,
+                source_kind="message",
+                requester_user_id=sender,
+                coalescing_key=CoalescingKey(room.room_id, "$thread", sender),
+            )
+        await _wait_for(
+            lambda: sum(len(entry.queue) for entry in bot._coalescing_gate._gates.values()) == 2,
+        )
+        assert calls == []
+
+        response_task.cancel()
+        assert await runner.drain_inbox_responses() is True
+
+        await _wait_for(lambda: [list(batch.source_event_ids) for batch in calls] == [["$f1", "$f2"]])
+    assert calls[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+
+
+@pytest.mark.asyncio
+async def test_machine_and_human_follow_ups_split_solo_batch() -> None:
+    """A scheduled fire queued alongside a human follow-up dispatches as its own turn."""
+    busy = {"value": True}
+    idle = asyncio.Event()
+
+    async def wait_until_idle(_key: CoalescingKey) -> None:
+        await idle.wait()
+
+    gate, batches = _gate(
+        debounce_seconds=0.0,
+        dispatch_allowed_now=lambda _key: not busy["value"],
+        wait_until_dispatch_allowed=wait_until_idle,
+    )
+
+    await gate.admit(
+        CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+        ready_result=_ready(_plain_event("$human", "human follow-up", 1_000_000)),
+        source_event_id="$human",
+        source_kind="message",
+    )
+    await gate.admit(
+        CoalescingKey("!room:localhost", "$thread", "@scheduler:localhost"),
+        ready_result=_ready(_plain_event("$fire", "scheduled check-in", 1_000_100), source_kind="scheduled"),
+        source_event_id="$fire",
+        source_kind="scheduled",
+    )
+    await asyncio.sleep(0.01)
+    assert batches == []
+
+    busy["value"] = False
+    idle.set()
+    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$human"], ["$fire"]])
+    assert batches[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert batches[1].dispatch_policy_source_kind is None
+    await gate.drain_all()
