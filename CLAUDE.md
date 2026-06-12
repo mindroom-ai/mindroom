@@ -110,6 +110,7 @@ Matrix sync callback
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `memory/` | Mem0 memory: agent and team-scoped |
 | `knowledge/` | Knowledge base / RAG file indexing with watcher |
+| `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `scheduling.py` | Cron and natural-language task scheduling |

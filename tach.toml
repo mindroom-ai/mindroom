@@ -410,7 +410,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.knowledge.availability",
-    "mindroom.knowledge.manager",
+    "mindroom.knowledge.file_listing",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.status",
@@ -2447,7 +2447,7 @@ depends_on = [
 path = "mindroom.knowledge"
 depends_on = [
     "mindroom.knowledge.availability",
-    "mindroom.knowledge.manager",
+    "mindroom.knowledge.file_listing",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.knowledge.status",
     "mindroom.knowledge.utils",
@@ -2456,6 +2456,13 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.availability"
 depends_on = []
+
+[[modules]]
+path = "mindroom.knowledge.file_listing"
+depends_on = [
+    "mindroom.knowledge.redaction",
+    "mindroom.path_globs",
+]
 
 [[modules]]
 path = "mindroom.knowledge.index_metadata"
@@ -2489,10 +2496,10 @@ depends_on = [
     "mindroom.chunking",
     "mindroom.constants",
     "mindroom.embedding_factory",
+    "mindroom.knowledge.file_listing",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
-    "mindroom.path_globs",
 ]
 
 [[modules]]
@@ -2545,7 +2552,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.watch"
 depends_on = [
-    "mindroom.knowledge.manager",
+    "mindroom.knowledge.file_listing",
     "mindroom.knowledge.registry",
     "mindroom.logging_config",
 ]

@@ -6,14 +6,12 @@ import asyncio
 import base64
 import hashlib
 import os
-import subprocess
 import time
 import uuid
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, cast, runtime_checkable
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -27,6 +25,13 @@ from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.embedding_factory import create_configured_embedder
+from mindroom.knowledge.file_listing import (
+    git_checkout_present,
+    git_tracked_relative_paths_from_checkout,
+    include_knowledge_relative_path,
+    knowledge_files_from_relative_paths,
+    list_knowledge_files,
+)
 from mindroom.knowledge.index_metadata import (
     load_index_metadata_payload,
     parse_index_metadata_fields,
@@ -45,10 +50,10 @@ from mindroom.knowledge.redaction import (
     redact_url_credentials,
 )
 from mindroom.logging_config import get_logger
-from mindroom.path_globs import matches_root_glob
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
+    from pathlib import Path
 
     from agno.knowledge.reader.base import Reader
 
@@ -64,7 +69,6 @@ _SOURCE_SIZE_KEY = "source_size"
 _SOURCE_DIGEST_KEY = "source_digest"
 _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 32
 _POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
-_GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS = 5.0
 _INDEXING_STATUS_RESETTING = "resetting"
 _INDEXING_STATUS_INDEXING = "indexing"
 _INDEXING_STATUS_COMPLETE = "complete"
@@ -72,61 +76,6 @@ _INDEXING_STATUSES = {
     _INDEXING_STATUS_RESETTING,
     _INDEXING_STATUS_INDEXING,
     _INDEXING_STATUS_COMPLETE,
-}
-_GLOB_CHARS = frozenset("*?[")
-_TEXT_LIKE_EXTENSIONS = {
-    ".md",
-    ".markdown",
-    ".txt",
-    ".text",
-    ".rst",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".ini",
-    ".csv",
-    ".tsv",
-    ".html",
-    ".xml",
-    ".py",
-    ".pyi",
-    ".js",
-    ".jsx",
-    ".ts",
-    ".tsx",
-    ".mjs",
-    ".cjs",
-    ".c",
-    ".cc",
-    ".cpp",
-    ".cxx",
-    ".h",
-    ".hh",
-    ".hpp",
-    ".java",
-    ".kt",
-    ".kts",
-    ".go",
-    ".rs",
-    ".rb",
-    ".php",
-    ".swift",
-    ".scala",
-    ".sc",
-    ".sh",
-    ".bash",
-    ".zsh",
-    ".fish",
-    ".ps1",
-    ".sql",
-    ".css",
-    ".scss",
-    ".sass",
-    ".less",
-    ".vue",
-    ".svelte",
-    ".proto",
 }
 _FileSignature = tuple[int, int, str]
 
@@ -163,12 +112,6 @@ class _CandidatePublishState:
     index_published: bool = False
 
 
-@dataclass(frozen=True)
-class _ListingTarget:
-    path: Path
-    mode: Literal["file", "dir", "walk"]
-
-
 def _raise_cancelled() -> NoReturn:
     raise asyncio.CancelledError
 
@@ -187,80 +130,8 @@ def _ensure_knowledge_directory_ready(knowledge_path: Path) -> None:
     knowledge_path.mkdir(parents=True, exist_ok=True)
 
 
-def git_checkout_present(root: Path, *, timeout_seconds: float | None = None) -> bool:
-    """Return whether root itself is a Git worktree checkout."""
-    if not root.is_dir():
-        return False
-    effective_timeout_seconds = _GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    if effective_timeout_seconds <= 0:
-        effective_timeout: float | None = None
-    else:
-        effective_timeout = effective_timeout_seconds
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree", "--show-toplevel"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=effective_timeout,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    if result.returncode != 0:
-        return False
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if len(lines) < 2 or lines[0] != "true":
-        return False
-    try:
-        return Path(lines[1]).resolve() == root.resolve()
-    except OSError:
-        return False
-
-
 def _collection_name(base_id: str, knowledge_path: Path) -> str:
     return f"{_COLLECTION_PREFIX}_{storage_key_for_base(base_id, knowledge_path)}"
-
-
-def _split_pattern_parts(pattern: str) -> tuple[str, ...]:
-    normalized = pattern.replace("\\", "/").strip().removeprefix("./").strip("/")
-    if not normalized:
-        return ()
-    return tuple(part for part in normalized.split("/") if part and part != ".")
-
-
-def _part_has_glob(part: str) -> bool:
-    return any(char in part for char in _GLOB_CHARS)
-
-
-def _listing_targets_for_pattern(resolved_root: Path, pattern: str) -> list[_ListingTarget]:
-    parts = _split_pattern_parts(pattern)
-    if not parts:
-        return []
-    first_glob_index = next((index for index, part in enumerate(parts) if _part_has_glob(part)), len(parts))
-    if first_glob_index == len(parts):
-        return [_ListingTarget(resolved_root.joinpath(*parts), "file")]
-
-    base = resolved_root.joinpath(*parts[:first_glob_index]) if first_glob_index else resolved_root
-    remaining_parts = parts[first_glob_index:]
-    if len(remaining_parts) == 1 and remaining_parts[0] != "**":
-        return [_ListingTarget(base, "dir")]
-    return [_ListingTarget(base, "walk")]
-
-
-def _listing_targets(resolved_root: Path, patterns: list[str]) -> list[_ListingTarget]:
-    if not patterns:
-        return [_ListingTarget(resolved_root, "walk")]
-
-    deduped: list[_ListingTarget] = []
-    seen: set[tuple[Path, str]] = set()
-    for pattern in patterns:
-        for target in _listing_targets_for_pattern(resolved_root, pattern):
-            key = (target.path, target.mode)
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(target)
-    return deduped
 
 
 def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
@@ -385,249 +256,6 @@ def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
     return merged or None
 
 
-def _is_hidden_relative_path(relative_path: Path) -> bool:
-    return any(part.startswith(".") for part in relative_path.parts)
-
-
-def _include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
-    """Return whether a relative path is managed by the base path filters."""
-    path_obj = Path(relative_path)
-    if path_obj.is_absolute() or ".." in path_obj.parts:
-        return False
-
-    base_config = config.get_knowledge_base_config(base_id)
-    if base_config.include_patterns and not any(
-        matches_root_glob(relative_path, pattern) for pattern in base_config.include_patterns
-    ):
-        return False
-    if any(matches_root_glob(relative_path, pattern) for pattern in base_config.exclude_patterns):
-        return False
-
-    git_config = base_config.git
-    if git_config is not None and git_config.skip_hidden and _is_hidden_relative_path(path_obj):
-        return False
-
-    if git_config is None:
-        return True
-
-    git_included = not git_config.include_patterns or any(
-        matches_root_glob(relative_path, pattern) for pattern in git_config.include_patterns
-    )
-    git_excluded = any(matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
-    return git_included and not git_excluded
-
-
-def include_semantic_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
-    """Return whether a relative path is semantically indexable for one base."""
-    if not _include_knowledge_relative_path(config, base_id, relative_path):
-        return False
-
-    base_config = config.get_knowledge_base_config(base_id)
-    include_extensions = set(base_config.include_extensions) if base_config.include_extensions is not None else None
-    exclude_extensions = set(base_config.exclude_extensions)
-    allowed_extensions = include_extensions if include_extensions is not None else _TEXT_LIKE_EXTENSIONS
-
-    suffix = Path(relative_path).suffix.lower()
-    if suffix not in allowed_extensions:
-        return False
-    return suffix not in exclude_extensions
-
-
-def include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
-    """Return whether a relative path belongs to the active source set for one base."""
-    if config.get_knowledge_base_config(base_id).mode == "files":
-        return _include_knowledge_relative_path(config, base_id, relative_path)
-    return include_semantic_knowledge_relative_path(config, base_id, relative_path)
-
-
-@dataclass
-class _KnowledgePathFilter:
-    config: Config
-    base_id: str
-    root: Path
-    _directory_symlink_cache: dict[Path, bool] = field(default_factory=dict)
-
-    def include_file(self, file_path: Path, *, check_directory_symlinks: bool = True) -> bool:
-        """Return whether a file belongs to the active source set for one base."""
-        candidate = file_path if file_path.is_absolute() else self.root / file_path
-        try:
-            relative_path = candidate.relative_to(self.root)
-        except ValueError:
-            return False
-
-        if not include_knowledge_relative_path(self.config, self.base_id, relative_path.as_posix()):
-            return False
-        if check_directory_symlinks and self.directory_is_symlink_or_under_symlink(candidate.parent):
-            return False
-        if candidate.is_symlink():
-            return False
-        try:
-            resolved_candidate = candidate.resolve(strict=True)
-            resolved_candidate.relative_to(self.root)
-        except (OSError, ValueError):
-            return False
-        return candidate.is_file()
-
-    def directory_is_symlink_or_under_symlink(self, directory: Path) -> bool:
-        """Return whether a directory is outside root or reached through a symlink."""
-        try:
-            relative_path = directory.relative_to(self.root)
-        except ValueError:
-            return True
-
-        current = self.root
-        for part in relative_path.parts:
-            current = current / part
-            cached = self._directory_symlink_cache.get(current)
-            if cached is None:
-                cached = current.is_symlink()
-                self._directory_symlink_cache[current] = cached
-            if cached:
-                return True
-        return False
-
-
-def _add_listed_knowledge_file(
-    path_filter: _KnowledgePathFilter,
-    path: Path,
-    *,
-    check_directory_symlinks: bool,
-    files: list[Path],
-    seen_paths: set[Path],
-) -> None:
-    if not path_filter.include_file(path, check_directory_symlinks=check_directory_symlinks):
-        return
-    resolved_path = path.resolve()
-    if resolved_path in seen_paths:
-        return
-    seen_paths.add(resolved_path)
-    files.append(resolved_path)
-
-
-def _collect_listing_target_files(
-    path_filter: _KnowledgePathFilter,
-    target: _ListingTarget,
-    *,
-    files: list[Path],
-    seen_paths: set[Path],
-) -> None:
-    def add_file(path: Path, *, check_directory_symlinks: bool) -> None:
-        _add_listed_knowledge_file(
-            path_filter,
-            path,
-            check_directory_symlinks=check_directory_symlinks,
-            files=files,
-            seen_paths=seen_paths,
-        )
-
-    if target.mode == "file":
-        add_file(target.path, check_directory_symlinks=True)
-        return
-    if not target.path.is_dir() or path_filter.directory_is_symlink_or_under_symlink(target.path):
-        return
-    if target.mode == "dir":
-        for path in target.path.iterdir():
-            if path.is_file():
-                add_file(path, check_directory_symlinks=False)
-        return
-    for dirpath, dirnames, filenames in os.walk(target.path, followlinks=False):
-        current_dir = Path(dirpath)
-        dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
-        for filename in filenames:
-            add_file(current_dir / filename, check_directory_symlinks=False)
-
-
-def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
-    """List managed files without constructing a knowledge manager."""
-    root = knowledge_root.resolve()
-    if not root.is_dir():
-        return []
-
-    path_filter = _KnowledgePathFilter(config=config, base_id=base_id, root=root)
-    files: list[Path] = []
-    seen_paths: set[Path] = set()
-    include_patterns = config.get_knowledge_base_config(base_id).include_patterns
-    for target in _listing_targets(root, include_patterns):
-        _collect_listing_target_files(path_filter, target, files=files, seen_paths=seen_paths)
-    return sorted(files)
-
-
-def _knowledge_file_paths_from_relative_paths(
-    config: Config,
-    base_id: str,
-    knowledge_root: Path,
-    relative_paths: Iterable[str],
-) -> list[Path]:
-    root = knowledge_root.resolve()
-    path_filter = _KnowledgePathFilter(config=config, base_id=base_id, root=root)
-    files: list[Path] = []
-    for relative_path in sorted(set(relative_paths)):
-        path = root / relative_path
-        if path_filter.include_file(path):
-            files.append(path)
-    return files
-
-
-def _git_tracked_relative_paths_from_checkout(
-    config: Config,
-    base_id: str,
-    knowledge_root: Path,
-    *,
-    timeout_seconds: float | None = None,
-) -> set[str]:
-    git_config = config.get_knowledge_base_config(base_id).git
-    if git_config is None:
-        return set()
-    effective_timeout_seconds = float(
-        git_config.sync_timeout_seconds if timeout_seconds is None else timeout_seconds,
-    )
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z"],
-            cwd=str(knowledge_root),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=effective_timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
-        msg = f"Git command timed out after {effective_timeout_seconds:g}s: git ls-files -z"
-        raise RuntimeError(msg) from exc
-    except OSError as exc:
-        msg = f"Git command failed: git ls-files -z\n{exc}"
-        raise RuntimeError(msg) from exc
-
-    if result.returncode != 0:
-        details = redact_credentials_in_text((result.stderr or result.stdout).strip())
-        msg = f"Git command failed with exit code {result.returncode}: git ls-files -z"
-        if details:
-            msg = f"{msg}\n{details}"
-        raise RuntimeError(msg)
-
-    return {
-        path for path in result.stdout.split("\x00") if path and include_knowledge_relative_path(config, base_id, path)
-    }
-
-
-def list_git_tracked_knowledge_files(
-    config: Config,
-    base_id: str,
-    knowledge_root: Path,
-    *,
-    timeout_seconds: float | None = None,
-) -> list[Path]:
-    """List Git-tracked files using the active source set for one base."""
-    root = knowledge_root.resolve()
-    if not git_checkout_present(root, timeout_seconds=timeout_seconds):
-        return []
-    return _knowledge_file_paths_from_relative_paths(
-        config,
-        base_id,
-        root,
-        _git_tracked_relative_paths_from_checkout(config, base_id, root, timeout_seconds=timeout_seconds),
-    )
-
-
 def _file_content_digest(file_path: Path) -> str:
     digest = hashlib.sha256()
     with file_path.open("rb") as handle:
@@ -653,9 +281,9 @@ def knowledge_source_signature(
         tracked_paths = (
             set(tracked_relative_paths)
             if tracked_relative_paths is not None
-            else _git_tracked_relative_paths_from_checkout(config, base_id, root)
+            else git_tracked_relative_paths_from_checkout(config, base_id, root)
         )
-        files = _knowledge_file_paths_from_relative_paths(config, base_id, root, tracked_paths)
+        files = knowledge_files_from_relative_paths(config, base_id, root, tracked_paths)
     for path in files:
         try:
             stat = path.stat()
@@ -1102,12 +730,12 @@ class KnowledgeManager:
             if self._git_tracked_relative_paths is None:
                 if not git_checkout_present(knowledge_root, timeout_seconds=self._git_sync_timeout_seconds()):
                     return []
-                self._git_tracked_relative_paths = _git_tracked_relative_paths_from_checkout(
+                self._git_tracked_relative_paths = git_tracked_relative_paths_from_checkout(
                     self.config,
                     self.base_id,
                     knowledge_root,
                 )
-            return _knowledge_file_paths_from_relative_paths(
+            return knowledge_files_from_relative_paths(
                 self.config,
                 self.base_id,
                 knowledge_root,
@@ -1379,7 +1007,17 @@ class KnowledgeManager:
             _SOURCE_SIZE_KEY: source_size,
             _SOURCE_DIGEST_KEY: source_digest,
         }
-        reader = self._build_reader(resolved_path)
+        try:
+            reader = self._build_reader(resolved_path)
+        except ImportError as exc:
+            logger.warning(
+                "Skipping knowledge file because its reader dependency is not installed",
+                base_id=self.base_id,
+                path=relative_path,
+                extension=resolved_path.suffix.lower(),
+                error=str(exc),
+            )
+            return False
         target_knowledge = knowledge or self._knowledge
 
         try:

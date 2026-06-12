@@ -51,6 +51,7 @@ class IndexingSettings:
     exclude_patterns: str
     include_extensions: str
     exclude_extensions: str
+    extra_extensions: str = ""
 
     @classmethod
     def from_metadata(cls, settings: Mapping[str, str]) -> IndexingSettings | None:
@@ -75,7 +76,7 @@ class IndexingSettings:
             "include_extensions",
             "exclude_extensions",
         }
-        optional_keys = {"include_patterns", "exclude_patterns"}
+        optional_keys = {"include_patterns", "exclude_patterns", "extra_extensions"}
         if not required_keys.issubset(settings) or set(settings) - required_keys - optional_keys:
             return None
         mode = settings["mode"]
@@ -102,6 +103,7 @@ class IndexingSettings:
             exclude_patterns=settings.get("exclude_patterns", ""),
             include_extensions=settings["include_extensions"],
             exclude_extensions=settings["exclude_extensions"],
+            extra_extensions=settings.get("extra_extensions", ""),
         )
 
     def to_metadata(self) -> dict[str, str]:
@@ -127,6 +129,7 @@ class IndexingSettings:
             "exclude_patterns": self.exclude_patterns,
             "include_extensions": self.include_extensions,
             "exclude_extensions": self.exclude_extensions,
+            "extra_extensions": self.extra_extensions,
         }
 
     def query_compatibility_key(self) -> tuple[str, str, str, str, str, str, str, str]:
@@ -144,7 +147,7 @@ class IndexingSettings:
 
     def corpus_compatibility_key(
         self,
-    ) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
+    ) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
         """Return fields that must match for safe source-corpus reuse."""
         return (
             self.base_id,
@@ -161,6 +164,7 @@ class IndexingSettings:
             self.exclude_patterns,
             self.include_extensions,
             self.exclude_extensions,
+            self.extra_extensions,
         )
 
 
@@ -233,6 +237,7 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
             _filter_settings_key(base_config.include_extensions) if base_config.include_extensions is not None else ""
         )
         exclude_extensions = _filter_settings_key(base_config.exclude_extensions)
+        extra_extensions = _filter_settings_key(base_config.extra_extensions)
     else:
         embedder_provider = ""
         embedder_model = ""
@@ -242,6 +247,7 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
         chunk_overlap = ""
         include_extensions = ""
         exclude_extensions = ""
+        extra_extensions = ""
     return IndexingSettings(
         base_id=base_id,
         storage_root=str(storage_path.resolve()),
@@ -263,4 +269,5 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
         exclude_patterns=_filter_settings_key(base_config.exclude_patterns),
         include_extensions=include_extensions,
         exclude_extensions=exclude_extensions,
+        extra_extensions=extra_extensions,
     )
