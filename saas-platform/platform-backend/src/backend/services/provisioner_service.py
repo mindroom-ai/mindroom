@@ -179,7 +179,13 @@ def _instance_matrix_registration_shared_secret(instance_id: str) -> str:
 
 
 def _stable_instance_secret(purpose: str, instance_id: str) -> str:
-    """Derive one stable per-instance secret from the platform root secret."""
+    """Derive one stable per-instance secret from the platform root secret.
+
+    WARNING: when INSTANCE_CREDENTIALS_ENCRYPTION_SECRET is unset, PROVISIONER_API_KEY doubles
+    as the HMAC root secret. Rotating PROVISIONER_API_KEY without first setting
+    INSTANCE_CREDENTIALS_ENCRYPTION_SECRET silently invalidates every derived per-instance
+    secret (credential encryption keys, Matrix registration shared secrets) for existing tenants.
+    """
     root_secret = (INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY).strip()
     if not root_secret:
         msg = "INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY must be configured"
