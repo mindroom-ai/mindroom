@@ -50,9 +50,10 @@ class SyncRestartRetryQueue:
             self._attempted.pop(next(iter(self._attempted)))
 
     async def flush(self) -> None:
-        """Run every queued retry exactly once, isolating individual failures."""
+        """Run every queued retry exactly once in FIFO order, isolating individual failures."""
         while self._pending:
-            key, retry = self._pending.popitem()
+            key = next(iter(self._pending))
+            retry = self._pending.pop(key)
             self._mark_attempted(key)
             logger.info("sync_restart_retry_started", source_event_id=key)
             try:

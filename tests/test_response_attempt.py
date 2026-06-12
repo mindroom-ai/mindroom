@@ -240,7 +240,7 @@ async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
     )
     await inner_started.wait()
     outer.cancel(msg=SYNC_RESTART_CANCEL_MSG)
-    await asyncio.wait({outer})
+    assert await outer == "$existing"
 
     assert cancellation_reasons == ["sync_restart_cancelled"]
     assert inner_cancel_args == [(SYNC_RESTART_CANCEL_MSG,)]

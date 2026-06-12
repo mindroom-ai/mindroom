@@ -13,7 +13,7 @@ from mindroom.sync_restart_retry import SyncRestartRetryQueue
 from tests.conftest import request_envelope
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 
 def _request(on_sync_restart_cancelled: Callable[[], None] | None = None) -> ResponseRequest:
@@ -113,6 +113,25 @@ async def test_queue_isolates_individual_retry_failures() -> None:
     queue.register("$b", succeeding)
     await queue.flush()
     assert runs == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_queue_flushes_in_registration_order() -> None:
+    """Retries must run FIFO so older interrupted turns answer first."""
+    queue = SyncRestartRetryQueue()
+    runs: list[str] = []
+
+    def make_retry(key: str) -> Callable[[], Awaitable[None]]:
+        async def retry() -> None:
+            runs.append(key)
+
+        return retry
+
+    for key in ("$first", "$second", "$third"):
+        queue.register(key, make_retry(key))
+
+    await queue.flush()
+    assert runs == ["$first", "$second", "$third"]
 
 
 @pytest.mark.asyncio
