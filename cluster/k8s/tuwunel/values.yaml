@@ -1,0 +1,146 @@
+# Standalone Tuwunel homeserver chart.
+# It deploys the MindRoom Tuwunel fork as a single-replica homeserver that the mindroom-runtime chart can pair with.
+# Ingress, TLS, and apex well-known delegation come from your own cluster.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/mindroom-ai/mindroom-tuwunel
+  tag: latest
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+deploymentAnnotations: {}
+podAnnotations: {}
+podLabels: {}
+# Leave empty for the chart default.
+# Set this when adopting an existing Deployment whose selector is immutable.
+selectorLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+# The release image runs Tuwunel as root, so the chart sets no restrictive container security context by default.
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 8008
+  annotations: {}
+
+tuwunel:
+  # The Matrix server name used in user IDs, for example example.com.
+  # Tuwunel cannot change this after the first start without a database wipe.
+  serverName: ""
+  # Public HTTPS base URL where clients reach this homeserver, for example https://matrix.example.com.
+  # Leave empty to default to https://<serverName>.
+  clientBaseUrl: ""
+  # Listener port inside the pod.
+  port: 8008
+  logLevel: info
+  # MindRoom fork feature: collapse superseded streaming edits in /sync responses.
+  compactEdits: true
+  registrationToken:
+    # Existing Secret holding the shared registration token.
+    # When set, the chart enables token-gated registration and points Tuwunel at the mounted token file.
+    # Reference the same Secret from the mindroom-runtime chart's matrix.registrationToken.
+    existingSecret: ""
+    key: MATRIX_REGISTRATION_TOKEN
+  wellKnown:
+    # Homeserver base URL served in /.well-known/matrix/client.
+    # Leave empty to default to the effective clientBaseUrl.
+    client: ""
+    # host:port served in /.well-known/matrix/server for federation delegation.
+    # Leave empty to default to <serverName>:443.
+    server: ""
+  oidc:
+    enabled: false
+    # Provider software or service brand recognized by Tuwunel, for example keycloak, google, or github.
+    brand: ""
+    # Optional display name shown on the login page; defaults to brand.
+    name: ""
+    # Issuer URL for OpenID discovery.
+    # Required for self-hosted providers; canonical public brands have built-in defaults.
+    issuer: ""
+    clientId: ""
+    clientSecret:
+      # Existing Secret holding the OAuth client secret. Required when oidc.enabled=true.
+      existingSecret: ""
+      key: OIDC_CLIENT_SECRET
+    # Callback URL registered with the provider.
+    # Leave empty to default to <clientBaseUrl>/_matrix/client/unstable/login/sso/callback/<clientId>.
+    callbackUrl: ""
+    # Optional scope restriction, for example [openid, profile, email].
+    scope: []
+    # Raw TOML appended inside the [[global.identity_provider]] block, for example userid_claims or trusted.
+    extraConfig: ""
+  # Raw TOML appended to the [global] section of the rendered tuwunel.toml.
+  extraConfig: ""
+
+config:
+  create: true
+  # Existing ConfigMap with a fully custom tuwunel.toml. Disables the chart-rendered config.
+  existingConfigMap: ""
+  key: tuwunel.toml
+  mountPath: /etc/tuwunel/tuwunel.toml
+
+storage:
+  create: true
+  existingClaim: ""
+  volumeName: data
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  size: 20Gi
+  # Tuwunel stores its database and media under this path.
+  mountPath: /var/lib/tuwunel
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 2Gi
+
+probes:
+  startup:
+    enabled: true
+    custom: {}
+    path: /_matrix/client/versions
+    port: matrix
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 60
+  readiness:
+    enabled: true
+    custom: {}
+    path: /_matrix/client/versions
+    port: matrix
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+  liveness:
+    enabled: true
+    custom: {}
+    path: /_matrix/client/versions
+    port: matrix
+    periodSeconds: 30
+    timeoutSeconds: 10
+    failureThreshold: 6
+
+env:
+  # Raw Kubernetes EnvVar entries appended to the Tuwunel container, for example TUWUNEL_* overrides.
+  extra: []
+  # Raw Kubernetes EnvFromSource entries appended to the Tuwunel container.
+  envFrom: []
+
+extraVolumes: []
+extraVolumeMounts: []
