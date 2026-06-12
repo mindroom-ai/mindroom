@@ -46,7 +46,7 @@ jobs:
       # so a misconfigured app fails the job before the expensive notarized build.
       - name: Mint release bot token
         id: release-bot
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ vars.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
@@ -219,7 +219,7 @@ jobs:
       # which the mindroom-release-bot app installation grants.
       - name: Mint release bot token
         id: release-bot
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ vars.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
