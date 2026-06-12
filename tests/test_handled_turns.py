@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
 
+import mindroom.handled_turns as handled_turns_module
 from mindroom.file_locks import advisory_file_lock
-from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
+from mindroom.handled_turns import (
+    HandledTurnLedger,
+    HandledTurnRecord,
+    HandledTurnState,
+    _reset_handled_turn_ledger_runtime,
+)
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 
@@ -22,6 +30,12 @@ if TYPE_CHECKING:
 def temp_dir(tmp_path: Path) -> Path:
     """Return a temporary directory for ledger tests."""
     return tmp_path
+
+
+def _reload_ledger(agent_name: str, base_path: Path) -> HandledTurnLedger:
+    """Simulate a process restart: flush persists, drop shared state, reload from disk."""
+    _reset_handled_turn_ledger_runtime()
+    return HandledTurnLedger(agent_name, base_path=base_path)
 
 
 def _write_responses_file(
@@ -357,7 +371,7 @@ def test_visible_echo_persists_across_reload(temp_dir: Path) -> None:
 
     tracker1.record_visible_echo("event123", "$echo")
 
-    tracker2 = HandledTurnLedger("test_visible_echo_reload", base_path=temp_dir)
+    tracker2 = _reload_ledger("test_visible_echo_reload", temp_dir)
 
     assert not tracker2.has_responded("event123")
     assert tracker2.get_visible_echo_event_id("event123") == "$echo"
@@ -386,7 +400,7 @@ def test_persistence_round_trip(temp_dir: Path) -> None:
         source_event_prompts={"$first": "first", "$second": "second"},
     )
 
-    tracker2 = HandledTurnLedger("test_persist", base_path=temp_dir)
+    tracker2 = _reload_ledger("test_persist", temp_dir)
 
     assert tracker2.has_responded("$first")
     assert tracker2.has_responded("$second")
@@ -416,7 +430,7 @@ def test_persistence_round_trip_preserves_response_context(temp_dir: Path) -> No
         conversation_target=conversation_target,
     )
 
-    tracker2 = HandledTurnLedger("test_persist_context", base_path=temp_dir)
+    tracker2 = _reload_ledger("test_persist_context", temp_dir)
 
     turn_record = tracker2.get_turn_record("$reply")
     assert turn_record is not None
@@ -442,7 +456,7 @@ def test_persistence_round_trip_preserves_requester_and_correlation(temp_dir: Pa
         correlation_id="corr-123",
     )
 
-    tracker2 = HandledTurnLedger("test_persist_request_context", base_path=temp_dir)
+    tracker2 = _reload_ledger("test_persist_request_context", temp_dir)
 
     turn_record = tracker2.get_turn_record("$reply")
     assert turn_record is not None
@@ -535,7 +549,7 @@ def test_record_without_requester_or_correlation_loads_cleanly(temp_dir: Path) -
         },
     )
 
-    reloaded = HandledTurnLedger("missing_request_context", base_path=temp_dir)
+    reloaded = _reload_ledger("missing_request_context", temp_dir)
     turn_record = reloaded.get_turn_record("$event")
     assert turn_record is not None
     assert turn_record.response_event_id == "$response"
@@ -640,7 +654,7 @@ def test_large_coalesced_turn_round_trips(temp_dir: Path) -> None:
         source_event_prompts=prompt_map,
     )
 
-    reloaded = HandledTurnLedger("test_large_coalesced", base_path=temp_dir)
+    reloaded = _reload_ledger("test_large_coalesced", temp_dir)
 
     turn_record = reloaded.get_turn_record(source_event_ids[-1])
     assert turn_record is not None
@@ -750,35 +764,29 @@ def test_concurrent_access_keeps_json_valid(temp_dir: Path) -> None:
         thread.join()
 
     assert len(tracker._responses) == 100
+    tracker.flush()
     with tracker._responses_file.open() as file:
         assert len(json.load(file)) == 100
 
 
-def test_concurrent_cross_instance_writes_wait_for_lock_and_merge(temp_dir: Path) -> None:
-    """A second ledger instance should wait on the lock file and preserve both writes."""
+def test_cross_process_lock_defers_persist_without_blocking_writers(temp_dir: Path) -> None:
+    """A held cross-process lock should stall only the disk merge, never the recording caller."""
     tracker_a = HandledTurnLedger("test_cross_instance_lock", base_path=temp_dir)
     tracker_b = HandledTurnLedger("test_cross_instance_lock", base_path=temp_dir)
     _record_handled_turn(tracker_a, ["$first"], response_event_id="$response-a")
-
-    writer_started = threading.Event()
-    writer_finished = threading.Event()
-
-    def write_second_turn() -> None:
-        writer_started.set()
-        _record_handled_turn(tracker_b, ["$second"], response_event_id="$response-b")
-        writer_finished.set()
+    tracker_a.flush()
 
     with advisory_file_lock(tracker_a._responses_lock_file):
-        writer_thread = threading.Thread(target=write_second_turn)
-        writer_thread.start()
-        assert writer_started.wait(timeout=5.0)
-        time.sleep(0.05)
-        assert not writer_finished.is_set()
-    assert writer_finished.wait(timeout=5.0)
-    writer_thread.join(timeout=1.0)
-    assert not writer_thread.is_alive()
+        # Recording returns immediately and is visible in shared memory even
+        # while another process holds the ledger file lock.
+        _record_handled_turn(tracker_b, ["$second"], response_event_id="$response-b")
+        assert _get_response_event_id(tracker_b, "$second") == "$response-b"
+        # The queued disk merge cannot complete while the lock is held.
+        persisted = json.loads(tracker_a._responses_file.read_text(encoding="utf-8"))
+        assert "$second" not in persisted
 
-    tracker_c = HandledTurnLedger("test_cross_instance_lock", base_path=temp_dir)
+    tracker_b.flush()
+    tracker_c = _reload_ledger("test_cross_instance_lock", temp_dir)
     assert _get_response_event_id(tracker_c, "$first") == "$response-a"
     assert _get_response_event_id(tracker_c, "$second") == "$response-b"
 
@@ -791,7 +799,7 @@ def test_multiple_instances_merge_updates(temp_dir: Path) -> None:
     _record_handled_turn(tracker_a, ["$first"], response_event_id="$response-a")
     _record_handled_turn(tracker_b, ["$second"], response_event_id="$response-b")
 
-    tracker_c = HandledTurnLedger("test_multi_instance", base_path=temp_dir)
+    tracker_c = _reload_ledger("test_multi_instance", temp_dir)
     assert _get_response_event_id(tracker_c, "$first") == "$response-a"
     assert _get_response_event_id(tracker_c, "$second") == "$response-b"
 
@@ -822,6 +830,7 @@ def test_quarantines_malformed_ledger_file(temp_dir: Path) -> None:
     responses_file.write_text("{not valid json", encoding="utf-8")
 
     tracker = HandledTurnLedger("bad_json", base_path=temp_dir)
+    tracker.warm()
 
     assert tracker._responses == {}
     assert json.loads(responses_file.read_text(encoding="utf-8")) == {}
@@ -835,6 +844,7 @@ def test_quarantines_non_utf8_ledger_file(temp_dir: Path) -> None:
     responses_file.write_bytes(b"\xff\xfe\x00")
 
     tracker = HandledTurnLedger("bad_utf8", base_path=temp_dir)
+    tracker.warm()
 
     assert tracker._responses == {}
     assert json.loads(responses_file.read_text(encoding="utf-8")) == {}
@@ -848,6 +858,7 @@ def test_quarantines_structurally_invalid_ledger_file(temp_dir: Path) -> None:
     responses_file.write_text(json.dumps(["oops"]), encoding="utf-8")
 
     tracker = HandledTurnLedger("bad_shape", base_path=temp_dir)
+    tracker.warm()
 
     assert tracker._responses == {}
     assert json.loads(responses_file.read_text(encoding="utf-8")) == {}
@@ -862,6 +873,7 @@ def test_quarantines_ledger_file_with_invalid_event_entry(temp_dir: Path) -> Non
     responses_file.write_text(json.dumps({"$event": []}), encoding="utf-8")
 
     tracker = HandledTurnLedger("bad_entry", base_path=temp_dir)
+    tracker.warm()
 
     assert tracker._responses == {}
     assert json.loads(responses_file.read_text(encoding="utf-8")) == {}
@@ -871,7 +883,7 @@ def test_quarantines_ledger_file_with_invalid_event_entry(temp_dir: Path) -> Non
 
 
 def test_shared_reads_fail_soft_on_corrupt_file_without_quarantining(temp_dir: Path) -> None:
-    """Shared-lock reads should return empty state instead of trying to repair the ledger."""
+    """Concurrent reads over a corrupt file should fail soft from shared memory state."""
     tracker_a = HandledTurnLedger("bad_race", base_path=temp_dir)
     tracker_b = HandledTurnLedger("bad_race", base_path=temp_dir)
     tracker_a._responses_file.write_text("{not valid json", encoding="utf-8")
@@ -919,3 +931,73 @@ def test_get_turn_record_returns_none_for_unknown_source(temp_dir: Path) -> None
     tracker = HandledTurnLedger("test_missing", base_path=temp_dir)
 
     assert tracker.get_turn_record("$missing") is None
+
+
+def test_construction_touches_no_filesystem(temp_dir: Path) -> None:
+    """Binding a ledger must stay free of filesystem access so bot init never stalls the loop."""
+    missing_parent = temp_dir / "does-not-exist" / "tracking"
+
+    tracker = HandledTurnLedger("test_lazy_init", base_path=missing_parent)
+
+    assert not missing_parent.exists()
+    assert tracker._responses == {}
+
+
+@pytest.mark.asyncio
+async def test_warm_on_slow_filesystem_does_not_block_event_loop(
+    temp_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """warm() must run its advisory-lock load off the loop so heartbeats keep ticking."""
+    gate = threading.Event()
+    real_lock = handled_turns_module.advisory_file_lock
+
+    @contextmanager
+    def gated_lock(lock_path: Path, *, exclusive: bool = True) -> object:
+        gate.wait()
+        with real_lock(lock_path, exclusive=exclusive):
+            yield
+
+    monkeypatch.setattr(handled_turns_module, "advisory_file_lock", gated_lock)
+    tracker = HandledTurnLedger("test_slow_warm", base_path=temp_dir)
+    warm_task = asyncio.create_task(asyncio.to_thread(tracker.warm))
+
+    # The warm thread is parked on the gated lock; the loop must stay live.
+    heartbeats = 0
+    while heartbeats < 50:
+        await asyncio.sleep(0)
+        heartbeats += 1
+    assert not warm_task.done()
+
+    gate.set()
+    await warm_task
+    assert tracker._responses == {}
+
+
+def test_record_returns_before_disk_persist_completes(temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recording must apply in memory and return while the disk merge is still blocked."""
+    tracker = HandledTurnLedger("test_async_persist", base_path=temp_dir)
+    tracker.warm()
+
+    gate = threading.Event()
+    real_lock = handled_turns_module.advisory_file_lock
+
+    @contextmanager
+    def gated_lock(lock_path: Path, *, exclusive: bool = True) -> object:
+        gate.wait()
+        with real_lock(lock_path, exclusive=exclusive):
+            yield
+
+    monkeypatch.setattr(handled_turns_module, "advisory_file_lock", gated_lock)
+
+    # If recording touched the (gated) file lock on the calling thread this
+    # would deadlock; returning at all proves the disk merge is write-behind.
+    _record_handled_turn(tracker, ["$event"], response_event_id="$response")
+    assert tracker.has_responded("$event")
+    persisted = json.loads(tracker._responses_file.read_text(encoding="utf-8"))
+    assert "$event" not in persisted
+
+    gate.set()
+    tracker.flush()
+    persisted = json.loads(tracker._responses_file.read_text(encoding="utf-8"))
+    assert persisted["$event"]["response_event_id"] == "$response"

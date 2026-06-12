@@ -1,4 +1,12 @@
-"""Track handled turn outcomes for one agent."""
+"""Track handled turn outcomes for one agent.
+
+Reads are served from in-memory state shared across every ledger bound to the
+same responses file, so sibling ledger instances in one process observe each
+other's writes without touching the filesystem. Disk persistence happens on a
+single write-behind worker thread that merges applied records into the file
+under an advisory lock, keeping cross-process writers safe while the event
+loop never blocks on filesystem I/O (issue #1260).
+"""
 
 from __future__ import annotations
 
@@ -7,7 +15,7 @@ import os
 import threading
 import time
 import typing
-from contextlib import contextmanager
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -255,23 +263,83 @@ class HandledTurnRecord:
 
 
 @dataclass
+class _LedgerState:
+    """In-memory ledger state shared by every ledger bound to one responses file."""
+
+    responses: dict[str, _SerializedHandledTurnRecord] = field(default_factory=dict)
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    loaded: bool = False
+    pending_persists: list[Future[None]] = field(default_factory=list, repr=False)
+
+
+_LEDGER_STATES: dict[str, _LedgerState] = {}
+_LEDGER_RUNTIME_LOCK = threading.Lock()
+_PERSIST_EXECUTOR: ThreadPoolExecutor | None = None
+
+
+def _shared_ledger_state(responses_file: Path) -> _LedgerState:
+    """Return the process-wide shared state for one responses file."""
+    key = str(responses_file.absolute())
+    with _LEDGER_RUNTIME_LOCK:
+        state = _LEDGER_STATES.get(key)
+        if state is None:
+            state = _LedgerState()
+            _LEDGER_STATES[key] = state
+        return state
+
+
+def _persist_executor() -> ThreadPoolExecutor:
+    """Return the shared single-worker executor that orders ledger persists."""
+    global _PERSIST_EXECUTOR
+    with _LEDGER_RUNTIME_LOCK:
+        if _PERSIST_EXECUTOR is None:
+            _PERSIST_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="handled-turn-persist")
+        return _PERSIST_EXECUTOR
+
+
+def _reset_handled_turn_ledger_runtime() -> None:
+    """Flush pending persists and drop shared ledger state (tests and forked runtimes)."""
+    global _PERSIST_EXECUTOR
+    with _LEDGER_RUNTIME_LOCK:
+        executor = _PERSIST_EXECUTOR
+        _PERSIST_EXECUTOR = None
+        _LEDGER_STATES.clear()
+    if executor is not None:
+        executor.shutdown(wait=True)
+
+
+@dataclass
 class HandledTurnLedger:
     """Track handled source events for one runtime entity."""
 
     agent_name: str
     base_path: Path
-    _responses: dict[str, _SerializedHandledTurnRecord] = field(default_factory=dict, init=False)
     _responses_file: Path = field(init=False)
     _responses_lock_file: Path = field(init=False)
-    _thread_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    _state: _LedgerState = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Initialize paths and load existing handled turns."""
-        self.base_path.mkdir(parents=True, exist_ok=True)
+        """Bind shared ledger state for this agent without touching the filesystem."""
         self._responses_file = _responses_file_path(self.base_path, self.agent_name)
         self._responses_lock_file = self._responses_file.with_suffix(f"{self._responses_file.suffix}.lock")
-        self._load_responses()
+        self._state = _shared_ledger_state(self._responses_file)
+
+    @property
+    def _responses(self) -> dict[str, _SerializedHandledTurnRecord]:
+        return self._state.responses
+
+    @_responses.setter
+    def _responses(self, responses: dict[str, _SerializedHandledTurnRecord]) -> None:
+        self._state.responses = responses
+
+    def warm(self) -> None:
+        """Load and compact the persisted ledger; call from a worker thread, not the event loop."""
         self._cleanup_old_events()
+
+    def flush(self) -> None:
+        """Block until every scheduled ledger persist has reached disk."""
+        with self._state.lock:
+            self._wait_for_pending_persists_locked()
 
     def record_handled_turn(self, handled_turn: HandledTurnState) -> None:
         """Record one handled-turn state as a terminal outcome."""
@@ -279,9 +347,9 @@ class HandledTurnLedger:
         if not normalized_source_event_ids:
             return
 
-        with self._thread_lock, self._file_lock(exclusive=True):
-            self._responses = self._read_responses_file_locked()
-            self._persist_handled_turn_locked(
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            self._apply_handled_turn_locked(
                 source_event_ids=normalized_source_event_ids,
                 response_event_id=handled_turn.response_event_id,
                 completed=True,
@@ -293,7 +361,7 @@ class HandledTurnLedger:
                 history_scope=handled_turn.history_scope,
                 conversation_target=handled_turn.conversation_target,
             )
-            self._save_responses_locked()
+            self._schedule_persist_locked(normalized_source_event_ids)
         logger.debug("handled_turn_recorded", source_event_count=len(normalized_source_event_ids))
 
     def record_handled_turn_record(self, turn_record: HandledTurnRecord) -> None:
@@ -302,9 +370,9 @@ class HandledTurnLedger:
         if not normalized_source_event_ids:
             return
 
-        with self._thread_lock, self._file_lock(exclusive=True):
-            self._responses = self._read_responses_file_locked()
-            self._persist_handled_turn_locked(
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            self._apply_handled_turn_locked(
                 normalized_source_event_ids,
                 response_event_id=turn_record.response_event_id,
                 completed=turn_record.completed,
@@ -317,16 +385,16 @@ class HandledTurnLedger:
                 conversation_target=turn_record.conversation_target,
                 anchor_event_id=turn_record.anchor_event_id,
             )
-            self._save_responses_locked()
+            self._schedule_persist_locked(normalized_source_event_ids)
         logger.debug("handled_turn_recorded", source_event_count=len(normalized_source_event_ids))
 
     def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         """Track a visible echo without marking the turn terminally handled."""
-        with self._thread_lock, self._file_lock(exclusive=True):
-            self._responses = self._read_responses_file_locked()
+        with self._state.lock:
+            self._ensure_loaded_locked()
             existing_record = self._responses.get(source_event_id)
             source_event_ids = _source_event_ids_for_record(source_event_id, existing_record)
-            self._persist_handled_turn_locked(
+            self._apply_handled_turn_locked(
                 source_event_ids=source_event_ids,
                 response_event_id=_response_event_id_for_record(existing_record),
                 completed=_completed_for_record(existing_record),
@@ -339,7 +407,7 @@ class HandledTurnLedger:
                 conversation_target=_conversation_target_for_record(existing_record),
                 anchor_event_id=_anchor_event_id_for_record(source_event_ids, existing_record),
             )
-            self._save_responses_locked()
+            self._schedule_persist_locked(source_event_ids)
         logger.debug(
             "visible_echo_tracked",
             agent=self.agent_name,
@@ -349,15 +417,15 @@ class HandledTurnLedger:
 
     def has_responded(self, event_id: str) -> bool:
         """Return whether the source event has a terminal recorded outcome."""
-        with self._thread_lock, self._file_lock(exclusive=False):
-            self._responses = self._read_responses_file_locked(repair_corrupt_file=False)
+        with self._state.lock:
+            self._ensure_loaded_locked()
             record = self._responses.get(event_id)
             return bool(record and record.get("completed", True))
 
     def get_visible_echo_event_id(self, source_event_id: str) -> str | None:
         """Return the tracked visible echo event ID for one source event."""
-        with self._thread_lock, self._file_lock(exclusive=False):
-            self._responses = self._read_responses_file_locked(repair_corrupt_file=False)
+        with self._state.lock:
+            self._ensure_loaded_locked()
             return _visible_echo_event_id_for_record(self._responses.get(source_event_id))
 
     def visible_echo_event_id_for_sources(self, source_event_ids: typing.Sequence[str]) -> str | None:
@@ -365,14 +433,14 @@ class HandledTurnLedger:
         normalized_source_event_ids = _normalize_source_event_ids(source_event_ids)
         if not normalized_source_event_ids:
             return None
-        with self._thread_lock, self._file_lock(exclusive=False):
-            self._responses = self._read_responses_file_locked(repair_corrupt_file=False)
+        with self._state.lock:
+            self._ensure_loaded_locked()
             return self._visible_echo_for_sources(normalized_source_event_ids)
 
     def get_turn_record(self, source_event_id: str) -> HandledTurnRecord | None:
         """Return the handled-turn record for one source event."""
-        with self._thread_lock, self._file_lock(exclusive=False):
-            self._responses = self._read_responses_file_locked(repair_corrupt_file=False)
+        with self._state.lock:
+            self._ensure_loaded_locked()
             record = self._responses.get(source_event_id)
             if record is None:
                 return None
@@ -392,13 +460,45 @@ class HandledTurnLedger:
                 timestamp=record["timestamp"],
             )
 
-    def _load_responses(self) -> None:
-        """Load handled turns from disk."""
-        with self._thread_lock, self._file_lock(exclusive=True):
+    def _ensure_loaded_locked(self) -> None:
+        """Load persisted records into shared memory once while the state lock is held."""
+        if self._state.loaded:
+            return
+        self.base_path.mkdir(parents=True, exist_ok=True)
+        with advisory_file_lock(self._responses_lock_file, exclusive=True):
             self._responses = self._read_responses_file_locked()
+        self._state.loaded = True
 
-    def _save_responses_locked(self) -> None:
-        """Persist handled turns while the thread and file locks are held."""
+    def _wait_for_pending_persists_locked(self) -> None:
+        """Wait for queued disk merges while the state lock is held."""
+        pending = list(self._state.pending_persists)
+        self._state.pending_persists.clear()
+        for future in pending:
+            future.result()
+
+    def _schedule_persist_locked(self, source_event_ids: tuple[str, ...]) -> None:
+        """Queue one write-behind disk merge for records already applied to memory."""
+        records = {event_id: self._responses[event_id] for event_id in source_event_ids}
+        future = _persist_executor().submit(self._persist_records, records)
+        self._state.pending_persists = [pending for pending in self._state.pending_persists if not pending.done()]
+        self._state.pending_persists.append(future)
+
+    def _persist_records(self, records: dict[str, _SerializedHandledTurnRecord]) -> None:
+        """Merge already-applied records into the persisted ledger from a worker thread."""
+        try:
+            with advisory_file_lock(self._responses_lock_file, exclusive=True):
+                persisted_responses = self._read_responses_file_locked()
+                persisted_responses.update(records)
+                self._write_responses_file_locked(persisted_responses)
+        except Exception:
+            logger.exception(
+                "handled_turn_persist_failed",
+                agent=self.agent_name,
+                responses_file=str(self._responses_file),
+            )
+
+    def _write_responses_file_locked(self, responses: dict[str, _SerializedHandledTurnRecord]) -> None:
+        """Atomically write one ledger payload while the file lock is held."""
         temp_path = None
         try:
             with NamedTemporaryFile(
@@ -410,7 +510,7 @@ class HandledTurnLedger:
                 delete=False,
             ) as temp_file:
                 temp_path = self.base_path / Path(temp_file.name).name
-                json.dump(self._responses, temp_file, indent=2)
+                json.dump(responses, temp_file, indent=2)
                 temp_file.flush()
                 os.fsync(temp_file.fileno())
             temp_path.replace(self._responses_file)
@@ -420,31 +520,25 @@ class HandledTurnLedger:
                 temp_path.unlink()
 
     def _cleanup_old_events(self, max_events: int = 10000, max_age_days: int = 30) -> None:
-        """Remove old handled-turn records based on age and count."""
-        with self._thread_lock, self._file_lock(exclusive=True):
-            self._responses = _cleaned_responses(
-                self._read_responses_file_locked(),
-                max_events=max_events,
-                max_age_days=max_age_days,
-            )
-            self._save_responses_locked()
+        """Drop stale persisted records by age and count, then reload shared memory."""
+        with self._state.lock:
+            self._wait_for_pending_persists_locked()
+            self.base_path.mkdir(parents=True, exist_ok=True)
+            with advisory_file_lock(self._responses_lock_file, exclusive=True):
+                self._responses = _cleaned_responses(
+                    self._read_responses_file_locked(),
+                    max_events=max_events,
+                    max_age_days=max_age_days,
+                )
+                self._write_responses_file_locked(self._responses)
+            self._state.loaded = True
         logger.info(
             "handled_turn_cleanup_completed",
             agent=self.agent_name,
             kept_event_count=len(self._responses),
         )
 
-    @contextmanager
-    def _file_lock(self, *, exclusive: bool) -> typing.Iterator[None]:
-        """Lock the ledger for cross-instance readers and writers."""
-        with advisory_file_lock(self._responses_lock_file, exclusive=exclusive):
-            yield
-
-    def _read_responses_file_locked(
-        self,
-        *,
-        repair_corrupt_file: bool = True,
-    ) -> dict[str, _SerializedHandledTurnRecord]:
+    def _read_responses_file_locked(self) -> dict[str, _SerializedHandledTurnRecord]:
         """Read and normalize persisted responses while the file lock is held."""
         if not self._responses_file.exists():
             return {}
@@ -452,38 +546,23 @@ class HandledTurnLedger:
             with self._responses_file.open(encoding="utf-8") as response_file:
                 data = json.load(response_file)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            if repair_corrupt_file:
-                quarantined_file = self._quarantine_corrupt_responses_file_locked()
-                logger.warning(
-                    "Quarantined malformed handled-turn ledger file",
-                    agent=self.agent_name,
-                    responses_file=str(self._responses_file),
-                    quarantined_file=str(quarantined_file or self._responses_file),
-                )
-            else:
-                logger.warning(
-                    "Detected malformed handled-turn ledger file during shared read",
-                    agent=self.agent_name,
-                    responses_file=str(self._responses_file),
-                )
+            quarantined_file = self._quarantine_corrupt_responses_file_locked()
+            logger.warning(
+                "Quarantined malformed handled-turn ledger file",
+                agent=self.agent_name,
+                responses_file=str(self._responses_file),
+                quarantined_file=str(quarantined_file or self._responses_file),
+            )
             return {}
         if not isinstance(data, dict):
-            if repair_corrupt_file:
-                quarantined_file = self._quarantine_corrupt_responses_file_locked()
-                logger.warning(
-                    "Quarantined structurally invalid handled-turn ledger file",
-                    agent=self.agent_name,
-                    responses_file=str(self._responses_file),
-                    quarantined_file=str(quarantined_file or self._responses_file),
-                    payload_type=type(data).__name__,
-                )
-            else:
-                logger.warning(
-                    "Detected structurally invalid handled-turn ledger file during shared read",
-                    agent=self.agent_name,
-                    responses_file=str(self._responses_file),
-                    payload_type=type(data).__name__,
-                )
+            quarantined_file = self._quarantine_corrupt_responses_file_locked()
+            logger.warning(
+                "Quarantined structurally invalid handled-turn ledger file",
+                agent=self.agent_name,
+                responses_file=str(self._responses_file),
+                quarantined_file=str(quarantined_file or self._responses_file),
+                payload_type=type(data).__name__,
+            )
             return {}
         normalized_records: dict[str, _SerializedHandledTurnRecord] = {}
         invalid_event_ids: list[str] = []
@@ -494,22 +573,14 @@ class HandledTurnLedger:
             normalized_records[event_id] = _normalize_serialized_record(event_id, record)
 
         if invalid_event_ids:
-            if repair_corrupt_file:
-                quarantined_file = self._quarantine_corrupt_responses_file_locked()
-                logger.warning(
-                    "Quarantined handled-turn ledger file with invalid event entries",
-                    agent=self.agent_name,
-                    responses_file=str(self._responses_file),
-                    quarantined_file=str(quarantined_file or self._responses_file),
-                    invalid_event_ids=invalid_event_ids,
-                )
-            else:
-                logger.warning(
-                    "Detected handled-turn ledger file with invalid event entries during shared read",
-                    agent=self.agent_name,
-                    responses_file=str(self._responses_file),
-                    invalid_event_ids=invalid_event_ids,
-                )
+            quarantined_file = self._quarantine_corrupt_responses_file_locked()
+            logger.warning(
+                "Quarantined handled-turn ledger file with invalid event entries",
+                agent=self.agent_name,
+                responses_file=str(self._responses_file),
+                quarantined_file=str(quarantined_file or self._responses_file),
+                invalid_event_ids=invalid_event_ids,
+            )
         return normalized_records
 
     def _quarantine_corrupt_responses_file_locked(self) -> Path | None:
@@ -537,7 +608,7 @@ class HandledTurnLedger:
                 return visible_echo_event_id
         return None
 
-    def _persist_handled_turn_locked(
+    def _apply_handled_turn_locked(
         self,
         source_event_ids: tuple[str, ...],
         *,
@@ -552,7 +623,7 @@ class HandledTurnLedger:
         conversation_target: MessageTarget | None,
         anchor_event_id: str | None = None,
     ) -> None:
-        """Persist one handled turn while the thread and file locks are already held."""
+        """Apply one handled turn to in-memory state while the state lock is held."""
         visible_echo_event_id = visible_echo_event_id or self._visible_echo_for_sources(source_event_ids)
         prompt_map = self._normalized_prompt_map(source_event_ids, source_event_prompts)
         response_owner = self._normalized_response_owner(source_event_ids, response_owner)
@@ -782,15 +853,16 @@ def _serialized_record(
 
 
 def _responses_file_path(base_path: Path, agent_name: str) -> Path:
-    """Return the validated ledger path for one agent."""
+    """Return the validated ledger path for one agent.
+
+    Validation is purely lexical: agent names cannot carry path separators or
+    parent references, so the joined path cannot escape ``base_path`` and no
+    filesystem access is needed at construction time.
+    """
     if not agent_name or ".." in agent_name or "/" in agent_name or "\\" in agent_name:
         message = f"Invalid handled-turn ledger agent name: {agent_name!r}"
         raise ValueError(message)
-    responses_file = base_path / f"{agent_name}_responded.json"
-    if responses_file.resolve().parent != base_path.resolve():
-        message = f"Invalid handled-turn ledger path for agent: {agent_name!r}"
-        raise ValueError(message)
-    return responses_file
+    return base_path / f"{agent_name}_responded.json"
 
 
 def _cleaned_responses(
