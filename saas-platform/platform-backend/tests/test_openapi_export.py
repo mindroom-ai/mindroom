@@ -19,7 +19,6 @@ def test_committed_openapi_schema_is_current(tmp_path: Path) -> None:
         [sys.executable, str(BACKEND_DIR / "scripts" / "export_openapi.py"), str(exported_path)],
         check=True,
         cwd=BACKEND_DIR,
-        capture_output=True,
     )
     exported = json.loads(exported_path.read_text())
     committed = json.loads((BACKEND_DIR / "openapi.json").read_text())

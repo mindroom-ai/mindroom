@@ -151,9 +151,9 @@ export default function UpgradePage() {
           const isCurrentPlan = plan.id === currentTier
           const isDowngrade = plans.findIndex(p => p.id === plan.id) < plans.findIndex(p => p.id === currentTier)
 
-          // Parse prices and calculate display values
-          const monthlyPrice = plan.price_monthly
-          const yearlyPrice = plan.price_yearly
+          // Parse prices and calculate display values ('custom' is the backend literal)
+          const monthlyPrice = plan.price_monthly === 'custom' ? 'Custom' : plan.price_monthly
+          const yearlyPrice = plan.price_yearly === 'custom' ? 'Custom' : plan.price_yearly
           const isCustom = monthlyPrice === 'Custom'
 
           // Calculate yearly monthly equivalent (with discount)
