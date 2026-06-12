@@ -63,6 +63,7 @@ from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.tool_approval import is_process_active_approval_card
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
@@ -85,6 +86,7 @@ from .delivery_gateway import (
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, InboundTurnNormalizerDeps
+from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
@@ -97,6 +99,7 @@ from .matrix.room_member_joins import (
     room_member_joins_from_sync_timeline,
 )
 from .media_inputs import MediaInputs
+from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
@@ -106,6 +109,7 @@ from .scheduling import (
     restore_scheduled_tasks,
 )
 from .startup_errors import PermanentStartupError
+from .sync_restart_retry import SyncRestartRetryQueue
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -147,6 +151,7 @@ class _RoomMemberJoinSyncHookPlan:
     arm_after_response: bool = True
     emit_state: bool = False
     emit_timeline: bool = False
+    record_state_seen: bool = False
 
 
 def _create_task_wrapper(
@@ -286,6 +291,7 @@ class AgentBot:
     _tool_runtime_support: ToolRuntimeSupport
     _post_response_effects_support: PostResponseEffectsSupport
     _ingress_hook_runner: IngressHookRunner
+    _request_payload_preparer: ResponsePayloadPreparer
     _hook_context_support: HookContextSupport
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
@@ -313,6 +319,7 @@ class AgentBot:
         self.config_path = config_path
         self.logger = logger.bind(agent=self.agent_name)
         self.stop_manager = StopManager()
+        self._restart_retry_queue = SyncRestartRetryQueue()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -371,9 +378,10 @@ class AgentBot:
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
-            upload_grace_seconds=lambda: self.config.defaults.coalescing.upload_grace_ms / 1000,
             is_shutting_down=lambda: self._sync_shutting_down,
             wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
+            room_scope_is_single_conversation=self._room_scope_is_single_conversation,
+            dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
@@ -386,7 +394,6 @@ class AgentBot:
         )
         self._knowledge_access_support = KnowledgeAccessSupport(
             runtime=self._runtime_view,
-            logger=self.logger,
             runtime_paths=self.runtime_paths,
         )
         self._conversation_cache = MatrixConversationCache(
@@ -458,6 +465,15 @@ class AgentBot:
             delivery_gateway=self._delivery_gateway,
             conversation_cache=self._conversation_cache,
         )
+        self._ingress_hook_runner = IngressHookRunner(
+            hook_context=self._hook_context_support,
+        )
+        self._request_payload_preparer = ResponsePayloadPreparer(
+            normalizer=self._inbound_turn_normalizer,
+            ingress_hook_runner=self._ingress_hook_runner,
+            agent_name=self.agent_name,
+            logger=self.logger,
+        )
         self._response_runner = ResponseRunner(
             ResponseRunnerDeps(
                 runtime=self._runtime_view,
@@ -473,10 +489,8 @@ class AgentBot:
                 delivery_gateway=self._delivery_gateway,
                 post_response_effects=self._post_response_effects_support,
                 state_writer=self._conversation_state_writer,
+                request_preparer=self._request_payload_preparer,
             ),
-        )
-        self._ingress_hook_runner = IngressHookRunner(
-            hook_context=self._hook_context_support,
         )
         self._edit_regenerator = EditRegenerator(
             EditRegeneratorDeps(
@@ -499,6 +513,15 @@ class AgentBot:
                 matrix_id=runtime_matrix_id,
             ),
         )
+        self._ingress_validator = IngressValidator(
+            IngressValidatorDeps(
+                runtime=self._runtime_view,
+                runtime_paths=self.runtime_paths,
+                matrix_id=runtime_matrix_id,
+                turn_store=self._turn_store,
+                turn_policy=self._turn_policy,
+            ),
+        )
         self._turn_controller = TurnController(
             TurnControllerDeps(
                 runtime=self._runtime_view,
@@ -517,6 +540,8 @@ class AgentBot:
                 turn_store=self._turn_store,
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
+                ingress=self._ingress_validator,
+                restart_retry=self._restart_retry_queue,
             ),
         )
 
@@ -525,6 +550,21 @@ class AgentBot:
         if not is_active_follow_up_coalescing_key(key):
             return
         await self._response_runner.wait_for_thread_response_idle(key.room_id, key.thread_id)
+
+    def _coalesced_dispatch_allowed_now(self, key: CoalescingKey) -> bool:
+        """Return whether one coalescing key's target has no active response right now."""
+        return key.thread_id not in self._response_runner.active_thread_ids_for_room(key.room_id)
+
+    def _room_scope_is_single_conversation(self, room_id: str) -> bool:
+        """Return whether this agent treats the whole room as one conversation."""
+        return (
+            self.config.get_entity_thread_mode(
+                self.agent_name,
+                self.runtime_paths,
+                room_id=room_id,
+            )
+            == "room"
+        )
 
     def _rebuild_runtime_components_after_login_if_identity_changed(self, matrix_id_before_login: MatrixID) -> None:
         """Refresh startup collaborators when Matrix login authenticates as a different user."""
@@ -715,16 +755,16 @@ class AgentBot:
 
     async def _prewarm_claimed_startup_thread_room(self, room_id: str) -> None:
         """Prewarm one claimed room and release the claim unless the room-level pass finishes."""
+        completed = False
         try:
-            completed = await self._conversation_cache.prewarm_recent_room_threads(
-                room_id,
-                is_shutting_down=lambda: self._sync_shutting_down,
-            )
-        except asyncio.CancelledError:
-            await self.startup_thread_prewarm_registry.release(room_id)
-            raise
-        if not completed:
-            await self.startup_thread_prewarm_registry.release(room_id)
+            async with self.startup_thread_prewarm_registry.room_slot():
+                completed = await self._conversation_cache.prewarm_recent_room_threads(
+                    room_id,
+                    is_shutting_down=lambda: self._sync_shutting_down,
+                )
+        finally:
+            if not completed:
+                await self.startup_thread_prewarm_registry.release(room_id)
 
     async def _run_startup_thread_prewarm(self) -> None:
         """Prewarm recent thread snapshots per joined room without blocking live dispatch behind cache seeding."""
@@ -1116,6 +1156,7 @@ class AgentBot:
             arm_after_response=True,
             emit_state=emit_certified_state,
             emit_timeline=restored_token_first_sync_response,
+            record_state_seen=decision.state is SyncTrustState.CERTIFIED and not emit_certified_state,
         )
 
     async def _run_sync_response_side_effects(
@@ -1126,6 +1167,8 @@ class AgentBot:
         room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
     ) -> None:
         """Run sync-response side effects that must poison certification on failure."""
+        if room_member_join_hook_plan.record_state_seen:
+            await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
         if room_member_join_hook_plan.emit_timeline:
             await self._emit_room_member_joined_sync_timeline_hooks(response)
         if room_member_join_hook_plan.emit_state:
@@ -1152,6 +1195,15 @@ class AgentBot:
 
         if self._sync_shutting_down:
             return
+
+        if self._restart_retry_queue.has_pending:
+            # The sync loop is healthy again: re-dispatch turns whose responses
+            # were cancelled by stall recovery, once each.
+            create_background_task(
+                self._restart_retry_queue.flush(),
+                name=f"sync_restart_retry_{self.agent_name}",
+                owner=self._runtime_view,
+            )
 
         if isinstance(_response, nio.SyncResponse):
             restored_token_first_sync_response = (
@@ -1467,11 +1519,13 @@ class AgentBot:
             await self._cancel_deferred_overdue_task_drain()
         background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
         drain_result = await self._coalescing_gate.drain_all(ready_timeout_seconds=5.0)
+        responses_drained = await self._response_runner.drain_inbox_responses(cancel_after_seconds=5.0)
         post_drain_background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
         callback_failure_count = self._runtime_view.callback_failure_count
         if (
             background_tasks_completed
             and drain_result.completed
+            and responses_drained
             and post_drain_background_tasks_completed
             and callback_failure_count == 0
             and self._sync_trust_state is SyncTrustState.CERTIFIED
@@ -1480,6 +1534,7 @@ class AgentBot:
         elif (
             not background_tasks_completed
             or not drain_result.completed
+            or not responses_drained
             or not post_drain_background_tasks_completed
             or callback_failure_count
         ):
@@ -1541,7 +1596,7 @@ class AgentBot:
         early_reservation_owner = None
         approval_reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
         if approval_reply_to_event_id is not None and is_process_active_approval_card(approval_reply_to_event_id):
-            requester_user_id = self._turn_controller._requester_user_id(
+            requester_user_id = self._ingress_validator.requester_user_id(
                 sender=event.sender,
                 source=event.source,
             )
@@ -1599,17 +1654,24 @@ class AgentBot:
             config=self.config,
             runtime_paths=self.runtime_paths,
             storage_root=self.runtime_paths.storage_root,
+            # Live callbacks are armed only after startup sync; prev_content may be absent.
+            require_previous_membership=False,
         )
         if join is None:
             return
 
         await self._emit_room_member_joined_hooks(join)
 
-    async def _emit_room_member_joined_sync_state_hooks(self, response: nio.SyncResponse) -> None:
-        """Expose human joins that matrix-nio delivers through sync room state."""
+    async def _emit_room_member_joined_sync_state_hooks(
+        self,
+        response: nio.SyncResponse,
+        *,
+        record_only: bool = False,
+    ) -> None:
+        """Expose or record human joins that matrix-nio delivers through sync room state."""
         if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not self._room_member_join_hooks_armed:
             return
-        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
+        if not record_only and not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return
         client = self.client
         if client is None:
@@ -1621,6 +1683,7 @@ class AgentBot:
             config=self.config,
             runtime_paths=self.runtime_paths,
             storage_root=self.runtime_paths.storage_root,
+            record_only=record_only,
         ):
             await self._emit_room_member_joined_hooks(join)
 
@@ -1676,12 +1739,11 @@ class AgentBot:
             self.config,
             room.room_id,
             self.runtime_paths,
-            room_alias=room.canonical_alias,
         ):
             self.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
             return
 
-        requester_user_id = self._turn_controller._requester_user_id(
+        requester_user_id = self._ingress_validator.requester_user_id(
             sender=event.sender,
             source=event.source,
         )
@@ -1774,13 +1836,19 @@ class AgentBot:
         self._log_matrix_event_callback_started(room, event, callback_name="media")
         await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
 
-    def _agent_has_matrix_messaging_tool(self, agent_name: str) -> bool:
+    def _agent_has_matrix_messaging_tool(self, agent_name: str, session_id: str | None = None) -> bool:
         """Return whether an agent can issue Matrix message actions."""
         try:
-            tool_names = self.config.get_agent_tools(agent_name)
+            tool_names = [
+                entry.name
+                for entry in visible_tool_surface(
+                    agent_name=agent_name,
+                    config=self.config,
+                    session_id=session_id,
+                    enable_dynamic_tools_manager=False,
+                ).runtime_tool_configs
+            ]
         except ValueError:
-            return False
-        if not isinstance(tool_names, list | tuple | set):
             return False
         return "matrix_message" in tool_names
 
@@ -2103,14 +2171,14 @@ class TeamBot(AgentBot):
         )
 
         configured_mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
-        materializable_agent_names = self._turn_policy.materializable_agent_names()
+        availability = self._turn_policy.responder_availability()
         team_resolution = resolve_configured_team(
             self.agent_name,
             self.current_configured_team_agents(),
             configured_mode,
             self.config,
             self.runtime_paths,
-            materializable_agent_names=materializable_agent_names,
+            materializable_agent_names=availability.materializable_agent_names,
         )
         if team_resolution.outcome is not TeamOutcome.TEAM:
             assert team_resolution.reason is not None

@@ -147,6 +147,7 @@ def _prepared_run(agent: object, *, prompt: str = "Help me with something") -> S
         run_input=[Message(role="user", content=prompt)],
         unseen_event_ids=[],
         prepared_history=PreparedHistoryState(),
+        runtime_model_name="default",
     )
 
 

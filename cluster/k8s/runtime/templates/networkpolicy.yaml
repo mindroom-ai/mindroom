@@ -1,4 +1,11 @@
 {{- if and (eq .Values.workers.backend "kubernetes") .Values.workers.kubernetes.networkPolicy.create }}
+{{- $egressPolicyEnabled := and (include "mindroom-runtime.egressProxyEnabled" .) .Values.egressProxy.networkPolicy.create -}}
+{{- $proxyNamespace := include "mindroom-runtime.egressProxyNamespace" . -}}
+{{- $proxyPort := include "mindroom-runtime.egressProxyServicePort" . -}}
+{{- $dnsNamespaceSelector := .Values.egressProxy.networkPolicy.dns.namespaceSelector -}}
+{{- $dnsPodSelector := .Values.egressProxy.networkPolicy.dns.podSelector -}}
+{{- $hasDnsNamespaceSelector := kindIs "map" $dnsNamespaceSelector -}}
+{{- $hasDnsPodSelector := kindIs "map" $dnsPodSelector -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -17,6 +24,9 @@ spec:
       {{- end }}
   policyTypes:
     - Ingress
+    {{- if $egressPolicyEnabled }}
+    - Egress
+    {{- end }}
   ingress:
     - from:
         - namespaceSelector:
@@ -28,4 +38,85 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.workers.kubernetes.port }}
+  {{- if $egressPolicyEnabled }}
+  egress:
+    - to:
+        {{- if or $hasDnsNamespaceSelector $hasDnsPodSelector }}
+        -
+          {{- if $hasDnsNamespaceSelector }}
+          namespaceSelector:
+            {{- toYaml $dnsNamespaceSelector | nindent 12 }}
+          {{- end }}
+          {{- if $hasDnsPodSelector }}
+          podSelector:
+            {{- toYaml $dnsPodSelector | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- range .Values.egressProxy.networkPolicy.dns.ipBlocks }}
+        - ipBlock:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - {{- if and (not .Values.approvedEgress.enabled) .Values.egressProxy.networkPolicy.proxyNamespaceSelector }}
+          namespaceSelector:
+            {{- toYaml .Values.egressProxy.networkPolicy.proxyNamespaceSelector | nindent 12 }}
+          {{- else }}
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $proxyNamespace | quote }}
+          {{- end }}
+          podSelector:
+            {{- include "mindroom-runtime.egressProxyPodSelector" . | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: {{ $proxyPort }}
+    {{- with .Values.egressProxy.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.approvedEgress.enabled .Values.approvedEgress.networkPolicy.create }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mindroom-runtime.approvedEgressNetworkPolicyName" . }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    {{- include "mindroom-runtime.approvedEgressPodSelector" . | nindent 4 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ include "mindroom-runtime.workerNamespace" . | quote }}
+          podSelector:
+            matchLabels:
+              mindroom.ai/component: worker
+              app.kubernetes.io/managed-by: mindroom
+              app.kubernetes.io/name: mindroom-worker
+              {{- with .Values.workers.kubernetes.extraLabels }}
+              {{- toYaml . | nindent 14 }}
+              {{- end }}
+      ports:
+        - port: {{ .Values.approvedEgress.service.proxyPort }}
+          protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ .Values.approvedEgress.service.apiPort }}
+          protocol: TCP
 {{- end }}

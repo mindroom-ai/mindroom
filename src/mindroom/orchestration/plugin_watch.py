@@ -1,20 +1,69 @@
-"""Plugin watcher loop and snapshot helpers for the orchestrator."""
+"""Plugin watcher loop and snapshot state for the orchestrator."""
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom import file_watcher
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.plugins import get_configured_plugin_roots
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.plugins import PluginReloadResult
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class PluginWatchState:
+    """Watcher baselines and dirty-state revision for the configured plugin roots."""
+
+    runtime_paths: RuntimePaths
+    last_snapshot_by_root: dict[Path, dict[Path, int]] = field(default_factory=dict)
+    revision: int = 0
+
+    def _configured_roots(self, config: Config | None) -> tuple[Path, ...]:
+        """Return the plugin roots configured by one config snapshot."""
+        if config is None:
+            return ()
+        return get_configured_plugin_roots(config, self.runtime_paths)
+
+    def sync_roots(self, config: Config | None) -> tuple[Path, ...]:
+        """Drop removed roots and seed baselines for newly configured ones."""
+        configured_roots = self._configured_roots(config)
+        _drop_unconfigured_plugin_root_snapshots(configured_roots, self.last_snapshot_by_root)
+        for root in configured_roots:
+            if root not in self.last_snapshot_by_root:
+                self.last_snapshot_by_root[root] = file_watcher._tree_snapshot(root)
+        return configured_roots
+
+    def capture(self, config: Config | None) -> tuple[tuple[Path, ...], dict[Path, dict[Path, int]]]:
+        """Return the configured roots and their current snapshots without committing them."""
+        configured_roots = self._configured_roots(config)
+        return configured_roots, {root: file_watcher._tree_snapshot(root) for root in configured_roots}
+
+    def replace_snapshots(
+        self,
+        configured_roots: tuple[Path, ...],
+        root_snapshots: dict[Path, dict[Path, int]],
+    ) -> None:
+        """Replace watcher baselines and clear any stale pending dirty state."""
+        _drop_unconfigured_plugin_root_snapshots(configured_roots, self.last_snapshot_by_root)
+        for root in configured_roots:
+            self.last_snapshot_by_root[root] = root_snapshots[root]
+        self.revision += 1
+
+    def refresh(self, config: Config | None) -> tuple[Path, ...]:
+        """Capture fresh watcher baselines for the current plugin roots."""
+        configured_roots, root_snapshots = self.capture(config)
+        self.replace_snapshots(configured_roots, root_snapshots)
+        return configured_roots
 
 
 class _PluginWatcherRuntime(Protocol):
@@ -22,11 +71,7 @@ class _PluginWatcherRuntime(Protocol):
 
     running: bool
     config: Config | None
-    _plugin_watch_last_snapshot_by_root: dict[Path, dict[Path, int]]
-    _plugin_watch_state_revision: int
-
-    def _sync_plugin_watch_roots(self, config: Config | None = None) -> tuple[Path, ...]:
-        """Align watcher baselines with the currently configured plugin roots."""
+    plugin_watch: PluginWatchState
 
     async def reload_plugins_now(
         self,
@@ -39,7 +84,7 @@ class _PluginWatcherRuntime(Protocol):
 
 async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
     """Watch configured plugin roots and hot-reload them after debounced edits."""
-    last_snapshot_by_root = orchestrator._plugin_watch_last_snapshot_by_root
+    watch_state = orchestrator.plugin_watch
     pending_changes = set()
     last_change_at: float | None = None
     loop = asyncio.get_running_loop()
@@ -47,8 +92,8 @@ async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
     while not orchestrator.running:  # noqa: ASYNC110
         await asyncio.sleep(0.1)
 
-    configured_roots = orchestrator._sync_plugin_watch_roots()
-    watch_state_revision = orchestrator._plugin_watch_state_revision
+    configured_roots = watch_state.sync_roots(orchestrator.config)
+    watch_state_revision = watch_state.revision
 
     while orchestrator.running:
         await asyncio.sleep(file_watcher._WATCH_SCAN_INTERVAL_SECONDS)
@@ -58,13 +103,13 @@ async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
             if config is None:
                 continue
 
-            configured_roots = orchestrator._sync_plugin_watch_roots(config)
-            if watch_state_revision != orchestrator._plugin_watch_state_revision:
+            configured_roots = watch_state.sync_roots(config)
+            if watch_state_revision != watch_state.revision:
                 pending_changes.clear()
                 last_change_at = None
-                watch_state_revision = orchestrator._plugin_watch_state_revision
+                watch_state_revision = watch_state.revision
             pending_changes = _filter_pending_plugin_changes(pending_changes, configured_roots)
-            changed_paths = _collect_plugin_root_changes(configured_roots, last_snapshot_by_root)
+            changed_paths = _collect_plugin_root_changes(configured_roots, watch_state.last_snapshot_by_root)
 
             if changed_paths:
                 pending_changes.update(changed_paths)
@@ -117,34 +162,6 @@ def _drop_unconfigured_plugin_root_snapshots(
 ) -> None:
     for root in set(last_snapshot_by_root) - set(configured_roots):
         last_snapshot_by_root.pop(root, None)
-
-
-def sync_plugin_root_snapshots(
-    configured_roots: tuple[Path, ...],
-    last_snapshot_by_root: dict[Path, dict[Path, int]],
-) -> None:
-    """Drop removed roots and seed baselines for newly configured ones."""
-    _drop_unconfigured_plugin_root_snapshots(configured_roots, last_snapshot_by_root)
-    for root in configured_roots:
-        if root in last_snapshot_by_root:
-            continue
-        last_snapshot_by_root[root] = file_watcher._tree_snapshot(root)
-
-
-def capture_plugin_root_snapshots(configured_roots: tuple[Path, ...]) -> dict[Path, dict[Path, int]]:
-    """Return the current watcher baselines for one explicit plugin-root set."""
-    return {root: file_watcher._tree_snapshot(root) for root in configured_roots}
-
-
-def replace_plugin_root_snapshots(
-    configured_roots: tuple[Path, ...],
-    root_snapshots: dict[Path, dict[Path, int]],
-    last_snapshot_by_root: dict[Path, dict[Path, int]],
-) -> None:
-    """Replace watcher baselines with the snapshots that match the applied plugin runtime."""
-    _drop_unconfigured_plugin_root_snapshots(configured_roots, last_snapshot_by_root)
-    for root in configured_roots:
-        last_snapshot_by_root[root] = root_snapshots.get(root, {}).copy()
 
 
 def _path_is_under_any_root(path: Path, roots: tuple[Path, ...]) -> bool:

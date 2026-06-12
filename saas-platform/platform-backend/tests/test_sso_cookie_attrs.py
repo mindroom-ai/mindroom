@@ -9,9 +9,16 @@ from tests.stripe_mock import create_stripe_mock
 
 sys.modules.setdefault("stripe", create_stripe_mock())
 
+import pytest  # noqa: E402
 from backend.deps import Limiter, get_remote_address, limiter, verify_user  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from main import app  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def clear_dependency_overrides():
+    yield
+    app.dependency_overrides.pop(verify_user, None)
 
 
 def _override_verify_user() -> dict[str, str]:
@@ -36,3 +43,40 @@ def test_sso_cookie_has_security_flags() -> None:
     assert "Secure" in set_cookie
     # Starlette normalizes to lowercase in some backends
     assert "samesite=lax" in set_cookie.lower()
+
+
+def test_sso_cookie_is_host_only() -> None:
+    """SSO token cookie must stay on the API host, not every tenant subdomain."""
+    app.dependency_overrides[verify_user] = _override_verify_user
+    app.state.limiter = Limiter(key_func=get_remote_address)
+    app.state.limiter.reset()
+    limiter.reset()
+    client = TestClient(app)
+
+    response = client.post(
+        "/my/sso-cookie", headers={"authorization": "Bearer tok", "X-Forwarded-For": "10.1.2.4"}, data="x"
+    )
+
+    assert response.status_code == 200
+    cookies = response.headers.get_list("set-cookie")
+    token_cookies = [cookie for cookie in cookies if cookie.startswith("mindroom_jwt=tok")]
+    assert len(token_cookies) == 1
+    assert "Domain=" not in token_cookies[0]
+    assert all("Domain=" not in cookie for cookie in cookies)
+
+
+def test_clear_sso_cookie_clears_host_only_cookie() -> None:
+    """Logout clears the current host-only cookie."""
+    app.state.limiter = Limiter(key_func=get_remote_address)
+    app.state.limiter.reset()
+    limiter.reset()
+    client = TestClient(app)
+
+    response = client.delete("/my/sso-cookie", headers={"X-Forwarded-For": "10.1.2.5"})
+
+    assert response.status_code == 200
+    cookies = response.headers.get_list("set-cookie")
+    assert any(
+        cookie.startswith("mindroom_jwt=") and "Domain=" not in cookie and "Max-Age=0" in cookie for cookie in cookies
+    )
+    assert all("Domain=" not in cookie for cookie in cookies)

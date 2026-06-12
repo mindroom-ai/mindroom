@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from copy import deepcopy
+from dataclasses import dataclass
+from hashlib import sha256
 import hmac
 import time
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
+import jwt
 from backend import auth_monitor
 from backend.metrics import record_admin_verification, record_auth_event
 from backend.config import auth_client, logger, supabase
-from cachetools import TTLCache
 from fastapi import Header, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -18,8 +22,67 @@ from slowapi.util import get_remote_address
 if TYPE_CHECKING:
     from supabase import Client
 
-# TTL cache for auth verification (5 minutes, max 100 entries)
-_auth_cache = TTLCache(maxsize=100, ttl=300)
+AUTH_CACHE_MAX_ENTRIES = 100
+AUTH_CACHE_MAX_TTL_SECONDS = 300
+
+
+@dataclass(frozen=True)
+class AuthCacheEntry:
+    """Cached auth result bounded by the JWT expiration."""
+
+    expires_at: datetime
+    user_data: dict[str, Any]
+
+
+_auth_cache: OrderedDict[str, AuthCacheEntry] = OrderedDict()
+
+
+def _auth_cache_key(token: str) -> str:
+    return sha256(token.encode()).hexdigest()
+
+
+def _token_cache_deadline(token: str, now: datetime) -> datetime | None:
+    try:
+        claims = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
+    except jwt.InvalidTokenError:
+        return None
+
+    exp = claims.get("exp")
+    if not isinstance(exp, int | float):
+        return None
+
+    token_expires_at = datetime.fromtimestamp(exp, UTC)
+    if token_expires_at <= now:
+        return None
+
+    max_cache_expires_at = now + timedelta(seconds=AUTH_CACHE_MAX_TTL_SECONDS)
+    return min(token_expires_at, max_cache_expires_at)
+
+
+def _cached_user_data(token: str, now: datetime) -> dict[str, Any] | None:
+    cache_key = _auth_cache_key(token)
+    entry = _auth_cache.get(cache_key)
+    if entry is None:
+        return None
+
+    if entry.expires_at <= now:
+        _auth_cache.pop(cache_key, None)
+        return None
+
+    _auth_cache.move_to_end(cache_key)
+    return deepcopy(entry.user_data)
+
+
+def _store_auth_cache(token: str, user_data: dict[str, Any], now: datetime) -> None:
+    expires_at = _token_cache_deadline(token, now)
+    if expires_at is None:
+        return
+
+    cache_key = _auth_cache_key(token)
+    _auth_cache[cache_key] = AuthCacheEntry(expires_at=expires_at, user_data=deepcopy(user_data))
+    _auth_cache.move_to_end(cache_key)
+    while len(_auth_cache) > AUTH_CACHE_MAX_ENTRIES:
+        _auth_cache.popitem(last=False)
 
 
 def client_ip_from_request(request: Request) -> str:
@@ -102,10 +165,11 @@ async def verify_user(authorization: str = Header(None), request: Request = None
         auth_monitor.record_failure(client_ip)
         raise
 
-    # Check cache first
-    if token in _auth_cache:
+    now = datetime.now(UTC)
+    cached_user_data = _cached_user_data(token, now)
+    if cached_user_data is not None:
         logger.info("Auth cache hit (instant)")
-        return _auth_cache[token]
+        return cached_user_data
 
     # Start timing for database lookup
     start = time.perf_counter()
@@ -134,7 +198,7 @@ async def verify_user(authorization: str = Header(None), request: Request = None
         except Exception:
             logger.info(f"Account not found for user {account_id}, creating...")
             try:
-                now = datetime.now(UTC).isoformat()
+                now_iso = now.isoformat()
                 create_result = (
                     sb.table("accounts")
                     .insert(
@@ -144,8 +208,8 @@ async def verify_user(authorization: str = Header(None), request: Request = None
                             "full_name": user.user.user_metadata.get("full_name", "")
                             if user.user.user_metadata
                             else "",
-                            "created_at": now,
-                            "updated_at": now,
+                            "created_at": now_iso,
+                            "updated_at": now_iso,
                         }
                     )
                     .execute()
@@ -167,8 +231,7 @@ async def verify_user(authorization: str = Header(None), request: Request = None
             "account": result.data,
         }
 
-        # Cache the result (TTL handled by TTLCache)
-        _auth_cache[token] = user_data
+        _store_auth_cache(token, user_data, now)
 
         # Log the time taken for database auth
         db_time = time.perf_counter() - start

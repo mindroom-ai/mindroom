@@ -1,11 +1,18 @@
 """Test dependency injection utilities."""
 
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from unittest.mock import MagicMock, Mock, patch
 
+import jwt
 import pytest
 from fastapi import HTTPException
 
 from backend.metrics import get_admin_metric, reset_security_metrics
+
+
+def _jwt_with_exp(expires_at: datetime) -> str:
+    return jwt.encode({"sub": "user_123", "exp": int(expires_at.timestamp())}, "secret", algorithm="HS256")
 
 
 class TestDeps:
@@ -80,7 +87,10 @@ class TestDeps:
         self, mock_supabase: MagicMock, mock_auth_client: MagicMock, mock_time: Mock
     ):
         """Test user verification creates account if not exists."""
-        from backend.deps import verify_user
+        from backend.deps import _auth_cache, verify_user
+
+        _auth_cache.clear()
+        token = _jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
 
         # Setup mock user
         mock_user = Mock()
@@ -99,7 +109,7 @@ class TestDeps:
         mock_supabase.table().insert().execute.return_value = Mock(data={"id": "new_user_123"})
 
         # Test
-        result = await verify_user("Bearer new-user-token")
+        result = await verify_user(f"Bearer {token}")
 
         # Verify
         assert result["user_id"] == "new_user_123"
@@ -109,21 +119,27 @@ class TestDeps:
         insert_call = mock_supabase.table().insert.call_args[0][0]
         assert insert_call["id"] == "new_user_123"
         assert insert_call["email"] == "new@example.com"
+        assert sha256(token.encode()).hexdigest() in _auth_cache
+        _auth_cache.clear()
 
     @pytest.mark.asyncio
     async def test_verify_user_cache_hit(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
         """Test user verification uses cache."""
-        from backend.deps import _auth_cache, verify_user
+        from backend.deps import AuthCacheEntry, _auth_cache, verify_user
 
         # Pre-populate cache
-        _auth_cache["cached-token"] = {
-            "user_id": "cached_user",
-            "account_id": "cached_user",
-            "email": "cached@example.com",
-        }
+        token = _jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
+        _auth_cache[sha256(token.encode()).hexdigest()] = AuthCacheEntry(
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            user_data={
+                "user_id": "cached_user",
+                "account_id": "cached_user",
+                "email": "cached@example.com",
+            },
+        )
 
         # Test
-        result = await verify_user("Bearer cached-token")
+        result = await verify_user(f"Bearer {token}")
 
         # Verify
         assert result["user_id"] == "cached_user"
@@ -132,6 +148,109 @@ class TestDeps:
         mock_auth_client.auth.get_user.assert_not_called()
 
         # Clean up cache
+        _auth_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_verify_user_cache_key_is_token_hash(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
+        """Auth cache must not store raw bearer tokens as keys."""
+        from backend.deps import _auth_cache, verify_user
+
+        _auth_cache.clear()
+        token = _jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
+        mock_user = Mock()
+        mock_user.user.id = "user_123"
+        mock_user.user.email = "test@example.com"
+        mock_user.user.user_metadata = {"full_name": "Test User"}
+        mock_auth_client.auth.get_user.return_value = mock_user
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"id": "user_123", "email": "test@example.com"}
+        )
+
+        await verify_user(f"Bearer {token}")
+
+        assert token not in _auth_cache
+        assert sha256(token.encode()).hexdigest() in _auth_cache
+        _auth_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_verify_user_cache_deadline_is_bounded_by_token_exp(
+        self, mock_supabase: MagicMock, mock_auth_client: MagicMock
+    ):
+        """Auth cache entries must expire no later than the JWT exp claim."""
+        from backend.deps import _auth_cache, verify_user
+
+        _auth_cache.clear()
+        expires_at = datetime.now(UTC) + timedelta(seconds=30)
+        token = _jwt_with_exp(expires_at)
+        mock_user = Mock()
+        mock_user.user.id = "user_123"
+        mock_user.user.email = "test@example.com"
+        mock_user.user.user_metadata = {"full_name": "Test User"}
+        mock_auth_client.auth.get_user.return_value = mock_user
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"id": "user_123", "email": "test@example.com"}
+        )
+
+        await verify_user(f"Bearer {token}")
+
+        entry = _auth_cache[sha256(token.encode()).hexdigest()]
+        assert entry.expires_at <= expires_at
+        assert entry.expires_at > datetime.now(UTC)
+        _auth_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_verify_user_cache_does_not_share_mutable_user_data(
+        self, mock_supabase: MagicMock, mock_auth_client: MagicMock
+    ):
+        """Request handlers must not be able to mutate cached auth data."""
+        from backend.deps import _auth_cache, verify_user
+
+        _auth_cache.clear()
+        token = _jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
+        mock_user = Mock()
+        mock_user.user.id = "user_123"
+        mock_user.user.email = "test@example.com"
+        mock_user.user.user_metadata = {"full_name": "Test User"}
+        mock_auth_client.auth.get_user.return_value = mock_user
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"id": "user_123", "email": "test@example.com"}
+        )
+
+        result = await verify_user(f"Bearer {token}")
+        result["email"] = "mutated@example.com"
+        result["account"]["email"] = "mutated@example.com"
+        mock_auth_client.auth.get_user.reset_mock()
+
+        cached_result = await verify_user(f"Bearer {token}")
+
+        assert cached_result["email"] == "test@example.com"
+        assert cached_result["account"]["email"] == "test@example.com"
+        mock_auth_client.auth.get_user.assert_not_called()
+        _auth_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_verify_user_does_not_accept_expired_cached_token(self, mock_auth_client: MagicMock):
+        """Expired JWTs must not be accepted through a stale auth cache hit."""
+        from backend.deps import AuthCacheEntry, _auth_cache, verify_user
+
+        _auth_cache.clear()
+        token = _jwt_with_exp(datetime.now(UTC) - timedelta(seconds=1))
+        cache_key = sha256(token.encode()).hexdigest()
+        _auth_cache[cache_key] = AuthCacheEntry(
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            user_data={
+                "user_id": "cached_user",
+                "account_id": "cached_user",
+                "email": "cached@example.com",
+            },
+        )
+        mock_auth_client.auth.get_user.return_value = None
+
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_user(f"Bearer {token}")
+
+        assert exc_info.value.status_code == 401
+        assert cache_key not in _auth_cache
         _auth_cache.clear()
 
     @pytest.mark.asyncio

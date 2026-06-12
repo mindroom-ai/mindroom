@@ -213,20 +213,22 @@ async def test_room_member_joined_supports_router_agent_scope(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_router_ignores_live_room_member_join_without_previous_membership(tmp_path: Path) -> None:
-    """Live member events without previous membership are ambiguous snapshots."""
-    seen: list[str] = []
+async def test_router_emits_live_room_member_join_without_previous_membership(tmp_path: Path) -> None:
+    """Live member joins can omit unsigned previous membership."""
+    seen: list[RoomMemberJoinedContext] = []
 
     @hook(EVENT_ROOM_MEMBER_JOINED)
     async def joined(ctx: RoomMemberJoinedContext) -> None:
-        seen.append(ctx.event_id)
+        seen.append(ctx)
 
     bot = _router_bot(tmp_path)
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
-    await bot._on_room_member(_room(), _room_member_event(event_id="$profile-update", prev_membership=None))
+    await bot._on_room_member(_room(), _room_member_event(event_id="$sso-autojoin", prev_membership=None))
 
-    assert seen == []
+    assert len(seen) == 1
+    assert seen[0].event_id == "$sso-autojoin"
+    assert seen[0].prev_membership is None
 
 
 @pytest.mark.asyncio
@@ -289,7 +291,7 @@ async def test_router_emits_room_member_joined_from_first_restored_token_sync_ti
         _sync_response_with_state(
             room.room_id,
             [],
-            timeline_events=[_room_member_event(event_id="$catchup-join")],
+            timeline_events=[_room_member_event(event_id="$catchup-join", prev_membership=None)],
         ),
     )
 
@@ -334,6 +336,53 @@ async def test_router_ignores_restored_token_first_sync_full_state_member_snapsh
 
     assert seen == []
 
+    await bot._on_room_member(
+        room,
+        _room_member_event(event_id="$profile-update", prev_membership=None),
+    )
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_router_ignores_restored_token_timeline_profile_update_for_existing_member(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restored-token timeline member updates should not onboard users already in state."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot._first_sync_done = False
+    bot._room_member_join_hooks_armed = False
+    bot._sync_trust_state = SyncTrustState.PENDING
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_restored"
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._maybe_start_startup_thread_prewarm = MagicMock()
+    bot._maybe_start_deferred_overdue_task_drain = MagicMock()
+    monkeypatch.setattr(
+        bot,
+        "_sync_cache_result_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [_room_member_event(event_id="$existing-member", prev_membership=None)],
+            timeline_events=[_room_member_event(event_id="$profile-update", prev_membership=None)],
+        ),
+    )
+
+    assert seen == []
+
 
 @pytest.mark.asyncio
 async def test_router_ignores_sync_state_member_snapshot_without_previous_membership(
@@ -362,6 +411,13 @@ async def test_router_ignores_sync_state_member_snapshot_without_previous_member
             room.room_id,
             [_room_member_event(event_id="$snapshot-join", prev_membership=None)],
         ),
+    )
+
+    assert seen == []
+
+    await bot._on_room_member(
+        room,
+        _room_member_event(event_id="$profile-update", prev_membership=None),
     )
 
     assert seen == []

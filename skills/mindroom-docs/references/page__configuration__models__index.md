@@ -5,6 +5,7 @@ Models define the AI providers and model IDs used by agents.
 ## Supported Providers
 
 - `anthropic` - Claude models (Anthropic)
+- `bedrock_claude` - Anthropic Claude models on Amazon Bedrock
 - `azure` - OpenAI models through Azure OpenAI deployments
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT subscription login
@@ -44,10 +45,16 @@ models:
     id: claude-haiku-4-5
     context_window: 200000
 
+  # Anthropic Claude on Amazon Bedrock
+  bedrock_opus:
+    provider: bedrock_claude
+    id: anthropic.claude-opus-4-8
+    context_window: 1000000
+
   # OpenAI
   gpt:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.5
 
   # Azure OpenAI
   azure:
@@ -155,6 +162,24 @@ Set `context_window` to the limit of your deployment when you know it.
 Set `AZURE_OPENAI_API_VERSION` only when you need to override Agno's default API version.
 For starter config generation, use `mindroom config init --provider azure`.
 
+## Amazon Bedrock Claude
+
+Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
+MindRoom uses Agno's AWS Bedrock Claude model wrapper and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
+Use Opus when you want the highest Claude tier available through Bedrock.
+
+```yaml
+models:
+  default:
+    provider: bedrock_claude
+    id: anthropic.claude-opus-4-8
+    context_window: 1000000
+```
+
+MindRoom reads AWS settings from the config-adjacent `.env` file, exported environment, local AWS profile, or runtime IAM role.
+For starter config generation, use `mindroom config init --provider bedrock_claude`.
+
 ## Context Window
 
 When `context_window` is set, MindRoom uses it to budget persisted replay and required destructive compaction.
@@ -211,6 +236,18 @@ GROQ_API_KEY=...
 OPENROUTER_API_KEY=...
 CEREBRAS_API_KEY=...
 DEEPSEEK_API_KEY=...
+```
+
+For Amazon Bedrock Claude, use standard AWS credential resolution:
+
+```bash
+AWS_REGION=us-east-1
+# Optional static credentials:
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_SESSION_TOKEN=...
+# Optional local profile instead:
+AWS_PROFILE=...
 ```
 
 For Ollama, you can also set:

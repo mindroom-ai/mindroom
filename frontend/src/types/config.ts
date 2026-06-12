@@ -2,6 +2,7 @@ import type { PROVIDERS } from "@/lib/providers";
 
 export type ProviderType = keyof typeof PROVIDERS;
 export type MemoryBackend = "mem0" | "file" | "none";
+export type MemorySearchMode = "keyword" | "semantic";
 export type WorkerScope = "shared" | "user" | "user_agent";
 export type PrivateWorkerScope = Exclude<WorkerScope, "shared">;
 export type AgentPolicySource =
@@ -35,6 +36,11 @@ export interface MemoryConfig {
   file?: {
     path?: string | null;
     max_entrypoint_lines?: number;
+  };
+  search?: {
+    mode?: MemorySearchMode;
+    include?: string[];
+    include_entrypoint?: boolean;
   };
   auto_flush?: {
     enabled?: boolean;

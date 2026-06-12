@@ -2931,6 +2931,122 @@ class TestThreadHistoryCache:
         assert recovered_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_history_refuses_stale_fallback_when_cached_rows_miss_root(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Stale fallback must never serve cached rows that lack the thread root (PR #741)."""
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        rootless_reply = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Cached reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Cached reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        client = MagicMock()
+        client.room_get_event = AsyncMock(side_effect=RuntimeError("root fetch failed"))
+        client.room_get_event_relations = MagicMock()
+        client.room_messages = AsyncMock(side_effect=RuntimeError("scan failed"))
+
+        try:
+            await _replace_thread(
+                cache,
+                "!room:localhost",
+                "$thread_root",
+                [self._cache_source(rootless_reply)],
+                validated_at=time.time(),
+            )
+            await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="force_refetch")
+
+            with pytest.raises(RuntimeError, match="scan failed"):
+                await fetch_thread_history(
+                    client,
+                    "!room:localhost",
+                    "$thread_root",
+                    event_cache=cache,
+                )
+
+            remaining_rows = await cache.get_thread_events("!room:localhost", "$thread_root")
+        finally:
+            await cache.close()
+
+        assert remaining_rows is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_dispatch_thread_history_never_falls_back_to_stale_cache(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Dispatch reads must raise on refetch failure instead of serving stale cached rows."""
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        stale_reply = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Cached reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Cached reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        client = MagicMock()
+        client.room_get_event = AsyncMock(side_effect=RuntimeError("root fetch failed"))
+        client.room_get_event_relations = MagicMock()
+        client.room_messages = AsyncMock(side_effect=RuntimeError("scan failed"))
+
+        try:
+            await _replace_thread(
+                cache,
+                "!room:localhost",
+                "$thread_root",
+                [self._cache_source(root_event), self._cache_source(stale_reply)],
+                validated_at=time.time(),
+            )
+            await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="force_refetch")
+
+            with pytest.raises(RuntimeError, match="scan failed"):
+                await matrix_client_module.fetch_dispatch_thread_history(
+                    client,
+                    "!room:localhost",
+                    "$thread_root",
+                    event_cache=cache,
+                )
+            with pytest.raises(RuntimeError, match="scan failed"):
+                await matrix_client_module.fetch_dispatch_thread_snapshot(
+                    client,
+                    "!room:localhost",
+                    "$thread_root",
+                    event_cache=cache,
+                )
+
+            advisory_history = await matrix_client_module.fetch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+            )
+        finally:
+            await cache.close()
+
+        assert advisory_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_STALE_CACHE
+        assert [message.body for message in advisory_history] == ["Root message", "Cached reply"]
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("cache_state_side_effect", "cached_events_side_effect"),
         [

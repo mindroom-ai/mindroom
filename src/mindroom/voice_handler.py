@@ -157,6 +157,7 @@ async def _compute_normalized_voice_message(
         room_id=room.room_id,
         thread_id=thread_id,
         sender=event.sender,
+        event_timestamp=event.server_timestamp,
         filename=event.body if isinstance(event.body, str) else None,
     )
 
@@ -275,6 +276,7 @@ async def prepare_raw_voice_fallback_message(
             room_id=room.room_id,
             thread_id=thread_id,
             sender=event.sender,
+            event_timestamp=event.server_timestamp,
             filename=event.body if isinstance(event.body, str) else None,
         )
         attachment_id = attachment_record.attachment_id if attachment_record is not None else None
@@ -663,4 +665,8 @@ def _voice_mention_entity_name(
             return None
         return registry.current_entity_name_for_user_id(user_id, include_router=False)
 
-    return resolve_entity_name_for_mention_localpart(localpart, config)
+    return resolve_entity_name_for_mention_localpart(
+        localpart,
+        config,
+        allow_generated_agent_localparts=False,
+    )

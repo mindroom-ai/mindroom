@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.commands.parsing import command_parser
-from mindroom.dispatch_source import is_automation_source_kind, is_voice_event
+from mindroom.dispatch_source import is_voice_event
 from mindroom.matrix.event_info import EventInfo
 
 if TYPE_CHECKING:
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 type _RequesterResolver = Callable[[str, object], str]
 type _HandledLookup = Callable[[str], bool]
+type _VisibleRouterVoiceEchoLookup = Callable[[str, object], bool]
 type _RecentRoomEventsLookup = Callable[..., Awaitable[Sequence[dict[str, Any]]]]
 # Implementations fail open by returning None after logging lookup failures.
 type _ThreadIdForEventLookup = Callable[[str, str], Awaitable[str | None]]
@@ -36,19 +37,22 @@ def has_newer_unresponded_in_thread(
     requester_user_id: str,
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
-    source_kind: str | None,
+    may_be_superseded_by_newer_requester_turn: bool,
     requester_user_id_for_event: _RequesterResolver,
+    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
     sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
     """Return True when full thread history proves a newer unhandled requester turn exists."""
-    if is_automation_source_kind(source_kind or ""):
+    if not may_be_superseded_by_newer_requester_turn:
         return False
     event_ts = event.server_timestamp
     if event_ts is None or not thread_history:
         return False
     for message in thread_history:
+        if is_visible_router_voice_echo(message.sender, message.content):
+            continue
         if (
             requester_user_id_for_event(
                 message.sender,
@@ -104,6 +108,7 @@ def _unresponded_requester_event_id(
     skipped_event_id: str,
     requester_user_id: str,
     requester_user_id_for_event: _RequesterResolver,
+    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
     sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
 ) -> str | None:
@@ -114,11 +119,14 @@ def _unresponded_requester_event_id(
     sender = event_source.get("sender")
     if not isinstance(event_id, str) or event_id == skipped_event_id or not isinstance(sender, str):
         return None
-    if requester_user_id_for_event(sender, event_source) != requester_user_id:
+    content = event_source.get("content")
+    if (
+        is_visible_router_voice_echo(sender, content)
+        or requester_user_id_for_event(sender, event_source) != requester_user_id
+    ):
         return None
     if is_handled(event_id):
         return None
-    content = event_source.get("content")
     body = content.get("body") if isinstance(content, dict) else None
     event_view = _CachedEventView(sender=sender, source=event_source)
     if (
@@ -140,6 +148,7 @@ async def _newer_unresponded_cached_thread_event_id(
     thread_id: str,
     get_thread_id_for_event: _ThreadIdForEventLookup | None,
     requester_user_id_for_event: _RequesterResolver,
+    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
     sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
 ) -> str | None:
@@ -161,6 +170,7 @@ async def _newer_unresponded_cached_thread_event_id(
             skipped_event_id=skipped_event_id,
             requester_user_id=requester_user_id,
             requester_user_id_for_event=requester_user_id_for_event,
+            is_visible_router_voice_echo=is_visible_router_voice_echo,
             sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
             is_handled=is_handled,
         )
@@ -175,17 +185,17 @@ async def has_newer_unresponded_cached_thread_event(
     event: TextDispatchEvent,
     requester_user_id: str,
     thread_id: str | None,
-    source_kind: str | None,
+    may_be_superseded_by_newer_requester_turn: bool,
     get_recent_room_events: _RecentRoomEventsLookup | None,
     get_thread_id_for_event: _ThreadIdForEventLookup | None,
     requester_user_id_for_event: _RequesterResolver,
+    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
     sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
     """Return positive cached-event proof for degraded dispatch replay history."""
-    # Automation backlog replay should not suppress older automation turns by scanning raw cached room events.
-    if thread_id is None or event.server_timestamp is None or is_automation_source_kind(source_kind or ""):
+    if thread_id is None or event.server_timestamp is None or not may_be_superseded_by_newer_requester_turn:
         return False
     if get_recent_room_events is None:
         return False
@@ -214,6 +224,7 @@ async def has_newer_unresponded_cached_thread_event(
         thread_id=thread_id,
         get_thread_id_for_event=get_thread_id_for_event,
         requester_user_id_for_event=requester_user_id_for_event,
+        is_visible_router_voice_echo=is_visible_router_voice_echo,
         sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
         is_handled=is_handled,
     )

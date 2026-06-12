@@ -36,6 +36,7 @@ from mindroom.scheduling import (
     schedule_task,
     scheduled_task_read_sort_key,
 )
+from mindroom.scheduling_executor import ScheduledWorkflowOutcome
 from tests.conftest import bind_runtime_paths, make_event_cache_mock
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
@@ -47,7 +48,7 @@ def _runtime_paths() -> object:
     return resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
-def _isolated_runtime_paths(tmp_path: Path) -> object:
+def _test_runtime_paths(tmp_path: Path) -> object:
     return resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -932,7 +933,10 @@ async def test_run_once_task_stops_when_cancelled_via_matrix_state() -> None:
 
     with (
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
-        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+        ) as execute_mock,
         patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock()),
     ):
         await _run_once_task(
@@ -975,7 +979,10 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
 
     with (
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
-        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+        ) as execute_mock,
     ):
         await _run_once_task(
             client,
@@ -1014,7 +1021,10 @@ async def test_run_once_task_marks_completed_after_success() -> None:
             "mindroom.scheduling.get_scheduled_task",
             new=AsyncMock(side_effect=[pending_record, pending_record]),
         ),
-        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(return_value=True)) as execute_mock,
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+        ) as execute_mock,
     ):
         await _run_once_task(
             client,
@@ -1058,7 +1068,10 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
             "mindroom.scheduling.get_scheduled_task",
             new=AsyncMock(side_effect=[pending_record, pending_record]),
         ),
-        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(return_value=False)) as execute_mock,
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=False, failure_reason="send failed")),
+        ) as execute_mock,
     ):
         await _run_once_task(
             client,
@@ -1110,7 +1123,10 @@ async def test_run_cron_task_executes_latest_state_workflow() -> None:
 
     with (
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
-        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+        ) as execute_mock,
         patch("mindroom.scheduling.croniter", return_value=_ImmediateCron()),
     ):
         await _run_cron_task(
@@ -1154,7 +1170,10 @@ async def test_run_cron_task_keeps_pending_state_after_success() -> None:
             "mindroom.scheduling.get_scheduled_task",
             new=AsyncMock(side_effect=[pending_record, pending_record]),
         ),
-        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(return_value=True)) as execute_mock,
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+        ) as execute_mock,
         patch("mindroom.scheduling.croniter", return_value=_ImmediateCron()),
     ):
         await _run_cron_task(
@@ -1190,7 +1209,10 @@ async def test_run_cron_task_stops_when_cancelled_via_matrix_state() -> None:
 
     with (
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
-        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+        ) as execute_mock,
     ):
         await _run_cron_task(
             client,
@@ -1669,7 +1691,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
     """Configured schedule rooms should use the static responder boundary without membership refresh."""
     client = AsyncMock()
     room = _matrix_room("!test:server", members_synced=False)
-    runtime_paths = _isolated_runtime_paths(tmp_path)
+    runtime_paths = _test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={
@@ -1734,7 +1756,7 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
     """Existing-thread schedules should validate parsed mentions against thread-scoped responders."""
     client = AsyncMock()
     room = _matrix_room("!test:server")
-    runtime_paths = _isolated_runtime_paths(tmp_path)
+    runtime_paths = _test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={

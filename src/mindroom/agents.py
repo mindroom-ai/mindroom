@@ -34,11 +34,18 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.timing import timed
 from mindroom.tool_approval import tool_requires_approval_for_openai_compat
-from mindroom.tool_system.catalog import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.catalog import (
+    TOOL_METADATA,
+    default_worker_routed_tools,
+    ensure_tool_registry_loaded,
+    get_tool_by_name,
+)
 from mindroom.tool_system.dynamic_toolkits import (
-    DynamicToolkitSelection,
-    resolve_dynamic_toolkit_selection,
-    resolve_special_tool_names,
+    VisibleToolSurface,
+    deferred_tool_catalog_entries,
+    has_deferred_tools,
+    resolve_dynamic_tool_selection,
+    visible_tool_surface,
 )
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
@@ -81,6 +88,10 @@ _DEFAULT_MIND_CONTEXT_FILES = (
     "IDENTITY.md",
     "TOOLS.md",
     "HEARTBEAT.md",
+)
+_PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
+    "./.mindroom-worker-assets/",
+    ".mindroom-worker-assets/",
 )
 
 
@@ -186,6 +197,8 @@ def _load_context_files(
     for raw_path in context_files:
         if isinstance(raw_path, Path):
             resolved_path = raw_path
+        elif raw_path.startswith(_PROJECTED_WORKER_ASSET_PATH_PREFIXES):
+            resolved_path = constants.resolve_config_relative_path(raw_path, runtime_paths)
         elif agent_name is not None and storage_path is not None:
             resolved_path = resolve_agent_owned_path(
                 raw_path,
@@ -529,13 +542,14 @@ def _load_agent_model_instance(
 
 
 @timed("system_prompt_assembly.agent_create.toolkit_build")
-def build_agent_toolkit(  # noqa: C901, PLR0911
+def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     tool_name: str,
     *,
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
     worker_tools: list[str],
+    runtime_overrides: dict[str, object] | None,
     agent_runtime: ResolvedAgentRuntime | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     execution_identity: ToolExecutionIdentity | None,
@@ -545,6 +559,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
+    Callers own runtime override resolution before invoking this builder.
     Returns ``None`` when the configured tool should be skipped, such as an
     explicit ``delegate`` entry without valid delegation targets.
     """
@@ -640,12 +655,32 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
+    if tool_name == "dynamic_workflow":
+        from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools  # noqa: PLC0415
+
+        return _wrap_direct_agent_toolkit_for_output_files(
+            DynamicWorkflowTools(),
+            agent_runtime=agent_runtime,
+            runtime_paths=runtime_paths,
+            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+        )
+
+    if tool_name == "report_publishing":
+        from mindroom.custom_tools.report_publishing import ReportPublishingTools  # noqa: PLC0415
+
+        return _wrap_direct_agent_toolkit_for_output_files(
+            ReportPublishingTools(),
+            agent_runtime=agent_runtime,
+            runtime_paths=runtime_paths,
+            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+        )
+
     if tool_name == "dynamic_tools":
         from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit  # noqa: PLC0415
 
-        if not agent_config.allowed_toolkits:
+        if not has_deferred_tools(config, agent_name):
             logger.warning(
-                "Skipping 'dynamic_tools' tool for agent '%s': allowed_toolkits is empty",
+                "Skipping 'dynamic_tools' tool for agent '%s': no deferred tools are configured",
                 agent_name,
             )
             return None
@@ -680,7 +715,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         config.defaults.tool_output_auto_save_threshold_bytes,
         agent_runtime.is_private,
         execution_identity,
-        config.get_agent_tool_runtime_overrides(agent_name, tool_name, runtime_paths=runtime_paths),
+        runtime_overrides,
     )
 
 
@@ -688,27 +723,29 @@ def get_agent_toolkit_names(
     agent_name: str,
     config: Config,
     *,
+    session_id: str | None = None,
     delegation_depth: int = 0,
 ) -> list[str]:
-    """Return the complete ordered toolkit list for an agent runtime."""
-    tool_names = list(config.get_agent_tools(agent_name))
-    for tool_name in resolve_special_tool_names(
-        agent_name=agent_name,
-        config=config,
-        delegation_depth=delegation_depth,
-        enable_dynamic_tools_manager=True,
-    ):
-        if tool_name not in tool_names:
-            tool_names.append(tool_name)
+    """Return the provider-visible toolkit list for a new agent runtime."""
+    return [
+        entry.name
+        for entry in visible_tool_surface(
+            agent_name=agent_name,
+            config=config,
+            session_id=session_id,
+            delegation_depth=delegation_depth,
+            enable_dynamic_tools_manager=session_id is not None,
+        ).runtime_tool_configs
+    ]
 
-    return tool_names
 
-
-def _resolve_runtime_worker_tools(
+def resolve_runtime_worker_tools(
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
     runtime_tool_names: list[str],
+    *,
+    tool_registry_preloaded: bool = False,
 ) -> list[str]:
     """Return worker-routed tools for one concrete runtime tool selection."""
     agent_config = config.get_agent(agent_name)
@@ -718,9 +755,8 @@ def _resolve_runtime_worker_tools(
     if configured is not None:
         return config.expand_tool_names(list(configured))
 
-    from mindroom.tool_system.catalog import default_worker_routed_tools, ensure_tool_registry_loaded  # noqa: PLC0415
-
-    ensure_tool_registry_loaded(runtime_paths, config)
+    if not tool_registry_preloaded:
+        ensure_tool_registry_loaded(runtime_paths, config)
     return default_worker_routed_tools(runtime_tool_names)
 
 
@@ -753,34 +789,51 @@ def _build_dynamic_tooling_instruction_block(
     config: Config,
     agent_name: str,
     *,
-    loaded_toolkits: tuple[str, ...],
     enable_dynamic_tools_manager: bool,
 ) -> str | None:
-    """Return compact prompt guidance for dynamic toolkit loading."""
-    agent_config = config.get_agent(agent_name)
-    if not enable_dynamic_tools_manager or not agent_config.allowed_toolkits:
+    """Return static prompt guidance for per-tool dynamic loading."""
+    if not enable_dynamic_tools_manager or not has_deferred_tools(config, agent_name):
         return None
 
-    toolkit_lines: list[str] = []
-    for toolkit_name in agent_config.allowed_toolkits:
-        description = config.get_toolkit(toolkit_name).description.strip()
+    catalog_lines: list[str] = []
+    for entry in deferred_tool_catalog_entries(agent_name=agent_name, config=config, loaded_tools=[]):
+        description = entry.description.strip()
         if description:
-            toolkit_lines.append(f"- {toolkit_name}: {description}")
+            catalog_lines.append(f"{entry.name} - {description}")
         else:
-            toolkit_lines.append(f"- {toolkit_name}")
+            catalog_lines.append(entry.name)
 
-    current_toolkits = ", ".join(loaded_toolkits) if loaded_toolkits else "(none)"
-    sticky_toolkits = ", ".join(agent_config.initial_toolkits) if agent_config.initial_toolkits else "(none)"
-    toolkit_catalog = "\n".join(toolkit_lines)
     return config.render_prompt(
         "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
-        toolkit_catalog=toolkit_catalog,
-        current_toolkits=current_toolkits,
-        sticky_toolkits=sticky_toolkits,
+        tool_catalog="\n".join(catalog_lines),
     )
 
 
-def _enable_all_history_replay(entity: Agent | Team) -> None:
+def _build_dynamic_tooling_state_suffix(
+    config: Config,
+    agent_name: str,
+    *,
+    loaded_tools: tuple[str, ...],
+    enable_dynamic_tools_manager: bool,
+) -> str | None:
+    """Return the small volatile dynamic-tool state suffix for the final instruction slot."""
+    if not enable_dynamic_tools_manager or not has_deferred_tools(config, agent_name):
+        return None
+
+    initial_tools = [
+        entry.name for entry in config.get_agent_authored_deferred_tool_configs(agent_name) if entry.initial
+    ]
+    current_tools = ", ".join(loaded_tools) if loaded_tools else "(none)"
+    sticky_tools = ", ".join(initial_tools) if initial_tools else "(none)"
+    return "\n".join(
+        (
+            "Dynamic tools currently loaded for this session: " + current_tools,
+            "Sticky initial dynamic tools that cannot be unloaded: " + sticky_tools,
+        ),
+    )
+
+
+def enable_all_history_replay(entity: Agent | Team) -> None:
     """Undo Agno's default three-run history fallback."""
     entity.num_history_runs = None
 
@@ -909,6 +962,11 @@ def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -
     return cast("list[HookRegistryPlugin]", load_plugins(config, runtime_paths))
 
 
+@timed("system_prompt_assembly.agent_create.tool_registry_sync")
+def _sync_agent_tool_registry(config: Config, runtime_paths: constants.RuntimePaths) -> None:
+    ensure_tool_registry_loaded(runtime_paths, config, load_plugin_tools=False)
+
+
 @timed("system_prompt_assembly.agent_create.hook_bridge")
 def _build_agent_tool_hook_bridge(
     *,
@@ -968,8 +1026,8 @@ def _resolve_agent_dynamic_tool_selection(
     config: Config,
     session_id: str | None,
     delegation_depth: int,
-) -> DynamicToolkitSelection:
-    return resolve_dynamic_toolkit_selection(
+) -> VisibleToolSurface:
+    return resolve_dynamic_tool_selection(
         agent_name=agent_name,
         config=config,
         session_id=session_id,
@@ -1064,6 +1122,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     active_model_name: str | None = None,
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
+    persist_runtime_state: bool = True,
+    disable_runtime_capabilities: bool = False,
+    disabled_tool_names: frozenset[str] = frozenset(),
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     timing_scope: str | None = None,
@@ -1077,7 +1138,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         execution_identity: Request execution identity used to resolve scoped
             state, workspaces, worker routing, and requester-local storage.
         session_id: Stable Agno session id used to resolve session-scoped
-            dynamic toolkit state.
+            dynamic tool state.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
@@ -1088,6 +1149,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             support Matrix reaction-based question flows.
         include_openai_compat_guidance: Whether to include OpenAI-compatible
             history-format guidance in the shared identity prompt.
+        persist_runtime_state: Whether this agent instance should write durable
+            Agno history, learning, and culture state.
+        disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
+            and preloaded context files for a restricted in-process agent run.
+        disabled_tool_names: Resolved tool names to omit from this instance.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
         refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
@@ -1104,19 +1170,22 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     """
     del timing_scope
     resolved_storage_path = runtime_paths.storage_root
+    create_runtime_state = not disable_runtime_capabilities
     agent_runtime = resolve_agent_runtime(
         agent_name,
         config,
         runtime_paths,
         execution_identity=execution_identity,
-        create=True,
+        create=create_runtime_state,
     )
 
     agent_config = config.get_agent(agent_name)
-    ensure_default_agent_workspaces(config, resolved_storage_path)
+    if create_runtime_state:
+        ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
     plugins = _load_agent_plugins(config, runtime_paths)
+    _sync_agent_tool_registry(config, runtime_paths)
     tool_hook_bridge = _build_agent_tool_hook_bridge(
         hook_registry=hook_registry,
         plugins=plugins,
@@ -1129,18 +1198,21 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     )
 
     storage = (
-        history_storage
-        if history_storage is not None
-        else agent_storage.create_state_storage(
-            agent_name,
-            agent_runtime.state_root,
-            subdir="sessions",
-            session_table=f"{agent_name}_sessions",
+        None
+        if not persist_runtime_state
+        else (
+            history_storage
+            if history_storage is not None
+            else agent_storage.create_state_storage(
+                agent_name,
+                agent_runtime.state_root,
+                subdir="sessions",
+                session_table=f"{agent_name}_sessions",
+            )
         )
     )
-    # Dynamic toolkit state remains per-agent in V1 because each agent keeps its
-    # own session DB. Team members may share one conversation session_id, but
-    # toolkit loads do not cross agent boundaries yet.
+    # Dynamic tool state is keyed by agent and session scope, so team members
+    # sharing one Matrix thread do not leak loaded tools across agents.
     dynamic_tool_selection = _resolve_agent_dynamic_tool_selection(
         agent_name=agent_name,
         config=config,
@@ -1150,22 +1222,40 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     resolved_tool_configs = {
         entry.name: entry.tool_config_overrides for entry in dynamic_tool_selection.runtime_tool_configs
     }
-    worker_tools = _resolve_runtime_worker_tools(
+    if disable_runtime_capabilities:
+        resolved_tool_configs = {}
+    elif disabled_tool_names:
+        resolved_tool_configs = {
+            tool_name: overrides
+            for tool_name, overrides in resolved_tool_configs.items()
+            if tool_name not in disabled_tool_names
+        }
+    loaded_tools = (
+        ()
+        if disable_runtime_capabilities
+        else tuple(
+            tool_name for tool_name in dynamic_tool_selection.loaded_tools if tool_name not in disabled_tool_names
+        )
+    )
+    worker_tools = resolve_runtime_worker_tools(
         agent_name,
         config,
         runtime_paths,
         list(resolved_tool_configs),
+        tool_registry_preloaded=True,
     )
     workspace = agent_runtime.workspace
     tools: list[Toolkit] = []
     for tool_name in resolved_tool_configs:
         try:
+            runtime_overrides = config.get_agent_tool_runtime_overrides(agent_name, tool_name)
             toolkit = build_agent_toolkit(
                 tool_name,
                 agent_name=agent_name,
                 config=config,
                 runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
+                runtime_overrides=runtime_overrides,
                 agent_runtime=agent_runtime,
                 tool_config_overrides=resolved_tool_configs.get(tool_name),
                 session_id=session_id,
@@ -1195,7 +1285,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             subdir="learning",
             session_table=f"{agent_name}_learning_sessions",
         )
-        if _is_learning_enabled(agent_config, defaults)
+        if persist_runtime_state and _is_learning_enabled(agent_config, defaults)
         else None
     )
 
@@ -1229,16 +1319,17 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     # Combine identity and datetime contexts
     full_context = identity_context + datetime_context
 
-    full_context += _build_additional_context(
-        agent_name,
-        agent_config,
-        config.defaults.max_preload_chars,
-        personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
-        truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
-        workspace_context_files=workspace.context_files if workspace is not None else (),
-        storage_path=resolved_storage_path,
-        runtime_paths=runtime_paths,
-    )
+    if not disable_runtime_capabilities:
+        full_context += _build_additional_context(
+            agent_name,
+            agent_config,
+            config.defaults.max_preload_chars,
+            personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
+            truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
+            workspace_context_files=workspace.context_files if workspace is not None else (),
+            storage_path=resolved_storage_path,
+            runtime_paths=runtime_paths,
+        )
 
     role = full_context + agent_config.role
     instructions = list(agent_config.instructions)
@@ -1252,28 +1343,37 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         model_id=model.id,
     )
 
-    skills = _load_agent_skills(
-        agent_name,
-        config,
-        runtime_paths,
-        workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
+    skills = (
+        None
+        if disable_runtime_capabilities
+        else _load_agent_skills(
+            agent_name,
+            config,
+            runtime_paths,
+            workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
+        )
     )
     if skills and skills.get_skill_names():
         instructions.append(config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"))
 
-    dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
-        config,
-        agent_name,
-        loaded_toolkits=dynamic_tool_selection.loaded_toolkits,
-        enable_dynamic_tools_manager=session_id is not None,
-    )
+    dynamic_tooling_block = None
+    if not disable_runtime_capabilities:
+        dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
+            config,
+            agent_name,
+            enable_dynamic_tools_manager=session_id is not None,
+        )
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
 
-    if agent_runtime.tool_base_dir is not None:
+    if agent_runtime.tool_base_dir is not None and not disable_runtime_capabilities:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
 
-    file_mode_knowledge_instruction = _file_mode_knowledge_instruction_block(agent_name, config, agent_runtime)
+    file_mode_knowledge_instruction = (
+        None
+        if disable_runtime_capabilities
+        else _file_mode_knowledge_instruction_block(agent_name, config, agent_runtime)
+    )
     if file_mode_knowledge_instruction is not None:
         instructions.append(file_mode_knowledge_instruction)
 
@@ -1284,15 +1384,30 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     if include_interactive_questions:
         instructions.append(config.get_prompt("INTERACTIVE_QUESTION_PROMPT"))
 
+    dynamic_tooling_state_suffix = None
+    if not disable_runtime_capabilities:
+        dynamic_tooling_state_suffix = _build_dynamic_tooling_state_suffix(
+            config,
+            agent_name,
+            loaded_tools=loaded_tools,
+            enable_dynamic_tools_manager=session_id is not None,
+        )
+    if dynamic_tooling_state_suffix is not None:
+        instructions.append(dynamic_tooling_state_suffix)
+
     _log_toolkits_without_unique_model_functions(tools, agent_name=agent_name)
 
-    knowledge_enabled = bool(config.get_agent_knowledge_base_ids(agent_name)) and knowledge is not None
+    knowledge_enabled = (
+        not disable_runtime_capabilities
+        and bool(config.get_agent_knowledge_base_ids(agent_name))
+        and knowledge is not None
+    )
     knowledge_sources = (
         knowledge_source_descriptions(knowledge) if knowledge_enabled and isinstance(knowledge, Knowledge) else ()
     )
     culture_storage_root = resolved_storage_path
     cache_private_culture = False
-    if agent_runtime.is_private:
+    if agent_runtime.is_private and persist_runtime_state:
         worker_key = agent_runtime.worker_key
         if worker_key is None:
             msg = f"Private agent '{agent_name}' requires a worker key to resolve culture state"
@@ -1309,12 +1424,16 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             worker_key=worker_key,
         )
         cache_private_culture = True
-    culture_manager, culture_settings = _resolve_agent_culture(
-        agent_name,
-        config,
-        culture_storage_root,
-        model,
-        cache_private=cache_private_culture,
+    culture_manager, culture_settings = (
+        _resolve_agent_culture(
+            agent_name,
+            config,
+            culture_storage_root,
+            model,
+            cache_private=cache_private_culture,
+        )
+        if persist_runtime_state
+        else (None, None)
     )
 
     add_culture_to_context: bool | None = None
@@ -1325,32 +1444,14 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         update_cultural_knowledge = culture_settings.update_cultural_knowledge
         enable_agentic_culture = culture_settings.enable_agentic_culture
 
-    # Resolve history settings: per-agent override → defaults.
-    # When agent sets one knob, force the other to None to avoid Agno
-    # receiving both (it warns and drops num_history_messages).
-    if agent_config.num_history_messages is not None:
-        num_history_runs = None
-        num_history_messages = agent_config.num_history_messages
-    elif agent_config.num_history_runs is not None:
-        num_history_runs = agent_config.num_history_runs
-        num_history_messages = None
-    else:
-        num_history_runs = defaults.num_history_runs
-        num_history_messages = defaults.num_history_messages
-
-    # Track whether we want "all history" to bypass Agno's default after construction
-    include_all_history = num_history_runs is None and num_history_messages is None
+    # Shared history-policy source of truth with the team replay path.
+    history_settings = config.get_entity_history_settings(agent_name)
+    history_policy = history_settings.policy
 
     compress_tool_results = (
         agent_config.compress_tool_results
         if agent_config.compress_tool_results is not None
         else defaults.compress_tool_results
-    )
-
-    max_tool_calls_from_history = (
-        agent_config.max_tool_calls_from_history
-        if agent_config.max_tool_calls_from_history is not None
-        else defaults.max_tool_calls_from_history
     )
 
     agent = _initialize_agent_instance(
@@ -1362,15 +1463,15 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         skills=skills,
         instructions=instructions,
         db=storage,
-        learning=_resolve_agent_learning(agent_config, defaults, learning_storage),
+        learning=_resolve_agent_learning(agent_config, defaults, learning_storage) if persist_runtime_state else False,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
         search_knowledge=knowledge_enabled,
-        add_history_to_context=True,
-        add_session_summary_to_context=True,
-        num_history_runs=num_history_runs,
-        num_history_messages=num_history_messages,
+        add_history_to_context=persist_runtime_state,
+        add_session_summary_to_context=persist_runtime_state,
+        num_history_runs=history_policy.num_history_runs,
+        num_history_messages=history_policy.num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.
         store_history_messages=False,
         culture_manager=culture_manager,
@@ -1378,18 +1479,18 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
         compress_tool_results=compress_tool_results,
-        max_tool_calls_from_history=max_tool_calls_from_history,
+        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
         telemetry=False,
     )
-    if include_all_history:
-        _enable_all_history_replay(agent)
+    if history_policy.mode == "all":
+        enable_all_history_replay(agent)
 
     logger.info(
         "Created agent",
         agent=agent_name,
         display_name=agent_config.display_name,
         tool_count=len(tools),
-        loaded_dynamic_toolkits=list(dynamic_tool_selection.loaded_toolkits),
+        loaded_dynamic_tools=list(dynamic_tool_selection.loaded_tools),
     )
 
     return agent
@@ -1425,9 +1526,11 @@ __all__ = [
     "build_agent_toolkit",
     "create_agent",
     "describe_agent",
+    "enable_all_history_replay",
     "ensure_default_agent_workspaces",
     "get_agent_toolkit_names",
     "get_rooms_for_entity",
     "remove_run_by_event_id",
+    "resolve_runtime_worker_tools",
     "show_tool_calls_for_agent",
 ]

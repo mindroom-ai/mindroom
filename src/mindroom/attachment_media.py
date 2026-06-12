@@ -42,27 +42,13 @@ def _inline_media_content_key(record: AttachmentRecord) -> tuple[str, ...]:
     return (record.kind, mime_type, "filepath", str(record.local_path))
 
 
-def _partition_inline_media_by_content(
-    attachment_records: list[AttachmentRecord],
-    *,
-    current_attachment_ids: set[str],
-) -> list[AttachmentRecord]:
-    inline_records: list[AttachmentRecord] = []
-    seen_keys: set[tuple[str, ...]] = set()
-    current_records = [record for record in attachment_records if record.attachment_id in current_attachment_ids]
-    historical_records = [record for record in attachment_records if record.attachment_id not in current_attachment_ids]
-    for record in [*current_records, *historical_records]:
-        key = _inline_media_content_key(record)
-        if record.attachment_id in current_attachment_ids or key not in seen_keys:
-            inline_records.append(record)
-            seen_keys.add(key)
-    return inline_records
-
-
-def _attachment_records_to_media(
+def attachment_records_to_media(
     attachment_records: list[AttachmentRecord],
 ) -> tuple[list[Audio], list[Image], list[File], list[Video]]:
-    """Convert persisted attachments into Agno media objects."""
+    """Convert attachment records into Agno media objects and remember them for dedupe."""
+    for record in attachment_records:
+        _remember_attachment_record(record)
+
     audio: list[Audio] = []
     images: list[Image] = []
     files: list[File] = []
@@ -116,15 +102,14 @@ def _attachment_records_to_media(
     return audio, images, files, videos
 
 
-def resolve_attachment_media(
+def resolve_scoped_attachments(
     storage_path: Path,
     attachment_ids: list[str],
     *,
     room_id: str | None = None,
     thread_id: str | None = None,
-    current_attachment_ids: set[str] | None = None,
-) -> tuple[list[str], list[Audio], list[Image], list[File], list[Video]]:
-    """Resolve attachment IDs into Agno media objects.
+) -> list[AttachmentRecord]:
+    """Resolve attachment IDs into records scoped to the current context.
 
     When *room_id* is provided, only attachments registered for the current
     room/thread context are included. Mismatched records are dropped with a
@@ -147,28 +132,15 @@ def resolve_attachment_media(
                 room_id=room_id,
                 thread_id=thread_id,
             )
-    resolved_attachment_ids = [record.attachment_id for record in attachment_records]
     for record in attachment_records:
         _remember_attachment_record(record)
-    media_records = (
-        _partition_inline_media_by_content(attachment_records, current_attachment_ids=current_attachment_ids)
-        if current_attachment_ids is not None
-        else attachment_records
-    )
-    attachment_audio, attachment_images, attachment_files, attachment_videos = _attachment_records_to_media(
-        media_records,
-    )
     emit_elapsed_timing(
-        "response_payload.resolve_attachment_media",
+        "response_payload.resolve_scoped_attachments",
         started,
         room_id=room_id,
         thread_id=thread_id,
         requested_attachment_count=len(attachment_ids),
         resolved_attachment_count=len(attachment_records),
         rejected_attachment_count=rejected_count,
-        audio_count=len(attachment_audio),
-        image_count=len(attachment_images),
-        file_count=len(attachment_files),
-        video_count=len(attachment_videos),
     )
-    return resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos
+    return attachment_records

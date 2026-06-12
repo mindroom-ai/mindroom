@@ -36,6 +36,14 @@ def agent_username_localpart(agent_name: str, runtime_paths: RuntimePaths) -> st
     return f"{_AGENT_USERNAME_PREFIX}{agent_name}"
 
 
+def unnamespaced_agent_name_from_username_localpart(username_localpart: str) -> str | None:
+    """Extract an unnamespaced generated agent name from a Matrix username localpart."""
+    if not username_localpart.lower().startswith(_AGENT_USERNAME_PREFIX):
+        return None
+    agent_name = username_localpart[len(_AGENT_USERNAME_PREFIX) :]
+    return agent_name or None
+
+
 def managed_room_alias_localpart(room_key: str, runtime_paths: RuntimePaths) -> str:
     """Build the managed room alias localpart for a room key."""
     namespace = _mindroom_namespace(runtime_paths)
@@ -70,6 +78,19 @@ def room_alias_localpart(room_alias: str) -> str | None:
     if not room_alias.startswith("#") or ":" not in room_alias:
         return None
     return room_alias[1:].split(":", 1)[0]
+
+
+def room_alias_identifier_candidates(room_alias: str, runtime_paths: RuntimePaths) -> list[str]:
+    """Return alias, localpart, and managed-room key identifiers for one Matrix alias."""
+    identifiers = [room_alias]
+    localpart = room_alias_localpart(room_alias)
+    if not localpart:
+        return identifiers
+    identifiers.append(localpart)
+    managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
+    if managed_room_key:
+        identifiers.append(managed_room_key)
+    return identifiers
 
 
 def extract_server_name_from_homeserver(homeserver: str, runtime_paths: RuntimePaths) -> str:

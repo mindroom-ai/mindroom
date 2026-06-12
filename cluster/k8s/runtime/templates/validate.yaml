@@ -1,6 +1,18 @@
 {{- if not (or (eq .Values.eventCache.backend "postgres") (eq .Values.eventCache.backend "sqlite")) -}}
 {{- fail "eventCache.backend must be either postgres or sqlite" -}}
 {{- end -}}
+{{- $configSource := include "mindroom-runtime.configSource" . -}}
+{{- if not (or (eq $configSource "configMap") (eq $configSource "file")) -}}
+{{- fail "config.source must be either configMap or file" -}}
+{{- end -}}
+{{- if eq $configSource "file" -}}
+{{- if not .Values.config.path -}}
+{{- fail "config.path is required when config.source=file" -}}
+{{- end -}}
+{{- if not (hasPrefix "/" .Values.config.path) -}}
+{{- fail "config.path must be absolute when config.source=file" -}}
+{{- end -}}
+{{- end -}}
 {{- if and (eq .Values.eventCache.backend "postgres") (not .Values.eventCache.databaseUrlEnv) -}}
 {{- fail "eventCache.databaseUrlEnv is required when eventCache.backend=postgres" -}}
 {{- end -}}
@@ -12,4 +24,150 @@
 {{- end -}}
 {{- if and (eq .Values.eventCache.backend "postgres") .Values.eventCache.postgres.create (not .Values.eventCache.postgres.auth.existingSecret) (not .Values.eventCache.databaseUrl.existingSecret) (eq .Values.eventCache.postgres.auth.passwordKey (include "mindroom-runtime.eventCacheDatabaseUrlSecretKey" .)) -}}
 {{- fail "eventCache.postgres.auth.passwordKey must differ from the event-cache database URL secret key" -}}
+{{- end -}}
+{{- if .Values.stateStorage.enabled -}}
+{{- if and (not .Values.stateStorage.create) (not .Values.stateStorage.existingClaim) -}}
+{{- fail "stateStorage.existingClaim or stateStorage.create=true is required when stateStorage.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.create (not .Values.stateStorage.existingClaim) (not .Values.stateStorage.size) -}}
+{{- fail "stateStorage.size is required when chart-managed state storage is enabled" -}}
+{{- end -}}
+{{- if eq (include "mindroom-runtime.storageVolumeName" .) (include "mindroom-runtime.stateStorageVolumeName" .) -}}
+{{- fail "stateStorage.volumeName must differ from storage.volumeName" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.mountPath (eq .Values.stateStorage.mountPath .Values.storage.mountPath) -}}
+{{- fail "stateStorage.mountPath must differ from storage.mountPath" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.encryptionKeys.enabled .Values.stateStorage.encryptionKeys.mountPath (eq .Values.stateStorage.encryptionKeys.mountPath .Values.storage.mountPath) -}}
+{{- fail "stateStorage.encryptionKeys.mountPath must differ from storage.mountPath" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.syncTokens.enabled .Values.stateStorage.syncTokens.mountPath (eq .Values.stateStorage.syncTokens.mountPath .Values.storage.mountPath) -}}
+{{- fail "stateStorage.syncTokens.mountPath must differ from storage.mountPath" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.mountPath .Values.stateStorage.encryptionKeys.enabled .Values.stateStorage.encryptionKeys.mountPath (eq .Values.stateStorage.mountPath .Values.stateStorage.encryptionKeys.mountPath) -}}
+{{- fail "stateStorage.mountPath must differ from stateStorage.encryptionKeys.mountPath" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.mountPath .Values.stateStorage.syncTokens.enabled .Values.stateStorage.syncTokens.mountPath (eq .Values.stateStorage.mountPath .Values.stateStorage.syncTokens.mountPath) -}}
+{{- fail "stateStorage.mountPath must differ from stateStorage.syncTokens.mountPath" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.encryptionKeys.enabled .Values.stateStorage.encryptionKeys.mountPath .Values.stateStorage.syncTokens.enabled .Values.stateStorage.syncTokens.mountPath (eq .Values.stateStorage.encryptionKeys.mountPath .Values.stateStorage.syncTokens.mountPath) -}}
+{{- fail "stateStorage.encryptionKeys.mountPath must differ from stateStorage.syncTokens.mountPath" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.encryptionKeys.enabled (not .Values.stateStorage.encryptionKeys.mountPath) -}}
+{{- fail "stateStorage.encryptionKeys.mountPath is required when stateStorage.encryptionKeys.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.encryptionKeys.enabled (not .Values.stateStorage.encryptionKeys.subPath) -}}
+{{- fail "stateStorage.encryptionKeys.subPath is required when stateStorage.encryptionKeys.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.syncTokens.enabled (not .Values.stateStorage.syncTokens.mountPath) -}}
+{{- fail "stateStorage.syncTokens.mountPath is required when stateStorage.syncTokens.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.syncTokens.enabled (not .Values.stateStorage.syncTokens.subPath) -}}
+{{- fail "stateStorage.syncTokens.subPath is required when stateStorage.syncTokens.enabled=true" -}}
+{{- end -}}
+{{- end -}}
+{{- $contentBundleNames := dict -}}
+{{- range $index, $bundle := .Values.contentBundles -}}
+{{- if not $bundle.name -}}
+{{- fail (printf "contentBundles[%d].name is required" $index) -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $bundle.name) -}}
+{{- fail (printf "contentBundles[%d].name must contain only lowercase letters, numbers, and hyphens" $index) -}}
+{{- end -}}
+{{- if gt (len $bundle.name) 48 -}}
+{{- fail (printf "contentBundles[%d].name must be 48 characters or fewer" $index) -}}
+{{- end -}}
+{{- if hasKey $contentBundleNames $bundle.name -}}
+{{- fail (printf "contentBundles[%d].name %q is used more than once" $index $bundle.name) -}}
+{{- end -}}
+{{- $_ := set $contentBundleNames $bundle.name true -}}
+{{- if not $bundle.image -}}
+{{- fail (printf "contentBundles[%d].image is required" $index) -}}
+{{- end -}}
+{{- if not (regexMatch "@sha256:[a-f0-9]{64}$" $bundle.image) -}}
+{{- fail (printf "contentBundles[%d].image must be pinned by full sha256 digest" $index) -}}
+{{- end -}}
+{{- $sourcePath := default "/bundle" $bundle.sourcePath -}}
+{{- if not (hasPrefix "/" $sourcePath) -}}
+{{- fail (printf "contentBundles[%d].sourcePath must be absolute" $index) -}}
+{{- end -}}
+{{- if and $bundle.targetPath (not (hasPrefix "/" $bundle.targetPath)) -}}
+{{- fail (printf "contentBundles[%d].targetPath must be absolute" $index) -}}
+{{- end -}}
+{{- $targetPath := include "mindroom-runtime.contentBundleTargetPath" (list $ $bundle) -}}
+{{- $storageMountPath := $.Values.storage.mountPath | trimSuffix "/" -}}
+{{- if eq $storageMountPath "" -}}
+{{- $storageMountPath = "/" -}}
+{{- end -}}
+{{- if eq $targetPath $storageMountPath -}}
+{{- fail (printf "contentBundles[%d].targetPath cannot be equal to storage.mountPath %s" $index $.Values.storage.mountPath) -}}
+{{- end -}}
+{{- if and (ne $storageMountPath "/") (not (hasPrefix (printf "%s/" $storageMountPath) $targetPath)) -}}
+{{- fail (printf "contentBundles[%d].targetPath must be under storage.mountPath %s" $index $.Values.storage.mountPath) -}}
+{{- end -}}
+{{- if and $bundle.seed $bundle.seed.enabled (not $bundle.seed.command) -}}
+{{- fail (printf "contentBundles[%d].seed.command is required when seed.enabled=true" $index) -}}
+{{- end -}}
+{{- end -}}
+{{- $egressProxyEnabled := or .Values.egressProxy.enabled .Values.approvedEgress.enabled -}}
+{{- $egressPolicyEnabled := and $egressProxyEnabled .Values.egressProxy.networkPolicy.create -}}
+{{- if and $egressProxyEnabled (ne .Values.workers.backend "kubernetes") -}}
+{{- fail "egressProxy.enabled or approvedEgress.enabled requires workers.backend=kubernetes" -}}
+{{- end -}}
+{{- if and $egressProxyEnabled (not (include "mindroom-runtime.egressProxyServiceName" .)) -}}
+{{- fail "egress proxy service name is required when egressProxy.enabled=true or approvedEgress.enabled=true" -}}
+{{- end -}}
+{{- if and $egressPolicyEnabled (not .Values.workers.kubernetes.networkPolicy.create) -}}
+{{- fail "egressProxy.networkPolicy.create=true requires workers.kubernetes.networkPolicy.create=true" -}}
+{{- end -}}
+{{- $proxyPodSelector := .Values.egressProxy.networkPolicy.proxyPodSelector -}}
+{{- if and $egressPolicyEnabled (not .Values.approvedEgress.enabled) (or (not (kindIs "map" $proxyPodSelector)) (not (or $proxyPodSelector.matchLabels $proxyPodSelector.matchExpressions))) -}}
+{{- fail "egressProxy.networkPolicy.proxyPodSelector with matchLabels or matchExpressions is required when egressProxy.networkPolicy.create=true" -}}
+{{- end -}}
+{{- $dnsNamespaceSelector := .Values.egressProxy.networkPolicy.dns.namespaceSelector -}}
+{{- $dnsPodSelector := .Values.egressProxy.networkPolicy.dns.podSelector -}}
+{{- $dnsIpBlocks := .Values.egressProxy.networkPolicy.dns.ipBlocks -}}
+{{- if and $egressPolicyEnabled (not (or (kindIs "map" $dnsNamespaceSelector) (kindIs "map" $dnsPodSelector) $dnsIpBlocks)) -}}
+{{- fail "egressProxy.networkPolicy.dns requires namespaceSelector, podSelector, or ipBlocks when egressProxy.networkPolicy.create=true" -}}
+{{- end -}}
+{{- if .Values.approvedEgress.enabled -}}
+{{- if not .Values.approvedEgress.image.repository -}}
+{{- fail "approvedEgress.image.repository is required when approvedEgress.enabled=true" -}}
+{{- end -}}
+{{- if not (or .Values.approvedEgress.image.tag .Values.approvedEgress.image.digest) -}}
+{{- fail "approvedEgress.image.tag or approvedEgress.image.digest is required when approvedEgress.enabled=true" -}}
+{{- end -}}
+{{- if and (not .Values.approvedEgress.serviceAccount.create) (not .Values.approvedEgress.serviceAccount.name) -}}
+{{- fail "approvedEgress.serviceAccount.name is required when approvedEgress.serviceAccount.create=false" -}}
+{{- end -}}
+{{- if not (include "mindroom-runtime.approvedEgressTokenSecretName" .) -}}
+{{- fail "approvedEgress.enabled requires approvedEgress.token.existingSecret or workers.sandbox.proxyToken" -}}
+{{- end -}}
+{{- if not (include "mindroom-runtime.approvedEgressTokenSecretKey" .) -}}
+{{- fail "approvedEgress token key is required when approvedEgress.enabled=true" -}}
+{{- end -}}
+{{- if not .Values.approvedEgress.allowlist.key -}}
+{{- fail "approvedEgress.allowlist.key is required when approvedEgress.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.approvedEgress.allowlist.existingConfigMap .Values.approvedEgress.allowlist.domains -}}
+{{- fail "approvedEgress.allowlist.domains cannot be set when approvedEgress.allowlist.existingConfigMap is set" -}}
+{{- end -}}
+{{- if not .Values.egressProxy.networkPolicy.create -}}
+{{- fail "approvedEgress.enabled requires egressProxy.networkPolicy.create=true so workers cannot bypass the proxy" -}}
+{{- end -}}
+{{- if and .Values.approvedEgress.persistence.enabled (not .Values.approvedEgress.persistence.existingClaim) (not .Values.approvedEgress.persistence.size) -}}
+{{- fail "approvedEgress.persistence.size is required when chart-managed approved egress persistence is enabled" -}}
+{{- end -}}
+{{- end -}}
+{{- $agentVault := .Values.workers.kubernetes.agentVault -}}
+{{- if $agentVault.accessTool.enabled -}}
+{{- if not $agentVault.enabled -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.enabled requires workers.kubernetes.agentVault.enabled=true" -}}
+{{- end -}}
+{{- if not (trim (default "" $agentVault.accessTool.adminAgentName)) -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.adminAgentName must not be empty" -}}
+{{- end -}}
+{{- if not (and (trim (default "" $agentVault.accessTool.adminTokenSecret.name)) (trim (default "" $agentVault.accessTool.adminTokenSecret.key))) -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.adminTokenSecret.name and .key must not be empty" -}}
+{{- end -}}
 {{- end -}}

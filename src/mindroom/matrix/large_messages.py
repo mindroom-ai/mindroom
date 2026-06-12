@@ -26,6 +26,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
+    TOOL_TRACE_CONTENT_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.logging_config import get_logger
@@ -56,7 +57,7 @@ _PASSTHROUGH_CONTENT_KEYS = frozenset(
 _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
     {
         "io.mindroom.long_text",
-        "io.mindroom.tool_trace",
+        TOOL_TRACE_CONTENT_KEY,
         STREAM_VISIBLE_BODY_KEY,
     },
 )

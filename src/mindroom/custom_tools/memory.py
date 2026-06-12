@@ -92,7 +92,7 @@ class MemoryTools(Toolkit):
     async def search_memories(self, query: str, limit: int = 5) -> str:
         """Search your memories for information relevant to a query.
 
-        Use this when you need to recall previously stored facts or context.
+        Use this when you need to recall previously stored facts, notes, or context.
 
         Args:
             query: What to search for in your memories.
@@ -118,7 +118,10 @@ class MemoryTools(Toolkit):
             lines = [f"Found {len(results)} memory(ies):"]
             for i, mem in enumerate(results, 1):
                 mid = mem.get("id", "?")
-                lines.append(f"{i}. [id={mid}] {mem.get('memory', '')}")
+                metadata = mem.get("metadata")
+                search_mode = metadata.get("search_mode") if isinstance(metadata, dict) else None
+                mode_label = f" [{search_mode}]" if search_mode in {"keyword", "semantic"} else ""
+                lines.append(f"{i}. [id={mid}]{mode_label} {mem.get('memory', '')}")
             return "\n".join(lines)
         except Exception as e:
             logger.exception("Failed to search memories via tool", agent=self._agent_name, error=str(e))

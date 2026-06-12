@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.dispatch_source import source_kind_allows_trusted_original_sender, source_kind_from_content
 from mindroom.entity_resolution import (
     configured_routable_entity_ids_for_room,
     current_internal_sender_ids,
@@ -16,7 +17,7 @@ from mindroom.entity_resolution import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.state import matrix_state_for_runtime
-from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, room_alias_localpart
+from mindroom.matrix_identifiers import room_alias_identifier_candidates
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -37,17 +38,11 @@ def _room_permission_lookup_keys(
     room_key: str | None = None,
 ) -> list[str]:
     """Build room identifiers that can be used as authorization map keys."""
-    keys = [room_id]
+    keys = room_alias_identifier_candidates(room_id, runtime_paths) if room_id.startswith("#") else [room_id]
     if room_key:
         keys.append(room_key)
     if room_alias:
-        keys.append(room_alias)
-        localpart = room_alias_localpart(room_alias)
-        if localpart:
-            keys.append(localpart)
-            managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
-            if managed_room_key:
-                keys.append(managed_room_key)
+        keys.extend(room_alias_identifier_candidates(room_alias, runtime_paths))
     return list(dict.fromkeys(keys))
 
 
@@ -68,8 +63,6 @@ def is_authorized_sender(
     config: Config,
     room_id: str,
     runtime_paths: RuntimePaths,
-    *,
-    room_alias: str | None = None,
 ) -> bool:
     """Check if a sender is authorized to interact with agents.
 
@@ -78,7 +71,6 @@ def is_authorized_sender(
         config: Application configuration
         room_id: Room ID for permission checks
         runtime_paths: Explicit runtime context for Matrix identity resolution
-        room_alias: Optional canonical room alias for permission checks
 
     Returns:
         True if the sender is authorized, False otherwise
@@ -96,13 +88,17 @@ def is_authorized_sender(
         return True
 
     room_permissions = config.authorization.room_permissions
-    # Check room-specific permissions by direct room identifiers first.
-    for permission_key in _room_permission_lookup_keys(room_id, room_alias=room_alias, runtime_paths=runtime_paths):
+    # Check room-specific permissions by direct room identifiers first. A room
+    # ID is stable; a direct alias target is an explicit caller target rather
+    # than room state content.
+    for permission_key in _room_permission_lookup_keys(room_id, runtime_paths=runtime_paths):
         if permission_key in room_permissions:
             return resolved_id in room_permissions[permission_key]
 
-    # If callers didn't provide room_alias, try persisted managed-room identifiers
-    # so room key/alias permissions still work when only room_id is available.
+    # Try persisted managed-room identifiers so room key/alias permissions still
+    # work when only room_id is available. This state is authored by MindRoom's
+    # room-management flow, unlike arbitrary canonical aliases from Matrix room
+    # events.
     if room_id.startswith("!") and not all(key.startswith("!") for key in room_permissions):
         room_key, persisted_alias = _lookup_managed_room_identifiers(room_id, runtime_paths)
         for permission_key in _room_permission_lookup_keys(
@@ -171,7 +167,8 @@ def get_effective_sender_id_for_reply_permissions(
 
     Internal MindRoom senders may relay user-originated messages (voice
     transcriptions, scheduled task fires, etc.) and include the original sender
-    in event content. For trusted internal senders, use that embedded sender.
+    in event content. For trusted internal senders and trusted source kinds, use
+    that embedded sender.
     """
     is_internal_mindroom_sender = sender_id in current_internal_sender_ids(config, runtime_paths)
     if not is_internal_mindroom_sender:
@@ -181,6 +178,8 @@ def get_effective_sender_id_for_reply_permissions(
 
     content = event_source.get("content")
     if not isinstance(content, Mapping):
+        return sender_id
+    if not source_kind_allows_trusted_original_sender(source_kind_from_content(content)):
         return sender_id
 
     original_sender = content.get(ORIGINAL_SENDER_KEY)

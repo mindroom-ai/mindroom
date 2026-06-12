@@ -20,8 +20,10 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, _ThreadIdLookup
 from mindroom.matrix.cache import (
     ConversationEventCache,
+    ThreadCacheState,
     event_normalization,
     sqlite_event_cache_events,
     sqlite_event_cache_threads,
@@ -30,13 +32,23 @@ from mindroom.matrix.cache import (
 from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client_thread_history import fetch_thread_history
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.timing import DispatchPipelineTiming
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import (
+    agent_response_should_respond,
+    bind_runtime_paths,
+    create_mock_room,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -543,6 +555,111 @@ async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_context_waits_for_strict_thread_history_after_degraded_snapshot(
+    tmp_path: Path,
+) -> None:
+    """A proven thread must fall back to strict history before dispatch planning."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "primary": AgentConfig(display_name="Primary", rooms=["!room:localhost"]),
+                "secondary": AgentConfig(display_name="Secondary", rooms=["!room:localhost"]),
+            },
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    route_paths = runtime_paths_for(config)
+    route_ids = entity_ids(config, route_paths)
+    runtime = BotRuntimeState(
+        client=MagicMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=MagicMock(),
+        event_cache_write_coordinator=None,
+    )
+    resolver = ConversationResolver(
+        ConversationResolverDeps(
+            runtime=runtime,
+            logger=MagicMock(),
+            runtime_paths=runtime_paths,
+            agent_name="primary",
+            matrix_id=route_ids["primary"],
+            conversation_cache=MagicMock(),
+        ),
+    )
+    degraded_history = thread_history_result(
+        [],
+        is_full_history=False,
+        diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True},
+    )
+    strict_history = thread_history_result(
+        [
+            ResolvedVisibleMessage.synthetic(
+                sender=route_ids["primary"].full_id,
+                body="I can handle this.",
+                event_id="$agent-reply",
+                thread_id="$thread:localhost",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender="@requester:localhost",
+                body="Please continue.",
+                event_id="$user-follow-up",
+                thread_id="$thread:localhost",
+            ),
+        ],
+        is_full_history=True,
+    )
+    event_info = MagicMock(spec=EventInfo)
+
+    with (
+        patch.object(
+            resolver,
+            "_explicit_thread_id_for_event",
+            AsyncMock(return_value=_ThreadIdLookup(thread_id="$thread:localhost", thread_history=degraded_history)),
+        ),
+        patch.object(
+            resolver,
+            "_read_thread_messages",
+            AsyncMock(return_value=strict_history),
+        ) as read_thread_messages,
+    ):
+        result = await resolver._resolve_thread_context(
+            "!room:localhost",
+            "$incoming:localhost",
+            event_info,
+            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
+            caller_label="dispatch_context",
+        )
+
+    assert result.is_thread is True
+    assert result.thread_id == "$thread:localhost"
+    assert result.thread_history == strict_history
+    assert result.requires_model_history_refresh is False
+    assert result.replay_guard_degraded is False
+    read_thread_messages.assert_awaited_once_with(
+        "!room:localhost",
+        "$thread:localhost",
+        mode=ThreadReadMode.STRICT_FULL,
+        caller_label="dispatch_context_strict_thread_fallback",
+    )
+    assert agent_response_should_respond(
+        agent_name="primary",
+        am_i_mentioned=False,
+        is_thread=True,
+        room=create_mock_room("!room:localhost", ["primary", "secondary"], config),
+        thread_history=result.thread_history,
+        config=config,
+        runtime_paths=route_paths,
+        sender_id="@requester:localhost",
+        available_responders_in_room=[route_ids["primary"], route_ids["secondary"]],
+    )
+
+
+@pytest.mark.asyncio
 async def test_dispatch_thread_read_uses_single_deadline_after_coordinator_wait(
     tmp_path: Path,
 ) -> None:
@@ -804,6 +921,193 @@ async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
     assert state.invalidation_reason == "newer_thread_marker"
     assert state.room_invalidated_at == 200.0
     assert state.room_invalidation_reason == "newer_room_marker"
+
+
+def _thread_cache_state(
+    *,
+    validated_at: float | None = None,
+    invalidated_at: float | None = None,
+    invalidation_reason: str | None = None,
+    room_invalidated_at: float | None = None,
+    room_invalidation_reason: str | None = None,
+) -> ThreadCacheState:
+    return ThreadCacheState(
+        validated_at=validated_at,
+        invalidated_at=invalidated_at,
+        invalidation_reason=invalidation_reason,
+        room_invalidated_at=room_invalidated_at,
+        room_invalidation_reason=room_invalidation_reason,
+    )
+
+
+@pytest.mark.parametrize(
+    ("cache_state", "expected_reason"),
+    [
+        pytest.param(None, "no_cache_state", id="missing_state_rejects"),
+        pytest.param(
+            _thread_cache_state(invalidated_at=100.0, invalidation_reason="live_thread_mutation"),
+            "cache_never_validated",
+            id="never_validated_rejects",
+        ),
+        pytest.param(
+            _thread_cache_state(validated_at=100.0, invalidated_at=100.0, invalidation_reason="tie"),
+            "thread_invalidated_after_validation",
+            id="thread_invalidation_tie_rejects",
+        ),
+        pytest.param(
+            _thread_cache_state(validated_at=100.0, room_invalidated_at=100.0, room_invalidation_reason="tie"),
+            "room_invalidated_after_validation",
+            id="room_invalidation_tie_rejects",
+        ),
+        pytest.param(
+            _thread_cache_state(validated_at=200.0, invalidated_at=100.0, invalidation_reason="superseded"),
+            None,
+            id="invalidation_before_validation_accepts",
+        ),
+        pytest.param(
+            _thread_cache_state(validated_at=200.0, room_invalidated_at=100.0, room_invalidation_reason="superseded"),
+            None,
+            id="room_invalidation_before_validation_accepts",
+        ),
+        # PR #731 removed the age rule and PR #734 removed the restart rule: an arbitrarily old
+        # validation stays trusted until an invalidation marker lands at or after it.
+        pytest.param(
+            _thread_cache_state(validated_at=1.0),
+            None,
+            id="ancient_validation_accepts",
+        ),
+    ],
+)
+def test_thread_cache_rejection_reason_rule_table(
+    cache_state: ThreadCacheState | None,
+    expected_reason: str | None,
+) -> None:
+    """The durable trust gate must reject exactly on missing/never-validated/invalidated-at-or-after state."""
+    assert thread_cache_rejection_reason(cache_state) == expected_reason
+
+
+@pytest.mark.asyncio
+async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(tmp_path: Path) -> None:
+    """A fetch that raced with a thread or room invalidation must not bury the newer stale marker."""
+    cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+    root_source = {
+        "event_id": "$thread_root",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "content": {"body": "Root message", "msgtype": "m.text"},
+    }
+
+    try:
+        await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], validated_at=100.0)
+        with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
+            await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
+
+        replaced_behind_marker = await cache.replace_thread_if_not_newer(
+            "!room:localhost",
+            "$thread_root",
+            [root_source],
+            fetch_started_at=150.0,
+            validated_at=300.0,
+        )
+        state_after_refusal = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+
+        replaced_after_marker = await cache.replace_thread_if_not_newer(
+            "!room:localhost",
+            "$thread_root",
+            [root_source],
+            fetch_started_at=250.0,
+            validated_at=300.0,
+        )
+        state_after_replace = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+    finally:
+        await cache.close()
+
+    assert replaced_behind_marker is False
+    assert state_after_refusal is not None
+    assert state_after_refusal.invalidated_at == 200.0
+    assert thread_cache_rejection_reason(state_after_refusal) == "thread_invalidated_after_validation"
+
+    assert replaced_after_marker is True
+    assert state_after_replace is not None
+    # The stored validation time is clamped to fetch start, so an invalidation landing during the
+    # fetch still outranks this snapshot at read time even if it slipped past the replace guard.
+    assert state_after_replace.validated_at == 250.0
+    assert state_after_replace.invalidated_at is None
+    assert thread_cache_rejection_reason(state_after_replace) is None
+
+
+@pytest.mark.asyncio
+async def test_replace_thread_if_not_newer_refuses_after_midflight_room_invalidation(tmp_path: Path) -> None:
+    """A room-wide stale marker that landed after fetch start must also refuse snapshot replacement."""
+    cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+    root_source = {
+        "event_id": "$thread_root",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "content": {"body": "Root message", "msgtype": "m.text"},
+    }
+
+    try:
+        await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], validated_at=100.0)
+        with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
+            await cache.mark_room_threads_stale("!room:localhost", reason="sync_thread_lookup_unavailable")
+
+        replaced = await cache.replace_thread_if_not_newer(
+            "!room:localhost",
+            "$thread_root",
+            [root_source],
+            fetch_started_at=150.0,
+            validated_at=300.0,
+        )
+        state = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+    finally:
+        await cache.close()
+
+    assert replaced is False
+    assert state is not None
+    assert state.room_invalidated_at == 200.0
+    assert thread_cache_rejection_reason(state) == "room_invalidated_after_validation"
+
+
+@pytest.mark.asyncio
+async def test_incremental_revalidation_requires_incremental_invalidation_reason(tmp_path: Path) -> None:
+    """Appends may only clear invalidations caused by incremental mutations, never other reasons."""
+    cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+    root_source = {
+        "event_id": "$thread_root",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "content": {"body": "Root message", "msgtype": "m.text"},
+    }
+
+    try:
+        await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], validated_at=100.0)
+
+        not_invalidated = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
+
+        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_append_failed")
+        non_incremental = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
+        state_after_non_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+
+        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
+        incremental = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
+        state_after_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+    finally:
+        await cache.close()
+
+    assert not_invalidated is False
+    assert non_incremental is False
+    assert state_after_non_incremental is not None
+    assert thread_cache_rejection_reason(state_after_non_incremental) == "thread_invalidated_after_validation"
+    assert incremental is True
+    assert state_after_incremental is not None
+    assert thread_cache_rejection_reason(state_after_incremental) is None
 
 
 @pytest.mark.asyncio

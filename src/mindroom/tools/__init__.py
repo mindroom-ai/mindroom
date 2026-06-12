@@ -20,12 +20,15 @@ from mindroom.tools import (
     compact_context,  # noqa: F401
     delegate,  # noqa: F401
     dynamic_tools,  # noqa: F401
+    dynamic_workflow,  # noqa: F401
     memory,  # noqa: F401
+    report_publishing,  # noqa: F401
     self_config,  # noqa: F401
 )
 from mindroom.tools.agentql import agentql_tools
 from mindroom.tools.airflow import airflow_tools
 from mindroom.tools.apify import apify_tools
+from mindroom.tools.approved_egress import approved_egress_tools
 from mindroom.tools.arxiv import arxiv_tools
 from mindroom.tools.attachments import attachments_tools
 from mindroom.tools.aws_lambda import aws_lambda_tools
@@ -118,6 +121,7 @@ from mindroom.tools.sql import sql_tools
 from mindroom.tools.subagents import subagents_tools
 from mindroom.tools.tavily import tavily_tools
 from mindroom.tools.telegram import telegram_tools
+from mindroom.tools.thread_model import thread_model_tools
 from mindroom.tools.thread_summary import register_thread_summary_tools
 from mindroom.tools.thread_tags import thread_tags_tools
 from mindroom.tools.todoist import todoist_tools
@@ -146,6 +150,7 @@ __all__ = [
     "agentql_tools",
     "airflow_tools",
     "apify_tools",
+    "approved_egress_tools",
     "arxiv_tools",
     "attachments_tools",
     "aws_lambda_tools",
@@ -239,6 +244,7 @@ __all__ = [
     "subagents_tools",
     "tavily_tools",
     "telegram_tools",
+    "thread_model_tools",
     "thread_tags_tools",
     "todoist_tools",
     "trafilatura_tools",
@@ -336,3 +342,82 @@ def _homeassistant_tools() -> type[Toolkit]:
     from mindroom.custom_tools.homeassistant import HomeAssistantTools
 
     return HomeAssistantTools
+
+
+@register_tool_with_metadata(
+    name="agent_vault_access",
+    display_name="Agent Vault Access",
+    description="Grant yourself UI access to manage this agent's Agent Vault secrets",
+    category=ToolCategory.INTEGRATIONS,
+    icon="Lock",
+    icon_color="text-amber-600",
+    dependencies=["httpx"],
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.SPECIAL,
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.WORKER_TARGET,
+    ),
+    config_fields=[
+        ConfigField(
+            name="MINDROOM_AGENT_VAULT_ACCESS_API_URL",
+            label="Agent Vault API URL",
+            type="url",
+            required=True,
+            placeholder="http://agent-vault:14321",
+            description="Base URL of the Agent Vault server API.",
+        ),
+        ConfigField(
+            name="MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN",
+            label="Agent Vault Admin Token",
+            type="password",
+            required=False,
+            description=(
+                "Instance-owner session or agent token used to create vaults, join them as "
+                "vault-admin (the /join step is owner-only), and grant membership. "
+                "Provide this or the admin token file."
+            ),
+        ),
+        ConfigField(
+            name="MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE",
+            label="Agent Vault Admin Token File",
+            type="text",
+            required=False,
+            placeholder="/etc/agent-vault-access/token",
+            description=(
+                "Path to a file holding the admin token, re-read on every call so an in-place "
+                "Secret rotation takes effect without a restart. Takes precedence over the inline token."
+            ),
+        ),
+        ConfigField(
+            name="MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL",
+            label="Agent Vault UI Base URL",
+            type="url",
+            required=True,
+            placeholder="https://example.com/agent-vault",
+            description="Public base URL of the gated Agent Vault UI.",
+        ),
+        ConfigField(
+            name="MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN",
+            label="Account Email Domain",
+            type="text",
+            required=True,
+            placeholder="example.com",
+            description="Domain used to map a requester's Matrix localpart to their Agent Vault account email.",
+        ),
+        ConfigField(
+            name="MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX",
+            label="Vault Name Prefix",
+            type="text",
+            required=False,
+            default="agent-vault",
+            description="Prefix used to derive the per-worker vault name; must match workers.kubernetes.agentVault.vaultNamePrefix.",
+        ),
+    ],
+    function_names=("request_vault_access",),
+)
+def _agent_vault_access_tools() -> type[Toolkit]:
+    """Return the Agent Vault self-service access tool."""
+    from mindroom.custom_tools.agent_vault_access import AgentVaultAccessTools
+
+    return AgentVaultAccessTools

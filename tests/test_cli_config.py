@@ -23,8 +23,9 @@ from typer.testing import CliRunner
 import mindroom.constants as constants_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
+from mindroom.cli import migrate as migrate_cli
 from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
-from mindroom.cli.main import _load_active_config_or_exit, app
+from mindroom.cli.main import _load_active_config_or_exit, _threads_export, app
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.handled_turns import HandledTurnLedger
@@ -42,6 +43,7 @@ from mindroom.model_defaults import (
     llama_cpp_server_command,
 )
 from mindroom.startup_errors import PermanentStartupError
+from mindroom.thread_export import ThreadExportStats
 from tests.conftest import load_config_yaml, normalize_console_output
 
 runner = CliRunner()
@@ -72,6 +74,17 @@ def _invoke_with_runtime(
     if env:
         command_env.update(env)
     return cast("object", runner.invoke(app, args, env=command_env, **kwargs))
+
+
+def _write_minimal_runtime_config(path: Path) -> None:
+    path.write_text(
+        "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+        "agents:\n  general:\n    display_name: General Agent\n    model: default\n"
+        "router:\n  model: default\n"
+        "matrix_space:\n  enabled: false\n"
+        "authorization:\n  global_users: []\n",
+        encoding="utf-8",
+    )
 
 
 def test_cli_import_keeps_help_path_runtime_modules_lazy() -> None:
@@ -199,10 +212,11 @@ class TestConfigInit:
             "TOOLS.md",
             "HEARTBEAT.md",
         ]
-        assert mind["knowledge_bases"] == ["mind_memory"]
+        assert "knowledge_bases" not in mind
         assert mind["tools"] == [
             "shell",
             "coding",
+            "memory",
             "duckduckgo",
             "website",
             "browser",
@@ -212,14 +226,16 @@ class TestConfigInit:
             "thread_tags",
         ]
         assert mind["skills"] == ["mindroom-docs"]
-        assert config["knowledge_bases"]["mind_memory"]["path"] == (
-            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory"
-        )
-        assert config["knowledge_bases"]["mind_memory"]["watch"] is True
+        assert "knowledge_bases" not in config
         assert config["memory"]["backend"] == "file"
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
         assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
         assert config["memory"]["file"]["max_entrypoint_lines"] == 200
+        assert config["memory"]["search"] == {
+            "mode": "semantic",
+            "include": ["memory/**/*.md"],
+            "include_entrypoint": False,
+        }
         assert config["memory"]["auto_flush"]["enabled"] is True
         assert "openclaw_compat" not in target.read_text()
 
@@ -263,14 +279,12 @@ class TestConfigInit:
         assert (workspace / "memory").exists()
         assert (workspace / "SOUL.md").exists()
         assert (workspace / "MEMORY.md").exists()
-        assert config["knowledge_bases"]["mind_memory"]["path"] == (
-            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory"
-        )
+        assert "knowledge_bases" not in config
 
         env_content = (tmp_path / ".env").read_text()
         assert f"MINDROOM_STORAGE_PATH={storage_root.resolve()}" in env_content
 
-    def test_init_runtime_storage_override_keeps_mind_workspace_and_kb_in_sync(
+    def test_init_runtime_storage_override_keeps_mind_workspace_in_sync(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -284,12 +298,7 @@ class TestConfigInit:
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(runtime_storage))
 
         config = load_config_yaml(target)
-        runtime_paths = constants_module.resolve_runtime_paths(config_path=target)
-        resolved_knowledge_path = constants_module.resolve_config_relative_path(
-            config.knowledge_bases["mind_memory"].path,
-            runtime_paths,
-        )
-        assert resolved_knowledge_path == runtime_storage.resolve() / "agents" / "mind" / "workspace" / "memory"
+        assert "mind_memory" not in config.knowledge_bases
 
         ensure_default_agent_workspaces(config, runtime_storage)
         runtime_workspace = runtime_storage / "agents" / "mind" / "workspace"
@@ -341,7 +350,7 @@ class TestConfigInit:
 
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
-        assert config["knowledge_bases"]["mind_memory"]["path"] == ("./mindroom_data/agents/mind/workspace/memory")
+        assert "knowledge_bases" not in config
         assert "${MINDROOM_STORAGE_PATH}" not in target.read_text()
         assert (tmp_path / "mindroom_data" / "agents" / "mind" / "workspace").exists()
         assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
@@ -435,6 +444,7 @@ class TestConfigInit:
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
         assert "MATRIX_SERVER_NAME=mindroom.chat" in env_content
         assert "MINDROOM_PROVISIONING_URL=https://mindroom.chat" in env_content
+        assert "MINDROOM_NAMESPACE=" in env_content
         assert "MATRIX_REGISTRATION_TOKEN=" in env_content
         assert "Env file updated" in normalize_console_output(result.output)
 
@@ -598,14 +608,14 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert "mindroom_user" not in config
-        assert config["models"]["default"]["provider"] == "openai"
+        assert config["models"]["default"]["provider"] == "llama_cpp"
         assert config["models"]["default"]["id"] == LLAMA_CPP_GEMMA
         assert config["models"]["default"]["context_window"] == 128_000
         assert config["models"]["default"]["extra_kwargs"] == {
             "api_key": "sk-no-key-required",
             "base_url": "http://localhost:8080/v1",
         }
-        assert config["models"][LOCAL_QWEN_PRESET_NAME]["provider"] == "openai"
+        assert config["models"][LOCAL_QWEN_PRESET_NAME]["provider"] == "llama_cpp"
         assert config["models"][LOCAL_QWEN_PRESET_NAME]["id"] == LLAMA_CPP_QWEN
         assert config["models"][LOCAL_QWEN_PRESET_NAME]["context_window"] == LOCAL_QWEN_CONTEXT_WINDOW
         assert config["models"][LOCAL_QWEN_PRESET_NAME]["extra_kwargs"] == {
@@ -830,14 +840,10 @@ class TestConfigInit:
         workspace = tmp_path / "mindroom_data" / "agents" / "mind" / "workspace"
         assert (workspace / "SOUL.md").exists()
         config = yaml.safe_load(target.read_text(encoding="utf-8"))
-        runtime_paths = constants_module.resolve_runtime_paths(config_path=target)
-        resolved_kb_path = constants_module.resolve_config_relative_path(
-            config["knowledge_bases"]["mind_memory"]["path"],
-            runtime_paths,
-        )
-        assert resolved_kb_path == workspace / "memory"
+        assert "knowledge_bases" not in config
+        assert (workspace / "memory").exists()
 
-    def test_init_keeps_existing_env_storage_root_for_workspace_and_knowledge_base(
+    def test_init_keeps_existing_env_storage_root_for_workspace(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -862,12 +868,8 @@ class TestConfigInit:
         workspace = custom_root / "agents" / "mind" / "workspace"
         assert (workspace / "SOUL.md").exists()
         config = yaml.safe_load(target.read_text(encoding="utf-8"))
-        runtime_paths = constants_module.resolve_runtime_paths(config_path=target)
-        resolved_kb_path = constants_module.resolve_config_relative_path(
-            config["knowledge_bases"]["mind_memory"]["path"],
-            runtime_paths,
-        )
-        assert resolved_kb_path == workspace / "memory"
+        assert "knowledge_bases" not in config
+        assert (workspace / "memory").exists()
         assert env_path.read_text(encoding="utf-8").startswith(f"MINDROOM_STORAGE_PATH={custom_root}\n")
 
     def test_init_overwrites_env_when_confirmed(self, tmp_path: Path) -> None:
@@ -972,6 +974,39 @@ class TestConfigInit:
         assert "Azure OpenAI" in output
         assert "deployment" in output
 
+    def test_init_bedrock_claude_preset_uses_opus_model(self, tmp_path: Path) -> None:
+        """Config init --provider bedrock_claude uses Amazon Bedrock Claude Opus defaults."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "bedrock_claude"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "bedrock_claude"
+        assert config["models"]["default"]["id"] == "anthropic.claude-opus-4-8"
+        assert config["models"]["default"]["context_window"] == 1_000_000
+
+        config_text = target.read_text(encoding="utf-8")
+        assert "# sonnet:" in config_text
+        assert "#   id: global.anthropic.claude-sonnet-4-6" in config_text
+        assert "# haiku:" in config_text
+        assert "#   id: global.anthropic.claude-haiku-4-5" in config_text
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "AWS_REGION=us-east-1" in env_content
+        assert "# AWS_ACCESS_KEY_ID=your-access-key-id" in env_content
+        assert "# AWS_SECRET_ACCESS_KEY=your-secret-access-key" in env_content
+        assert "# AWS_PROFILE=your-profile" in env_content
+        assert "\nANTHROPIC_API_KEY=" not in env_content
+        assert "\nOPENAI_API_KEY=" not in env_content
+
+    @pytest.mark.parametrize("provider", ["bedrock", "aws_bedrock", "aws-bedrock", "bedrock-claude"])
+    def test_init_rejects_bedrock_claude_provider_aliases(self, tmp_path: Path, provider: str) -> None:
+        """Config init should expose only the canonical Bedrock Claude preset name."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", provider])
+        assert result.exit_code == 1
+        assert "Invalid --provider value" in normalize_console_output(result.output)
+
     def test_provider_env_template_uses_canonical_provider_env_key(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1045,6 +1080,276 @@ class TestConfigInit:
         env_content = (tmp_path / ".env").read_text()
         assert "ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id" in env_content
         assert "CLOUD_ML_REGION=us-central1" in env_content
+
+
+# ---------------------------------------------------------------------------
+# mindroom config migrate
+# ---------------------------------------------------------------------------
+
+
+def _old_config_init_mind_memory_config(knowledge_path: str) -> str:
+    return f"""\
+# MindRoom Configuration
+# Generated by: mindroom config init
+# Keep this hand-written comment.
+
+models:
+  default:
+    provider: openai
+    id: gpt-5.5
+
+agents:
+  assistant:
+    display_name: Assistant
+    role: A helpful general-purpose assistant
+    model: default
+    rooms:
+      - lobby
+    accept_invites: true
+    tools: []
+    instructions:
+      - Be helpful and conversational
+  mind:
+    display_name: Mind
+    role: Personal assistant with persistent file-based identity and memory
+    model: default
+    include_default_tools: false
+    learning: false
+    memory_backend: file
+    rooms:
+      - personal
+    accept_invites: true
+    context_files:
+      - SOUL.md
+      - AGENTS.md
+      - USER.md
+      - IDENTITY.md
+      - TOOLS.md
+      - HEARTBEAT.md
+    knowledge_bases:
+      - mind_memory
+    tools:
+      - shell
+      - coding
+      - duckduckgo
+      - website
+      - browser
+      - scheduler
+      - subagents
+      - matrix_message
+      - thread_tags
+    skills:
+      - mindroom-docs
+    instructions:
+      - You wake up fresh each session with no memory of previous conversations. Your context files are already loaded into your system prompt.
+      - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write or update the relevant file directly.
+      - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
+      - Ask before external or destructive actions.
+      - Before answering prior-history questions, search memory files first when a knowledge base is configured.
+
+router:
+  model: default
+  accept_invites: true
+
+matrix_room_access:
+  mode: single_user_private
+
+knowledge_bases:
+  mind_memory:
+    path: {knowledge_path}
+    watch: true
+
+# File-based memory requires no external LLM, and starter configs use a local embedder for knowledge indexing.
+memory:
+  backend: file
+  embedder:
+    provider: sentence_transformers
+    config:
+      model: sentence-transformers/all-MiniLM-L6-v2
+  file:
+    max_entrypoint_lines: 200
+  auto_flush:
+    enabled: true
+
+defaults:
+  tools:
+    - scheduler
+  markdown: true
+"""
+
+
+def _migrated_config_init_mind_memory_config() -> str:
+    return """\
+# MindRoom Configuration
+# Generated by: mindroom config init
+# Keep this hand-written comment.
+
+models:
+  default:
+    provider: openai
+    id: gpt-5.5
+
+agents:
+  assistant:
+    display_name: Assistant
+    role: A helpful general-purpose assistant
+    model: default
+    rooms:
+      - lobby
+    accept_invites: true
+    tools: []
+    instructions:
+      - Be helpful and conversational
+  mind:
+    display_name: Mind
+    role: Personal assistant with persistent file-based identity and memory
+    model: default
+    include_default_tools: false
+    learning: false
+    memory_backend: file
+    rooms:
+      - personal
+    accept_invites: true
+    context_files:
+      - SOUL.md
+      - AGENTS.md
+      - USER.md
+      - IDENTITY.md
+      - TOOLS.md
+      - HEARTBEAT.md
+    tools:
+      - shell
+      - coding
+      - memory
+      - duckduckgo
+      - website
+      - browser
+      - scheduler
+      - subagents
+      - matrix_message
+      - thread_tags
+    skills:
+      - mindroom-docs
+    instructions:
+      - You wake up fresh each session with no memory of previous conversations. Your context files are already loaded into your system prompt.
+      - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write or update the relevant file directly.
+      - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
+      - Ask before external or destructive actions.
+      - Before answering prior-history questions, use search_memories first.
+
+router:
+  model: default
+  accept_invites: true
+
+matrix_room_access:
+  mode: single_user_private
+
+# File-based memory requires no external LLM.
+memory:
+  backend: file
+  embedder:
+    provider: sentence_transformers
+    config:
+      model: sentence-transformers/all-MiniLM-L6-v2
+  file:
+    max_entrypoint_lines: 200
+  search:
+    mode: semantic
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
+  auto_flush:
+    enabled: true
+
+defaults:
+  tools:
+    - scheduler
+  markdown: true
+"""
+
+
+class TestConfigMigrate:
+    """Tests for `mindroom config migrate`."""
+
+    @pytest.mark.parametrize(
+        "knowledge_path",
+        [
+            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory",
+            "./mindroom_data/agents/mind/workspace/memory",
+        ],
+    )
+    def test_migrate_updates_old_config_init_mind_memory_without_reformatting(
+        self,
+        tmp_path: Path,
+        knowledge_path: str,
+    ) -> None:
+        """Old starter mind_memory config should be text-patched to memory search."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_old_config_init_mind_memory_config(knowledge_path), encoding="utf-8")
+
+        result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Applied migration" in normalize_console_output(result.output)
+        assert cfg.read_text(encoding="utf-8") == _migrated_config_init_mind_memory_config()
+
+        config = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        mind = config["agents"]["mind"]
+        assert "knowledge_bases" not in mind
+        assert mind["tools"] == [
+            "shell",
+            "coding",
+            "memory",
+            "duckduckgo",
+            "website",
+            "browser",
+            "scheduler",
+            "subagents",
+            "matrix_message",
+            "thread_tags",
+        ]
+        assert "knowledge_bases" not in config
+        assert config["memory"]["search"] == {
+            "mode": "semantic",
+            "include": ["memory/**/*.md"],
+            "include_entrypoint": False,
+        }
+
+    def test_migrate_leaves_custom_mind_memory_config_unchanged(self, tmp_path: Path) -> None:
+        """Customized old memory knowledge path should not be silently rewritten."""
+        cfg = tmp_path / "config.yaml"
+        original = _old_config_init_mind_memory_config("./custom-memory")
+        cfg.write_text(original, encoding="utf-8")
+
+        result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "No migrations applied" in normalize_console_output(result.output)
+        assert cfg.read_text(encoding="utf-8") == original
+
+    def test_migrate_missing_config_exits_with_error(self, tmp_path: Path) -> None:
+        """Config migrate should fail cleanly when no config exists."""
+        missing = tmp_path / "config.yaml"
+
+        result = runner.invoke(app, ["config", "migrate", "--path", str(missing)])
+
+        assert result.exit_code == 1
+        assert "No config file found" in normalize_console_output(result.output)
+
+    def test_migrate_write_failure_reports_write_error(self, tmp_path: Path) -> None:
+        """Write failures should not be reported as config validation failures."""
+        cfg = tmp_path / "config.yaml"
+        original = _old_config_init_mind_memory_config("${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory")
+        cfg.write_text(original, encoding="utf-8")
+
+        with patch.object(migrate_cli, "_write_text_atomic", side_effect=OSError("disk full")):
+            result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
+
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 1
+        assert "Could not write migrated configuration" in output
+        assert "Invalid configuration" not in output
+        assert cfg.read_text(encoding="utf-8") == original
 
 
 # ---------------------------------------------------------------------------
@@ -1285,6 +1590,113 @@ class TestConfigValidate:
         assert "ANTHROPIC_VERTEX_PROJECT_ID" in result.output
         assert "CLOUD_ML_REGION" in result.output
 
+    def test_validate_warns_for_missing_bedrock_claude_region(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config validate should warn about missing Bedrock region settings."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-4-8\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        monkeypatch.delenv("AWS_PROFILE_FILE", raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Missing environment variables" in result.output
+        assert "bedrock_claude" in result.output
+        assert "AWS_REGION" in result.output
+
+    def test_validate_accepts_bedrock_claude_region_in_extra_kwargs(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config validate should accept Bedrock region configured on the model."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n"
+            "    provider: bedrock_claude\n"
+            "    id: anthropic.claude-opus-4-8\n"
+            "    extra_kwargs:\n"
+            "      aws_region: us-west-2\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        monkeypatch.delenv("AWS_PROFILE_FILE", raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Missing environment variables" not in result.output
+
+    def test_validate_accepts_bedrock_claude_profile_in_extra_kwargs(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config validate should accept a Bedrock AWS profile without explicit region."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n"
+            "    provider: bedrock_claude\n"
+            "    id: anthropic.claude-opus-4-8\n"
+            "    extra_kwargs:\n"
+            "      aws_profile: dev-profile\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        monkeypatch.delenv("AWS_PROFILE_FILE", raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Missing environment variables" not in result.output
+
+    def test_validate_accepts_bedrock_claude_profile_from_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config validate should accept Bedrock AWS_PROFILE without explicit region."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-4-8\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION_FILE", raising=False)
+        monkeypatch.setenv("AWS_PROFILE", "dev-profile")
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Missing environment variables" not in result.output
+
     def test_validate_uses_active_config_sibling_env_from_exported_config_path(self, tmp_path: Path) -> None:
         """Config validate should honor the sibling .env of the exported active config path."""
         cfg = tmp_path / "config.yaml"
@@ -1345,7 +1757,9 @@ class TestRunErrorHandling:
         assert result.exit_code == 1
         assert "No config found" in result.output
         assert "mindroom config init" in result.output
-        provider_guidance = "mindroom config init --provider {openrouter,ollama,openai,azure,codex,claude"
+        provider_guidance = (
+            "mindroom config init --provider {openrouter,ollama,openai,azure,bedrock_claude,codex,claude"
+        )
         assert provider_guidance in result.output
         mock_main.assert_not_awaited()
         assert not cfg.exists()
@@ -1493,6 +1907,95 @@ class TestVersionAndHelp:
         assert result.exit_code == 0
         assert "config" in result.output
         assert "avatars" in result.output
+        assert "threads" in result.output
+
+    def test_threads_export_help_shows_export_flags(self) -> None:
+        """Thread export help should expose the one-shot and watch controls."""
+        result = runner.invoke(app, ["threads", "export", "--help"])
+        assert result.exit_code == 0
+        output = normalize_console_output(result.output)
+        assert "--watch" in output
+        assert "--interval" in output
+        assert "--room" in output
+        assert "--output" in output
+
+    def test_threads_export_runs_once_and_forwards_options(self, tmp_path: Path) -> None:
+        """Thread export command should invoke the exporter with CLI options."""
+        config_path = tmp_path / "config.yaml"
+        storage_path = tmp_path / "storage"
+        output_path = tmp_path / "exports"
+        _write_minimal_runtime_config(config_path)
+
+        with patch(
+            "mindroom.thread_export.export_threads_once",
+            new=AsyncMock(return_value=ThreadExportStats(output_dir=output_path)),
+        ) as export_threads_once:
+            result = _invoke_with_runtime(
+                [
+                    "threads",
+                    "export",
+                    "--output",
+                    str(output_path),
+                    "--room",
+                    "lob",
+                    "--interval",
+                    "7",
+                    "--max-thread-roots",
+                    "11",
+                ],
+                config_path,
+                storage_path=storage_path,
+            )
+
+        assert result.exit_code == 0
+        export_threads_once.assert_awaited_once()
+        export_kwargs = export_threads_once.await_args.kwargs
+        assert export_kwargs["output_dir"] == output_path
+        assert export_kwargs["room_filter"] == "lob"
+        assert export_kwargs["max_thread_roots"] == 11
+        assert export_kwargs["runtime_paths"].storage_root == storage_path.resolve()
+
+    @pytest.mark.asyncio
+    async def test_threads_export_watch_retries_runtime_errors(self, tmp_path: Path) -> None:
+        """Watch mode should keep running after a transient exporter error."""
+        config_path = tmp_path / "config.yaml"
+        storage_path = tmp_path / "storage"
+        output_path = tmp_path / "exports"
+        _write_minimal_runtime_config(config_path)
+        sleep_count = 0
+
+        async def sleep_once_then_stop(seconds: int) -> None:
+            nonlocal sleep_count
+            assert seconds == 7
+            sleep_count += 1
+            if sleep_count == 2:
+                raise typer.Exit(0)
+
+        export_results = [
+            RuntimeError("temporary"),
+            ThreadExportStats(output_dir=output_path),
+        ]
+        with (
+            patch(
+                "mindroom.thread_export.export_threads_once",
+                new=AsyncMock(side_effect=export_results),
+            ) as export_once,
+            patch("mindroom.cli.main.asyncio.sleep", new=sleep_once_then_stop),
+            pytest.raises(typer.Exit) as exit_info,
+        ):
+            await _threads_export(
+                config_path=config_path,
+                storage_path=storage_path,
+                output=output_path,
+                room=None,
+                watch=True,
+                interval=7,
+                max_thread_roots=11,
+            )
+
+        assert exit_info.value.exit_code == 0
+        assert export_once.await_count == 2
+        assert sleep_count == 2
 
 
 # ---------------------------------------------------------------------------

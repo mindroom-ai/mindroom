@@ -21,7 +21,10 @@ class TestProvisionerIntegration:
     @pytest.fixture(autouse=True)
     def setup_auth(self):
         """Setup authentication for all tests."""
-        with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-api-key"):
+        with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-api-key"),
+            patch("backend.services.provisioner_service.PROVISIONER_API_KEY", "test-api-key"),
+        ):
             yield
 
     @pytest.fixture
@@ -44,7 +47,7 @@ class TestProvisionerIntegration:
             # Updates should succeed (URLs, status updates)
             mock_db.table().update().eq().execute.return_value = Mock()
 
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                 # Namespace creation might fail initially (common in real scenarios)
                 namespace_attempts = 0
 
@@ -60,11 +63,11 @@ class TestProvisionerIntegration:
 
                 mock_kubectl.side_effect = kubectl_side_effect
 
-                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                with patch("backend.services.provisioner_service.run_helm") as mock_helm:
                     # Helm deployment succeeds
                     mock_helm.return_value = (0, "Release installed successfully", "")
 
-                    with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+                    with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
                         # Deployment not immediately ready (realistic)
                         mock_wait.return_value = False
 
@@ -100,10 +103,10 @@ class TestProvisionerIntegration:
 
             mock_db.table().update.side_effect = update_side_effect
 
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                 mock_kubectl.return_value = (0, "Namespace created", "")
 
-                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                with patch("backend.services.provisioner_service.run_helm") as mock_helm:
                     # Helm deployment fails
                     mock_helm.return_value = (1, "", "Error: timed out waiting for the condition")
 
@@ -130,22 +133,18 @@ class TestProvisionerIntegration:
             mock_db.table().insert().execute.return_value = Mock(data=[{"instance_id": "777"}])
             mock_db.table().update().eq().execute.return_value = Mock()
 
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                 mock_kubectl.return_value = (0, "Success", "")
 
-                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                with patch("backend.services.provisioner_service.run_helm") as mock_helm:
                     mock_helm.return_value = (0, "Deployed", "")
 
-                    with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+                    with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
                         mock_wait.return_value = True  # Ready immediately
 
                         provision_response = client.post(
                             "/system/provision",
-                            json={
-                                "subscription_id": "sub-lifecycle",
-                                "account_id": "acc-lifecycle",
-                                "tier": "byok",
-                            },
+                            json={"subscription_id": "sub-lifecycle", "account_id": "acc-lifecycle", "tier": "byok"},
                             headers=valid_auth,
                         )
 
@@ -153,12 +152,12 @@ class TestProvisionerIntegration:
             instance_id = provision_response.json()["customer_id"]
 
             # Step 2: Stop the instance
-            with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
+            with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
                 mock_check.return_value = True
-                with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+                with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                     mock_kubectl.return_value = (0, "Deployment scaled to 0", "")
 
-                    with patch("backend.routes.provisioner.update_instance_status") as mock_update:
+                    with patch("backend.services.provisioner_service.update_instance_status") as mock_update:
                         mock_update.return_value = True
 
                         stop_response = client.post(f"/system/instances/{instance_id}/stop", headers=valid_auth)
@@ -167,12 +166,12 @@ class TestProvisionerIntegration:
             assert stop_response.json()["success"] is True
 
             # Step 3: Start the instance
-            with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
+            with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
                 mock_check.return_value = True
-                with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+                with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                     mock_kubectl.return_value = (0, "Deployment scaled to 1", "")
 
-                    with patch("backend.routes.provisioner.update_instance_status") as mock_update:
+                    with patch("backend.services.provisioner_service.update_instance_status") as mock_update:
                         mock_update.return_value = True
 
                         start_response = client.post(f"/system/instances/{instance_id}/start", headers=valid_auth)
@@ -181,9 +180,9 @@ class TestProvisionerIntegration:
             assert start_response.json()["success"] is True
 
             # Step 4: Restart the instance
-            with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
+            with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
                 mock_check.return_value = True
-                with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+                with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                     mock_kubectl.return_value = (0, "Deployment restarted", "")
 
                     restart_response = client.post(f"/system/instances/{instance_id}/restart", headers=valid_auth)
@@ -192,10 +191,10 @@ class TestProvisionerIntegration:
             assert restart_response.json()["success"] is True
 
             # Step 5: Uninstall the instance
-            with patch("backend.routes.provisioner.run_helm") as mock_helm:
+            with patch("backend.services.provisioner_service.run_helm") as mock_helm:
                 mock_helm.return_value = (0, "Release uninstalled", "")
 
-                with patch("backend.routes.provisioner.update_instance_status") as mock_update:
+                with patch("backend.services.provisioner_service.update_instance_status") as mock_update:
                     mock_update.return_value = True
 
                     uninstall_response = client.delete(f"/system/instances/{instance_id}/uninstall", headers=valid_auth)
@@ -221,10 +220,10 @@ class TestProvisionerIntegration:
             mock_db.table().insert.side_effect = insert_side_effect
             mock_db.table().update().eq().execute.return_value = Mock()
 
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                 mock_kubectl.return_value = (0, "Success", "")
 
-                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                with patch("backend.services.provisioner_service.run_helm") as mock_helm:
                     # Simulate varying deployment times
                     deploy_times = [0.1, 0.2, 0.15]  # seconds
                     deploy_counter = [0]
@@ -240,7 +239,7 @@ class TestProvisionerIntegration:
 
                     mock_helm.side_effect = helm_side_effect
 
-                    with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+                    with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
                         mock_wait.return_value = False  # Not immediately ready
 
                         # Launch multiple concurrent requests
@@ -292,7 +291,7 @@ class TestProvisionerIntegration:
 
             mock_db.table().update.side_effect = update_side_effect
 
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
 
                 async def kubectl_side_effect(args, **kwargs):
                     if args[:2] == ["get", "pvc"]:
@@ -303,10 +302,10 @@ class TestProvisionerIntegration:
 
                 mock_kubectl.side_effect = kubectl_side_effect
 
-                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                with patch("backend.services.provisioner_service.run_helm") as mock_helm:
                     mock_helm.return_value = (0, "Release upgraded", "")
 
-                    with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+                    with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
                         mock_wait.return_value = True
 
                         response = client.post(
@@ -345,7 +344,7 @@ class TestProvisionerIntegration:
                 ]
             )
 
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                 # Return different values based on the kubectl command
                 def kubectl_side_effect(args, namespace=None):
                     if "-o=jsonpath={.spec.replicas}" in args:
@@ -360,7 +359,7 @@ class TestProvisionerIntegration:
 
                 mock_kubectl.side_effect = kubectl_side_effect
 
-                with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
+                with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
                     # Instance 3 doesn't exist in k8s
                     async def check_exists(instance_id, namespace=None):
                         return instance_id != "3"
@@ -400,13 +399,13 @@ class TestProvisionerIntegration:
             mock_db.table().insert().execute.return_value = Mock(data=[{"instance_id": "888"}])
             mock_db.table().update().eq().execute.return_value = Mock()
 
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                 mock_kubectl.return_value = (0, "Success", "")
 
-                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                with patch("backend.services.provisioner_service.run_helm") as mock_helm:
                     mock_helm.return_value = (0, "Deployed", "")
 
-                    with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+                    with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
                         # Not ready initially
                         mock_wait.return_value = False
 
@@ -453,13 +452,13 @@ class TestProvisionerIntegration:
 
             mock_db.table().update.side_effect = update_side_effect
 
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                 mock_kubectl.return_value = (0, "Success", "")
 
-                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                with patch("backend.services.provisioner_service.run_helm") as mock_helm:
                     mock_helm.return_value = (0, "Deployed", "")
 
-                    with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+                    with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
                         mock_wait.return_value = True
 
                         response = client.post(
@@ -482,9 +481,9 @@ class TestProvisionerIntegration:
         ]
 
         for operation, endpoint in test_cases:
-            with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
+            with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
                 mock_check.return_value = True
-                with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+                with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                     # Kubectl returns error
                     mock_kubectl.return_value = (1, "", f"Error: deployment 'mindroom-{operation}' not found")
 
@@ -495,7 +494,7 @@ class TestProvisionerIntegration:
 
     def test_uninstall_with_helm_errors(self, client: TestClient, valid_auth: dict):
         """Test uninstall handling when helm encounters various errors."""
-        with patch("backend.routes.provisioner.run_helm") as mock_helm:
+        with patch("backend.services.provisioner_service.run_helm") as mock_helm:
             # Helm uninstall fails with specific error
             mock_helm.return_value = (1, "", "Error: release mindroom-999 not found")
 
@@ -507,14 +506,14 @@ class TestProvisionerIntegration:
 
     def test_database_update_failures_are_non_fatal(self, client: TestClient, valid_auth: dict):
         """Test that database update failures don't break core operations."""
-        with patch("backend.routes.provisioner.update_instance_status") as mock_update:
+        with patch("backend.services.provisioner_service.update_instance_status") as mock_update:
             # Database updates fail
             mock_update.return_value = False
 
-            with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
+            with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
                 mock_check.return_value = True
 
-                with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+                with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                     mock_kubectl.return_value = (0, "Success", "")
 
                     # Test start with DB failure

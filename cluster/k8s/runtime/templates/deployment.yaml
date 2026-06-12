@@ -5,6 +5,14 @@
 {{- $workerAuthSecretName := include "mindroom-runtime.workerAuthSecretName" . -}}
 {{- $eventCacheDatabaseUrlSecretName := include "mindroom-runtime.eventCacheDatabaseUrlSecretName" . -}}
 {{- $eventCacheDatabaseUrlSecretKey := include "mindroom-runtime.eventCacheDatabaseUrlSecretKey" . -}}
+{{- $workerExtraEnvJson := include "mindroom-runtime.workerExtraEnvJson" . -}}
+{{- $approvedEgressTokenSecretName := include "mindroom-runtime.approvedEgressTokenSecretName" . -}}
+{{- $approvedEgressTokenSecretKey := include "mindroom-runtime.approvedEgressTokenSecretKey" . -}}
+{{- $usesConfigMapConfig := include "mindroom-runtime.usesConfigMapConfig" . -}}
+{{- $configPath := include "mindroom-runtime.configPath" . -}}
+{{- $workerConfigMapName := include "mindroom-runtime.workerConfigMapName" . -}}
+{{- $workerConfigKey := include "mindroom-runtime.workerConfigKey" . -}}
+{{- $workerConfigPath := include "mindroom-runtime.workerConfigPath" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -62,9 +70,78 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.initContainers }}
+      {{- if or (and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled) .Values.initContainers .Values.contentBundles }}
       initContainers:
+{{ if and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled }}
+        - name: prepare-state-storage
+          image: {{ .Values.stateStorage.initPermissions.image | quote }}
+          imagePullPolicy: {{ .Values.stateStorage.initPermissions.imagePullPolicy }}
+          {{- with .Values.stateStorage.initPermissions.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mkdir -p "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} "/state/{{ .Values.stateStorage.syncTokens.subPath }}"{{ end }}
+              chown -R {{ .Values.stateStorage.initPermissions.runAsUser }}:{{ .Values.stateStorage.initPermissions.fsGroup }} "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} "/state/{{ .Values.stateStorage.syncTokens.subPath }}"{{ end }}
+              chmod {{ .Values.stateStorage.initPermissions.chmod }} "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} "/state/{{ .Values.stateStorage.syncTokens.subPath }}"{{ end }}
+          volumeMounts:
+            - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
+              mountPath: /state
+{{- end }}
+        {{- with .Values.initContainers }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{ range $bundle := .Values.contentBundles }}
+        {{- $sourcePath := include "mindroom-runtime.contentBundleSourcePath" (list $ $bundle) -}}
+        {{- $targetPath := include "mindroom-runtime.contentBundleTargetPath" (list $ $bundle) -}}
+        {{- $overwrite := true -}}
+        {{- if hasKey $bundle "overwrite" -}}
+        {{- $overwrite = $bundle.overwrite -}}
+        {{- end -}}
+        - name: {{ printf "content-bundle-%s" $bundle.name | trunc 63 | trimSuffix "-" }}
+          image: {{ $bundle.image | quote }}
+          imagePullPolicy: {{ default "IfNotPresent" $bundle.imagePullPolicy }}
+          command:
+            - sh
+            - -ec
+          args:
+            - |-
+              set -eu
+              {{- if $overwrite }}
+              rm -rf {{ $targetPath | quote }}
+              {{- end }}
+              mkdir -p {{ $targetPath | quote }}
+              cp -a {{ printf "%s/." $sourcePath | quote }} {{ printf "%s/" $targetPath | quote }}
+              {{- if and $bundle.seed $bundle.seed.enabled }}
+              {{ include "mindroom-runtime.contentBundleSeedCommand" (list $bundle) }}
+              {{- end }}
+          volumeMounts:
+            - name: {{ include "mindroom-runtime.storageVolumeName" $ }}
+              mountPath: {{ $.Values.storage.mountPath }}
+            {{ with $bundle.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{ end }}
+          {{ with $bundle.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{ end }}
+          {{ with $bundle.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{ end }}
+          {{ with $bundle.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{ end }}
+          {{ with $bundle.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{ end }}
+        {{ end }}
       {{- end }}
       containers:
         - name: mindroom
@@ -87,7 +164,7 @@ spec:
             - name: MINDROOM_STORAGE_PATH
               value: {{ .Values.storage.mountPath | quote }}
             - name: MINDROOM_CONFIG_PATH
-              value: {{ .Values.config.mountPath | quote }}
+              value: {{ $configPath | quote }}
             - name: HOME
               value: {{ .Values.storage.mountPath | quote }}
             {{- if .Values.runtime.logLevel }}
@@ -131,6 +208,29 @@ spec:
                   name: {{ $proxyTokenSecretName }}
                   key: {{ .Values.workers.sandbox.proxyToken.key }}
             {{- end }}
+            {{- if .Values.approvedEgress.enabled }}
+            {{- if .Values.approvedEgress.manageRuntimeConfig }}
+            - name: MINDROOM_APPROVED_EGRESS_ENABLED
+              value: "true"
+            {{- end }}
+            - name: MINDROOM_APPROVED_EGRESS_API_URL
+              value: {{ include "mindroom-runtime.approvedEgressApiUrl" . | quote }}
+            - name: MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH
+              value: {{ .Values.approvedEgress.allowlist.mountPath | quote }}
+            - name: MINDROOM_APPROVED_EGRESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $approvedEgressTokenSecretName }}
+                  key: {{ $approvedEgressTokenSecretKey }}
+            {{- if .Values.approvedEgress.maxTtlSeconds }}
+            - name: MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS
+              value: {{ .Values.approvedEgress.maxTtlSeconds | quote }}
+            {{- end }}
+            {{- if .Values.approvedEgress.sandboxProxyTimeoutSeconds }}
+            - name: MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS
+              value: {{ .Values.approvedEgress.sandboxProxyTimeoutSeconds | quote }}
+            {{- end }}
+            {{- end }}
             {{- if eq .Values.workers.backend "static_runner" }}
             - name: MINDROOM_SANDBOX_PROXY_URL
               value: {{ printf "http://localhost:%v" .Values.workers.staticRunner.port | quote }}
@@ -155,12 +255,16 @@ spec:
               value: {{ .Values.storage.mountPath | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX
               value: {{ .Values.workers.kubernetes.storageSubpathPrefix | quote }}
+            {{- if $workerConfigMapName }}
             - name: MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME
-              value: {{ include "mindroom-runtime.workerConfigMapName" . | quote }}
+              value: {{ $workerConfigMapName | quote }}
+            {{- end }}
+            {{- if $workerConfigKey }}
             - name: MINDROOM_KUBERNETES_WORKER_CONFIG_KEY
-              value: {{ include "mindroom-runtime.workerConfigKey" . | quote }}
+              value: {{ $workerConfigKey | quote }}
+            {{- end }}
             - name: MINDROOM_KUBERNETES_WORKER_CONFIG_PATH
-              value: {{ include "mindroom-runtime.workerConfigPath" . | quote }}
+              value: {{ $workerConfigPath | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS
               value: {{ .Values.workers.kubernetes.idleTimeoutSeconds | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS
@@ -189,13 +293,51 @@ spec:
             - name: MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE
               value: "true"
             {{- end }}
-            {{- if .Values.workers.kubernetes.extraEnv }}
+            {{- if $workerExtraEnvJson }}
             - name: MINDROOM_KUBERNETES_WORKER_ENV_JSON
-              value: {{ toJson .Values.workers.kubernetes.extraEnv | quote }}
+              value: {{ $workerExtraEnvJson | quote }}
             {{- end }}
             {{- if or .Values.workers.kubernetes.ownerDeploymentName (eq $workerNamespace .Release.Namespace) }}
             - name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME
               value: {{ default $fullname .Values.workers.kubernetes.ownerDeploymentName | quote }}
+            {{- end }}
+            {{- with .Values.workers.kubernetes.agentVault }}
+            {{- if .enabled }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED
+              value: "true"
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE
+              value: {{ required "workers.kubernetes.agentVault.cliImage is required when agentVault is enabled" .cliImage | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL
+              value: {{ required "workers.kubernetes.agentVault.ownerEmail is required when agentVault is enabled" .ownerEmail | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_VAULT_NAME_PREFIX
+              value: {{ .vaultNamePrefix | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_API_URL
+              value: {{ .apiUrl | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL
+              value: {{ .proxyUrl | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME
+              value: {{ .bootstrapSecretName | quote }}
+            {{- if .workerCaConfigMapName }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME
+              value: {{ .workerCaConfigMapName | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.workers.kubernetes.agentVault }}
+            {{- if .accessTool.enabled }}
+            - name: MINDROOM_AGENT_VAULT_ACCESS_API_URL
+              value: {{ .apiUrl | quote }}
+            - name: MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL
+              value: {{ required "workers.kubernetes.agentVault.accessTool.uiBaseUrl is required when the access tool is enabled" .accessTool.uiBaseUrl | quote }}
+            - name: MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN
+              value: {{ required "workers.kubernetes.agentVault.accessTool.emailDomain is required when the access tool is enabled" .accessTool.emailDomain | quote }}
+            - name: MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX
+              value: {{ .vaultNamePrefix | quote }}
+            # Mounted Secret file, not env: the kubelet refreshes the mount in
+            # place, so a bootstrap re-run (token rotation) needs no restart.
+            - name: MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE
+              value: {{ printf "/etc/agent-vault-access/%s" .accessTool.adminTokenSecret.key | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
             {{- if .Values.matrix.homeserverUrl }}
@@ -270,12 +412,41 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
+            {{- if $usesConfigMapConfig }}
             - name: config
               mountPath: {{ .Values.config.mountPath }}
               subPath: {{ .Values.config.key }}
               readOnly: true
+            {{- end }}
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ .Values.storage.mountPath }}
+            {{- if .Values.stateStorage.enabled }}
+            {{- if .Values.stateStorage.mountPath }}
+            - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
+              mountPath: {{ .Values.stateStorage.mountPath }}
+            {{- end }}
+            {{- if .Values.stateStorage.encryptionKeys.enabled }}
+            - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
+              mountPath: {{ .Values.stateStorage.encryptionKeys.mountPath }}
+              subPath: {{ .Values.stateStorage.encryptionKeys.subPath }}
+            {{- end }}
+            {{- if .Values.stateStorage.syncTokens.enabled }}
+            - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
+              mountPath: {{ .Values.stateStorage.syncTokens.mountPath }}
+              subPath: {{ .Values.stateStorage.syncTokens.subPath }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.approvedEgress.enabled }}
+            - name: approved-egress-allowlist
+              mountPath: {{ .Values.approvedEgress.allowlist.mountPath | quote }}
+              subPath: {{ .Values.approvedEgress.allowlist.key | quote }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.workers.kubernetes.agentVault.accessTool.enabled }}
+            - name: agent-vault-access-admin
+              mountPath: /etc/agent-vault-access
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -297,7 +468,7 @@ spec:
             - name: MINDROOM_SANDBOX_RUNNER_PORT
               value: {{ .Values.workers.staticRunner.port | quote }}
             - name: MINDROOM_CONFIG_PATH
-              value: {{ .Values.config.mountPath | quote }}
+              value: {{ $configPath | quote }}
             - name: MINDROOM_STORAGE_PATH
               value: {{ .Values.storage.mountPath | quote }}
             - name: HOME
@@ -323,10 +494,12 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
+            {{- if $usesConfigMapConfig }}
             - name: config
               mountPath: {{ .Values.config.mountPath }}
               subPath: {{ .Values.config.key }}
               readOnly: true
+            {{- end }}
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ .Values.storage.mountPath }}
             - name: sandbox-workspace
@@ -336,15 +509,35 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       volumes:
+        {{- if $usesConfigMapConfig }}
         - name: config
           configMap:
             name: {{ include "mindroom-runtime.configMapName" . }}
+        {{- end }}
         - name: {{ include "mindroom-runtime.storageVolumeName" . }}
           persistentVolumeClaim:
             claimName: {{ include "mindroom-runtime.storageClaimName" . }}
+        {{- if .Values.stateStorage.enabled }}
+        - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
+          persistentVolumeClaim:
+            claimName: {{ include "mindroom-runtime.stateStorageClaimName" . }}
+        {{- end }}
+        {{- if .Values.approvedEgress.enabled }}
+        - name: approved-egress-allowlist
+          configMap:
+            name: {{ include "mindroom-runtime.approvedEgressConfigMapName" . }}
+        {{- end }}
         {{- if eq .Values.workers.backend "static_runner" }}
         - name: sandbox-workspace
           emptyDir: {}
+        {{- end }}
+        {{- if .Values.workers.kubernetes.agentVault.accessTool.enabled }}
+        - name: agent-vault-access-admin
+          secret:
+            secretName: {{ .Values.workers.kubernetes.agentVault.accessTool.adminTokenSecret.name }}
+            # Optional: lets the control plane start before the first
+            # bootstrap publishes the token; the tool errors cleanly until then.
+            optional: true
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

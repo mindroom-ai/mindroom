@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from agno.models.metrics import Metrics
 from agno.run.base import RunStatus
 
-from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.constants import AI_RUN_METADATA_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -29,24 +29,6 @@ def empty_request_metric_totals() -> dict[str, int]:
         "cache_read_tokens": 0,
         "cache_write_tokens": 0,
     }
-
-
-def _get_model_config(
-    config: Config,
-    agent_name: str,
-    *,
-    runtime_paths: RuntimePaths,
-    room_id: str | None = None,
-) -> tuple[str | None, ModelConfig | None]:
-    """Return configured model name/config for an agent when available."""
-    if agent_name not in config.agents and agent_name not in config.teams and agent_name != ROUTER_AGENT_NAME:
-        return None, None
-    model_name = config.resolve_runtime_model(
-        entity_name=agent_name,
-        room_id=room_id,
-        runtime_paths=runtime_paths,
-    ).model_name
-    return model_name, config.models.get(model_name)
 
 
 def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
@@ -229,17 +211,15 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
     return {AI_RUN_METADATA_KEY: dict(ai_run_metadata)}
 
 
-def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
+def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     *,
-    agent_name: str,
     config: Config,
-    runtime_paths: RuntimePaths,
+    model_name: str,
     run_id: str | None,
     session_id: str | None,
     status: RunStatus | str | None,
     model: str | None,
     model_provider: str | None,
-    room_id: str | None = None,
     metrics: Metrics | dict[str, Any] | None = None,
     metrics_fallback: dict[str, Any] | None = None,
     context_raw_input_tokens: int | None = None,
@@ -248,14 +228,15 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     context_cache_write_tokens: int | None = None,
     tool_count: int | None = None,
     prepared_history: PreparedHistoryState | None = None,
-) -> dict[str, Any] | None:
-    """Build the Matrix event content fragment for one AI run."""
-    model_name, model_config = _get_model_config(
-        config,
-        agent_name,
-        runtime_paths=runtime_paths,
-        room_id=room_id,
-    )
+) -> dict[str, Any]:
+    """Build the Matrix event content fragment for one AI run.
+
+    `model_name` is the configured model name resolved at run preparation time.
+    It must not be re-resolved here: the per-thread override store can change
+    mid-run (for example via `switch_thread_model`), and this metadata must
+    describe the model that actually produced the response.
+    """
+    model_config = config.models.get(model_name)
     model_id = model or (model_config.id if model_config is not None else None)
     provider = model_provider or (model_config.provider if model_config is not None else None)
 
@@ -313,16 +294,12 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     if status is not None:
         raw_status = status.value if isinstance(status, RunStatus) else str(status)
         payload["status"] = raw_status.lower()
-    if model_name is not None or model_id is not None or provider is not None:
-        model_payload: dict[str, Any] = {}
-        if model_name is not None:
-            model_payload["config"] = model_name
-        if model_id is not None:
-            model_payload["id"] = model_id
-        if provider is not None:
-            model_payload["provider"] = provider
-        if model_payload:
-            payload["model"] = model_payload
+    model_payload: dict[str, Any] = {"config": model_name}
+    if model_id is not None:
+        model_payload["id"] = model_id
+    if provider is not None:
+        model_payload["provider"] = provider
+    payload["model"] = model_payload
     if usage_payload:
         payload["usage"] = usage_payload
     context_payload = _build_context_payload(
@@ -343,6 +320,4 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     if tool_count is not None:
         payload["tools"] = {"count": tool_count}
 
-    if len(payload) == 1:
-        return None
     return {AI_RUN_METADATA_KEY: payload}

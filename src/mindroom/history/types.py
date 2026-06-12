@@ -71,6 +71,16 @@ class HistoryPolicy:
     mode: _HistoryMode
     limit: int | None = None
 
+    @property
+    def num_history_runs(self) -> int | None:
+        """Return the Agno run-replay limit for this policy."""
+        return self.limit if self.mode == "runs" else None
+
+    @property
+    def num_history_messages(self) -> int | None:
+        """Return the Agno message-replay limit for this policy."""
+        return self.limit if self.mode == "messages" else None
+
 
 @dataclass(frozen=True)
 class ResolvedHistorySettings:

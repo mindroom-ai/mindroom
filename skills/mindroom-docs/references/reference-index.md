@@ -21,9 +21,8 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Teams | `configuration/teams.md` | `configuration/teams/index.md` | `page__configuration__teams__index.md` |
 | Cultures | `configuration/cultures.md` | `configuration/cultures/index.md` | `page__configuration__cultures__index.md` |
 | Router | `configuration/router.md` | `configuration/router/index.md` | `page__configuration__router__index.md` |
-| Toolkits | `configuration/toolkits.md` | `configuration/toolkits/index.md` | `page__configuration__toolkits__index.md` |
 | Overview | `tools/index.md` | `tools/index.md` | `page__tools__index.md` |
-| Dynamic Toolkits | `tools/dynamic-toolkits.md` | `tools/dynamic-toolkits/index.md` | `page__tools__dynamic-toolkits__index.md` |
+| Dynamic Tools | `tools/dynamic-tools.md` | `tools/dynamic-tools/index.md` | `page__tools__dynamic-tools__index.md` |
 | Execution & Coding | `tools/execution-and-coding.md` | `tools/execution-and-coding/index.md` | `page__tools__execution-and-coding__index.md` |
 | Data & Databases | `tools/data-and-databases.md` | `tools/data-and-databases/index.md` | `page__tools__data-and-databases__index.md` |
 | Web Search | `tools/web-search.md` | `tools/web-search/index.md` | `page__tools__web-search__index.md` |
@@ -70,5 +69,6 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Trusted Upstream Browser Auth | `deployment/trusted-upstream-auth.md` | `deployment/trusted-upstream-auth/index.md` | `page__deployment__trusted-upstream-auth__index.md` |
 | Docker | `deployment/docker.md` | `deployment/docker/index.md` | `page__deployment__docker__index.md` |
 | Sandbox Proxy | `deployment/sandbox-proxy.md` | `deployment/sandbox-proxy/index.md` | `page__deployment__sandbox-proxy__index.md` |
+| Approved Egress | `deployment/approved-egress.md` | `deployment/approved-egress/index.md` | `page__deployment__approved-egress__index.md` |
 | Kubernetes | `deployment/kubernetes.md` | `deployment/kubernetes/index.md` | `page__deployment__kubernetes__index.md` |
 | CLI Reference | `cli.md` | `cli/index.md` | `page__cli__index.md` |

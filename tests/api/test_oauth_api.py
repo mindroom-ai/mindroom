@@ -42,6 +42,15 @@ from mindroom.tool_system.worker_routing import (
 from tests.api.conftest import trusted_upstream_headers
 
 
+@pytest.fixture(autouse=True)
+def _allow_example_test_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve fake public OAuth hostnames through the shared server-fetch validator."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 0))],
+    )
+
+
 def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) -> constants.RuntimePaths:
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",

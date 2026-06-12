@@ -146,16 +146,15 @@ CONTEXT_TRUNCATION_MARKER_TEMPLATE = (
     "[Content truncated - {omitted_chars} chars omitted. Use search_knowledge_base for older history.]"
 )
 
-DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE = """## Dynamic Toolkits
-You may manage optional tool bundles with the `dynamic_tools` tool.
-Allowed toolkits:
-{toolkit_catalog}
-Currently loaded: {current_toolkits}
-Sticky initial toolkits that cannot be unloaded: {sticky_toolkits}
-Use `list_toolkits()` when unsure which toolkit contains a capability.
-Use `load_tools(toolkit)` or `unload_tools(toolkit)` to change the loaded set.
-In team conversations, each member manages its own toolkit state, so loading one member does not load the others.
-Those changes take effect on the next request in the same session, not later in this run."""
+DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE = """## Dynamic Tools
+Deferred tools are available by exact name and can be loaded for this session.
+<available-deferred-tools>
+{tool_catalog}
+</available-deferred-tools>
+Use load_tool(tool_name) to load one by exact name.
+Use tool_search(query) for keyword lookup across deferred tools.
+Changes take effect on the next request in this session.
+In team conversations, each member manages its own dynamic tool state."""
 
 PREVIOUS_CONVERSATION_THREAD_HEADER = "Previous conversation in this thread:"
 CURRENT_MESSAGE_PROMPT_INTRO = "Current message:\n"
@@ -422,9 +421,9 @@ Make each room instantly recognizable at small sizes."""
 
 CODEX_DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
 DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS = (
-    "Manage optional toolkits for this session. "
-    "Use list_toolkits() when unsure. "
-    "load_tools() and unload_tools() apply on the next request in the same session."
+    "Manage deferred tools for this session. "
+    "Use list_tools() or tool_search() when unsure. "
+    "load_tool() and unload_tool() apply on the next request in the same session."
 )
 DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can delegate tasks to the following agents:
 {agent_descriptions}
@@ -455,9 +454,7 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "CONTEXT_TRUNCATION_MARKER_TEMPLATE": frozenset({"omitted_chars"}),
         "DATETIME_CONTEXT_TEMPLATE": frozenset({"date_str", "timezone_str", "timezone_abbrev"}),
         "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE": frozenset({"agent_descriptions"}),
-        "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE": frozenset(
-            {"toolkit_catalog", "current_toolkits", "sticky_toolkits"},
-        ),
+        "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE": frozenset({"tool_catalog"}),
         "MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE": frozenset(
             {"no_reply_token", "existing_block", "excerpt"},
         ),

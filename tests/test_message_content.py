@@ -75,6 +75,7 @@ class TestResolvedMessageExtraction:
     def setup_method(self) -> None:
         """Clear cache before each test."""
         message_content_module._mxc_cache.clear()
+        message_content_module._mxc_cache_total_bytes = 0
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:
@@ -735,6 +736,7 @@ class TestDownloadMxcText:
     def setup_method(self) -> None:
         """Clear cache before each test."""
         message_content_module._mxc_cache.clear()
+        message_content_module._mxc_cache_total_bytes = 0
 
     @pytest.mark.asyncio
     async def test_invalid_mxc_url(self) -> None:
@@ -772,12 +774,69 @@ class TestDownloadMxcText:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_download_rejects_plaintext_over_byte_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Oversized sidecar bytes should not be decoded, cached, or persisted."""
+        monkeypatch.setattr(message_content_module, "_mxc_text_max_bytes", 5, raising=False)
+        client = AsyncMock()
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"123456"
+        client.download.return_value = response
+        event_cache = AsyncMock()
+        event_cache.get_mxc_text.return_value = None
+
+        result = await _download_mxc_text(
+            client,
+            "mxc://server/oversized",
+            event_cache=event_cache,
+            room_id="!room:server",
+        )
+
+        assert result is None
+        assert "mxc://server/oversized" not in message_content_module._mxc_cache
+        event_cache.store_mxc_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_download_rejects_encrypted_sidecar_over_byte_limit_before_decrypt(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Oversized encrypted sidecars should be rejected before decryption allocates plaintext."""
+        monkeypatch.setattr(message_content_module, "_mxc_text_max_bytes", 5, raising=False)
+        client = AsyncMock()
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"123456"
+        client.download.return_value = response
+        file_info = {"key": {"k": "key"}, "hashes": {"sha256": "hash"}, "iv": "iv"}
+
+        with patch("mindroom.matrix.message_content.crypto.attachments.decrypt_attachment") as mock_decrypt:
+            result = await _download_mxc_text(client, "mxc://server/encrypted-oversized", file_info)
+
+        assert result is None
+        mock_decrypt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_download_rejects_decrypted_sidecar_over_byte_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Decrypted sidecar bytes should be capped before UTF-8 decode and JSON parsing."""
+        monkeypatch.setattr(message_content_module, "_mxc_text_max_bytes", 5, raising=False)
+        client = AsyncMock()
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"small"
+        client.download.return_value = response
+        file_info = {"key": {"k": "key"}, "hashes": {"sha256": "hash"}, "iv": "iv"}
+
+        with patch("mindroom.matrix.message_content.crypto.attachments.decrypt_attachment", return_value=b"123456"):
+            result = await _download_mxc_text(client, "mxc://server/decrypted-oversized", file_info)
+
+        assert result is None
+        assert "mxc://server/decrypted-oversized" not in message_content_module._mxc_cache
+
+    @pytest.mark.asyncio
     async def test_mxc_cache_uses_lru_eviction(self) -> None:
         """A cache hit should refresh recency so the oldest untouched entry is evicted first."""
         client = AsyncMock()
         now = time.time()
         for index in range(message_content_module._mxc_cache_max_entries):
-            message_content_module._mxc_cache[f"mxc://server/{index}"] = (str(index), now)
+            message_content_module._cache_mxc_text(f"mxc://server/{index}", str(index), now)
 
         assert await _download_mxc_text(client, "mxc://server/0") == "0"
         client.download.assert_not_called()
@@ -790,6 +849,24 @@ class TestDownloadMxcText:
         assert "mxc://server/0" in message_content_module._mxc_cache
         assert "mxc://server/1" not in message_content_module._mxc_cache
 
+    @pytest.mark.asyncio
+    async def test_mxc_cache_prunes_by_total_bytes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The in-memory sidecar cache should be bounded by bytes as well as entry count."""
+        monkeypatch.setattr(message_content_module, "_mxc_cache_max_entries", 10)
+        monkeypatch.setattr(message_content_module, "_mxc_cache_max_bytes", 10, raising=False)
+        client = AsyncMock()
+        first_response = MagicMock(spec=nio.DownloadResponse)
+        first_response.body = b"123456"
+        second_response = MagicMock(spec=nio.DownloadResponse)
+        second_response.body = b"abcdef"
+        client.download.side_effect = [first_response, second_response]
+
+        assert await _download_mxc_text(client, "mxc://server/first") == "123456"
+        assert await _download_mxc_text(client, "mxc://server/second") == "abcdef"
+
+        assert "mxc://server/first" not in message_content_module._mxc_cache
+        assert "mxc://server/second" in message_content_module._mxc_cache
+
 
 class TestCanonicalContentResolution:
     """Tests for sidecar-backed canonical content extraction."""
@@ -797,6 +874,7 @@ class TestCanonicalContentResolution:
     def setup_method(self) -> None:
         """Clear cache before each test."""
         message_content_module._mxc_cache.clear()
+        message_content_module._mxc_cache_total_bytes = 0
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_content_metadata(self) -> None:

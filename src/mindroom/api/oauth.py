@@ -13,21 +13,13 @@ from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import login_redirect_for_request, verify_user
-from mindroom.api.credentials import (
-    build_dashboard_execution_identity,
-    consume_pending_oauth_request,
-    issue_pending_oauth_state,
-    resolve_request_credentials_target,
-    worker_target_for_credentials_target,
-)
+from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
+from mindroom.api.credentials_target import resolve_request_credentials_target, worker_target_for_credentials_target
+from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
 from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session
-from mindroom.oauth import (
-    OAuthClaimValidationError,
-    OAuthProvider,
-    OAuthProviderError,
-)
+from mindroom.oauth import OAuthClaimValidationError, OAuthProvider, OAuthProviderError
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import (
     OAuthConnectTarget,
@@ -41,7 +33,7 @@ from mindroom.oauth.service import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.api.credentials import RequestCredentialsTarget
+    from mindroom.api.credentials_target import RequestCredentialsTarget
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])

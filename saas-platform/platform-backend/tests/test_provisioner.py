@@ -55,34 +55,25 @@ def _assert_helm_uses_external_instance_secret(helm_args: list[str]) -> None:
 
 def _applied_instance_secret_data(apply_secret: AsyncMock) -> dict[str, str]:
     """Return the Secret payload passed to _apply_instance_secret."""
-    from backend.routes.provisioner import _apply_instance_secret
+    from backend.services.provisioner_service import _apply_instance_secret
 
     apply_secret.assert_awaited()
     bound = inspect.signature(_apply_instance_secret).bind(
-        *apply_secret.await_args.args,
-        **apply_secret.await_args.kwargs,
+        *apply_secret.await_args.args, **apply_secret.await_args.kwargs
     )
     return bound.arguments["secret_data"]
 
 
 def test_owner_matrix_user_id_from_email_matches_synapse_oidc_template() -> None:
     """Hosted owner MXIDs should match Synapse's OIDC email localpart mapping."""
-    from backend.routes.provisioner import _owner_matrix_user_id_from_email
+    from backend.services.provisioner_service import _owner_matrix_user_id_from_email
 
     assert (
-        _owner_matrix_user_id_from_email(
-            "Owner.User+Test@Example.COM",
-            instance_id="42",
-            base_domain="mindroom.chat",
-        )
+        _owner_matrix_user_id_from_email("Owner.User+Test@Example.COM", instance_id="42", base_domain="mindroom.chat")
         == "@owner.user+test:42.mindroom.chat"
     )
     assert (
-        _owner_matrix_user_id_from_email(
-            "_Owner=Test@example.com",
-            instance_id="42",
-            base_domain="mindroom.chat",
-        )
+        _owner_matrix_user_id_from_email("_Owner=Test@example.com", instance_id="42", base_domain="mindroom.chat")
         == "@=5fowner=3dtest:42.mindroom.chat"
     )
 
@@ -90,7 +81,7 @@ def test_owner_matrix_user_id_from_email_matches_synapse_oidc_template() -> None
 @pytest.mark.parametrize("stored_limit", ["not-a-number", object()])
 def test_matching_openrouter_metadata_treats_invalid_stored_limit_as_cache_miss(stored_limit: object) -> None:
     """Malformed advisory OpenRouter metadata should not block fresh provisioning."""
-    from backend.routes.provisioner import _matching_openrouter_metadata
+    from backend.services.provisioner_service import _matching_openrouter_metadata
 
     assert (
         _matching_openrouter_metadata(
@@ -108,7 +99,7 @@ def test_matching_openrouter_metadata_treats_invalid_stored_limit_as_cache_miss(
 @pytest.mark.asyncio
 async def test_provision_openrouter_key_revokes_superseded_stored_hash() -> None:
     """Replacing a stored OpenRouter key should revoke the superseded key hash."""
-    from backend.routes.provisioner import _provision_openrouter_key
+    from backend.services.provisioner_service import _provision_openrouter_key
 
     sb = MagicMock()
     sb.table().update().eq().execute.return_value = Mock()
@@ -121,9 +112,11 @@ async def test_provision_openrouter_key_revokes_superseded_stored_hash() -> None
     )
 
     with (
-        patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
-        patch("backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True),
-        patch("backend.routes.provisioner.delete_openrouter_key", create=True) as delete_key,
+        patch(
+            "backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True
+        ),
+        patch("backend.services.provisioner_service.create_openrouter_key", return_value=created_key, create=True),
+        patch("backend.services.provisioner_service.delete_openrouter_key", create=True) as delete_key,
     ):
         result = await _provision_openrouter_key(
             sb=sb,
@@ -145,7 +138,7 @@ async def test_provision_openrouter_key_revokes_superseded_stored_hash() -> None
 @pytest.mark.asyncio
 async def test_provision_openrouter_key_logs_superseded_hash_revoke_failure(caplog: pytest.LogCaptureFixture) -> None:
     """Superseded key deletion failure should be visible but not lose the replacement key."""
-    from backend.routes.provisioner import _provision_openrouter_key
+    from backend.services.provisioner_service import _provision_openrouter_key
 
     sb = MagicMock()
     sb.table().update().eq().execute.return_value = Mock()
@@ -159,10 +152,12 @@ async def test_provision_openrouter_key_logs_superseded_hash_revoke_failure(capl
 
     with (
         caplog.at_level(logging.WARNING),
-        patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
-        patch("backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True),
         patch(
-            "backend.routes.provisioner.delete_openrouter_key",
+            "backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True
+        ),
+        patch("backend.services.provisioner_service.create_openrouter_key", return_value=created_key, create=True),
+        patch(
+            "backend.services.provisioner_service.delete_openrouter_key",
             side_effect=OpenRouterError("OpenRouter key deletion failed"),
             create=True,
         ),
@@ -239,50 +234,54 @@ class TestProvisionerEndpoints:
     @pytest.fixture
     def mock_kubectl(self):
         """Mock kubectl commands."""
-        with patch("backend.routes.provisioner.run_kubectl") as mock:
+        with patch("backend.services.provisioner_service.run_kubectl") as mock:
             mock.return_value = (0, "Success", "")  # Default success response
             yield mock
 
     @pytest.fixture
     def mock_helm(self):
         """Mock helm commands."""
-        with patch("backend.routes.provisioner.run_helm") as mock:
+        with patch("backend.services.provisioner_service.run_helm") as mock:
             mock.return_value = (0, "Success", "")  # Default success response
             yield mock
 
     @pytest.fixture
     def mock_check_deployment(self):
         """Mock deployment existence check."""
-        with patch("backend.routes.provisioner.check_deployment_exists") as mock:
+        with patch("backend.services.provisioner_service.check_deployment_exists") as mock:
             mock.return_value = True  # Default exists
             yield mock
 
     @pytest.fixture
     def mock_wait_for_deployment(self):
         """Mock deployment readiness check."""
-        with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock:
+        with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock:
             mock.return_value = True  # Default ready
             yield mock
 
     @pytest.fixture
     def mock_update_status(self):
         """Mock update instance status."""
-        with patch("backend.routes.provisioner.update_instance_status") as mock:
+        with patch("backend.services.provisioner_service.update_instance_status") as mock:
             mock.return_value = True  # Default success
             yield mock
 
     @pytest.fixture
     def valid_auth_header(self):
         """Get valid authorization header."""
-        # Need to patch where it's used, not where it's defined
-        with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-api-key"):
+        # Need to patch where it's used, not where it's defined: the route checks
+        # the bearer token and the service derives stable instance secrets from it.
+        with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-api-key"),
+            patch("backend.services.provisioner_service.PROVISIONER_API_KEY", "test-api-key"),
+        ):
             yield {"Authorization": "Bearer test-api-key"}
 
     @pytest.fixture
     def mock_config(self):
         """Mock configuration values."""
         with patch.multiple(
-            "backend.routes.provisioner",
+            "backend.services.provisioner_service",
             INSTANCE_BASE_DOMAIN="mindroom.test",
             PLATFORM_DOMAIN="mindroom.test",
             SUPABASE_URL="https://supabase.test",
@@ -352,8 +351,10 @@ class TestProvisionerEndpoints:
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
         with (
-            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
-            patch("backend.routes.provisioner.create_openrouter_key", create=True) as create_key,
+            patch(
+                "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
+            ) as apply_secret,
+            patch("backend.services.provisioner_service.create_openrouter_key", create=True) as create_key,
         ):
             apply_secret.return_value = "hash"
             response = client.post(
@@ -381,7 +382,9 @@ class TestProvisionerEndpoints:
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
-        with patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret:
+        with patch(
+            "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
+        ) as apply_secret:
             apply_secret.return_value = "hash"
             response = client.post(
                 "/system/provision",
@@ -418,9 +421,15 @@ class TestProvisionerEndpoints:
         )
 
         with (
-            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
-            patch("backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True),
-            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+            patch(
+                "backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY",
+                "sk-or-v1-management",
+                create=True,
+            ),
+            patch("backend.services.provisioner_service.create_openrouter_key", return_value=created_key, create=True),
+            patch(
+                "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
+            ) as apply_secret,
         ):
             apply_secret.return_value = "hash"
             response = client.post(
@@ -459,11 +468,17 @@ class TestProvisionerEndpoints:
         )
 
         with (
-            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
             patch(
-                "backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True
+                "backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY",
+                "sk-or-v1-management",
+                create=True,
+            ),
+            patch(
+                "backend.services.provisioner_service.create_openrouter_key", return_value=created_key, create=True
             ) as create_key,
-            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+            patch(
+                "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
+            ) as apply_secret,
         ):
             apply_secret.return_value = "hash"
             response = client.post(
@@ -503,13 +518,19 @@ class TestProvisionerEndpoints:
         )
 
         with (
-            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
-            patch("backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True),
             patch(
-                "backend.routes.provisioner._persist_openrouter_key_metadata",
+                "backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY",
+                "sk-or-v1-management",
+                create=True,
+            ),
+            patch("backend.services.provisioner_service.create_openrouter_key", return_value=created_key, create=True),
+            patch(
+                "backend.services.provisioner_service._persist_openrouter_key_metadata",
                 side_effect=RuntimeError("supabase unavailable"),
             ),
-            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+            patch(
+                "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
+            ) as apply_secret,
         ):
             apply_secret.return_value = "hash"
             response = client.post(
@@ -537,8 +558,10 @@ class TestProvisionerEndpoints:
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
         with (
-            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "", create=True),
-            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+            patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "", create=True),
+            patch(
+                "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
+            ) as apply_secret,
         ):
             response = client.post(
                 "/system/provision",
@@ -574,11 +597,17 @@ class TestProvisionerEndpoints:
         )
 
         with (
-            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
             patch(
-                "backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True
+                "backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY",
+                "sk-or-v1-management",
+                create=True,
+            ),
+            patch(
+                "backend.services.provisioner_service.create_openrouter_key", return_value=created_key, create=True
             ) as create_key,
-            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+            patch(
+                "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
+            ) as apply_secret,
         ):
             apply_secret.return_value = "hash"
             response = client.post(
@@ -618,13 +647,12 @@ class TestProvisionerEndpoints:
         accounts_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = Mock(
             data=[{"email": "Owner.User+Test@example.com"}]
         )
-        mock_supabase.table.side_effect = lambda table: {
-            "accounts": accounts_table,
-            "instances": instances_table,
-        }[table]
+        mock_supabase.table.side_effect = lambda table: {"accounts": accounts_table, "instances": instances_table}[
+            table
+        ]
 
         with patch.multiple(
-            "backend.routes.provisioner",
+            "backend.services.provisioner_service",
             INSTANCE_MATRIX_OIDC_ENABLED="true",
             INSTANCE_MATRIX_OIDC_ISSUER="https://api.mindroom.test/matrix-oidc",
             INSTANCE_MATRIX_OIDC_CLIENT_ID="mindroom-synapse",

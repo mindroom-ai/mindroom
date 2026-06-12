@@ -554,10 +554,7 @@ class TestWebhookEndpoints:
     ):
         """Stripe price metadata must use the current tier field."""
         subscription_data = self._create_subscription_data()
-        subscription_data["items"]["data"][0]["price"]["metadata"] = {
-            "plan": "byok",
-            "billing_cycle": "monthly",
-        }
+        subscription_data["items"]["data"][0]["price"]["metadata"] = {"plan": "byok", "billing_cycle": "monthly"}
         event = self._create_stripe_event("customer.subscription.created", subscription_data)
         mock_stripe_signature.return_value = event
 

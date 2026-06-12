@@ -16,15 +16,20 @@ from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 
 @dataclass(frozen=True)
-class ResolvedToolConfig:
-    """Resolved authored tool config after defaults and per-agent overrides merge."""
+class EffectiveToolConfig:
+    """Effective authored tool config after defaults and per-agent overrides merge."""
 
     name: str
     tool_config_overrides: dict[str, object]
+    defer: bool = False
+    initial: bool = False
+    authored_order: int = 0
+    authored_name: str | None = None
 
 
 AgentLearningMode = Literal["always", "agentic"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
+_TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 
 
 class StreamingConfig(BaseModel):
@@ -58,14 +63,12 @@ class CoalescingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     debounce_ms: int = Field(
-        default=300,
+        default=1000,
         ge=0,
-        description="Sliding debounce window in milliseconds for live message coalescing",
-    )
-    upload_grace_ms: int = Field(
-        default=500,
-        ge=0,
-        description="Upload grace window in milliseconds for late media joining a text-first live batch",
+        description=(
+            "Sliding window in milliseconds that a media-tailed live batch waits for more "
+            "attachments or a trailing caption; batches ending in text dispatch immediately"
+        ),
     )
 
 
@@ -92,10 +95,21 @@ def _normalize_tool_entry_overrides(
 def _coerce_named_tool_entry(data: dict[object, object]) -> dict[str, object]:
     """Normalize the explicit ``{name: ..., overrides: ...}`` form."""
     normalized = cast("dict[str, object]", dict(data))
-    normalized["overrides"] = _normalize_tool_entry_overrides(
+    extra_keys = set(normalized) - {"name", "overrides", *_TOOL_CONFIG_CONTROL_KEYS}
+    if extra_keys:
+        msg = "Tool entries with a name key may only include name, overrides, defer, and initial"
+        raise ValueError(msg)
+    overrides = _normalize_tool_entry_overrides(
         normalized.get("overrides"),
         error_message="Tool entry overrides must be a mapping",
     )
+    misplaced_flags = sorted(set(overrides) & _TOOL_CONFIG_CONTROL_KEYS)
+    if misplaced_flags:
+        msg = "Tool control flags must be declared at the tool-entry level, not inside overrides: " + ", ".join(
+            misplaced_flags,
+        )
+        raise ValueError(msg)
+    normalized["overrides"] = overrides
     return normalized
 
 
@@ -113,12 +127,17 @@ def _coerce_single_key_tool_entry(data: dict[object, object]) -> dict[str, objec
         msg = "Tool entry names must be strings"
         raise ValueError(msg)  # noqa: TRY004 - keep Pydantic validation errors structured
 
+    normalized_overrides = _normalize_tool_entry_overrides(
+        overrides,
+        error_message=f"Tool '{name}' overrides must be a mapping",
+    )
+    control_flags = {
+        key: normalized_overrides.pop(key) for key in tuple(_TOOL_CONFIG_CONTROL_KEYS) if key in normalized_overrides
+    }
     return {
         "name": name,
-        "overrides": _normalize_tool_entry_overrides(
-            overrides,
-            error_message=f"Tool '{name}' overrides must be a mapping",
-        ),
+        "overrides": normalized_overrides,
+        **control_flags,
     }
 
 
@@ -129,6 +148,8 @@ class ToolConfigEntry(BaseModel):
 
     name: str
     overrides: dict[str, object] = Field(default_factory=dict)
+    defer: bool = False
+    initial: bool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -158,33 +179,25 @@ class ToolConfigEntry(BaseModel):
             raise ValueError(msg)
         return stripped
 
+    @model_validator(mode="after")
+    def validate_lazy_flags(self) -> Self:
+        """Reject redundant initial entries that are not deferred."""
+        if self.initial and not self.defer:
+            msg = "Tool entry initial=true requires defer=true"
+            raise ValueError(msg)
+        return self
+
     @model_serializer(mode="plain")
     def serialize(self) -> object:
         """Preserve the compact YAML form when no overrides are set."""
-        return self.name if not self.overrides else {self.name: self.overrides}
-
-
-class ToolkitDefinition(BaseModel):
-    """One dynamically loadable toolkit definition."""
-
-    model_config = ConfigDict(validate_assignment=True)
-
-    description: str = Field(default="", description="Short description shown to agents for this toolkit")
-    tools: list[ToolConfigEntry] = Field(
-        default_factory=list,
-        description="Tool entries dynamically loadable together as one toolkit",
-    )
-
-    @property
-    def tool_names(self) -> list[str]:
-        """Return authored toolkit tool names without inline override details."""
-        return [entry.name for entry in self.tools]
-
-    @field_validator("tools")
-    @classmethod
-    def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
-        """Ensure each toolkit tool appears at most once."""
-        return validate_unique_tool_entries(tools, scope_name="toolkit")
+        if not self.overrides and not self.defer and not self.initial:
+            return self.name
+        data = dict(self.overrides)
+        if self.defer:
+            data["defer"] = self.defer
+        if self.initial:
+            data["initial"] = self.initial
+        return {self.name: data}
 
 
 def validate_unique_tool_entries(
@@ -443,7 +456,12 @@ class DefaultsConfig(BaseModel):
     @classmethod
     def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
         """Ensure each default tool appears at most once."""
-        return validate_unique_tool_entries(tools, scope_name="default")
+        validated = validate_unique_tool_entries(tools, scope_name="default")
+        lazy_entries = [entry.name for entry in validated if entry.model_fields_set & {"defer", "initial"}]
+        if lazy_entries:
+            msg = "defaults.tools does not support defer or initial flags: " + ", ".join(lazy_entries)
+            raise ValueError(msg)
+        return validated
 
     @field_validator("worker_grantable_credentials")
     @classmethod

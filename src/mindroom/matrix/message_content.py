@@ -24,6 +24,9 @@ logger = get_logger(__name__)
 _mxc_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
 _cache_ttl = 3600.0  # 1 hour TTL
 _mxc_cache_max_entries = 500
+_mxc_text_max_bytes = 2 * 1024 * 1024
+_mxc_cache_max_bytes = 16 * 1024 * 1024
+_mxc_cache_total_bytes = 0
 
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
@@ -84,6 +87,50 @@ def _sidecar_mxc_url(content: dict[str, Any]) -> str | None:
     return file_url if isinstance(file_url, str) else None
 
 
+def _text_size_bytes(text: str) -> int:
+    return len(text.encode("utf-8", errors="replace"))
+
+
+def _mxc_text_exceeds_limit(text: str) -> bool:
+    return _text_size_bytes(text) > _mxc_text_max_bytes
+
+
+def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool:
+    if len(payload) <= _mxc_text_max_bytes:
+        return False
+    logger.warning(
+        "mxc_text_payload_exceeds_byte_limit",
+        mxc_url=mxc_url,
+        stage=stage,
+        size_bytes=len(payload),
+        limit_bytes=_mxc_text_max_bytes,
+    )
+    return True
+
+
+def _cache_mxc_text(mxc_url: str, text: str, timestamp: float) -> None:
+    global _mxc_cache_total_bytes
+
+    size_bytes = _text_size_bytes(text)
+    if size_bytes > _mxc_text_max_bytes:
+        logger.warning(
+            "mxc_text_cache_entry_exceeds_byte_limit",
+            mxc_url=mxc_url,
+            size_bytes=size_bytes,
+            limit_bytes=_mxc_text_max_bytes,
+        )
+        return
+    if not _mxc_cache:
+        _mxc_cache_total_bytes = 0
+    if mxc_url in _mxc_cache:
+        previous_text, _ = _mxc_cache[mxc_url]
+        _mxc_cache_total_bytes -= _text_size_bytes(previous_text)
+    _mxc_cache[mxc_url] = (text, timestamp)
+    _mxc_cache_total_bytes += size_bytes
+    _mxc_cache.move_to_end(mxc_url)
+    _clean_expired_cache()
+
+
 async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
     client: nio.AsyncClient,
     mxc_url: str,
@@ -104,15 +151,18 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         The downloaded text content, or None if download failed
 
     """
+    global _mxc_cache_total_bytes
+
     # Check cache first
     current_time = time.time()
     if mxc_url in _mxc_cache:
         content, timestamp = _mxc_cache[mxc_url]
-        if current_time - timestamp < _cache_ttl:
+        if current_time - timestamp < _cache_ttl and not _mxc_text_exceeds_limit(content):
             _mxc_cache.move_to_end(mxc_url)
             logger.debug("mxc_cache_hit", mxc_url=mxc_url)
             return content
         # Expired, remove from cache
+        _mxc_cache_total_bytes -= _text_size_bytes(content)
         del _mxc_cache[mxc_url]
 
     if event_cache is not None and room_id is not None:
@@ -122,9 +172,16 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
             logger.exception("Failed to read durable MXC text cache")
         else:
             if cached_text is not None:
-                _mxc_cache[mxc_url] = (cached_text, current_time)
-                _mxc_cache.move_to_end(mxc_url)
-                _clean_expired_cache()
+                if _mxc_text_exceeds_limit(cached_text):
+                    logger.warning(
+                        "durable_mxc_text_cache_entry_exceeds_byte_limit",
+                        mxc_url=mxc_url,
+                        room_id=room_id,
+                        size_bytes=_text_size_bytes(cached_text),
+                        limit_bytes=_mxc_text_max_bytes,
+                    )
+                    return None
+                _cache_mxc_text(mxc_url, cached_text, current_time)
                 logger.debug("mxc_text_cache_hit", mxc_url=mxc_url, room_id=room_id)
                 return cached_text
 
@@ -145,6 +202,11 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         if not isinstance(response, nio.DownloadResponse):
             logger.error("mxc_download_failed", mxc_url=mxc_url, error=str(response))
             return None
+        if not isinstance(response.body, bytes):
+            logger.error("mxc_download_returned_non_bytes_payload", mxc_url=mxc_url)
+            return None
+        if _mxc_bytes_exceed_limit(mxc_url, response.body, stage="download"):
+            return None
 
         # Handle encryption if needed
         if file_info and "key" in file_info:
@@ -160,6 +222,11 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
             except Exception:
                 logger.exception("Failed to decrypt attachment")
                 return None
+            if not isinstance(text_bytes, bytes):
+                logger.error("mxc_decrypt_returned_non_bytes_payload", mxc_url=mxc_url)
+                return None
+            if _mxc_bytes_exceed_limit(mxc_url, text_bytes, stage="decrypt"):
+                return None
         else:
             text_bytes = response.body
 
@@ -170,17 +237,13 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
             logger.exception("Downloaded content is not valid UTF-8 text")
             return None
         # Cache the result
-        _mxc_cache[mxc_url] = (decoded_text, time.time())
-        _mxc_cache.move_to_end(mxc_url)
+        _cache_mxc_text(mxc_url, decoded_text, time.time())
         logger.debug("mxc_content_cached", mxc_url=mxc_url)
         if event_cache is not None and room_id is not None:
             try:
                 await event_cache.store_mxc_text(room_id, mxc_url, decoded_text)
             except Exception:
                 logger.exception("Failed to persist durable MXC text cache")
-
-        if len(_mxc_cache) > _mxc_cache_max_entries:
-            _clean_expired_cache()
 
     except Exception:
         logger.exception("Error downloading MXC content")
@@ -343,17 +406,25 @@ async def _resolve_canonical_content(
 
 def _clean_expired_cache() -> None:
     """Remove expired entries, then evict oldest live entries until within the LRU bound."""
+    global _mxc_cache_total_bytes
+
     current_time = time.time()
     expired_keys = [key for key, (_, timestamp) in _mxc_cache.items() if current_time - timestamp >= _cache_ttl]
     for key in expired_keys:
+        text, _ = _mxc_cache[key]
+        _mxc_cache_total_bytes -= _text_size_bytes(text)
         del _mxc_cache[key]
     evicted_entries = 0
-    while len(_mxc_cache) > _mxc_cache_max_entries:
-        _mxc_cache.popitem(last=False)
+    if not _mxc_cache:
+        _mxc_cache_total_bytes = 0
+    while len(_mxc_cache) > _mxc_cache_max_entries or _mxc_cache_total_bytes > _mxc_cache_max_bytes:
+        _, (evicted_text, _) = _mxc_cache.popitem(last=False)
+        _mxc_cache_total_bytes -= _text_size_bytes(evicted_text)
         evicted_entries += 1
     if expired_keys or evicted_entries:
         logger.debug(
             "mxc_cache_cleaned",
             expired_entries=len(expired_keys),
             evicted_entries=evicted_entries,
+            cache_bytes=_mxc_cache_total_bytes,
         )

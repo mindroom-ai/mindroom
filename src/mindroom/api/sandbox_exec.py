@@ -21,6 +21,7 @@ from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
+    SHARED_CREDENTIALS_PATH_ENV,
     credentials_encryption_key_value,
     is_trusted_tool_runtime_env_file_name,
     sandbox_runner_runtime_state_env,
@@ -44,7 +45,7 @@ _WORKSPACE_ENV_HOOK_MAX_VALUE_BYTES = 32 * 1024
 _WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES = 128 * 1024
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
-EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
+EXECUTION_ENV_TOOL_NAMES = constants.EXECUTION_ENV_TOOL_NAMES
 
 
 def _runner_execution_mode(runtime_paths: RuntimePaths) -> str:
@@ -153,18 +154,40 @@ def request_execution_env(
     """Return the effective runtime-scoped execution env for one request."""
     if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return {}
-    if tool_name == "shell":
-        source_env = execution_env or runtime_paths.process_env
-        return dict(
-            constants.sandbox_shell_execution_runtime_env_values(
-                runtime_paths,
-                extra_env_passthrough=extra_env_passthrough,
-                process_env=source_env,
-            ),
-        )
+    # Agent Vault egress is composed from the worker pod's own token + endpoint,
+    # so it is always overlaid here at the worker (never shipped from the
+    # primary, which has neither the token nor the endpoint env).
+    agent_vault_env = constants.worker_proxy_execution_env({**os.environ, **runtime_paths.process_env})
     if execution_env:
-        return dict(execution_env)
-    return dict(constants.execution_tool_runtime_env_values(runtime_paths))
+        protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
+        env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
+        env.update(agent_vault_env)
+        return env
+    shell_process_env = (
+        runtime_paths.process_env
+        if runner_uses_dedicated_worker(runtime_paths)
+        else {**os.environ, **runtime_paths.process_env}
+    )
+    return constants.build_execution_tool_env(
+        tool_name,
+        runtime_paths,
+        extra_env_passthrough=extra_env_passthrough,
+        shell_process_env=shell_process_env,
+    )
+
+
+def _protected_dedicated_worker_execution_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return execution env names that a dedicated worker must keep worker-local."""
+    if not runner_uses_dedicated_worker(runtime_paths):
+        return frozenset()
+
+    protected_names = {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", SHARED_CREDENTIALS_PATH_ENV}
+    protected_names.update(
+        name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")
+    )
+    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
+        protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
+    return frozenset(protected_names)
 
 
 def tool_runtime_paths_with_request_env(
@@ -176,9 +199,11 @@ def tool_runtime_paths_with_request_env(
     trusted_env_overlay: Mapping[str, str] | None = None,
 ) -> RuntimePaths:
     """Return runtime paths overlaid with one tool-request env snapshot."""
+    protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
+    overlay_env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
     process_env = dict(constants.trusted_tool_runtime_env_values(runtime_paths)) if include_base_execution_env else {}
     process_env.update(sandbox_runner_runtime_state_env(runtime_paths.process_env))
-    process_env.update(execution_env)
+    process_env.update(overlay_env)
     env_file_values = (
         {
             key: value
@@ -188,6 +213,18 @@ def tool_runtime_paths_with_request_env(
         if include_base_execution_env
         else {}
     )
+    if protected_env_names:
+        process_env.update(
+            {key: runtime_paths.process_env[key] for key in protected_env_names if key in runtime_paths.process_env},
+        )
+        env_file_values.update(
+            {
+                key: runtime_paths.env_file_values[key]
+                for key in protected_env_names
+                if key in runtime_paths.env_file_values
+            },
+        )
+    env_file_values.update(overlay_env)
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
         process_env.update(trusted_env_overlay)
@@ -237,6 +274,15 @@ def generic_subprocess_env() -> dict[str, str]:
     """Build the baseline subprocess env for non-worker execution."""
     env = _subprocess_passthrough_env()
     env.update(vendor_telemetry_env_values())
+    for key in ("HOME", "PATH", "VIRTUAL_ENV"):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    python_path_parts = [str(_project_src_path())]
+    existing_python_path = os.environ.get("PYTHONPATH", "")
+    if existing_python_path:
+        python_path_parts.append(existing_python_path)
+    env["PYTHONPATH"] = os.pathsep.join(python_path_parts)
     return env
 
 

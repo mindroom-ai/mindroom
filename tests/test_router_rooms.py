@@ -356,6 +356,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
         return result
 
     monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
@@ -399,7 +400,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
             monkeypatch.setattr(bot, "sync_forever", mock_sync_forever)
 
         # Update config
-        updated = await orchestrator.update_config()
+        updated = await orchestrator.config_reload.update_config()
         assert updated  # Should return True since router needs restart
 
         # Router should be recreated with new rooms

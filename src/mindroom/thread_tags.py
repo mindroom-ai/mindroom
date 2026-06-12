@@ -23,6 +23,19 @@ _MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
 _TAG_NAME_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
 
+__all__ = [
+    "THREAD_TAGS_EVENT_TYPE",
+    "ThreadTagRecord",
+    "ThreadTagsError",
+    "ThreadTagsListing",
+    "ThreadTagsState",
+    "get_thread_tags",
+    "list_tagged_threads",
+    "normalize_tag_name",
+    "remove_thread_tag",
+    "set_thread_tag",
+]
+
 # ARCHITECTURE DECISION: One State Event Per Thread Tag
 #
 # Each `(thread_root_id, tag)` pair is stored as its own
@@ -716,7 +729,7 @@ async def _assert_thread_tags_write_allowed(
     )
 
 
-async def _get_thread_tags(
+async def get_thread_tags(
     client: nio.AsyncClient,
     room_id: str,
     thread_root_id: str,
@@ -785,7 +798,7 @@ async def set_thread_tag(
             error_prefix="Failed to write thread tags state",
         )
 
-        verified_state = await _get_thread_tags(
+        verified_state = await get_thread_tags(
             client,
             room_id,
             normalized_thread_root_id,
@@ -828,7 +841,7 @@ async def remove_thread_tag(
 
     remove_written = False
     for _ in range(_MAX_THREAD_TAG_WRITE_ATTEMPTS):
-        existing_state = await _get_thread_tags(
+        existing_state = await get_thread_tags(
             client,
             room_id,
             normalized_thread_root_id,
@@ -854,7 +867,7 @@ async def remove_thread_tag(
         )
         remove_written = True
 
-        verified_state = await _get_thread_tags(
+        verified_state = await get_thread_tags(
             client,
             room_id,
             normalized_thread_root_id,

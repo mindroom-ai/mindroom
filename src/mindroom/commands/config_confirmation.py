@@ -341,12 +341,16 @@ async def handle_confirmation_reaction(
         pending_change: The pending configuration change
 
     """
+    authorization = bot.config.authorization
+    resolved_sender = authorization.resolve_alias(event.sender)
+
     # Only process reactions from the requester
-    if event.sender != pending_change.requester:
+    if resolved_sender != pending_change.requester:
         logger.debug(
             "Ignoring config reaction from non-requester",
             sender=event.sender,
             requester=pending_change.requester,
+            resolved_sender=resolved_sender,
         )
         return
 
@@ -370,20 +374,35 @@ async def handle_confirmation_reaction(
     )
 
     if reaction_key == "✅":
-        # User confirmed - apply the change
-        from mindroom.commands.config_commands import apply_config_change  # noqa: PLC0415
+        if not authorization.config_command_enabled:
+            response_text = "❌ Config command disabled."
+            logger.info(
+                "Config change rejected because command is disabled",
+                path=pending_change.config_path,
+                requester=event.sender,
+            )
+        elif resolved_sender not in authorization.global_users:
+            response_text = "❌ Admin only."
+            logger.info(
+                "Config change rejected because requester is not admin",
+                path=pending_change.config_path,
+                requester=event.sender,
+            )
+        else:
+            # User confirmed - apply the change
+            from mindroom.commands.config_commands import apply_config_change  # noqa: PLC0415
 
-        response_text = await apply_config_change(
-            pending_change.config_path,
-            pending_change.new_value,
-            runtime_paths=bot.runtime_paths,
-        )
+            response_text = await apply_config_change(
+                pending_change.config_path,
+                pending_change.new_value,
+                runtime_paths=bot.runtime_paths,
+            )
 
-        logger.info(
-            "Config change confirmed",
-            path=pending_change.config_path,
-            requester=event.sender,
-        )
+            logger.info(
+                "Config change confirmed",
+                path=pending_change.config_path,
+                requester=event.sender,
+            )
     else:
         # User cancelled
         response_text = "❌ Configuration change cancelled."

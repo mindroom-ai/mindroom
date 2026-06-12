@@ -77,7 +77,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.5
 
 defaults:
   tools: [scheduler]
@@ -127,7 +127,7 @@ mindroom run
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
 | **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
-| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands handled by the router |
+| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!model [name\|list\|reset]`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands handled by the router |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
@@ -166,7 +166,7 @@ mindroom run
 - [Image Messages](https://docs.mindroom.chat/images/) - Image analysis with vision models
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Context-scoped file and video handling
 - [Streaming Responses](https://docs.mindroom.chat/streaming/) - Progressive message edits with presence-based gating
-- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands
+- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!model [name|list|reset]`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
 - [Interactive Q&A](https://docs.mindroom.chat/interactive/) - Clickable multiple-choice questions via Matrix reactions
 - [Authorization](https://docs.mindroom.chat/authorization/) - User and room access control
 - [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Optional root Matrix Space for grouping managed rooms
@@ -387,7 +387,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.5
 
 defaults:
   tools: [scheduler]
@@ -908,7 +908,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
 | `MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS` | Wall-clock seconds allowed for live dispatch-safe Matrix thread reads before dispatch proceeds with degraded thread evidence | `1.0` |
-| `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner` or `kubernetes`) | `static_runner` |
+| `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 
 ### OpenAI-Compatible API
 
@@ -992,6 +992,11 @@ agents:
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0, file, or none)
+    memory_search:                 # Optional: Per-agent file-memory search override
+      mode: semantic               # keyword or semantic; omitted fields inherit memory.search
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into each freshly built agent instance
       - SOUL.md
@@ -1103,6 +1108,8 @@ defaults:
 MindRoom uses `defaults.thread_summary_temperature` for automatic thread summaries on providers that support runtime temperature overrides.
 Set it to `null` to omit the field and use provider defaults.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
+Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
+Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
 Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
@@ -1147,6 +1154,11 @@ memory:
   file:                            # File-backed memory settings (when backend: file)
     path: null                     # Optional: fallback root for file memory paths
     max_entrypoint_lines: 200      # Default: 200 (max lines preloaded from MEMORY.md)
+  search:                          # File-backed memory search settings
+    mode: keyword                  # Default: keyword (keyword or semantic)
+    include:                       # Root-relative globs below the effective file-memory root
+      - memory/**/*.md             # Default: dated daily memory files
+    include_entrypoint: false      # Default: false (MEMORY.md is already preloaded)
   auto_flush:                      # Background memory auto-flush (file backend only)
     enabled: false                 # Default: false (enable background flush worker)
     flush_interval_seconds: 1800   # Default: 1800 (loop interval)
@@ -1227,6 +1239,7 @@ authorization:
   global_users: []                 # Users with access to all rooms
   room_permissions: {}             # Keys: room ID (!id), full alias (#alias:domain), or managed room key (alias)
   default_room_access: false       # Default: false
+  config_command_enabled: false    # Enable !config for global admin users; default: false
   aliases: {}                      # Map canonical Matrix user IDs to bridge aliases (see authorization docs)
   agent_reply_permissions: {}      # Per-agent/team/router (or '*') reply allowlists; supports globs like '*:example.com'
 
@@ -1242,6 +1255,11 @@ rooms:
 # Keys are room aliases, values are model names from the models section.
 # Example: room_models: {dev: sonnet, lobby: gpt4o}
 room_models: {}
+
+# Room-specific automatic thread summary model overrides (optional)
+# Keys are room aliases or raw Matrix room IDs, values are model names from the models section.
+# Example: room_thread_summary_models: {lobby: haiku}
+room_thread_summary_models: {}
 
 # Non-MindRoom bot accounts to exclude from multi-human detection (optional)
 # These accounts won't trigger the mention requirement in threads
@@ -1395,9 +1413,9 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - [Agents](https://docs.mindroom.chat/configuration/agents/) - Configure individual AI agents
 - [Models](https://docs.mindroom.chat/configuration/models/) - Configure AI model providers
 - [Teams](https://docs.mindroom.chat/configuration/teams/) - Configure multi-agent collaboration
-- [Toolkits](https://docs.mindroom.chat/configuration/toolkits/) - Configure dynamic tool bundles that agents load on demand
 - [Cultures](https://docs.mindroom.chat/configuration/cultures/) - Configure shared agent cultures
 - [Router](https://docs.mindroom.chat/configuration/router/) - Configure message routing
+- [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Configure optional tools that agents load on demand
 - [Memory](https://docs.mindroom.chat/memory/) - Configure memory providers and behavior
 - [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure file-backed knowledge bases
 - [Voice](https://docs.mindroom.chat/voice/) - Configure speech-to-text voice processing
@@ -1417,9 +1435,11 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/))
 - `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](https://docs.mindroom.chat/configuration/agents/))
 - `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent
+- `memory.search` controls file-backed `search_memories`, and `agents.<name>.memory_search` overrides it per agent
 - `memory.backend: none`, `memory: none`, or `agents.<name>.memory_backend: none` disables built-in durable memory for the effective agent without disabling Agno Learning
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
+- `authorization.config_command_enabled` defaults to `false`; when set to `true`, `!config` still requires `global_users`
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
@@ -1432,7 +1452,8 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 
 # Agent Configuration
 
-Agents are the core building blocks of MindRoom. Each agent is a specialized AI actor with specific capabilities.
+Agents are the core building blocks of MindRoom.
+Each agent is a specialized AI actor with specific capabilities.
 
 ## Basic Agent
 
@@ -1574,6 +1595,7 @@ agents:
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"`, `"file"`, or `"none"`). Inherits from global `memory.backend` when omitted |
+| `memory_search` | object | `null` | File-memory search override for this agent. Supports `mode`, `include`, and `include_entrypoint`; omitted fields inherit from global `memory.search` |
 | `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` defines which requester boundary gets a separate private instance of the agent's state. Private agents must not set `worker_scope`. Internally, MindRoom reuses that same requester boundary for worker execution, but `private.per` is still a different public config concept from `worker_scope`. `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root without overwriting existing files, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds PrivateAgentKnowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge, and private agents cannot participate in teams yet |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
@@ -1598,6 +1620,8 @@ Per-agent fields with a `null` default inherit from the `defaults` section at ru
 Per-agent values override them.
 `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent.
 Use `memory_backend: none` for stateless agents that should skip prompt memory lookup, automatic memory persistence, and the explicit `memory` tool.
+`agents.<name>.memory_search` can override `mode`, `include`, and `include_entrypoint` when the effective memory backend is `file`.
+Unset `memory_search` fields inherit from top-level `memory.search`.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
@@ -1754,13 +1778,22 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 ## Worker Routing
 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
-When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
+When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
+Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
+Some local-only tools stay in the primary runtime even when listed: `attachments`, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant`.
+Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
+Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
+Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
+Config-adjacent `.env` files are intentionally masked as files inside those Docker workers.
+A filtered public startup-runtime env payload can still propagate from exported env vars and allowed `.env` values.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
-The shared-only integrations require `worker_scope` unset or `shared`.
+Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
 That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
 OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
-Separately, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant` always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
+Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
+`gmail`, `google_calendar`, `google_drive`, and `google_sheets` also always stay local.
 `spotify` can still be proxied through the sandbox.
+The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 The supported `worker_scope` values are:
 
@@ -1838,6 +1871,11 @@ agents:
     tools: [file, shell]
     worker_tools: [file, shell]
     memory_backend: file
+    memory_search:
+      mode: semantic
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
     private:
       per: user
       root: mind_data
@@ -1958,9 +1996,11 @@ The normal Matrix and OpenAI-compatible reply paths build fresh agent instances 
 
 ## Agent Delegation
 
-Agents can delegate tasks to other agents using the `delegate_to` field. When configured, a delegation tool is automatically added to the agent — no need to include `"delegate"` in the `tools` list.
+Agents can delegate tasks to other agents using the `delegate_to` field.
+When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
-The delegated agent runs as a fresh, one-shot instance with no shared session or history. It executes the task and returns its response as the tool result.
+The delegated agent runs as a fresh, one-shot instance with no shared session or history.
+It executes the task and returns its response as the tool result.
 
 ```yaml
 agents:
@@ -2000,7 +2040,8 @@ Agent and team names must be distinct — the same key cannot appear in both `ag
 
 ## Defaults
 
-The `defaults` section sets fallback values for all agents. Any agent that omits a setting inherits the value from here.
+The `defaults` section sets fallback values for all agents.
+Any agent that omits a setting inherits the value from here.
 
 ```yaml
 defaults:
@@ -2055,6 +2096,7 @@ Models define the AI providers and model IDs used by agents.
 ## Supported Providers
 
 - `anthropic` - Claude models (Anthropic)
+- `bedrock_claude` - Anthropic Claude models on Amazon Bedrock
 - `azure` - OpenAI models through Azure OpenAI deployments
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT subscription login
@@ -2094,10 +2136,16 @@ models:
     id: claude-haiku-4-5
     context_window: 200000
 
+  # Anthropic Claude on Amazon Bedrock
+  bedrock_opus:
+    provider: bedrock_claude
+    id: anthropic.claude-opus-4-8
+    context_window: 1000000
+
   # OpenAI
   gpt:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.5
 
   # Azure OpenAI
   azure:
@@ -2205,6 +2253,24 @@ Set `context_window` to the limit of your deployment when you know it.
 Set `AZURE_OPENAI_API_VERSION` only when you need to override Agno's default API version.
 For starter config generation, use `mindroom config init --provider azure`.
 
+## Amazon Bedrock Claude
+
+Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
+MindRoom uses Agno's AWS Bedrock Claude model wrapper and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
+Use Opus when you want the highest Claude tier available through Bedrock.
+
+```yaml
+models:
+  default:
+    provider: bedrock_claude
+    id: anthropic.claude-opus-4-8
+    context_window: 1000000
+```
+
+MindRoom reads AWS settings from the config-adjacent `.env` file, exported environment, local AWS profile, or runtime IAM role.
+For starter config generation, use `mindroom config init --provider bedrock_claude`.
+
 ## Context Window
 
 When `context_window` is set, MindRoom uses it to budget persisted replay and required destructive compaction.
@@ -2261,6 +2327,18 @@ GROQ_API_KEY=...
 OPENROUTER_API_KEY=...
 CEREBRAS_API_KEY=...
 DEEPSEEK_API_KEY=...
+```
+
+For Amazon Bedrock Claude, use standard AWS credential resolution:
+
+```bash
+AWS_REGION=us-east-1
+# Optional static credentials:
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_SESSION_TOKEN=...
+# Optional local profile instead:
+AWS_PROFILE=...
 ```
 
 For Ollama, you can also set:
@@ -2551,7 +2629,7 @@ The router exclusively handles all commands:
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
-- `!config <operation>` - Manage configuration
+- `!config <operation>` - Manage configuration when explicitly enabled for global admins
 
 Even in single-responder rooms, commands are always processed by the router.
 
@@ -2663,178 +2741,6 @@ When one human and one agent or team are already talking in a thread, continuing
 Once a thread has multiple human users or multiple agent/team participants, tag the agents or teams you want next.
 In a new untagged message, automatic routing can still choose an agent or team when that is appropriate.
 
-# Toolkit Configuration
-
-Dynamic toolkits are groups of tools that agents can load and unload at runtime.
-Define toolkit bundles in the top-level `toolkits` section and grant agents access via `allowed_toolkits` and `initial_toolkits`.
-
-See [Dynamic Toolkits](https://docs.mindroom.chat/tools/dynamic-toolkits/) for the user-facing guide covering how agents interact with toolkits at runtime.
-
-## Top-Level `toolkits` Section
-
-```yaml
-toolkits:
-  devops:
-    description: Docker, AWS, and GitHub tools for infrastructure work
-    tools:
-      - docker
-      - aws_lambda
-      - github
-  research:
-    description: Web search and academic paper tools
-    tools:
-      - duckduckgo
-      - arxiv
-      - wikipedia
-  data:
-    description: Data analysis and visualization
-    tools:
-      - pandas
-      - csv
-      - visualization
-      - sql:
-          db_url: postgresql://localhost/analytics
-```
-
-Each toolkit has:
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `description` | string | `""` | Short description shown to agents when they call `list_toolkits()` |
-| `tools` | list | `[]` | Tool entries in the same format as agent `tools` (plain strings or single-key dicts with inline config overrides) |
-
-## Per-Agent Settings
-
-Agents opt into dynamic toolkits with two fields:
-
-```yaml
-agents:
-  assistant:
-    display_name: Assistant
-    role: A general-purpose helper
-    model: sonnet
-    tools: [file, shell]
-    allowed_toolkits: [devops, research, data]
-    initial_toolkits: [research]
-    rooms: [lobby]
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `allowed_toolkits` | list | `[]` | Toolkit names this agent may load at runtime. Each name must match a key in the top-level `toolkits` section |
-| `initial_toolkits` | list | `[]` | Toolkits loaded automatically when a new session starts. Must be a subset of `allowed_toolkits`. These are sticky — the agent cannot unload them |
-
-When `allowed_toolkits` is non-empty, MindRoom automatically adds the `dynamic_tools` meta-toolkit to the agent.
-You do not need to add `dynamic_tools` to the agent's `tools` list.
-
-## Validation Rules
-
-MindRoom validates toolkit configuration at startup and rejects invalid configs with clear error messages.
-
-### Reference Validation
-
-- Every entry in `allowed_toolkits` and `initial_toolkits` must match a key in the top-level `toolkits` section.
-- `initial_toolkits` must be a subset of `allowed_toolkits`.
-
-### Reserved Tools
-
-Toolkit definitions cannot include these reserved control-plane tools:
-
-- `delegate`
-- `dynamic_tools`
-- `self_config`
-
-These tools are managed by MindRoom internally and injected automatically when needed.
-
-### Tool Registry
-
-All tools listed in a toolkit must resolve through the normal tool registry.
-Plugin-provided tools work as long as they are registered before config validation runs.
-
-### Duplicate Tools
-
-Each tool name must appear at most once within a single toolkit definition.
-Duplicate entries within one toolkit are rejected.
-
-### Scope Compatibility
-
-Some integrations are restricted to shared or unscoped execution (see [Worker Routing](https://docs.mindroom.chat/configuration/agents/#worker-routing)).
-If an agent with an isolating `worker_scope` (or `private.per`) has a toolkit containing a shared-only integration, MindRoom rejects the config at startup.
-
-The following integrations are shared-only and cannot appear in toolkits assigned to agents with `user` or `user_agent` scope:
-
-`spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
-
-OAuth-backed remote MCP tools are requester-scoped and may appear in toolkits assigned to agents with isolating worker scopes.
-
-## Conflict Detection
-
-When an agent loads a toolkit at runtime, MindRoom checks for tool name collisions.
-If a toolkit tool is already present in the agent's active set (from static tools or another loaded toolkit) with different config overrides, the load is rejected with a conflict error.
-Identical duplicate tools are silently deduplicated.
-
-## Full Example
-
-```yaml
-models:
-  default:
-    provider: anthropic
-    id: claude-sonnet-4-6
-
-toolkits:
-  devops:
-    description: Infrastructure and deployment tools
-    tools:
-      - docker
-      - aws_lambda
-      - github
-  research:
-    description: Web search and academic sources
-    tools:
-      - duckduckgo
-      - arxiv
-      - wikipedia
-  data:
-    description: Data analysis and visualization
-    tools:
-      - pandas
-      - csv
-      - visualization
-
-agents:
-  assistant:
-    display_name: Assistant
-    role: A versatile helper that loads tools on demand
-    model: default
-    tools:
-      - file
-      - shell
-    allowed_toolkits: [devops, research, data]
-    initial_toolkits: [research]
-    rooms: [lobby]
-
-  researcher:
-    display_name: Researcher
-    role: Deep research specialist
-    model: default
-    tools:
-      - duckduckgo
-      - arxiv
-    allowed_toolkits: [data]
-    rooms: [lobby]
-
-defaults:
-  tools:
-    - scheduler
-```
-
-In this example:
-
-- `assistant` starts with `file`, `shell`, `scheduler` (from defaults), and the `research` toolkit tools.
-  It can load `devops` or `data` on demand, and cannot unload `research` because it is in `initial_toolkits`.
-- `researcher` starts with `duckduckgo`, `arxiv`, and `scheduler`.
-  It can load `data` on demand for analysis work.
-
 # Tools
 
 MindRoom includes 100+ built-in tools and presets that agents can use to work with files, services, external APIs, and Matrix-native workflows.
@@ -2882,12 +2788,13 @@ See [MCP](https://docs.mindroom.chat/mcp/) for the `mcp_servers` config and nami
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging, thread tags and summaries, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging, thread tags, summaries, and model overrides, low-level Matrix API access, and attachment-aware workflows.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, and task managers.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Explicit memory tools and external memory providers.
-- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Subagents, delegation, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Per-tool lazy loading for optional agent capabilities.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
 
@@ -2946,116 +2853,49 @@ Set `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` to disable that behavior.
 - [Scheduling](https://docs.mindroom.chat/scheduling/) - Chat command scheduling and task behavior.
 - [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/) - `openclaw_compat` preset and workspace portability.
 
-# Dynamic Toolkits
+# Dynamic Tools
 
-Dynamic toolkits let agents load and unload groups of tools at runtime without restarting MindRoom.
-This reduces context overhead by keeping rarely used tools out of the agent's active tool set until they are actually needed.
+Dynamic tools let an agent keep rarely used tools out of the provider-visible schema list until it needs them.
+The loading unit is one authored entry in the agent's `tools:` list.
+MindRoom performs the schema gating in its runtime, so the feature works across model providers.
 
-## Why Dynamic Toolkits
+## Configuration
 
-Every tool in an agent's active set adds to the system prompt and consumes context window tokens.
-An agent with 20+ tools pays that cost on every request, even when most tools go unused.
-Dynamic toolkits solve this by letting the agent start with a minimal tool set and pull in additional capabilities on demand.
-
-For example, a general-purpose assistant might start with `file` and `shell`, then load a `devops` toolkit (containing `docker`, `aws_lambda`, `github`) only when the user asks about infrastructure.
-
-## The Three Meta-Tools
-
-When an agent has `allowed_toolkits` configured, MindRoom automatically adds a `dynamic_tools` toolkit with three tools:
-
-### `list_toolkits()`
-
-Returns all allowed toolkits for the agent with their descriptions, tool names, and current loaded state.
-The agent calls this when it is unsure which toolkit contains a needed capability.
-
-### `load_tools(toolkit)`
-
-Loads one allowed toolkit by name.
-The tools in that toolkit become available on the **next request** in the same session, not later in the current model run.
-
-### `unload_tools(toolkit)`
-
-Removes one loaded toolkit by name.
-Like `load_tools`, the change takes effect on the **next request** in the same session.
-Toolkits listed in `initial_toolkits` are sticky and cannot be unloaded.
-
-## Next-Request Activation
-
-Tool changes do not take effect immediately.
-When an agent calls `load_tools("devops")`, the devops tools are not available in the same response — they appear on the next message in the same conversation thread.
-This is a fundamental design constraint: the model's tool list is fixed for the duration of one request.
-
-The agent receives a confirmation message like:
-
-```
-Toolkit 'devops' will be available on the next request in this session.
-```
-
-## Session State
-
-Dynamic toolkit state is persisted per agent per session in the agent's SQLite session database.
-When a session starts, `initial_toolkits` are loaded automatically.
-On subsequent requests, MindRoom reads the persisted loaded-toolkit set from the session and merges the corresponding tools into the agent's runtime tool list.
-
-If the config changes between requests (a toolkit is removed or an agent's `allowed_toolkits` is modified), MindRoom sanitizes the persisted state and drops any toolkits that are no longer valid.
-
-## Conflict Detection
-
-When loading a toolkit, MindRoom checks for tool name collisions with the agent's existing tools.
-If a toolkit contains a tool that is already active (from the agent's static tools or another loaded toolkit) and the two definitions have different config overrides, the load is rejected with a conflict error.
-Identical duplicate tools are allowed — the existing definition is kept.
-
-## V1 Limitation: Per-Agent State
-
-In V1, dynamic toolkit state is per-agent, not shared across team members.
-When an agent participates in a team conversation, each team member manages its own loaded toolkits independently.
-Loading a toolkit for one member does not load it for the others.
-
-## Example: Agent Using Dynamic Toolkits
-
-Given this configuration:
+Add `defer: true` to a tool entry to make it lazy.
+Add `initial: true` with `defer: true` when the tool should start loaded for every new session and remain sticky.
+The `initial` flag is rejected unless `defer` is also true.
+Lazy loading is per-agent, so `defaults.tools` does not accept `defer` or `initial`.
+Tool presets such as `openclaw_compat` also do not accept `defer` or `initial`; configure the individual member tools directly when they need lazy loading.
 
 ```yaml
-toolkits:
-  devops:
-    description: Docker, AWS, and GitHub tools for infrastructure work
-    tools: [docker, aws_lambda, github]
-  research:
-    description: Web search and academic paper tools
-    tools: [duckduckgo, arxiv, wikipedia]
-
 agents:
   assistant:
     display_name: Assistant
-    role: A general-purpose helper
-    model: sonnet
-    tools: [file, shell]
-    allowed_toolkits: [devops, research]
-    initial_toolkits: [research]
-    rooms: [lobby]
+    role: Help in chat
+    tools:
+      - shell
+      - coding: {defer: true, initial: true, restrict_to_base_dir: false}
+      - searxng: {defer: true, host: https://search.example.test, fixed_max_results: 10}
+      - name: serper
+        defer: true
+        overrides: {num_results: 10}
 ```
 
-The assistant starts each new session with `file`, `shell`, and the `research` tools (`duckduckgo`, `arxiv`, `wikipedia`) already loaded.
-The `research` toolkit is sticky because it is in `initial_toolkits` and cannot be unloaded.
+No flags means the tool is eager and appears in every request.
+`defer: true` hides the tool schema until the agent loads that authored tool for the current session.
+`defer: true, initial: true` loads the tool at session start and prevents unloading.
 
-A typical conversation might look like:
+## Runtime Tools
 
-1. **User**: "What papers exist on transformer architectures?"
-   - Agent uses `arxiv` (already loaded via `research` toolkit) to search.
+When an agent has at least one deferred tool and a stable session id, MindRoom injects the `dynamic_tools` manager.
+The manager exposes `list_tools()`, `tool_search(query)`, `load_tool(tool_name)`, and `unload_tool(tool_name)`.
+Search is plain keyword and exact-name lookup only.
+Loading or unloading takes effect on the next request in the same session.
 
-2. **User**: "Now deploy the demo app to AWS."
-   - Agent calls `list_toolkits()` to check available toolkits.
-   - Agent calls `load_tools("devops")` to load infrastructure tools.
-   - Agent responds: "I've loaded the devops toolkit. I'll have Docker, AWS Lambda, and GitHub tools available on your next message."
+## State Scope
 
-3. **User**: "Go ahead."
-   - Agent now has `docker`, `aws_lambda`, and `github` available and proceeds with the deployment.
-
-## See Also
-
-- [Toolkit Configuration](https://docs.mindroom.chat/configuration/toolkits/) — config reference for the `toolkits` section and per-agent settings
-- [Tools Overview](https://docs.mindroom.chat/tools/) — enabling and configuring tools
-- [Built-in Tools](https://docs.mindroom.chat/tools/builtin/) — complete list of available tools
+Loaded state is keyed by the exact `(agent, session_id)` pair.
+Two agents in the same Matrix thread do not share loaded tools.
 
 # Execution & Coding
 
@@ -3081,10 +2921,11 @@ Use these tools when you need local execution, coding-oriented file access, ligh
 
 ## Common Setup Notes
 
-All ten tools on this page are exposed as `setup_type: none` in the live tool registry, so they do not require dashboard OAuth setup or credential forms before they appear as available.
+Most tools on this page are exposed as `setup_type: none` in the live tool registry, so they do not require dashboard OAuth setup or credential forms before they appear as available.
+`docker` is marked `setup_type: special` and `requires_config` because Docker daemon access is privileged host control.
 `src/mindroom/api/integrations.py` currently has no dedicated integration endpoints for them because they are local-runtime tools rather than OAuth-backed services.
 
-MindRoom's built-in default worker-routed set is `coding`, `file`, `python`, and `shell`.
+MindRoom's built-in default worker-routed set is `coding`, `docker`, `file`, `python`, and `shell`.
 You can override the effective routed set with `defaults.worker_tools` or `agents.<name>.worker_tools`.
 When `worker_scope` is unset, worker-routed calls still execute in the sandbox, but they use a fresh runtime per call instead of a persistent scoped worker.
 `worker_scope: shared` reuses one runtime per agent, `worker_scope: user` reuses one runtime per requester across that requester's agents, and `worker_scope: user_agent` reuses one runtime per requester-agent pair.
@@ -3193,12 +3034,14 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 ## [`shell`]
 
-`shell` runs argv-style commands and is MindRoom's most configurable execution tool for sandboxed command-line work.
+`shell` runs command strings or argv-style commands and is MindRoom's most configurable execution tool for sandboxed command-line work.
 
 ### What It Does
 
 `shell` exposes `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`.
-`run_shell_command()` expects a list of arguments, not a shell-parsed string.
+`run_shell_command()` accepts either a natural shell command string or a list of argv strings.
+Plain command strings and single-item argv lists that look shell-like run through `bash -lc`.
+Explicit multi-item argv lists run directly without shell parsing.
 If the command exits within `timeout`, the tool returns the last `tail` lines of stdout, or stderr on non-zero exit.
 Shell output is also capped to the most recent 51200 bytes, with a truncation notice when older output is dropped.
 If the timeout is exceeded, the process keeps running in the background and the tool returns a `shell:...` handle.
@@ -3234,6 +3077,7 @@ agents:
 ```
 
 ```python
+run_shell_command("git status --short", tail=50)
 run_shell_command(["git", "status", "--short"], tail=50)
 run_shell_command(["bash", "-lc", "sleep 300 && echo done"], timeout=2)
 check_shell_command("shell:abcd1234")
@@ -3244,6 +3088,7 @@ kill_shell_command("shell:abcd1234")
 
 - `extra_env_passthrough` only affects sandboxed `shell` calls and matches exported process env, not config-adjacent `.env` entries.
   MindRoom forwards no committed runtime `.env` values by default; matched values pass through except credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and names starting with `MINDROOM_SANDBOX_`.
+- Use explicit argv lists for commands that need exact argument boundaries.
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.
@@ -3362,11 +3207,13 @@ ls("src/mindroom")
 `docker` exposes container operations such as `list_containers()`, `run_container()`, `exec_in_container()`, `start_container()`, `stop_container()`, `remove_container()`, `get_container_logs()`, and `inspect_container()`.
 It also exposes image, volume, and network operations including `pull_image()`, `build_image()`, `tag_image()`, `list_volumes()`, `create_volume()`, `list_networks()`, and `connect_container_to_network()`.
 On startup, the toolkit checks common Docker socket locations and pings the Docker daemon.
-`docker` defaults to primary execution, so it normally runs beside the main agent process rather than in the worker sandbox.
+MindRoom marks `docker` as worker-routed by default because Docker daemon access is privileged host control.
+In hosted, multi-tenant, or default-unsandboxed deployments, Docker is unavailable unless a worker backend is configured or unsafe local execution is explicitly enabled for local development.
 
 ### Configuration
 
-This tool has no tool-specific inline configuration fields.
+Set `include_tools` to an optional list of Docker command functions to expose, or leave it empty to expose all Docker commands.
+The deployment must provide Docker daemon access to the selected worker runtime if Docker operations should be allowed.
 
 ### Example
 
@@ -6567,18 +6414,19 @@ get_currently_playing()
 
 # Matrix & Attachments
 
-Use these tools to work inside the active Matrix room and thread, send follow-up messages, manage thread tags and summaries, and reuse files that belong to the current conversation.
+Use these tools to work inside the active Matrix room and thread, send follow-up messages, manage thread tags, summaries, and model overrides, and reuse files that belong to the current conversation.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `matrix-and-attachments` group.
-Use these tools when you need to send or inspect Matrix messages, manage thread tags or summaries, or handle attachment IDs that are scoped to the current room and thread.
+Use these tools when you need to send or inspect Matrix messages, manage thread tags, summaries, or model overrides, or handle attachment IDs that are scoped to the current room and thread.
 
 ## Tools On This Page
 
 - [`matrix_message`] - Send, reply, react, read, edit, or inspect Matrix conversation context.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
 - [`thread_summary`] - Set or update a Matrix thread summary from the current room and thread context.
+- [`thread_model`] - Show, switch, or reset the model override for the current Matrix thread.
 - [`matrix_api`] - Use a low-level Matrix event and state API with explicit room and event IDs.
 - [`attachments`] - List, inspect, and register context-scoped attachment IDs for later tool calls.
 
@@ -6587,7 +6435,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 These tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation.
 `matrix_message` implies `attachments` through `Config.IMPLIED_TOOLS`, so enabling `matrix_message` makes the `attachments` toolkit available even when you do not list it separately.
 Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run.
-Current source in this worktree exposes `matrix_message`, `thread_tags`, `thread_summary`, `matrix_api`, and `attachments` in this area.
+Current source in this worktree exposes `matrix_message`, `thread_tags`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
 
 ## [`matrix_message`]
 
@@ -6733,6 +6581,45 @@ set_thread_summary(
 - The tool writes a normal Matrix notice event, so the updated summary remains visible in the thread timeline.
 - Automatic thread summaries still exist, but this tool gives an agent an explicit override path when a human asks for a manual summary refresh.
 
+## [`thread_model`]
+
+`thread_model` lets agents show, switch, or reset the model override for the current Matrix thread, mirroring the `!model` chat command.
+
+### What It Does
+
+`thread_model` exposes `get_thread_model()`, `switch_thread_model(model_name)`, and `reset_thread_model()`.
+All three functions require an active thread context and return an error outside a thread.
+`switch_thread_model` accepts a configured model name from the `models:` section of `config.yaml` and rejects unknown names with the available model list.
+The override applies to all agents and teams in the thread, persists across restarts, and takes effect from the next message; the current response keeps the model it started with.
+`get_thread_model` returns the active override and the available model names.
+When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports `override: null` plus a `stale_override` field instead of an active override.
+`reset_thread_model` removes the override so agents use their configured models again.
+
+### Configuration
+
+This tool has no tool-specific inline configuration fields.
+
+### Example
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - thread_model
+```
+
+```python
+get_thread_model()
+switch_thread_model("opus")
+reset_thread_model()
+```
+
+### Notes
+
+- The override is stored per thread root in `mindroom_data/tracking/thread_models.json`.
+- Users can manage the same override with the `!model` chat command; see [Chat Commands](https://docs.mindroom.chat/chat-commands/).
+- An explicit `active_model_name` (for example a delegated child run) still beats the thread override, and the thread override beats `room_models` and the authored entity model.
+
 ## [`matrix_api`]
 
 `matrix_api` exposes a small low-level Matrix API surface for explicit room, event, and state operations, including room-scoped search.
@@ -6836,6 +6723,7 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 
 Automatic thread summaries are still implemented in `src/mindroom/thread_summary.py` as bot runtime behavior.
 The summarizer posts one `m.notice` summary after a thread reaches the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
+Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides, and always omits temperature for Vertex Claude summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
 
@@ -8107,10 +7995,15 @@ The tool always uses the current agent's configured MindRoom memory backend, so 
 Agents with `memory_backend: none` do not receive this tool.
 Search and list results include memory IDs, and those IDs are then used with `get_memory()`, `update_memory()`, and `delete_memory()`.
 The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
+For file-backed memory, `search_memories()` follows `memory.search.mode`.
+Keyword mode scans markdown files directly.
+Semantic mode searches the agent's file-memory scope through a lazy embedding index and falls back to keyword search when embeddings are unavailable.
+Result metadata includes `search_mode` so callers can tell which path produced the result.
 
 ### Configuration
 
 This tool has no tool-specific inline configuration fields.
+Use `memory.search` or `agents.<name>.memory_search` to configure file-backed search behavior.
 
 ### Example
 
@@ -8256,17 +8149,19 @@ search_zep_memory(query="release notes", search_scope="edges")
 
 # Agent Orchestration
 
-Use these tools and presets to coordinate other agents, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
+Use these tools and presets to coordinate other agents, save reusable Dynamic Workflows, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `agent-orchestration` group.
-Use these tools when you need multi-agent coordination, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
+Use these tools when you need multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
 
 ## Tools On This Page
 
 - [`subagents`] - Spawn Matrix-backed sub-agent sessions and message them later by session key or label.
 - [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
+- [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
+- [`report_publishing`] - Publish authorized report artifacts through revocable public links.
 - [`config_manager`] - Inspect MindRoom config and create, update, validate, or template agents and teams.
 - [`self_config`] - Let an agent read and update only its own configuration.
 - [`openclaw_compat`] - Config-only preset that expands to native MindRoom tools.
@@ -8274,13 +8169,15 @@ Use these tools when you need multi-agent coordination, runtime config changes, 
 
 ## Common Setup Notes
 
-All six entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
+All eight entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
 Only [`claude_agent`] has tool-specific credential fields.
 [`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
 `agents.<name>.delegate_to` auto-enables [`delegate`] when the list is non-empty and the current delegation depth is below the hard limit of 3.
 `agents.<name>.allow_self_config` or `defaults.allow_self_config` auto-enables [`self_config`].
 [`config_manager`] and [`self_config`] both save changes by revalidating the full runtime config before rewriting `config.yaml`.
 [`subagents`] requires a live Matrix tool runtime context with `room_id`, `requester_id`, Matrix client access, and a writable storage path.
+[`dynamic_workflow`] requires a live tool runtime context, a writable storage path, and a configured agent model.
+[`report_publishing`] requires a live tool runtime context, a writable storage path, and an authorized report source.
 [`openclaw_compat`] is a config preset, not a runtime toolkit.
 `Config.expand_tool_names()` expands presets and implied tools while deduping and preserving order.
 For [`openclaw_compat`], that means `matrix_message` is added directly and `attachments` is added indirectly through `Config.IMPLIED_TOOLS`.
@@ -8411,6 +8308,202 @@ delegate_task(
 - Recursive delegation is supported, but only up to a maximum depth of 3.
 - Use [`subagents`] when you need an ongoing threaded workflow.
 - Use [`delegate`] when you need a synchronous specialist answer inside the current run.
+
+## [`dynamic_workflow`]
+
+`dynamic_workflow` lets an agent save a reusable workflow, publish immutable revisions, run the active revision, and inspect stored run records.
+
+### What It Does
+
+`dynamic_workflow` exposes `create_workflow()`, `validate_workflow()`, `update_workflow()`, `run_workflow()`, `get_workflow_run()`, `list_workflows()`, and `list_workflow_revisions()`.
+All calls return JSON strings with a `status` field and operation-specific payload data.
+Saved specs live under `MINDROOM_STORAGE_PATH/dynamic_workflows/`.
+Each update creates a new immutable `revisions/<revision>.yaml` file and updates the small `workflow.yaml` pointer file.
+Each run pins the active revision at start time, writes a `runs/<run_id>.json` record, and writes `report.md`, `report.html`, and `step_outputs.json` under that run's artifact directory.
+If `MINDROOM_PUBLIC_URL` is set, successful and failed run payloads include a private report URL under `/reports/private/...`.
+Private report routes authorize the dashboard requester against the run's `requested_by` identity.
+Use [`report_publishing`] to publish a completed Dynamic Workflow run report through a revocable public URL under `/reports/public/<slug>`.
+If `MINDROOM_PUBLIC_URL` is unset, the report artifacts are still persisted on disk and listed in the run payload.
+
+### Configuration
+
+Enable the tool by adding `dynamic_workflow` to the agent that should be allowed to create and run workflows.
+The current implementation supports agent-scoped workflows from agent tools.
+Room and tenant scopes are reserved for a future approval policy, so tool calls with `scope="room"` or `scope="tenant"` return an error today.
+
+```yaml
+agents:
+  coordinator:
+    display_name: Coordinator
+    role: Build and run reusable Dynamic Workflows
+    model: sonnet
+    tools:
+      - dynamic_workflow
+```
+
+### Spec Shape
+
+Workflow specs are declarative JSON/YAML objects with `schema_version: 1`.
+The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `participants`, `workflow`, `outputs`, and `permissions`.
+`kind` must be `workflow`.
+`inputs` supports an object schema with `required`, `properties`, property `type`, property `description`, and property `enum`.
+Participants can be `ephemeral_agent` or `room_agent`.
+An `ephemeral_agent` can declare `id`, `name`, `role`, `description`, `model`, `tools`, and `instructions`.
+Ephemeral participant `tools` may grant any registered tool except agent-infrastructure tools (`memory`, `delegate`, `self_config`, `compact_context`, `dynamic_workflow`, `dynamic_tools`).
+Every participant tool must also be listed in `permissions.tools`.
+Participant tool calls require per-call user approval in the originating room unless the tool is pre-approved by the caller's `dynamic_workflow` `allowed_tools` config.
+Setting `allowed_tools` to `["*"]` pre-approves every granted tool.
+A `room_agent` can declare `id`, `agent`, and an empty `tools` list.
+Room-agent participants must already be available to the requester in the current room, use their configured model, and run without tools, skills, knowledge, durable state, or preloaded context files.
+Step types are `transform_step`, `agent_step`, and `report_step`.
+`transform_step` renders a template without calling a model.
+`agent_step` renders a prompt and sends it to the selected participant.
+`report_step` renders Markdown report content from input and prior step outputs.
+Outputs declare `id`, `type`, and `from_step`.
+Output `type` may be `text`, `markdown`, `json`, or `html_report`.
+Permissions support runtime caps, model caps, and tool grants.
+`permissions.data` must keep `matrix_history`, `attachments`, and `knowledge_bases` disabled until approval-backed data grants exist.
+
+### Example
+
+```python
+create_workflow(
+    spec={
+        "schema_version": 1,
+        "id": "brief-report",
+        "name": "Brief Report",
+        "description": "Create a short HTML report from one topic.",
+        "kind": "workflow",
+        "inputs": {
+            "type": "object",
+            "required": ["topic"],
+            "properties": {"topic": {"type": "string"}},
+        },
+        "participants": [
+            {
+                "id": "writer",
+                "kind": "ephemeral_agent",
+                "name": "Report Writer",
+                "model": "claude-sonnet-4-6",
+                "tools": ["duckduckgo", "website"],
+            },
+        ],
+        "workflow": [
+            {
+                "id": "write",
+                "type": "agent_step",
+                "participant": "writer",
+                "prompt": "Research the web and write a concise cited report about {input.topic}.",
+            },
+        ],
+        "outputs": [{"id": "report_html", "type": "html_report", "from_step": "write"}],
+        "permissions": {
+            "max_runtime_seconds": 1800,
+            "max_concurrent_agents": 4,
+            "max_total_agents": 8,
+            "models": ["claude-sonnet-4-6"],
+            "tools": ["duckduckgo", "website"],
+            "data": {"matrix_history": "none", "attachments": "none", "knowledge_bases": []},
+        },
+    },
+    reason="initial report workflow",
+)
+run_workflow("brief-report", {"topic": "Agno factories"})
+list_workflows()
+get_workflow_run("brief-report", "run_...")
+```
+
+### Pre-approving participant tools
+
+Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to skip per-call approval for trusted tools.
+
+```yaml
+agents:
+  builder:
+    display_name: Workflow Builder
+    tools:
+      - dynamic_workflow:
+          allowed_tools: [duckduckgo, website]
+```
+
+Use `allowed_tools: ["*"]` to pre-approve every tool a workflow grants.
+Tools outside `allowed_tools` still run, but each call posts an approval card in the originating room and waits for the requester's decision.
+
+### Notes
+
+- Dynamic Workflow runs execute synchronously on the current tool call path today.
+- Long-running background workflow management, workflow-activation approval cards, Matrix history grants, attachment grants, and knowledge-base grants are future work.
+- Ephemeral agents can only use models allowed by both the workflow permissions and the caller's current model policy.
+- Granted tools run with the calling agent's tool routing (credentials, worker sandboxing, and egress proxying), and the tool-hook bridge applies plugin gating plus the per-call approval flow.
+- Room-agent participants can reuse only agents that normal room routing would expose to the requester.
+- Runtime caps are enforced for sync and async runs, and async runs are marked failed at the deadline even if participant cancellation is delayed.
+
+## [`report_publishing`]
+
+`report_publishing` lets an agent intentionally publish authorized report artifacts through revocable public links.
+
+### What It Does
+
+`report_publishing` exposes `publish_report()` and `revoke_public_report(slug)`.
+All calls return JSON strings with a `status` field and operation-specific payload data.
+The tool does not accept arbitrary filesystem paths.
+It publishes only registered source references that the current Matrix requester is authorized to read.
+The current source types are `dynamic_workflow_run` and `static_site`.
+Use `dynamic_workflow_run` to publish a completed Dynamic Workflow HTML report.
+Use `static_site` to publish a copied workspace directory that contains `index.html` and optional CSS, JavaScript, images, fonts, or JSON assets.
+A `static_site` source path may also point at one workspace HTML file, which is copied and served as `index.html`.
+The static site source path is workspace-relative and the published copy is stored under `MINDROOM_STORAGE_PATH/report_publishing/artifacts/<slug>/`.
+A static site snapshot may contain at most 200 files and 10 MiB of total data, and publishing fails with an explanatory error beyond either limit.
+Static site links serve under the trailing-slash form `/reports/public/<slug>/`, and the slash-less form redirects there so relative asset URLs resolve.
+JavaScript is allowed for static sites, but the public route serves static sites with a sandbox CSP that omits `allow-same-origin` and sets `connect-src 'none'`.
+That means scripts can drive local page interactivity, but they cannot act as logged-in MindRoom dashboard code or call MindRoom APIs.
+Published link records live under `MINDROOM_STORAGE_PATH/report_publishing/`.
+Public report links serve the registered artifact without dashboard authentication until `revoke_public_report(slug)` revokes the slug.
+The `slug` is the public-report identifier returned by `publish_report()`.
+If `MINDROOM_PUBLIC_URL` is set, successful publish payloads include the absolute public URL.
+
+### Configuration
+
+Enable the tool by adding `report_publishing` to any agent that should be allowed to publish report artifacts.
+
+```yaml
+agents:
+  coordinator:
+    display_name: Coordinator
+    role: Build workflows and publish report links
+    model: sonnet
+    tools:
+      - dynamic_workflow
+      - report_publishing
+```
+
+### Example
+
+```python
+publish_report(
+    source_type="dynamic_workflow_run",
+    source={"workflow_id": "brief-report", "run_id": "run_..."},
+    confirm_public=True,
+)
+publish_report(
+    source_type="static_site",
+    source={"path": "public-demo", "title": "Public Demo"},
+    confirm_public=True,
+)
+revoke_public_report("pub_...")
+```
+
+### Notes
+
+- `confirm_public=True` is required so accidental publish calls fail closed.
+- Dynamic Workflow source references default to `scope="agent"` and may include an explicit `scope`.
+- Static site publishing requires an agent workspace and publishes an immutable copy, so later workspace edits need a new `publish_report()` call.
+- An agent has a workspace when it uses `memory_backend: file` or a `private:` workspace configuration, and the source path resolves against that canonical workspace root.
+- Only the run requester or the user who published the link may revoke it.
+- Additional registered report sources can be added without changing Dynamic Workflow storage.
+- No extra proxy route is needed when `/reports/public/*` already reaches the MindRoom backend.
+- If the dashboard frontend and Python backend are split across upstreams, route `/reports/public/*` to the Python backend and do not put dashboard-login middleware on that path.
+- Set `MINDROOM_PUBLIC_URL` to the externally reachable dashboard origin, such as `https://mindroom.lab.mindroom.chat`, so publish payloads include clickable absolute URLs.
 
 ## [`config_manager`]
 
@@ -8545,7 +8638,8 @@ This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom 
 
 ### Configuration
 
-This preset has no inline configuration fields.
+This preset has no inline configuration fields and cannot use `defer` or `initial`.
+Configure individual member tools directly when they need lazy loading.
 
 ### Example
 
@@ -9291,12 +9385,12 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 | **Research Sources** | arxiv, wikipedia, pubmed, hackernews | [→ research-sources](https://docs.mindroom.chat/tools/research-sources/) |
 | **AI & Generation** | openai, gemini, groq, replicate, fal, dalle, eleven_labs | [→ ai-and-generation](https://docs.mindroom.chat/tools/ai-and-generation/) |
 | **Media & Content** | youtube, spotify, giphy, moviepy, unsplash, brandfetch | [→ media-and-content](https://docs.mindroom.chat/tools/media-and-content/) |
-| **Matrix & Attachments** | matrix_message, thread_tags, thread_summary, matrix_api, attachments | [→ matrix-and-attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) |
+| **Matrix & Attachments** | matrix_message, thread_tags, thread_summary, thread_model, matrix_api, attachments | [→ matrix-and-attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) |
 | **Messaging & Social** | gmail, slack, discord, telegram, whatsapp, email, x, reddit | [→ messaging-and-social](https://docs.mindroom.chat/tools/messaging-and-social/) |
 | **Project Management** | github, jira, linear, clickup, notion, trello, todoist | [→ project-management](https://docs.mindroom.chat/tools/project-management/) |
 | **Calendar & Scheduling** | google_calendar, cal_com, scheduler | [→ calendar-and-scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) |
 | **Memory & Storage** | memory, mem0, zep | [→ memory-and-storage](https://docs.mindroom.chat/tools/memory-and-storage/) |
-| **Agent Orchestration** | subagents, delegate, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
+| **Agent Orchestration** | subagents, delegate, dynamic_workflow, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
 | **Automation & Platforms** | aws_lambda, aws_ses, airflow, e2b, daytona, composio, custom_api | [→ automation-and-platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) |
 | **Location, Commerce & Home** | google_maps, openweather, shopify, homeassistant | [→ location-commerce-and-home](https://docs.mindroom.chat/tools/location-commerce-and-home/) |
 
@@ -9400,6 +9494,7 @@ Use the OAuth `auth` block for remote MCP servers that need a different bearer t
 | Option | Type | Default | Notes |
 |--------|------|---------|-------|
 | `enabled` | bool | `true` | Set to `false` to disable one server without removing its config |
+| `required` | bool | `false` | Block dependent agent startup while this server is unavailable instead of degrading |
 | `transport` | string | *required* | One of `stdio`, `sse`, or `streamable-http` |
 | `command` | string | `null` | Required for `stdio` |
 | `args` | list[string] | `[]` | Optional `stdio` arguments |
@@ -9709,8 +9804,9 @@ The palace enforces deduplication at a 0.9 similarity threshold.
 MindRoom connects to MCP servers during startup and whenever `config.yaml` changes.
 If a server fails to start, initialize, or publish a valid tool catalog, MindRoom marks that server as failed and logs a warning.
 
-Agents and teams that reference `mcp_<server_id>` are blocked from starting while that server is failed.
-MindRoom retries failed MCP discovery during later syncs and config reloads.
+By default a failed server degrades gracefully: agents and teams that reference `mcp_<server_id>` still start, with that server's tools omitted from their tool schema.
+MindRoom keeps retrying failed MCP discovery in the background with exponential backoff, and restarts the affected agents and teams once the server recovers so they pick up its tools.
+Set `required: true` on a server to restore hard-fail behavior, where dependent agents and teams stay blocked from starting until the server is available.
 
 During tool execution, explicit MCP tool failures are surfaced as tool errors.
 Those explicit server-side errors are not retried automatically.
@@ -9801,7 +9897,7 @@ agents:
       - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write/update the relevant file directly.
       - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
       - Ask before external/public actions and destructive operations.
-      - Before answering prior-history questions, search memory files first with `search_knowledge_base` when configured.
+      - Before answering prior-history questions, search memory files first with `search_memories`.
 
     context_files:
       - SOUL.md
@@ -9811,23 +9907,22 @@ agents:
       - TOOLS.md
       - HEARTBEAT.md
 
-    knowledge_bases: [openclaw_memory]
-
     tools:
       - openclaw_compat
+      - memory
       - python
 
     skills:
       - transcribe
 
-knowledge_bases:
-  openclaw_memory:
-    path: ${MINDROOM_STORAGE_PATH}/agents/openclaw/workspace/memory
-    watch: false
-
 memory:
   file:
     max_entrypoint_lines: 200
+  search:
+    mode: semantic
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
   auto_flush:
     enabled: true
 ```
@@ -9835,10 +9930,9 @@ memory:
 When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root, so there is no need to add it to `context_files`.
 If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded.
 The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` is auto-implied by `matrix_message`), so listing those tools individually is not necessary.
-Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `openclaw_memory` read the same canonical workspace.
-This example sets `watch: false`, so direct external file edits require explicit reindex, while dashboard/API mutations still schedule refresh after a successful mutation.
-For shared local non-Git knowledge bases, `watch: true` still starts a live filesystem watcher.
-If `openclaw_memory` is Git-backed, update the repository and reindex instead of using dashboard upload or delete actions.
+Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `search_memories` read the same canonical workspace.
+Direct external edits to daily memory files are picked up lazily on the next semantic memory search.
+Use `knowledge_bases` only for non-memory project documents that should be searchable as external knowledge.
 
 ## Recommended workspace layout
 
@@ -9869,8 +9963,8 @@ OpenClaw-compatible agents use the same memory system as every other MindRoom ag
 - `memory_backend: file` on an individual agent to override the global default
 - `memory_backend: none` on an individual agent to keep that agent stateless
 - agents that use file memory store it under `agents/<name>/workspace/`, not under the shared global `memory.file.path` tree
-- `context_files` and OpenClaw-style knowledge paths should point into that same canonical workspace if you want one consistent file-first workflow
-- optional `knowledge_bases` for semantic recall over arbitrary workspace folders
+- `context_files` should point into that same canonical workspace if you want one consistent file-first workflow
+- optional `knowledge_bases` for semantic recall over arbitrary non-memory workspace folders
 
 Recommended for OpenClaw-style setups: `memory_backend: file` with the canonical workspace layout and `memory.auto_flush.enabled: true`.
 
@@ -12000,11 +12094,25 @@ memory:
   backend: file
   file:
     max_entrypoint_lines: 200
+  search:
+    mode: keyword
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
 ```
 
 `memory.file.path` is an optional fallback root for file-memory paths.
 It does not relocate canonical agent file memory (which always lives under the agent's workspace root).
 It can affect team file memory when the resolution determines the configured path should be used.
+`memory.search` controls how `search_memories` reads file-backed agent memory.
+`mode: keyword` scans markdown files directly.
+`mode: semantic` builds a lazy per-agent or per-requester vector index under `mindroom_data/memory_search_db/` and uses `memory.embedder`.
+`include` contains root-relative glob patterns below the effective file-memory root.
+The default `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
+Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by search.
+MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids duplicate retrieval.
+Semantic mode applies to the agent's own file-memory scope.
+Team-visible file memory is still keyword searched.
 
 Per-agent override example:
 
@@ -12017,7 +12125,14 @@ agents:
     display_name: Coder
     role: Write and review code
     memory_backend: file
+    memory_search:
+      mode: semantic
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
 ```
+
+Omitted `memory_search` fields inherit from `memory.search`.
 
 For shared agents, file memory now lives directly under `agents/<name>/workspace/`.
 For requester-private agents, file memory lives directly under the effective private root.
@@ -12102,6 +12217,7 @@ The Dashboard **Memory** page supports:
 - team/member read toggle (`team_reads_member_memory`)
 - embedder provider/model/host
 - file backend settings (`path`, `max_entrypoint_lines`)
+- search settings (`mode`, `include`, `include_entrypoint`)
 - auto-flush settings (intervals, idle/age thresholds, retries)
 - batch sizing
 - extractor settings (`no_reply_token`, message/char/time limits, `include_memory_context` dedupe bounds)
@@ -12525,11 +12641,21 @@ Attachments work in both direct messages and threads, and with both individual a
 ## Attachment IDs
 
 Each uploaded file or video is assigned a stable attachment ID (e.g., `att_abc123`).
-The agent's prompt is augmented with the available IDs:
+Attachments sent with the current message are listed in the prompt with full provenance (kind, filename, sender, send time, and originating event ID):
 
 ```
-Available attachment IDs: att_abc123. Use tool calls to inspect or process them.
+Attachments sent with the current message (use tool calls to inspect or process them by ID):
+- att_abc123 (image, "car.jpg", from @user:example.org, sent 2026-06-06 09:00 UTC, event $abc)
 ```
+
+Earlier attachments stay attached to the conversation messages that carried them: when thread history is rendered for the model, each message gets an inline annotation and (for user messages) the media itself, so attachments appear in chronological position:
+
+```
+@user:example.org: check this out
+[attachments: att_def456 (image, "house.jpg")]
+```
+
+Keeping media bytes pinned to their original messages also keeps the request prefix stable across turns, so provider prompt caching covers previously sent media instead of re-processing it every turn.
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
@@ -12554,7 +12680,7 @@ agents:
 
 | Operation | Description |
 |-----------|-------------|
-| `list_attachments(target?)` | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, created_at) |
+| `list_attachments(target?)` | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, event_timestamp, created_at) |
 | `get_attachment(attachment_id, mindroom_output_path?)` | Return one context attachment record, or save its bytes to a workspace-relative path and return a save receipt |
 | `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`) |
 
@@ -12610,7 +12736,8 @@ Commands start with `!` and are handled by the router agent.
 | `!list_schedules` | List pending scheduled tasks |
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
-| `!config <operation>` | View and modify configuration |
+| `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
+| `!config <operation>` | View and modify configuration (disabled by default, admin only when enabled) |
 | `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
 ## Who Handles Commands
@@ -12627,6 +12754,9 @@ Commands are subject to the same authorization rules as normal messages.
 The sender must be authorized to interact with MindRoom entities in the room (via `global_users`, `room_permissions`, or `default_room_access`).
 See [Authorization](https://docs.mindroom.chat/authorization/) for details.
 
+`!config` is disabled by default.
+Set `authorization.config_command_enabled: true` to enable it.
+When enabled, callers must be in `authorization.global_users`.
 For `!config set`, only the user who requested the change can confirm or cancel it via reactions.
 Pending config changes expire after 24 hours.
 
@@ -12644,7 +12774,7 @@ Display available commands or get detailed help on a specific topic.
 !help edit_schedule
 ```
 
-**Topics:** `schedule`, `config`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
+**Topics:** `schedule`, `config`, `model`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
 
 ### `!hi`
 
@@ -12735,9 +12865,29 @@ Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel 
 
 **Aliases:** `!editschedule`, `!edit-schedule`
 
+### `!model`
+
+Show or switch the model that every agent, team, and the router uses in the current thread.
+
+```
+!model
+!model list
+!model opus
+!model reset
+```
+
+`!model` and `!model list` show the current override and the available model names.
+Model names come from the `models:` section of `config.yaml`.
+The override applies from the next message in the thread and survives restarts.
+Other threads and rooms keep their configured models; room-wide overrides are configured via `room_models` in `config.yaml`.
+Agents can also switch the thread model themselves when they have the `thread_model` tool.
+
 ### `!config`
 
 View and modify MindRoom configuration from chat.
+This command is disabled by default.
+Set `authorization.config_command_enabled: true` to enable it.
+When enabled, only users in `authorization.global_users` can use it.
 Changes are validated against the Pydantic config schema before applying.
 
 **View configuration:**
@@ -12753,7 +12903,7 @@ Changes are validated against the Pydantic config schema before applying.
 
 ```
 !config set agents.analyst.display_name "Research Expert"
-!config set models.default.id gpt-5.4
+!config set models.default.id gpt-5.5
 !config set defaults.markdown false
 !config set timezone America/New_York
 ```
@@ -13224,6 +13374,9 @@ authorization:
   # Default for rooms not in room_permissions
   default_room_access: false
 
+  # Optional: enable !config for global admin users
+  config_command_enabled: false
+
   # Optional: per-agent/team/router reply allowlists
   # Keys must match an agent name, team name, "router", or "*"
   # Values are canonical Matrix user IDs or glob patterns (aliases are resolved)
@@ -13257,9 +13410,14 @@ matrix_room_access:
 - `global_users: []`
 - `room_permissions: {}`
 - `default_room_access: false`
+- `config_command_enabled: false`
 - `agent_reply_permissions: {}`
 
 This means only MindRoom system users (agents, teams, router, and the configured internal user if present) can interact with agents by default.
+
+`!config` is disabled by default.
+Set `authorization.config_command_enabled: true` only for trusted single-user or admin-managed environments.
+Even when enabled, callers must be in `authorization.global_users`.
 
 `mindroom_user.username` is a one-time account-creation request used to create the internal Matrix account.
 After the account exists, keep the same configured username and only change `mindroom_user.display_name` for visible name changes.
@@ -13684,6 +13842,7 @@ MindRoom's architecture consists of several key components working together.
 
 - [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/) - How MindRoom connects to Matrix
 - [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/) - How agents are managed
+- [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) - The inbound turn pipeline and its module boundaries
 
 ## Key Internal Modules
 
@@ -13691,6 +13850,7 @@ MindRoom's architecture consists of several key components working together.
 |--------|---------|
 | `orchestrator.py` | MultiAgentOrchestrator — boots entities, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (sync loops, config diffing, room invitations) |
+| `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `runtime_resolution.py` | Authoritative runtime resolution for agent materialization |
 | `team_exact_members.py` | Runtime resolution for team member materialization |
@@ -13700,24 +13860,43 @@ MindRoom's architecture consists of several key components working together.
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
-| `bot.py` | AgentBot and TeamBot runtime for Matrix event handling |
+| `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
+| `turn_controller.py` | TurnController — owns one inbound turn from ingress to recorded outcome |
+| `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
+| `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
+| `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
+| `ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
+| `coalescing.py` | Live message coalescing gate (text dispatches immediately; media waits for attachments and a trailing caption) |
+| `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
+| `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
+| `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
+| `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
+| `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
+| `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
+| `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
+| `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
+| `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
+| `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
-| `streaming.py` | Response streaming via progressive message edits |
+| `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
-| `response_tracker.py` | Duplicate response prevention |
 | `topic_generator.py` | AI-generated room topics |
 | `background_tasks.py` | Non-blocking async task management with GC protection |
 
 ## Data Flow
 
-1. **Message arrives** from Matrix homeserver
-2. **Responder is resolved** directly when one eligible agent or team remains, otherwise the router selects among candidates
-3. **Selected entity processes** the message using the Agno runtime
-4. **Tools execute** as needed (file operations, API calls, etc.)
-5. **Response sent** back to Matrix room
-6. **Memory updates** asynchronously in background
+1. **Message arrives** from the Matrix homeserver and `bot.py` hands it to `turn_controller.py`, which owns the turn from ingress to recorded outcome
+2. **Input is validated, normalized, and resolved**: `ingress_validation.py` checks trust and the effective requester, deduplicates handled event ids, and drops trusted router echoes; `inbound_turn_normalizer.py` shapes raw text, voice, and media into canonical turn inputs, and `conversation_resolver.py` resolves thread identity and history; `!commands` are control inputs that dispatch directly here instead of entering coalescing
+3. **Messages are ordered and coalesced**: `ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing.py` batches per conversation — a live batch ending in text is a complete utterance and dispatches immediately, a live batch ending in media waits a debounce window for more attachments or a trailing caption, and follow-up backlogs queued behind an active response flush as one combined turn at idle; conversations never wait on each other
+4. **The turn is planned**: `turn_policy.py` decides to ignore, route, or respond; a direct responder is resolved when one eligible agent or team remains, otherwise the router selects among candidates
+5. **Selected entity processes** the message via `response_runner.py` and the Agno runtime, executing tools as needed
+6. **Response is delivered** through `streaming.py` (progressive edits) and `delivery_gateway.py` (Matrix send/edit)
+7. **The turn is recorded** in the durable handled-turn ledger (`turn_store.py` / `handled_turns.py`) so restarts do not double-reply
+8. **Memory updates** asynchronously in background
+
+See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the module boundaries and the ongoing simplification roadmap.
 
 # Matrix Integration
 
@@ -14009,9 +14188,9 @@ main() entry
 
 Config changes are detected via polling (`watch_file()` checks `st_mtime` every second):
 
-1. On change, `update_config()` is called
-2. `_identify_entities_to_restart()` computes diff using `model_dump(exclude_none=True)`
-3. Affected entities are stopped, recreated, and restarted
+1. On change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload that first drains in-flight responses (forcing through after a timeout)
+2. `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`
+3. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted
 4. Removed entities run `cleanup()` (leave rooms, stop bot)
 5. New/restarted bots go through room setup
 
@@ -14022,7 +14201,9 @@ Skills are watched separately via `_watch_skills_task()` with cache invalidation
 The `src/mindroom/orchestration/` subpackage contains helpers extracted from the monolithic orchestrator:
 
 - **`runtime.py`** — Sync loop helpers: `sync_forever_with_restart()` with linear backoff (capped at 60s), `cancel_task()`, and `create_logged_task()` for safe asyncio task creation.
+- **`config_lifecycle.py`** — Debounced config-reload lifecycle: `ConfigReloadLifecycle` owns reload queueing, response draining, and the load → diff → plan sequencing, dispatching the plan back to the orchestrator to apply.
 - **`config_updates.py`** — Config diffing and reload planning: `build_config_update_plan()` computes a `ConfigUpdatePlan` by calling `_identify_entities_to_restart()`, which diffs old and new configs using `model_dump(exclude_none=True)`.
+- **`plugin_watch.py`** — Plugin hot-reload watcher: `watch_plugins_task()` polls configured plugin roots, with `PluginWatchState` owning the watcher baselines and dirty-state revision.
 - **`rooms.py`** — Room invitation helpers: `get_authorized_user_ids_to_invite()` and `get_root_space_user_ids_to_invite()` compute which users should be invited to managed rooms and the root Matrix space.
 
 ### Runtime Resolution
@@ -14072,6 +14253,7 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 - Each bot runs its own sync loop via `sync_forever_with_restart()`
 - Sync loop failures trigger automatic restart with linear backoff (5s, 10s, 15s, ... up to 60s max)
+- Watchdog-driven restarts of stalled sync loops add 0–10s of random jitter on top of the backoff so a loop-wide stall does not restart every sync loop as one thundering herd
 - Event callbacks run as background tasks (never block the sync loop)
 - `ResponseTracker` prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses
@@ -14099,6 +14281,8 @@ MindRoom can be deployed in various ways depending on your needs.
 | Method | Best For |
 |--------|----------|
 | [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/) | Simplest setup: run only `uvx mindroom run` locally |
+| [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) | Run MindRoom locally while execution tools run in isolated workers |
+| [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/) | Require static allowlists or human approval before Kubernetes workers reach external hostnames |
 | Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
 | [Docker (single container)](https://docs.mindroom.chat/deployment/docker/) | Single MindRoom runtime or when you already have Matrix |
 | [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/) | Multi-tenant SaaS, production |
@@ -14138,6 +14322,7 @@ Generate the pair code in `https://chat.mindroom.chat` under:
 `Settings -> Local MindRoom`.
 
 See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for the full walkthrough.
+If you want worker-routed execution tools like `coding`, `docker`, `file`, `python`, and `shell` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 ### Full Stack (recommended)
 
@@ -14281,6 +14466,17 @@ MindRoom then:
 2. Creates/updates configured agent Matrix users
 3. Joins/creates configured rooms
 4. Starts processing messages
+
+## Optional: Docker worker isolation
+
+If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+That especially includes `coding`, `docker`, `file`, `python`, and `shell`, plus other worker-safe tools that only need worker state or config-referenced filesystem assets.
+Dedicated Docker workers do not get a bind mount of `~/.mindroom` or the raw config-adjacent `.env` file.
+They still receive a filtered public startup-runtime env payload derived from exported env vars and allowed `.env` values.
+Proxied `shell` and `python` requests still receive their execution env from the active runtime contract, so ordinary `.env` values can remain visible to those tools even though the raw file is not mounted.
+Use credential leases or `MINDROOM_DOCKER_WORKER_ENV_JSON` for worker-specific secrets.
+Use `worker_scope: shared` when you want one persistent container per agent.
+Use `worker_scope: user_agent` when each requester should get separate per-agent containers.
 
 ## Credential Model (Important)
 
@@ -15040,7 +15236,11 @@ MindRoom stores data in the `mindroom_data` directory:
 
 ## Sandbox Proxy Isolation
 
-When configured, `shell`, `file`, and `python` tool calls can be proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools. Without proxy configuration, all tools execute locally in the MindRoom process.
+When configured, `coding`, `docker`, `file`, `python`, and `shell` tool calls can be proxied to a separate **sandbox-runner** sidecar container.
+The sidecar runs the same image but without access to secrets, credentials, or the primary data volume.
+This provides real process-level isolation for code-execution tools.
+In a simple local static-runner install with no proxy URL, execution tools continue to run in the MindRoom process.
+When routing is explicitly requested or a dedicated worker backend is configured, misconfigured worker routing fails closed instead of silently falling back to the primary runtime.
 
 See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
 
@@ -15076,9 +15276,10 @@ Compromising one dedicated worker token does not authorize requests to another d
 For tools that need credentials, such as a shell tool that calls an authenticated API, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once.
 Credentials never become part of the normal tool arguments or the model prompt.
 
-MindRoom currently ships two worker backend shapes:
+MindRoom currently ships three worker backend shapes:
 
 - `static_runner`: one shared sandbox-runner process, usually a sidecar container or a local HTTP service.
+- `docker`: dedicated worker containers created on demand from the primary runtime, with one logical worker per worker key.
 - `kubernetes`: dedicated worker pods created on demand from the primary runtime, with one logical worker per worker key.
 
 ## Where Agent Data Lives
@@ -15257,25 +15458,112 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 >   /app/run-sandbox-runner.sh
 > ```
 
+### Host machine + dedicated Docker workers (`MINDROOM_WORKER_BACKEND=docker`)
+
+Use this when you want the primary MindRoom runtime on the host, but you want worker-routed tools to execute in dedicated Docker workers.
+That most commonly means `shell`, `file`, and `python`, but other worker-safe tools can also be routed through workers when they only need worker state or config-referenced filesystem assets.
+The Docker backend starts one worker container per worker key and reuses it until the container goes idle or the Docker launch configuration changes.
+This is the simplest way to get one persistent container per agent without running Kubernetes.
+MindRoom builds a projected read-only config snapshot for each worker from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, rewrites config-relative paths into that snapshot, copies only the referenced config-relative assets needed for that worker into the snapshot, and mounts only the snapshot root into the container.
+MindRoom also sanitizes the projected worker `config.yaml`, removing sensitive config keys and authorization headers from the worker-visible snapshot before it is written.
+Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope: user_agent` snapshot only that agent's projected context files and assigned knowledge bases.
+`worker_scope: user` intentionally shares one worker across multiple agents, so it keeps the broader shared projection for that worker.
+Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
+MindRoom also masks config-adjacent `.env` inside the worker container, so the raw file is not mounted into the worker.
+Proxied `shell` and `python` requests still receive their execution env from the active runtime contract, so ordinary `.env` values can remain visible to those tools unless you remove them or override `execution_env`.
+If a tool inside the worker still needs a secret that you stored directly in `config.yaml`, provide that secret through a supported worker-visible env or credential path instead of relying on the projected config copy.
+
+MindRoom auto-installs the optional `docker` extra the first time this backend is used.
+If you disable auto-install with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1`, install it yourself with `uv sync --extra docker` in a source checkout or `pip install 'mindroom[docker]'`.
+If you are testing unreleased code from a source checkout, start MindRoom from that checkout instead of the published PyPI build.
+Use `uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom mindroom run`.
+Use plain `uvx mindroom run` only after the version you want is published on PyPI.
+When you test unreleased code, build a worker image from the same checkout so the primary runtime and worker containers run the same revision.
+
+```bash
+docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
+```
+
+Set the backend environment in your shell or `.env`:
+
+```bash
+export MINDROOM_WORKER_BACKEND=docker
+export MINDROOM_DOCKER_WORKER_IMAGE=mindroom:dev
+export MINDROOM_SANDBOX_PROXY_TOKEN=replace-me-with-a-long-random-token
+
+# Optional but useful for local debugging.
+export MINDROOM_DOCKER_WORKER_NAME_PREFIX=mindroom-worker
+export MINDROOM_DOCKER_WORKER_PUBLISH_HOST=127.0.0.1
+export MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS=60
+```
+
+For released versions, you can point `MINDROOM_DOCKER_WORKER_IMAGE` at the matching published image tag instead.
+
+Then route the tools you want into workers and choose a worker scope:
+
+```yaml
+defaults:
+  worker_tools: [shell, file, python]
+  worker_scope: shared
+
+agents:
+  code:
+    tools: [shell, file, python]
+
+  research:
+    tools: [shell, file, python]
+```
+
+`worker_scope: shared` is the setting to use when you want one persistent Docker container per agent.
+`worker_scope: user_agent` creates one container per requester and agent.
+`worker_scope: user` does not give you per-agent isolation, because all agents for one requester share the same worker state.
+
+You can verify the setup by asking two different agents to run `hostname` and then checking Docker:
+
+```bash
+docker ps --format '{{.Names}}\t{{.ID}}' | grep '^mindroom-worker'
+```
+
+In a live validation, separate `code` and `research` requests produced separate worker containers, and a second `code` request reused the original `code` container.
+
 ## Environment variable reference
 
 ### Primary MindRoom runtime (proxy client)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MINDROOM_WORKER_BACKEND` | Worker backend name: `static_runner` or `kubernetes` | `static_runner` |
-| `MINDROOM_SANDBOX_PROXY_URL` | URL of the shared sandbox runner when using `static_runner` | _(none — proxy disabled for `static_runner`)_ |
+| `MINDROOM_WORKER_BACKEND` | Worker backend name: `static_runner`, `docker`, or `kubernetes` | `static_runner` |
+| `MINDROOM_SANDBOX_PROXY_URL` | URL of the shared sandbox runner when using `static_runner` | _(none — plain static-runner installs execute locally)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Static-runner bearer token and Kubernetes control-plane secret used to derive per-worker runner tokens | _(required for worker-routed execution)_ |
-| `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off` | _(unset — uses proxy tools list)_ |
-| `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy | `*` (all, unless mode is `selective`) |
+| `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off` | _(unset — uses static proxy all-tools routing when `MINDROOM_SANDBOX_PROXY_URL` is set; otherwise uses default worker-routed execution tools)_ |
+| `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy when no agent-level `worker_tools` override is active | `*` for all mode or unset static-proxy mode, empty for selective mode or unset no-proxy mode |
+| `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Permit local execution of `coding`, `docker`, `file`, `python`, and `shell` when routing was explicitly requested but no worker/proxy backend is available | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | HTTP timeout for proxy calls | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Maximum attachment bytes the primary runtime will inline when saving context attachments into a worker workspace with `get_attachment(..., mindroom_output_path=...)` | `16777216` (16 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
 
-When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker endpoints through the Kubernetes backend and does not use `MINDROOM_SANDBOX_PROXY_URL`.
+When `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker endpoints dynamically and does not use `MINDROOM_SANDBOX_PROXY_URL`.
 The Helm chart sets the Kubernetes backend environment variables automatically.
 If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/) and `src/mindroom/workers/backends/kubernetes_config.py` for the required environment surface.
+
+### Dedicated Docker worker backend
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_DOCKER_WORKER_IMAGE` | Container image used for dedicated Docker workers | _(required when `MINDROOM_WORKER_BACKEND=docker`)_ |
+| `MINDROOM_DOCKER_WORKER_PORT` | Sandbox-runner port inside the worker container | `8766` |
+| `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH` | Worker root mount path inside the container | `/app/worker` |
+| `MINDROOM_DOCKER_WORKER_CONFIG_PATH` | Config path inside the worker container | `/app/config-host/config.yaml` |
+| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host path to `config.yaml` used to build the projected worker config snapshot; MindRoom mounts only the snapshot root, copies only the config-relative assets needed for that worker into it, masks `.env` inside the container, and removes sensitive config values plus auth headers from the worker-visible `config.yaml` | Resolved `MINDROOM_CONFIG_PATH` when it exists |
+| `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS` | Idle timeout before a worker container is eligible for cleanup | `1800` |
+| `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS` | Maximum wait for worker `/healthz` after startup | `60` |
+| `MINDROOM_DOCKER_WORKER_NAME_PREFIX` | Prefix used for generated worker container names | `mindroom-worker` |
+| `MINDROOM_DOCKER_WORKER_PUBLISH_HOST` | Host interface used when publishing worker ports | `127.0.0.1` |
+| `MINDROOM_DOCKER_WORKER_ENDPOINT_HOST` | Hostname the primary runtime uses to call published worker ports | Same value as `MINDROOM_DOCKER_WORKER_PUBLISH_HOST` |
+| `MINDROOM_DOCKER_WORKER_USER` | Container user for workers, or empty to use the image default | Current host uid:gid on POSIX, image default otherwise |
+| `MINDROOM_DOCKER_WORKER_ENV_JSON` | JSON object of extra env vars injected into each worker container | `{}` |
+| `MINDROOM_DOCKER_WORKER_LABELS_JSON` | JSON object of extra Docker labels applied to each worker container | `{}` |
 
 ### Sandbox runner
 
@@ -15295,8 +15583,11 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.m
 |------|----------|
 | `selective` | Only tools listed in `MINDROOM_SANDBOX_PROXY_TOOLS` are proxied. Recommended. |
 | `all` / `sandbox_all` | Every tool call goes through the proxy |
-| `off` / `local` / `disabled` | Proxy disabled even if URL is set |
-| _(unset)_ | If `MINDROOM_SANDBOX_PROXY_TOOLS` is `*` or unset, proxies all tools; if set to a list, proxies only those |
+| `off` / `local` / `disabled` | Proxy disabled even if URL is set, and execution tools may run in the primary runtime |
+| _(unset)_ | With a configured static proxy URL, proxies all tools for legacy compatibility. With `MINDROOM_WORKER_BACKEND=docker` or `kubernetes`, routes default worker tools and fails closed if the backend is misconfigured. With plain `static_runner` and no proxy URL, tools execute locally. |
+
+`MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is an explicit escape hatch for local development that restores primary-runtime execution for `coding`, `docker`, `file`, `python`, and `shell` after routing was explicitly requested without a working worker/proxy backend.
+Do not set it in hosted or multi-tenant deployments.
 
 ## Shell env and PATH
 
@@ -15312,6 +15603,74 @@ If you don't want a value to reach shell commands, don't match it with `extra_en
 If proxied shell commands need extra PATH entries such as wrapper directories, configure `shell_path_prepend`.
 This prepends the configured entries ahead of the runtime PATH while preserving the existing PATH order and removing duplicates.
 That keeps PATH handling deployment-specific instead of baking host-specific directories into the shell tool itself.
+
+## Brokered worker egress
+
+For tools that should call external APIs without receiving the real upstream credential, route worker-routed `shell`/`python` egress through a proxy that injects the credential in transit.
+Because this works at the network layer (proxy env), it does not inspect command lines or match API URLs — URLs hidden inside bash scripts, Python code, package CLIs, or subprocesses still route through the proxy.
+
+There are two supported shapes:
+
+- **Per-worker Agent Vault egress (Kubernetes backend)** — each worker gets its own vault identity and proxy-role token; see below. This is the per-user/per-agent isolation path.
+- **A shared egress proxy** — point worker egress at a proxy you run (for example [mindroom-egress-proxy](https://github.com/mindroom-ai/mindroom-egress-proxy)) by setting the worker proxy env yourself (`MINDROOM_KUBERNETES_WORKER_ENV_JSON` / the chart's `egressProxy` integration). The proxy owns the real credential; workers receive only its local URL. Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intentionally want the worker process to receive them.
+
+### Per-worker Agent Vault egress (Kubernetes backend)
+
+For per-user/per-agent isolation, the Kubernetes worker backend gives each dedicated worker its own Agent Vault identity against a single shared Agent Vault server — no per-worker bridge pod, Service, or NetworkPolicy.
+When enabled, each worker pod gets an init container that logs in with the instance owner credential (read from the bootstrap Secret's `AGENT_VAULT_OWNER_PASSWORD` key, mounted only on the init container), creates the worker's vault if missing (`worker_id_for_key(worker_key, prefix=vaultNamePrefix)`), then creates — or rotates — a proxy-role Agent Vault agent for that vault and writes its token to an in-pod `emptyDir`.
+The sandbox runner reads that token at execution time and composes `http://<token>:@<proxy host>` for python/shell only (Agent Vault accepts the token as the proxy basic-auth username), so credentials are injected in transit.
+
+```bash
+MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED=true
+MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE=infisical/agent-vault:<pinned>
+MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL=vault-owner@example.test
+# optional overrides and their defaults:
+MINDROOM_KUBERNETES_AGENT_VAULT_VAULT_NAME_PREFIX=agent-vault
+MINDROOM_KUBERNETES_AGENT_VAULT_API_URL=http://agent-vault:14321
+MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL=http://agent-vault:14322
+MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME=agent-vault-bootstrap
+```
+
+The proxy token lives only in the worker pod (in the `emptyDir` file and the python/shell subprocess env), never as a Kubernetes Secret, never in the primary, and never in process arguments; every worker restart rotates it.
+The agent's shell can read its own proxy token, but that token is proxy-role: it cannot read or decrypt credentials through the Agent Vault API and cannot reach any other worker's vault (see the isolation smoke below), so the isolation boundary is the per-worker vault scope rather than a network hop.
+
+For HTTPS, Agent Vault terminates TLS at its proxy, so workers must trust the vault root CA.
+Publish the CA (from `agent-vault ca fetch`) as a ConfigMap with key `ca.pem` and set `MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME` (chart: `workers.kubernetes.agentVault.workerCaConfigMapName`).
+Worker pods mount it at `/etc/agent-vault/ca.pem` and the runner exports `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`SSL_CERT_FILE` for python/shell egress.
+
+If you also enable the worker egress-proxy / approved-egress NetworkPolicies, they restrict worker egress and do not open the Agent Vault ports.
+Allow the worker pods and their init container to reach the Agent Vault api (`apiUrl`) and proxy (`proxyUrl`) ports — e.g. via `egressProxy.networkPolicy.extraEgress` — or the init container's health-check loop times out and the pod never starts.
+
+For non-Kubernetes deployments, point worker egress at a shared proxy you run yourself by setting the worker proxy env directly (see the shared egress proxy option above).
+
+### Self-service vault access
+
+The `agent_vault_access` tool lets a user ask their own agent for a link to manage that agent's vault.
+It resolves the caller's worker target to that worker's vault (`worker_id_for_key(worker_key, prefix)`, matching `agentVault.vaultNamePrefix`), grants the caller's Agent Vault account membership of that vault through the API, and returns the gated UI link.
+Configure it per deployment:
+
+```bash
+MINDROOM_AGENT_VAULT_ACCESS_API_URL=http://agent-vault:14321
+MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN=<owner or admin session/agent token>
+MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL=https://example.com/agent-vault
+MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN=example.com
+MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX=agent-vault  # must match workers.kubernetes.agentVault.vaultNamePrefix
+```
+
+The tool maps a requester's Matrix localpart to `localpart@EMAIL_DOMAIN` for the account grant.
+That mapping only decides *UI management access*; it never changes which worker reaches which vault, so the runtime secret boundary stays the per-worker vault scope plus the in-pod proxy-role token.
+The grant is idempotent and requires the user to have already registered and verified an Agent Vault account.
+
+### Validating the isolation model
+
+To validate the multi-identity isolation model end-to-end with Docker and the real `infisical/agent-vault` image, run:
+
+```bash
+uv run python tests/manual/agent_vault_isolation_live_smoke.py
+```
+
+The isolation smoke provisions one vault plus one proxy-role Agent Vault agent per worker identity, then proves each agent token injects only its own vault's credential, gets no injection for another vault's service, cannot list or decrypt another vault's credentials via the API, and cannot decrypt even its own vault's credentials.
+It also proves garbage and missing proxy session tokens are refused.
 
 Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process.
@@ -15374,7 +15733,9 @@ For an example, see `docs/tools/execution-and-coding.md`.
 
 ## Credential leases
 
-Some proxied tools need credentials (e.g., a `shell` tool that runs `git push` and needs an SSH key). Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease** — a short-lived, single-use token that the runner exchanges for credentials during execution.
+Some proxied tools need credentials, such as a `shell` tool that runs `git push` and needs an SSH key.
+Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease**.
+That lease is a short-lived, single-use token that the runner exchanges for credentials during execution.
 
 Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`:
 
@@ -15382,7 +15743,9 @@ Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_J
 export MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON='{"shell": ["github"], "python": ["openai"]}'
 ```
 
-This shares the `github` credential service with `shell` tool calls and `openai` with `python` tool calls. Credentials are never stored in the runner — each lease is consumed on use and expires after the configured TTL.
+This shares the `github` credential service with `shell` tool calls and `openai` with `python` tool calls.
+Credentials are never stored in the runner.
+Each lease is consumed on use and expires after the configured TTL.
 
 ## Security considerations
 
@@ -15412,9 +15775,9 @@ Credential leases are single-use: once consumed by an `/execute` call, the lease
 
 ## Per-agent configuration
 
-MindRoom owns the default local-versus-worker routing policy. You can override which tools are routed through the sandbox proxy per agent (or set a default for all agents) in `config.yaml`.
-
-Per-agent tool config overrides (inline `shell: {extra_env_passthrough: "DAWARICH_*"}` syntax in agent `tools` lists) are threaded through the sandbox proxy so workers receive the merged overrides alongside credentials and runtime overrides.
+MindRoom owns the default local-versus-worker routing policy.
+You can override which tools are routed through the sandbox proxy per agent, or set a default for all agents, in `config.yaml`.
+Per-agent tool config overrides, such as inline `shell: {extra_env_passthrough: "DAWARICH_*"}` syntax in agent `tools` lists, are threaded through the sandbox proxy so workers receive the merged overrides alongside credentials and runtime overrides.
 See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration) for the full syntax.
 
 ```yaml
@@ -15439,13 +15802,17 @@ The `worker_tools` field has three states:
 
 | Value | Behavior |
 |-------|----------|
-| `null` (omitted) | Use MindRoom's built-in default routing policy. Today that defaults to `coding`, `file`, `python`, and `shell` when those tools are enabled for the agent |
+| `null` (omitted) | Use MindRoom's built-in default routing policy. Today that defaults to `coding`, `docker`, `file`, `python`, and `shell` when those tools are enabled for the agent |
 | `[]` (empty list) | Explicitly disable sandbox proxying for this agent |
 | `["shell", "file"]` | Proxy exactly these tools for this agent |
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
-With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must still be configured for proxying to take effect.
-With `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
+Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
+Some local-only tools stay in the primary runtime even when listed: `attachments`, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant`.
+With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
+Without that URL, explicitly selected worker-routed tools fail closed unless `MINDROOM_SANDBOX_EXECUTION_MODE=off|local|disabled` or `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is set.
+If `worker_tools` is omitted and no static proxy URL is configured, simple local installs run those tools in the primary MindRoom process.
+With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
 
 ## Worker Scope
 
@@ -15453,6 +15820,7 @@ With `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamic
 `worker_scope` controls how those sandbox runtimes are shared between calls.
 Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant`.
 Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
+The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 You can set `worker_scope` per agent or in `defaults`:
 
@@ -15483,7 +15851,10 @@ The supported values are:
 | `user` | One runtime per user, shared across that user's agents |
 | `user_agent` | One runtime per user+agent pair |
 
-If `worker_scope` is unset, proxied tools still run in the sandbox, but each call gets a fresh runtime instead of a persistent one.
+If `worker_scope` is unset, proxied tools still use the sandbox runner and the request stays unscoped.
+With `MINDROOM_WORKER_BACKEND=static_runner`, no worker-specific storage root is selected.
+With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, MindRoom still provisions one unscoped worker per agent and tenant/account.
+`worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
 
 **Important notes:**
 
@@ -15500,7 +15871,79 @@ If `worker_scope` is unset, proxied tools still run in the sandbox, but each cal
 
 With `MINDROOM_WORKER_BACKEND=static_runner` and no `MINDROOM_SANDBOX_PROXY_URL`, tool calls execute directly in the primary MindRoom runtime process.
 This is fine for development but not recommended for production deployments where agents run untrusted code.
-With `MINDROOM_WORKER_BACKEND=kubernetes`, worker-routed tool calls fail closed when the backend is misconfigured instead of silently running locally.
+With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker-routed tool calls fail closed when the backend is misconfigured instead of silently running locally.
+
+# Approved Egress
+
+Approved egress lets worker-routed tools reach external hostnames through a policy-enforcing HTTP proxy.
+Use it when dedicated Kubernetes workers should be blocked from direct internet egress unless a hostname is statically allowlisted or temporarily approved by a human.
+
+## Runtime Chart
+
+The runtime chart can deploy the proxy and wire MindRoom to the built-in `approved_egress` toolkit.
+
+```yaml
+workers:
+  backend: kubernetes
+  sandbox:
+    proxyToken:
+      existingSecret: mindroom-sandbox-proxy
+      key: MINDROOM_SANDBOX_PROXY_TOKEN
+
+approvedEgress:
+  enabled: true
+  image:
+    tag: v0.1.0
+  allowlist:
+    domains:
+      - example.com
+      - .docs.example.com
+```
+
+The chart renders the proxy Deployment, Service, ServiceAccount, RBAC, allowlist ConfigMap, persistence PVC, worker egress NetworkPolicy, and proxy ingress NetworkPolicy.
+The chart also sets `MINDROOM_APPROVED_EGRESS_ENABLED`, `MINDROOM_APPROVED_EGRESS_API_URL`, `MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH`, `MINDROOM_APPROVED_EGRESS_TOKEN`, and `MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS` on the MindRoom container.
+When `MINDROOM_APPROVED_EGRESS_ENABLED=true`, MindRoom adds `approved_egress` to defaults and requires Matrix approval for `request_network_access` at runtime.
+These runtime-derived entries are not written back to `config.yaml` by dashboard or API saves.
+Set `approvedEgress.manageRuntimeConfig: false` to keep the proxy wiring but skip the runtime config overlay, for example when the authored config assigns `approved_egress` to specific agents instead of `defaults.tools`.
+
+## Custom Config
+
+The runtime chart handles custom `config.data` and `config.existingConfigMap` through `MINDROOM_APPROVED_EGRESS_ENABLED=true`, so you do not need to duplicate this block there.
+Use this block only when enabling the built-in toolkit outside the runtime chart.
+
+```yaml
+defaults:
+  tools:
+    - approved_egress
+
+tool_approval:
+  default: auto_approve
+  rules:
+    - match: request_network_access
+      action: require_approval
+```
+
+You can assign `approved_egress` to individual agents instead of `defaults.tools` if only some agents should request network access.
+The toolkit is built into MindRoom and uses the chart-provided policy API URL, token, allowlist path, and TTL settings.
+
+## Runtime Behavior
+
+Agents call `request_network_access(hostname, ttl_minutes, reason)` when a worker needs one blocked external hostname.
+The tool rejects schemes, ports, paths, wildcards, IP literals, single-label names, localhost names, cluster-local names, and known metadata hostnames before it calls the policy API.
+If the hostname already matches the static allowlist, the tool reports that no dynamic grant is needed.
+When `worker_scope: user_agent` is active, the tool creates a `worker_key` grant for the exact requester-owned worker.
+Shared or unscoped workers receive an `agent` grant.
+Requests for `worker_scope: user` are rejected because one user-scoped worker can serve multiple agents.
+
+## Secure Minimum
+
+Use `workers.backend: kubernetes`.
+Keep `workers.kubernetes.networkPolicy.create` and `egressProxy.networkPolicy.create` enabled.
+Provide `approvedEgress.token.existingSecret` or `workers.sandbox.proxyToken`.
+Pin `approvedEgress.image.tag` or `approvedEgress.image.digest`.
+Keep `request_network_access` behind `tool_approval`.
+Use a static allowlist for hostnames that should never require approval.
+Use short `approvedEgress.maxTtlSeconds` values for temporary grants.
 
 # Kubernetes Deployment
 
@@ -15636,10 +16079,11 @@ workers:
 ```
 
 See `cluster/k8s/runtime/README.md` and `cluster/k8s/runtime/values.yaml` for the full values surface.
+For chart-managed worker egress with human-approved temporary hostname grants, see [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/).
 
 ## Worker Backends
 
-The instance and runtime charts support two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`.
+The instance and runtime charts support two worker backend modes for worker-routed tools such as `coding`, `docker`, `file`, `python`, and `shell`.
 
 The dedicated-worker provisioning flow is implemented today.
 
@@ -15919,6 +16363,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
 │ config              Manage MindRoom configuration files.                               │
 │ avatars             Generate and sync managed avatar assets.                           │
+│ threads             Export Matrix threads to local files.                              │
 │ service             Install and manage MindRoom as a background user service.          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
@@ -16112,6 +16557,87 @@ Use `--force` to replace them.
 ```
 
 <!-- OUTPUT:END -->
+
+## threads
+
+Export Matrix threads to local files.
+
+<!-- CODE:START -->
+<!-- from mindroom.cli.main import app -->
+<!-- from typer.testing import CliRunner -->
+<!-- runner = CliRunner() -->
+<!-- result = runner.invoke(app, ["threads", "--help"]) -->
+<!-- print("```") -->
+<!-- print(result.output) -->
+<!-- print("```") -->
+<!-- CODE:END -->
+<!-- OUTPUT:START -->
+<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
+```
+
+ Usage: root threads [OPTIONS] COMMAND [ARGS]...
+
+ Export Matrix threads to local files.
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ export   Export Matrix threads to YAML files for grep/ripgrep search.                  │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+```
+
+<!-- OUTPUT:END -->
+
+## threads export
+
+Export Matrix threads to YAML files for grep/ripgrep search.
+The command reads persisted Matrix accounts and rooms from `matrix_state.yaml`, so run MindRoom once before exporting.
+By default it writes to `<storage>/thread_exports`.
+
+<!-- CODE:START -->
+<!-- from mindroom.cli.main import app -->
+<!-- from typer.testing import CliRunner -->
+<!-- runner = CliRunner() -->
+<!-- result = runner.invoke(app, ["threads", "export", "--help"]) -->
+<!-- print("```") -->
+<!-- print(result.output) -->
+<!-- print("```") -->
+<!-- CODE:END -->
+<!-- OUTPUT:START -->
+<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
+```
+
+ Usage: root threads export [OPTIONS]
+
+ Export Matrix threads to YAML files for grep/ripgrep search.
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --config            -c      PATH     Use this config file path.                        │
+│ --storage-path      -s      PATH     Base directory for persistent MindRoom data.      │
+│ --output            -o      PATH     Output directory. Defaults to                     │
+│                                      <storage>/thread_exports.                         │
+│ --room              -r      TEXT     Filter exported rooms by a substring of the room  │
+│                                      key, alias, name, or Matrix room ID.              │
+│ --watch                              Repeat the export forever on a fixed interval.    │
+│ --interval                  INTEGER  Watch interval in seconds. [default: 300]         │
+│ --max-thread-roots          INTEGER  Maximum thread roots to enumerate per room.       │
+│                                      [default: 2000]                                   │
+│ --help              -h               Show this message and exit.                       │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+```
+
+<!-- OUTPUT:END -->
+
+```bash
+mindroom threads export --storage-path mindroom_data --output /tmp/mindroom-thread-exports
+mindroom threads export --storage-path mindroom_data --room lobby
+mindroom threads export --storage-path mindroom_data --watch --interval 300
+```
 
 ## service
 
@@ -16330,6 +16856,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ edit       Open config.yaml in your default editor.                                    │
 │ validate   Validate config.yaml and check for common issues.                           │
 │ path       Show the resolved config file path and search locations.                    │
+│ migrate    Apply safe, text-preserving migrations to config.yaml.                      │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

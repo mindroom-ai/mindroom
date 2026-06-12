@@ -1,4 +1,27 @@
-"""Thread mutation grouping and advisory bookkeeping for Matrix conversation cache."""
+"""Thread mutation grouping and advisory bookkeeping for Matrix conversation cache.
+
+These three policies are the only writers of durable thread-cache state:
+
+1. ``ThreadOutboundWritePolicy`` records locally sent events after Matrix delivery succeeded, so it must
+   fail open: every cancellation or exception is swallowed and logged, never re-raised to the sender.
+
+2. ``ThreadLiveWritePolicy`` and ``ThreadSyncWritePolicy`` record homeserver timeline events; the sync
+   policy can additionally run in fail-closed mode (``raise_on_cache_write_failure``) so sync-token
+   certification only certifies responses whose writes durably landed.
+
+3. Barrier routing: mutations whose thread is known pre-queue run on the per-thread barrier; mutations
+   that need cache lookups to resolve their thread (plain edits and replies, outbound redactions) stay
+   on the room barrier, because earlier queued writes can create the lookup rows they depend on
+   (ISSUE-189 tracks finer routing).
+
+4. UNKNOWN-impact mutations invalidate the whole room's cached threads eagerly, outside the per-thread
+   queue: concurrent per-thread writers cannot uphold the ``room_invalidated_at >= validated_at``
+   ordering that read-time revalidation relies on.
+
+5. Within one sync batch, UNKNOWN impacts invalidate the room at most once per pass (once across the
+   message pass and once across the redaction pass); later UNKNOWN mutations in the same pass reuse
+   that invalidation instead of writing duplicate markers.
+"""
 
 from __future__ import annotations
 

@@ -17,6 +17,7 @@ def _render_chart(
     chart_dir: Path,
     *set_args: str,
     release_name: str = "mindroom-demo",
+    namespace: str | None = None,
     set_string_args: tuple[str, ...] = (),
     values_files: tuple[Path, ...] = (),
 ) -> list[dict[str, Any]]:
@@ -24,6 +25,7 @@ def _render_chart(
         chart_dir,
         *set_args,
         release_name=release_name,
+        namespace=namespace,
         set_string_args=set_string_args,
         values_files=values_files,
     )
@@ -35,6 +37,7 @@ def _run_helm_template(
     chart_dir: Path,
     *set_args: str,
     release_name: str = "mindroom-demo",
+    namespace: str | None = None,
     set_string_args: tuple[str, ...] = (),
     values_files: tuple[Path, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
@@ -47,6 +50,7 @@ def _run_helm_template(
             "template",
             release_name,
             str(chart_dir),
+            *(("--namespace", namespace) if namespace else ()),
             *(arg for value in values_files for arg in ("--values", str(value))),
             *(arg for value in set_args for arg in ("--set", value)),
             *(arg for value in set_string_args for arg in ("--set-string", value)),
@@ -101,6 +105,15 @@ def _container(deployment: dict[str, Any], name: str) -> dict[str, Any]:
         if container["name"] == name:
             return container
     msg = f"container {name} was not rendered"
+    raise AssertionError(msg)
+
+
+def _init_container(deployment: dict[str, Any], name: str) -> dict[str, Any]:
+    init_containers = deployment["spec"]["template"]["spec"].get("initContainers", [])
+    for container in init_containers:
+        if container["name"] == name:
+            return container
+    msg = f"init container {name} was not rendered"
     raise AssertionError(msg)
 
 
@@ -248,6 +261,181 @@ def test_instance_chart_wires_image_pull_secrets_to_control_plane_pods() -> None
 
     assert deployment["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ghcr-pull"}]
     assert worker_manager_account["imagePullSecrets"] == [{"name": "ghcr-pull"}]
+
+
+def test_runtime_chart_renders_content_bundle_init_containers_after_user_init_containers(tmp_path: Path) -> None:
+    """Content bundles should copy immutable image contents into runtime storage without replacing user hooks."""
+    values_path = tmp_path / "content-bundles.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "initContainers": [
+                    {
+                        "name": "prepare-storage",
+                        "image": "busybox:1.36",
+                        "command": ["sh", "-ec", "mkdir -p /app/agent_data/bootstrap"],
+                    },
+                ],
+                "contentBundles": [
+                    {
+                        "name": "team-config",
+                        "image": "ghcr.io/example/team-config@sha256:"
+                        "1111111111111111111111111111111111111111111111111111111111111111",
+                        "sourcePath": "/bundle",
+                        "targetPath": "/app/agent_data/content-bundles/team-config",
+                        "seed": {
+                            "enabled": True,
+                            "command": [
+                                "/app/agent_data/content-bundles/team-config/scripts/seed-content.sh",
+                            ],
+                        },
+                    },
+                    {
+                        "name": "policy-pack",
+                        "image": "registry.example.com/team/policy-pack@sha256:"
+                        "2222222222222222222222222222222222222222222222222222222222222222",
+                        "overwrite": False,
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    team_config = _init_container(deployment, "content-bundle-team-config")
+    policy_pack = _init_container(deployment, "content-bundle-policy-pack")
+
+    assert [container["name"] for container in pod_spec["initContainers"]][:3] == [
+        "prepare-storage",
+        "content-bundle-team-config",
+        "content-bundle-policy-pack",
+    ]
+    assert team_config["image"] == (
+        "ghcr.io/example/team-config@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    )
+    assert team_config["imagePullPolicy"] == "IfNotPresent"
+    assert team_config["command"] == ["sh", "-ec"]
+    assert team_config["args"] == [
+        "set -eu\n"
+        'rm -rf "/app/agent_data/content-bundles/team-config"\n'
+        'mkdir -p "/app/agent_data/content-bundles/team-config"\n'
+        'cp -a "/bundle/." "/app/agent_data/content-bundles/team-config/"\n'
+        '"/app/agent_data/content-bundles/team-config/scripts/seed-content.sh"',
+    ]
+    assert team_config["volumeMounts"] == [
+        {
+            "name": "storage",
+            "mountPath": "/app/agent_data",
+        },
+    ]
+    assert policy_pack["args"] == [
+        "set -eu\n"
+        'mkdir -p "/app/agent_data/content-bundles/policy-pack"\n'
+        'cp -a "/bundle/." "/app/agent_data/content-bundles/policy-pack/"',
+    ]
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "ghcr.io/example/team-config:latest",
+        "ghcr.io/example/team-config@sha256:short",
+    ],
+)
+def test_runtime_chart_rejects_content_bundle_images_without_digest(image: str) -> None:
+    """Hosted bundles should be pinned to immutable image digests."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "contentBundles[0].name=team-config",
+        f"contentBundles[0].image={image}",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "contentBundles[0].image must be pinned by full sha256 digest" in completed.stderr
+
+
+def test_runtime_chart_rejects_duplicate_content_bundle_names() -> None:
+    """Generated init container names must stay unique."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "contentBundles[0].name=team-config",
+        "contentBundles[0].image=ghcr.io/example/team-config@sha256:"
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "contentBundles[1].name=team-config",
+        "contentBundles[1].image=ghcr.io/example/other-config@sha256:"
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert 'contentBundles[1].name "team-config" is used more than once' in completed.stderr
+
+
+def test_runtime_chart_rejects_content_bundle_names_that_would_be_truncated() -> None:
+    """Bundle names must fit in generated Kubernetes init container names."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        f"contentBundles[0].name={'a' * 49}",
+        "contentBundles[0].image=ghcr.io/example/team-config@sha256:"
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "contentBundles[0].name must be 48 characters or fewer" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("target_path", "message"),
+    [
+        ("/app/agent_data", "contentBundles[0].targetPath cannot be equal to storage.mountPath /app/agent_data"),
+        ("/app/content/team-config", "contentBundles[0].targetPath must be under storage.mountPath /app/agent_data"),
+        ("/app/agent_data/../outside", "contentBundles[0].targetPath must be under storage.mountPath /app/agent_data"),
+    ],
+)
+def test_runtime_chart_rejects_content_bundle_target_paths_outside_storage(target_path: str, message: str) -> None:
+    """Bundle copy targets must stay inside runtime storage."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "contentBundles[0].name=team-config",
+        "contentBundles[0].image=ghcr.io/example/team-config@sha256:"
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        f"contentBundles[0].targetPath={target_path}",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert message in completed.stderr
+
+
+def test_runtime_chart_rejects_content_bundle_target_path_equal_root_storage() -> None:
+    """The root path should not be accepted when storage itself is mounted at root."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "storage.mountPath=/",
+        "contentBundles[0].name=team-config",
+        "contentBundles[0].image=ghcr.io/example/team-config@sha256:"
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "contentBundles[0].targetPath=/",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "contentBundles[0].targetPath cannot be equal to storage.mountPath /" in completed.stderr
 
 
 def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -> None:
@@ -676,6 +864,744 @@ def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> 
     }
 
 
+def test_runtime_chart_default_configmap_source_wires_runtime_and_worker_configmap() -> None:
+    """Default config mode should preserve the chart-managed ConfigMap mount and worker projection."""
+    docs = _render_runtime_chart()
+    config_map = _resource(docs, "ConfigMap", "mindroom-runtime-config")
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    mindroom_container = _container(deployment, "mindroom")
+    mindroom_env = _env_by_name(mindroom_container)
+
+    assert "config.yaml" in config_map["data"]
+    assert {"name": "config", "configMap": {"name": "mindroom-runtime-config"}} in pod_spec["volumes"]
+    assert {
+        "name": "config",
+        "mountPath": "/app/config.yaml",
+        "subPath": "config.yaml",
+        "readOnly": True,
+    } in mindroom_container["volumeMounts"]
+    assert mindroom_env["MINDROOM_CONFIG_PATH"]["value"] == "/app/config.yaml"
+    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME"]["value"] == "mindroom-runtime-config"
+    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_KEY"]["value"] == "config.yaml"
+    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_PATH"]["value"] == "/app/config.yaml"
+
+
+def test_runtime_chart_file_config_source_uses_bundle_path_without_configmap() -> None:
+    """File config mode should point runtime and workers at the bundle file without rendering a ConfigMap."""
+    config_path = "/app/agent_data/content-bundles/team-config/content/environments/prod/agent-config.yaml"
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "contentBundles[0].name=team-config",
+        "contentBundles[0].image=registry.example.com/team/mindroom-config@sha256:"
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "config.source=file",
+        f"config.path={config_path}",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    mindroom_container = _container(deployment, "mindroom")
+    mindroom_env = _env_by_name(mindroom_container)
+
+    assert not any(
+        doc.get("kind") == "ConfigMap" and doc.get("metadata", {}).get("name") == "mindroom-runtime-config"
+        for doc in docs
+    )
+    assert not any(volume["name"] == "config" for volume in pod_spec["volumes"])
+    assert not any(mount["name"] == "config" for mount in mindroom_container["volumeMounts"])
+    assert mindroom_env["MINDROOM_CONFIG_PATH"]["value"] == config_path
+    assert "MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME" not in mindroom_env
+    assert "MINDROOM_KUBERNETES_WORKER_CONFIG_KEY" not in mindroom_env
+    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_PATH"]["value"] == config_path
+    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH"]["value"] == "/app/agent_data"
+    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME"]["value"] == "mindroom-runtime-storage"
+
+
+def test_runtime_chart_static_runner_file_config_source_uses_bundle_path_without_configmap() -> None:
+    """Static runner mode should use the resolved file config path in both containers."""
+    config_path = "/app/agent_data/content-bundles/team-config/content/environments/prod/agent-config.yaml"
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=static_runner",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "contentBundles[0].name=team-config",
+        "contentBundles[0].image=registry.example.com/team/mindroom-config@sha256:"
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "config.source=file",
+        f"config.path={config_path}",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    mindroom_container = _container(deployment, "mindroom")
+    runner_container = _container(deployment, "sandbox-runner")
+
+    assert not any(
+        doc.get("kind") == "ConfigMap" and doc.get("metadata", {}).get("name") == "mindroom-runtime-config"
+        for doc in docs
+    )
+    assert not any(volume["name"] == "config" for volume in pod_spec["volumes"])
+    assert not any(mount["name"] == "config" for mount in mindroom_container["volumeMounts"])
+    assert not any(mount["name"] == "config" for mount in runner_container["volumeMounts"])
+    assert _env_by_name(mindroom_container)["MINDROOM_CONFIG_PATH"]["value"] == config_path
+    assert _env_by_name(runner_container)["MINDROOM_CONFIG_PATH"]["value"] == config_path
+
+
+def test_runtime_chart_file_config_source_rejects_missing_path() -> None:
+    """File config mode needs an explicit absolute file path."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "config.source=file",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "config.path is required when config.source=file" in completed.stderr
+
+
+def test_runtime_chart_file_config_source_rejects_relative_path() -> None:
+    """File config mode should fail early for paths that are not container-absolute."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "config.source=file",
+        "config.path=content/environments/prod/agent-config.yaml",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "config.path must be absolute when config.source=file" in completed.stderr
+
+
+def test_runtime_chart_rejects_unknown_config_source() -> None:
+    """Config source should be constrained to known chart modes."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "config.source=secret",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "config.source must be either configMap or file" in completed.stderr
+
+
+def test_runtime_chart_can_route_kubernetes_workers_through_existing_egress_proxy(tmp_path: Path) -> None:
+    """The runtime chart can inject proxy env and egress policy for dedicated workers."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                    "kubernetes": {
+                        "extraEnv": {
+                            "FOO": "bar",
+                            "NO_PROXY": "custom.local",
+                        },
+                    },
+                },
+                "egressProxy": {
+                    "enabled": True,
+                    "service": {
+                        "name": "egress-proxy",
+                        "namespace": "proxy-system",
+                        "port": 3128,
+                    },
+                    "noProxy": ["localhost", "127.0.0.1"],
+                    "networkPolicy": {
+                        "proxyPodSelector": {"matchLabels": {"app": "egress-proxy"}},
+                        "extraEgress": [
+                            {
+                                "to": [{"podSelector": {"matchLabels": {"app": "internal-api"}}}],
+                                "ports": [{"protocol": "TCP", "port": 8080}],
+                            },
+                        ],
+                    },
+                },
+            },
+        ),
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+    mindroom_container = _container(deployment, "mindroom")
+    worker_env = json.loads(_env_by_name(mindroom_container)["MINDROOM_KUBERNETES_WORKER_ENV_JSON"]["value"])
+
+    assert worker_env["HTTP_PROXY"] == "http://egress-proxy.proxy-system.svc.cluster.local:3128"
+    assert worker_env["HTTPS_PROXY"] == "http://egress-proxy.proxy-system.svc.cluster.local:3128"
+    assert worker_env["ALL_PROXY"] == "http://egress-proxy.proxy-system.svc.cluster.local:3128"
+    assert worker_env["http_proxy"] == "http://egress-proxy.proxy-system.svc.cluster.local:3128"
+    assert worker_env["https_proxy"] == "http://egress-proxy.proxy-system.svc.cluster.local:3128"
+    assert worker_env["all_proxy"] == "http://egress-proxy.proxy-system.svc.cluster.local:3128"
+    assert worker_env["NO_PROXY"] == "custom.local"
+    assert worker_env["no_proxy"] == "localhost,127.0.0.1"
+    assert worker_env["FOO"] == "bar"
+
+    assert policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
+    assert policy["spec"]["egress"][0]["to"][0] == {
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+        "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+    }
+    assert policy["spec"]["egress"][1] == {
+        "to": [
+            {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "proxy-system"}},
+                "podSelector": {"matchLabels": {"app": "egress-proxy"}},
+            },
+        ],
+        "ports": [{"protocol": "TCP", "port": 3128}],
+    }
+    assert policy["spec"]["egress"][2] == {
+        "to": [{"podSelector": {"matchLabels": {"app": "internal-api"}}}],
+        "ports": [{"protocol": "TCP", "port": 8080}],
+    }
+
+
+def test_runtime_chart_can_deploy_chart_managed_approved_egress_proxy(tmp_path: Path) -> None:
+    """Approved egress should render the proxy side and wire workers through it."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "approvedEgress": {
+                    "enabled": True,
+                    "image": {"tag": "v0.1.0"},
+                    "allowlist": {"domains": ["example.com", ".docs.example.com"]},
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    proxy_name = "mindroom-runtime-egress-proxy"
+    proxy_config_name = f"{proxy_name}-config"
+    proxy_pvc_name = f"{proxy_name}-data"
+    runtime_deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    proxy_deployment = _resource(docs, "Deployment", proxy_name)
+    proxy_service = _resource(docs, "Service", proxy_name)
+    proxy_config = _resource(docs, "ConfigMap", proxy_config_name)
+    proxy_pvc = _resource(docs, "PersistentVolumeClaim", proxy_pvc_name)
+    proxy_role = _resource(docs, "Role", proxy_name)
+    proxy_role_binding = _resource(docs, "RoleBinding", proxy_name)
+    proxy_service_account = _resource(docs, "ServiceAccount", proxy_name)
+    worker_policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+    proxy_policy = _resource(docs, "NetworkPolicy", f"{proxy_name}-ingress")
+    runtime_container = _container(runtime_deployment, "mindroom")
+    proxy_container = _container(proxy_deployment, "approved-egress-proxy")
+    runtime_env = _env_by_name(runtime_container)
+    proxy_env = _env_by_name(proxy_container)
+    worker_env = json.loads(runtime_env["MINDROOM_KUBERNETES_WORKER_ENV_JSON"]["value"])
+
+    assert runtime_env["MINDROOM_APPROVED_EGRESS_ENABLED"]["value"] == "true"
+    assert proxy_config["data"]["allowed-domains.txt"] == "example.com\n.docs.example.com\n"
+    assert proxy_pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
+    assert proxy_service_account["automountServiceAccountToken"] is True
+    assert proxy_role["rules"] == [
+        {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]},
+        {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["get"]},
+    ]
+    assert proxy_role_binding["subjects"] == [
+        {"kind": "ServiceAccount", "name": proxy_name, "namespace": "default"},
+    ]
+
+    assert proxy_container["image"] == "ghcr.io/mindroom-ai/mindroom-egress-proxy:v0.1.0"
+    assert proxy_container["ports"] == [
+        {"name": "proxy", "containerPort": 3128, "protocol": "TCP"},
+        {"name": "policy-api", "containerPort": 8080, "protocol": "TCP"},
+    ]
+    assert proxy_env["POD_NAMESPACE"]["value"] == "default"
+    assert proxy_env["MINDROOM_EGRESS_PROXY_LISTEN_PORT"]["value"] == "3128"
+    assert proxy_env["MINDROOM_APPROVED_EGRESS_API_PORT"]["value"] == "8080"
+    assert proxy_env["MINDROOM_EGRESS_ALLOWLIST_PATH"]["value"] == "/etc/mindroom-egress/allowed-domains.txt"
+    assert proxy_env["MINDROOM_EGRESS_DB_PATH"]["value"] == "/var/lib/mindroom-egress/grants.sqlite3"
+    assert proxy_env["MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS"]["value"] == "21600"
+    assert proxy_env["MINDROOM_APPROVED_EGRESS_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "mindroom-runtime-sandbox-proxy",
+        "key": "MINDROOM_SANDBOX_PROXY_TOKEN",
+    }
+    assert proxy_deployment["spec"]["template"]["spec"]["volumes"] == [
+        {"name": "allowlist", "configMap": {"name": proxy_config_name}},
+        {"name": "data", "persistentVolumeClaim": {"claimName": proxy_pvc_name}},
+    ]
+
+    assert proxy_service["spec"]["ports"] == [
+        {"name": "proxy", "port": 3128, "targetPort": "proxy", "protocol": "TCP"},
+        {"name": "policy-api", "port": 8080, "targetPort": "policy-api", "protocol": "TCP"},
+    ]
+    assert runtime_env["MINDROOM_APPROVED_EGRESS_API_URL"]["value"] == (
+        "http://mindroom-runtime-egress-proxy.default.svc.cluster.local:8080"
+    )
+    assert runtime_env["MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH"]["value"] == (
+        "/etc/mindroom-egress/allowed-domains.txt"
+    )
+    assert runtime_env["MINDROOM_APPROVED_EGRESS_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "mindroom-runtime-sandbox-proxy",
+        "key": "MINDROOM_SANDBOX_PROXY_TOKEN",
+    }
+    assert runtime_env["MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS"]["value"] == "21600"
+    assert {
+        "name": "approved-egress-allowlist",
+        "mountPath": "/etc/mindroom-egress/allowed-domains.txt",
+        "subPath": "allowed-domains.txt",
+        "readOnly": True,
+    } in runtime_container["volumeMounts"]
+
+    assert worker_env["HTTP_PROXY"] == "http://mindroom-runtime-egress-proxy.default.svc.cluster.local:3128"
+    assert worker_policy["spec"]["egress"][1] == {
+        "to": [
+            {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "default"}},
+                "podSelector": {
+                    "matchLabels": {
+                        "app.kubernetes.io/name": proxy_name,
+                        "app.kubernetes.io/instance": "mindroom-runtime",
+                        "app.kubernetes.io/component": "approved-egress-proxy",
+                    },
+                },
+            },
+        ],
+        "ports": [{"protocol": "TCP", "port": 3128}],
+    }
+    assert proxy_policy["spec"]["ingress"] == [
+        {
+            "from": [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "default"}},
+                    "podSelector": {
+                        "matchLabels": {
+                            "mindroom.ai/component": "worker",
+                            "app.kubernetes.io/managed-by": "mindroom",
+                            "app.kubernetes.io/name": "mindroom-worker",
+                        },
+                    },
+                },
+            ],
+            "ports": [{"port": 3128, "protocol": "TCP"}],
+        },
+        {
+            "from": [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "default"}},
+                    "podSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/name": "mindroom-runtime",
+                            "app.kubernetes.io/instance": "mindroom-runtime",
+                            "app.kubernetes.io/component": "runtime",
+                        },
+                    },
+                },
+            ],
+            "ports": [{"port": 8080, "protocol": "TCP"}],
+        },
+    ]
+
+
+def test_runtime_chart_approved_egress_sets_runtime_flag_for_custom_config(tmp_path: Path) -> None:
+    """Custom configs should still enable the built-in approved egress runtime overlay."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "approvedEgress": {"enabled": True, "image": {"tag": "v0.1.0"}},
+                "config": {
+                    "data": yaml.safe_dump(
+                        {
+                            "agents": {},
+                            "defaults": {"tools": ["scheduler"]},
+                            "models": {},
+                        },
+                    ),
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    runtime_config = yaml.safe_load(_resource(docs, "ConfigMap", "mindroom-runtime-config")["data"]["config.yaml"])
+    runtime_container = _container(_resource(docs, "Deployment", "mindroom-runtime"), "mindroom")
+    runtime_env = _env_by_name(runtime_container)
+
+    assert runtime_config["defaults"]["tools"] == ["scheduler"]
+    assert runtime_env["MINDROOM_APPROVED_EGRESS_ENABLED"]["value"] == "true"
+    assert "MINDROOM_APPROVED_EGRESS_API_URL" in runtime_env
+
+
+def test_runtime_chart_approved_egress_can_opt_out_of_runtime_config_overlay(tmp_path: Path) -> None:
+    """Disabling manageRuntimeConfig keeps proxy wiring without the runtime overlay flag."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "approvedEgress": {
+                    "enabled": True,
+                    "image": {"tag": "v0.1.0"},
+                    "manageRuntimeConfig": False,
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    runtime_container = _container(_resource(docs, "Deployment", "mindroom-runtime"), "mindroom")
+    runtime_env = _env_by_name(runtime_container)
+
+    assert "MINDROOM_APPROVED_EGRESS_ENABLED" not in runtime_env
+    assert "MINDROOM_APPROVED_EGRESS_API_URL" in runtime_env
+    assert "MINDROOM_APPROVED_EGRESS_TOKEN" in runtime_env
+
+
+def test_runtime_chart_approved_egress_uses_worker_namespace_for_pod_lookup_and_rbac() -> None:
+    """The proxy runs in the release namespace but reads worker pods from the worker namespace."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.kubernetes.namespace=mindroom-workers",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=v0.1.0",
+        release_name="mindroom-runtime",
+        namespace="mindroom-runtime-system",
+    )
+    proxy_name = "mindroom-runtime-egress-proxy"
+    proxy_deployment = _resource(docs, "Deployment", proxy_name)
+    proxy_role = _resource(docs, "Role", proxy_name)
+    proxy_role_binding = _resource(docs, "RoleBinding", proxy_name)
+    proxy_service_account = _resource(docs, "ServiceAccount", proxy_name)
+    proxy_container = _container(proxy_deployment, "approved-egress-proxy")
+    proxy_env = _env_by_name(proxy_container)
+
+    assert proxy_deployment["metadata"].get("namespace", "mindroom-runtime-system") == "mindroom-runtime-system"
+    assert proxy_service_account["metadata"].get("namespace", "mindroom-runtime-system") == "mindroom-runtime-system"
+    assert proxy_env["POD_NAMESPACE"]["value"] == "mindroom-workers"
+    assert proxy_role["metadata"]["namespace"] == "mindroom-workers"
+    assert proxy_role_binding["metadata"]["namespace"] == "mindroom-workers"
+    assert proxy_role_binding["subjects"] == [
+        {"kind": "ServiceAccount", "name": proxy_name, "namespace": "mindroom-runtime-system"},
+    ]
+
+
+def test_runtime_chart_approved_egress_ignores_external_proxy_scheme_and_namespace_selector(
+    tmp_path: Path,
+) -> None:
+    """Chart-managed approved egress should not inherit external proxy routing values."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "approvedEgress": {"enabled": True, "image": {"tag": "v0.1.0"}},
+                "egressProxy": {
+                    "service": {
+                        "name": "external-proxy",
+                        "namespace": "external-proxy",
+                        "port": 9443,
+                        "scheme": "https",
+                    },
+                    "networkPolicy": {
+                        "proxyNamespaceSelector": {"matchLabels": {"name": "external-proxy"}},
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    runtime_deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    worker_policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+    runtime_container = _container(runtime_deployment, "mindroom")
+    runtime_env = _env_by_name(runtime_container)
+    worker_env = json.loads(runtime_env["MINDROOM_KUBERNETES_WORKER_ENV_JSON"]["value"])
+
+    assert worker_env["HTTP_PROXY"] == "http://mindroom-runtime-egress-proxy.default.svc.cluster.local:3128"
+    assert worker_policy["spec"]["egress"][1] == {
+        "to": [
+            {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "default"}},
+                "podSelector": {
+                    "matchLabels": {
+                        "app.kubernetes.io/name": "mindroom-runtime-egress-proxy",
+                        "app.kubernetes.io/instance": "mindroom-runtime",
+                        "app.kubernetes.io/component": "approved-egress-proxy",
+                    },
+                },
+            },
+        ],
+        "ports": [{"protocol": "TCP", "port": 3128}],
+    }
+
+
+def test_runtime_chart_approved_egress_ignores_external_proxy_namespace_selector(
+    tmp_path: Path,
+) -> None:
+    """Chart-managed approved egress should always select its own namespace."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "approvedEgress": {"enabled": True, "image": {"tag": "v0.1.0"}},
+                "egressProxy": {
+                    "networkPolicy": {
+                        "proxyNamespaceSelector": {"matchLabels": {"name": "external-proxy"}},
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    worker_policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+
+    assert worker_policy["spec"]["egress"][1]["to"][0]["namespaceSelector"] == {
+        "matchLabels": {"kubernetes.io/metadata.name": "default"},
+    }
+
+
+def test_runtime_chart_does_not_render_approved_egress_resources_by_default() -> None:
+    """Disabled approved egress must leave the runtime chart on the existing worker path."""
+    docs = _render_runtime_chart()
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    runtime_env_names = {env["name"] for env in _container(deployment, "mindroom")["env"]}
+    rendered_proxy_resources = [
+        doc
+        for doc in docs
+        if doc.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component") == "approved-egress-proxy"
+    ]
+
+    assert rendered_proxy_resources == []
+    assert "MINDROOM_APPROVED_EGRESS_API_URL" not in runtime_env_names
+    assert "MINDROOM_APPROVED_EGRESS_TOKEN" not in runtime_env_names
+
+
+def test_runtime_chart_rejects_approved_egress_without_pinned_proxy_image() -> None:
+    """Operators should pin the optional proxy image before enabling the firewall path."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "approvedEgress.enabled=true",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "approvedEgress.image.tag or approvedEgress.image.digest is required" in completed.stderr
+
+
+def test_runtime_chart_rejects_approved_egress_without_token_secret() -> None:
+    """The policy API and plugin should not render without a bearer-token Secret."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "eventCache.postgres.auth.password=test-password",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=v0.1.0",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "approvedEgress.enabled requires approvedEgress.token.existingSecret "
+        "or workers.sandbox.proxyToken" in completed.stderr
+    )
+
+
+def test_runtime_chart_rejects_approved_egress_existing_service_account_without_name() -> None:
+    """Existing approved egress ServiceAccounts must be named explicitly."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=v0.1.0",
+        "approvedEgress.serviceAccount.create=false",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "approvedEgress.serviceAccount.name is required when "
+        "approvedEgress.serviceAccount.create=false" in completed.stderr
+    )
+
+
+def test_runtime_chart_dns_policy_renders_empty_namespace_selector_with_pod_selector(tmp_path: Path) -> None:
+    """An explicit empty DNS namespaceSelector should still render with the podSelector."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+                "egressProxy": {
+                    "enabled": True,
+                    "networkPolicy": {
+                        "proxyPodSelector": {"matchLabels": {"app": "egress-proxy"}},
+                        "dns": {
+                            # Helm deep-merges maps, so null deletes default labels and leaves {}.
+                            "namespaceSelector": {"matchLabels": None},
+                            "podSelector": {"matchLabels": {"k8s-app": "node-local-dns"}},
+                            "ipBlocks": [],
+                        },
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+
+    assert policy["spec"]["egress"][0]["to"] == [
+        {
+            "namespaceSelector": {},
+            "podSelector": {"matchLabels": {"k8s-app": "node-local-dns"}},
+        },
+    ]
+
+
+def test_runtime_chart_rejects_egress_proxy_policy_without_dns_destinations(tmp_path: Path) -> None:
+    """Worker egress policy should not render a DNS rule with no destination peers."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+                "egressProxy": {
+                    "enabled": True,
+                    "networkPolicy": {
+                        "proxyPodSelector": {"matchLabels": {"app": "egress-proxy"}},
+                        "dns": {
+                            "namespaceSelector": None,
+                            "podSelector": None,
+                            "ipBlocks": [],
+                        },
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "egressProxy.networkPolicy.dns requires namespaceSelector, podSelector, or ipBlocks "
+        "when egressProxy.networkPolicy.create=true" in completed.stderr
+    )
+
+
+def test_runtime_chart_rejects_egress_proxy_policy_without_worker_network_policy() -> None:
+    """Proxy egress rules only apply when the worker NetworkPolicy is rendered."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.kubernetes.networkPolicy.create=false",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "egressProxy.enabled=true",
+        "egressProxy.networkPolicy.proxyPodSelector.matchLabels.app=egress-proxy",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "egressProxy.networkPolicy.create=true requires workers.kubernetes.networkPolicy.create=true"
+        in completed.stderr
+    )
+
+
+def test_runtime_chart_rejects_egress_proxy_policy_without_proxy_pod_selector() -> None:
+    """Worker egress policy needs proxy pod labels because NetworkPolicy cannot target Services."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "egressProxy.enabled=true",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "egressProxy.networkPolicy.proxyPodSelector with matchLabels or matchExpressions is required "
+        "when egressProxy.networkPolicy.create=true" in completed.stderr
+    )
+
+
 def test_runtime_chart_disables_service_links_for_dynamic_worker_pods_by_default() -> None:
     """The runtime chart should pass the default service-link setting to generated workers."""
     docs = _render_runtime_chart()
@@ -740,6 +1666,156 @@ def test_runtime_chart_static_runner_uses_credentials_encryption_key_secret() ->
 
     assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == expected_env
     assert _env_by_name(runner_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == expected_env
+
+
+def test_runtime_chart_state_storage_renders_existing_pvc_mounts_and_init_permissions(tmp_path: Path) -> None:
+    """Hosted runtimes should keep Matrix client state on a dedicated PVC."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "stateStorage": {
+                    "enabled": True,
+                    "existingClaim": "mindroom-state",
+                    "mountPath": "/app/mindroom_state",
+                    "encryptionKeys": {
+                        "enabled": True,
+                        "mountPath": "/app/agent_data/encryption_keys",
+                        "subPath": "encryption_keys",
+                    },
+                    "syncTokens": {
+                        "enabled": True,
+                        "mountPath": "/app/agent_data/sync_tokens",
+                        "subPath": "sync_tokens",
+                    },
+                    "initPermissions": {
+                        "enabled": True,
+                        "runAsUser": 1000,
+                        "fsGroup": 1000,
+                    },
+                },
+                "initContainers": [
+                    {
+                        "name": "custom-init",
+                        "image": "busybox:1.36",
+                        "command": ["sh", "-c", "true"],
+                    },
+                ],
+                "extraVolumes": [{"name": "custom-config", "configMap": {"name": "custom-config"}}],
+                "extraVolumeMounts": [{"name": "custom-config", "mountPath": "/etc/custom"}],
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    mindroom_container = _container(deployment, "mindroom")
+    volume_mounts = {mount["mountPath"]: mount for mount in mindroom_container["volumeMounts"]}
+    volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
+    init_containers = {container["name"]: container for container in pod_spec["initContainers"]}
+
+    assert volumes["state-storage"]["persistentVolumeClaim"]["claimName"] == "mindroom-state"
+    assert volumes["custom-config"]["configMap"]["name"] == "custom-config"
+    assert volume_mounts["/app/mindroom_state"] == {
+        "name": "state-storage",
+        "mountPath": "/app/mindroom_state",
+    }
+    assert volume_mounts["/app/agent_data/encryption_keys"] == {
+        "name": "state-storage",
+        "mountPath": "/app/agent_data/encryption_keys",
+        "subPath": "encryption_keys",
+    }
+    assert volume_mounts["/app/agent_data/sync_tokens"] == {
+        "name": "state-storage",
+        "mountPath": "/app/agent_data/sync_tokens",
+        "subPath": "sync_tokens",
+    }
+    assert volume_mounts["/etc/custom"] == {"name": "custom-config", "mountPath": "/etc/custom"}
+
+    assert "prepare-state-storage" in init_containers
+    assert "custom-init" in init_containers
+    assert init_containers["prepare-state-storage"]["volumeMounts"] == [
+        {"name": "state-storage", "mountPath": "/state"},
+    ]
+    assert init_containers["prepare-state-storage"]["securityContext"] == {
+        "runAsUser": 0,
+        "runAsNonRoot": False,
+        "allowPrivilegeEscalation": False,
+    }
+    assert init_containers["prepare-state-storage"]["command"][:2] == ["sh", "-c"]
+    state_command = init_containers["prepare-state-storage"]["command"][2]
+    assert 'mkdir -p "/state" "/state/encryption_keys" "/state/sync_tokens"' in state_command
+    assert 'chown -R 1000:1000 "/state" "/state/encryption_keys" "/state/sync_tokens"' in state_command
+    assert 'chmod 2775 "/state" "/state/encryption_keys" "/state/sync_tokens"' in state_command
+
+
+def test_runtime_chart_state_storage_can_create_pvc() -> None:
+    """The runtime chart can manage the dedicated state PVC for simple hosted installs."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "stateStorage.enabled=true",
+        "stateStorage.create=true",
+        "stateStorage.size=20Gi",
+        "stateStorage.storageClassName=fast-rwo",
+        release_name="mindroom-runtime",
+    )
+    pvc = _resource(docs, "PersistentVolumeClaim", "mindroom-runtime-state")
+
+    assert pvc["spec"] == {
+        "accessModes": ["ReadWriteOnce"],
+        "storageClassName": "fast-rwo",
+        "resources": {"requests": {"storage": "20Gi"}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("conflict_args", "expected_error"),
+    [
+        (
+            ("stateStorage.mountPath=/app/agent_data/encryption_keys",),
+            "stateStorage.mountPath must differ from stateStorage.encryptionKeys.mountPath",
+        ),
+        (
+            ("stateStorage.mountPath=/app/agent_data/sync_tokens",),
+            "stateStorage.mountPath must differ from stateStorage.syncTokens.mountPath",
+        ),
+        (
+            ("stateStorage.encryptionKeys.mountPath=/app/agent_data",),
+            "stateStorage.encryptionKeys.mountPath must differ from storage.mountPath",
+        ),
+        (
+            ("stateStorage.syncTokens.mountPath=/app/agent_data",),
+            "stateStorage.syncTokens.mountPath must differ from storage.mountPath",
+        ),
+        (
+            ("stateStorage.syncTokens.mountPath=/app/agent_data/encryption_keys",),
+            "stateStorage.encryptionKeys.mountPath must differ from stateStorage.syncTokens.mountPath",
+        ),
+    ],
+)
+def test_runtime_chart_state_storage_rejects_mount_path_conflicts(
+    conflict_args: tuple[str, ...],
+    expected_error: str,
+) -> None:
+    """Generated runtime volumeMount paths must stay unique."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "stateStorage.enabled=true",
+        "stateStorage.existingClaim=mindroom-state",
+        *conflict_args,
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert expected_error in completed.stderr
 
 
 def test_runtime_chart_separate_worker_namespace_can_manage_per_worker_auth_secrets() -> None:

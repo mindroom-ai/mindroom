@@ -61,6 +61,10 @@ runtime:
   timing: false
 
 config:
+  # configMap keeps the existing chart-managed or externally managed ConfigMap behavior.
+  # file reads an absolute path that already exists in the runtime filesystem, commonly copied by contentBundles.
+  source: configMap
+  path: ""
   create: true
   existingConfigMap: ""
   key: config.yaml
@@ -144,6 +148,57 @@ storage:
   storageClassName: ""
   size: 10Gi
   mountPath: /app/agent_data
+
+stateStorage:
+  # Optional dedicated PVC for restart-critical Matrix client state.
+  enabled: false
+  create: false
+  existingClaim: ""
+  volumeName: state-storage
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  size: 10Gi
+  mountPath: /app/mindroom_state
+  encryptionKeys:
+    enabled: true
+    mountPath: /app/agent_data/encryption_keys
+    subPath: encryption_keys
+  syncTokens:
+    enabled: true
+    mountPath: /app/agent_data/sync_tokens
+    subPath: sync_tokens
+  initPermissions:
+    enabled: true
+    image: busybox:1.36
+    imagePullPolicy: IfNotPresent
+    # The init container uses chown/chmod and therefore runs as root by default.
+    securityContext:
+      runAsUser: 0
+      runAsNonRoot: false
+      allowPrivilegeEscalation: false
+    runAsUser: 1000
+    fsGroup: 1000
+    chmod: "2775"
+
+# Immutable content bundles copied into runtime storage before MindRoom starts.
+# Bundle images should be pinned by digest and contain files under sourcePath.
+# The default target path is <storage.mountPath>/content-bundles/<name>.
+contentBundles: []
+# Example:
+# contentBundles:
+#   - name: team-config
+#     image: registry.example.com/team/mindroom-config@sha256:1111111111111111111111111111111111111111111111111111111111111111
+#     sourcePath: /bundle
+#     targetPath: /app/agent_data/content-bundles/team-config
+#     seed:
+#       enabled: true
+#       command:
+#         - /app/agent_data/content-bundles/team-config/scripts/seed-content.sh
+# Then point MindRoom at a config file copied by the bundle:
+# config:
+#   source: file
+#   path: /app/agent_data/content-bundles/team-config/content/environments/prod/agent-config.yaml
 
 env:
   # Raw Kubernetes EnvVar entries appended to the MindRoom container.
@@ -257,6 +312,218 @@ workers:
       limits:
         cpu: 500m
         memory: 1Gi
+    # Per-worker Agent Vault egress. When enabled, each dedicated worker pod
+    # gets an init container that mints a proxy-role Agent Vault token for that
+    # worker's vault into an in-pod volume; the sandbox runner composes
+    # http://<token>:@<proxyUrl host> for python/shell egress. No separate
+    # bridge pod or Service is created.
+    #
+    # NOTE: if egressProxy/approvedEgress NetworkPolicies are also enabled, they
+    # restrict worker egress and do NOT open the Agent Vault api/proxy ports.
+    # You must allow the worker pods (and their init container) to reach the
+    # agent-vault api (apiUrl) and proxy (proxyUrl) ports, e.g. via
+    # egressProxy.networkPolicy.extraEgress, or the init container will time out.
+    agentVault:
+      enabled: false
+      # Agent Vault CLI image used by the init container to mint per-worker
+      # proxy-role agent tokens. Required when enabled.
+      cliImage: ""
+      # Agent Vault instance owner email used for provisioning. Required when enabled.
+      ownerEmail: ""
+      # Prefix for the per-worker vault name (worker_id_for_key); the
+      # agent_vault_access tool must use the same prefix
+      # (MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX) so the UI manages the
+      # same vault the worker reads.
+      vaultNamePrefix: agent-vault
+      apiUrl: http://agent-vault:14321
+      proxyUrl: http://agent-vault:14322
+      # Secret in the worker namespace holding AGENT_VAULT_OWNER_PASSWORD.
+      bootstrapSecretName: agent-vault-bootstrap
+      # Optional ConfigMap (key ca.pem) with the Agent Vault root CA; when set,
+      # worker pods mount it at /etc/agent-vault/ca.pem so brokered HTTPS
+      # traffic can trust the vault's TLS interception.
+      workerCaConfigMapName: ""
+      # Optionally run the Agent Vault server in-cluster. Leave disabled to
+      # point apiUrl/proxyUrl at an externally managed Agent Vault instance.
+      server:
+        enabled: false
+        # Service/Deployment name. Must match the host in apiUrl/proxyUrl.
+        name: agent-vault
+        # Agent Vault server image, pinned by digest; defaults to cliImage.
+        image: ""
+        imagePullPolicy: IfNotPresent
+        apiPort: 14321
+        mitmPort: 14322
+        # Key in bootstrapSecretName holding the master password that protects
+        # the vault's encryption key.
+        masterPasswordSecretKey: AGENT_VAULT_MASTER_PASSWORD
+        persistence:
+          enabled: true
+          size: 1Gi
+          storageClassName: ""
+          existingClaim: ""
+        # Optional SMTP for signup verification emails. When disabled, the
+        # server logs verification codes for the owner to relay manually.
+        smtp:
+          enabled: false
+          host: ""
+          port: 587
+          # starttls | implicit | none
+          tlsMode: starttls
+          fromName: Agent Vault
+          # Secret with keys AGENT_VAULT_SMTP_USERNAME, AGENT_VAULT_SMTP_PASSWORD,
+          # and AGENT_VAULT_SMTP_FROM.
+          existingSecret: ""
+        podSecurityContext:
+          fsGroup: 101
+          fsGroupChangePolicy: OnRootMismatch
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+        resources: {}
+      # Optional one-shot bootstrap Job: create/log in the instance owner, set
+      # instance policy (invite-only, allowed signup domains), and publish the
+      # root CA into workerCaConfigMapName so worker pods trust the vault's TLS
+      # interception. Re-runs are idempotent.
+      bootstrap:
+        enabled: false
+        # Agent Vault image, pinned by digest; defaults to cliImage.
+        image: ""
+        # Image providing kubectl, used to publish the CA ConfigMap. Required
+        # when enabled.
+        kubectlImage: ""
+        # Key in bootstrapSecretName holding the owner account password.
+        ownerPasswordSecretKey: AGENT_VAULT_OWNER_PASSWORD
+        # Comma-separated signup domain allowlist; empty means no restriction.
+        allowedDomains: ""
+        inviteOnly: true
+        resources: {}
+      # Optional wiring for the agent_vault_access tool: agents grant their
+      # requester UI access to the vault backing their own worker. When
+      # bootstrap.enabled, the bootstrap Job mints an owner-role agent and
+      # publishes its token into adminTokenSecret; the control plane reads it
+      # from a mounted file so a bootstrap re-run (token rotation) takes
+      # effect without a restart.
+      accessTool:
+        enabled: false
+        # Public base URL of the (deployer-gated) Agent Vault UI, e.g.
+        # https://example.com/agent-vault. Required when enabled.
+        uiBaseUrl: ""
+        # Domain that maps a requester's Matrix localpart to their vault
+        # account email. Required when enabled.
+        emailDomain: ""
+        # Owner-role agent the bootstrap Job creates/rotates for the tool.
+        adminAgentName: access-admin
+        # Secret the bootstrap Job publishes the token into (and the control
+        # plane mounts). Provide it yourself when bootstrap is disabled.
+        adminTokenSecret:
+          name: agent-vault-access-admin
+          key: token
+
+# Optional external HTTP proxy for dedicated Kubernetes workers.
+# This chart can point worker pods at an existing proxy Service and, when
+# requested, restrict worker egress so direct internet access must go through
+# that proxy.
+egressProxy:
+  enabled: false
+  injectWorkerProxyEnv: true
+  service:
+    name: mindroom-egress-proxy
+    namespace: ""
+    port: 3128
+    scheme: http
+  noProxy:
+    - localhost
+    - 127.0.0.1
+    - ::1
+  networkPolicy:
+    create: true
+    # Labels selecting the existing proxy pods. NetworkPolicy cannot target a Service directly.
+    proxyPodSelector: {}
+    proxyNamespaceSelector: {}
+    dns:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+      ipBlocks: []
+    # Raw Kubernetes NetworkPolicyEgressRule entries appended after DNS and proxy rules.
+    extraEgress: []
+
+# Optional chart-managed approved egress proxy for dedicated Kubernetes workers.
+# Enabling this deploys the proxy side and automatically points worker proxy
+# settings at it. Worker direct egress still depends on the worker NetworkPolicy.
+approvedEgress:
+  enabled: false
+  # Set false when the authored config already wires approved_egress (for example
+  # per-agent tool entries) and MindRoom should not add it to defaults at runtime.
+  manageRuntimeConfig: true
+  image:
+    repository: ghcr.io/mindroom-ai/mindroom-egress-proxy
+    # Pin a tag or digest before enabling this feature.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+    automountServiceAccountToken: true
+  rbac:
+    create: true
+  service:
+    # Leave empty for <fullname>-egress-proxy.
+    name: ""
+    proxyPort: 3128
+    apiPort: 8080
+    annotations: {}
+  token:
+    # Leave empty to reuse workers.sandbox.proxyToken.
+    existingSecret: ""
+    key: MINDROOM_SANDBOX_PROXY_TOKEN
+  allowlist:
+    domains: []
+    existingConfigMap: ""
+    key: allowed-domains.txt
+    mountPath: /etc/mindroom-egress/allowed-domains.txt
+  persistence:
+    enabled: true
+    existingClaim: ""
+    size: 10Gi
+    storageClassName: ""
+  dataPath: /var/lib/mindroom-egress
+  dbFileName: grants.sqlite3
+  maxTtlSeconds: 21600
+  sandboxProxyTimeoutSeconds: ""
+  logLevel: info
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+  networkPolicy:
+    create: true
+    name: ""
 
 initContainers: []
 extraContainers: []

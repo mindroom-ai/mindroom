@@ -29,6 +29,8 @@ class PendingApproval:
     created_at_ms: int
     thread_id: str | None = None
     agent_name: str | None = None
+    workflow_id: str | None = None
+    participant_id: str | None = None
     requested_at: str | None = None
     expires_at: str | None = None
 
@@ -66,6 +68,8 @@ class PendingApproval:
         requester_id = _content_str(content, "requester_id") or ""
         thread_id = _content_str(content, "thread_id")
         agent_name = _content_str(content, "agent_name")
+        workflow_id = _content_str(content, "workflow_id")
+        participant_id = _content_str(content, "participant_id")
 
         return cls(
             approval_id=approval_id,
@@ -81,6 +85,8 @@ class PendingApproval:
             created_at_ms=created_at_ms,
             thread_id=thread_id,
             agent_name=agent_name,
+            workflow_id=workflow_id,
+            participant_id=participant_id,
             requested_at=requested_at,
             expires_at=expires_at,
         )

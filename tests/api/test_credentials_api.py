@@ -9,8 +9,7 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants
-from mindroom.api import credentials as credentials_api
-from mindroom.api import main
+from mindroom.api import credentials_oauth_policy, credentials_target, main
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
@@ -86,7 +85,7 @@ def client(tmp_path: Path) -> TestClient:
 @pytest.fixture
 def mock_credentials_manager() -> Generator[MagicMock, None, None]:
     """Mock the credentials manager."""
-    with patch("mindroom.api.credentials.get_runtime_credentials_manager") as mock:
+    with patch("mindroom.api.credentials_target.get_runtime_credentials_manager") as mock:
         mock_manager = MagicMock()
         mock.return_value = mock_manager
         yield mock_manager
@@ -332,7 +331,7 @@ class TestCredentialsAPI:
             resolved_thread_id=None,
             session_id=None,
         )
-        target = credentials_api.RequestCredentialsTarget(
+        target = credentials_target.RequestCredentialsTarget(
             runtime_paths=runtime_paths,
             base_manager=manager,
             target_manager=manager,
@@ -341,7 +340,7 @@ class TestCredentialsAPI:
             execution_identity=identity,
         )
 
-        worker_target = credentials_api.worker_target_for_credentials_target(target)
+        worker_target = credentials_target.worker_target_for_credentials_target(target)
 
         assert worker_target == resolve_worker_target(
             "user_agent",
@@ -356,7 +355,7 @@ class TestCredentialsAPI:
         """Unscoped credential operations must keep using the primary credentials store."""
         runtime_paths = main._app_runtime_paths(client.app)
         manager = get_runtime_credentials_manager(runtime_paths)
-        target = credentials_api.RequestCredentialsTarget(
+        target = credentials_target.RequestCredentialsTarget(
             runtime_paths=runtime_paths,
             base_manager=manager,
             target_manager=manager,
@@ -365,7 +364,7 @@ class TestCredentialsAPI:
             execution_identity=None,
         )
 
-        assert credentials_api.worker_target_for_credentials_target(target) is None
+        assert credentials_target.worker_target_for_credentials_target(target) is None
 
     def test_rejects_shared_only_integration_services_for_isolating_scope(
         self,
@@ -679,7 +678,11 @@ class TestCredentialsAPI:
             ),
         )
 
-        with patch.object(credentials_api, "load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with patch.object(
+            credentials_oauth_policy,
+            "load_oauth_providers_for_snapshot",
+            return_value={provider.id: provider},
+        ):
             response = client.post(
                 "/api/credentials/mcp_demo_oauth_client",
                 json={
@@ -1019,7 +1022,11 @@ class TestCredentialsAPI:
         )
         assert worker_key is not None
 
-        with patch.object(credentials_api, "load_oauth_providers_for_snapshot", return_value={"acme": provider}):
+        with patch.object(
+            credentials_oauth_policy,
+            "load_oauth_providers_for_snapshot",
+            return_value={"acme": provider},
+        ):
             response = client.post(
                 "/api/credentials/acme_oauth_client?agent_name=general",
                 json={
@@ -1395,10 +1402,10 @@ class TestCredentialsAPI:
             return base_manager
 
         with patch(
-            "mindroom.api.credentials.get_runtime_credentials_manager",
+            "mindroom.api.credentials_target.get_runtime_credentials_manager",
             side_effect=_swap_runtime_on_manager_lookup,
         ):
-            target = credentials_api.resolve_request_credentials_target(request, agent_name="general")
+            target = credentials_target.resolve_request_credentials_target(request, agent_name="general")
 
         assert target.runtime_paths == runtime_a
         assert target.execution_identity is not None

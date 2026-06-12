@@ -157,12 +157,7 @@ def _email_from_user(user: dict[str, Any]) -> str:
 
 
 def _build_code_claims(
-    *,
-    user: dict[str, Any],
-    instance_id: str,
-    redirect_uri: str,
-    scope: str,
-    nonce: str | None,
+    *, user: dict[str, Any], instance_id: str, redirect_uri: str, scope: str, nonce: str | None
 ) -> dict[str, Any]:
     now = _now()
     return {

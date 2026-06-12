@@ -109,15 +109,15 @@ class TestMentionParsing:
         assert set(mentions) == {"@actual_calculator:localhost", "@actual_general:localhost"}
         assert len(mentions) == 2
 
-    def test_parse_with_generated_looking_localpart_does_not_resolve(self) -> None:
-        """Generated-looking localparts are not aliases unless configured exactly."""
+    def test_parse_with_generated_looking_localpart_resolves_entity_alias(self) -> None:
+        """Generated Matrix localparts also work as stable entity aliases."""
         config = _make_config(_default_runtime_paths())
 
         text = "Ask @mindroom_calculator for help"
         processed, mentions, _markdown = _parse_mentions_in_text(text, config)
 
-        assert processed == "Ask @mindroom_calculator for help"
-        assert mentions == []
+        assert processed == "Ask @actual_calculator:localhost for help"
+        assert mentions == ["@actual_calculator:localhost"]
 
     def test_parse_with_generated_looking_full_mxid_stays_literal(self) -> None:
         """Generated-looking full MXIDs are preserved as explicit literal users."""
@@ -316,8 +316,8 @@ class TestMentionParsing:
         assert content["body"] == "@actual_general_live:localhost could you help with this?"
         assert content["m.mentions"]["user_ids"] == ["@actual_general_live:localhost"]
 
-    def test_format_message_rejects_stale_generated_username_after_drift(self, tmp_path: Path) -> None:
-        """After username drift, stale generated localparts should not retarget the live account."""
+    def test_format_message_resolves_generated_alias_after_username_drift(self, tmp_path: Path) -> None:
+        """Generated aliases target the current account even after username drift."""
         runtime_paths = constants_mod.resolve_runtime_paths(
             config_path=tmp_path / "config.yaml",
             storage_path=tmp_path / "mindroom_data",
@@ -336,8 +336,8 @@ class TestMentionParsing:
             "@mindroom_general could you help with this?",
         )
 
-        assert content["body"] == "@mindroom_general could you help with this?"
-        assert "m.mentions" not in content
+        assert content["body"] == "@actual_general_live:localhost could you help with this?"
+        assert content["m.mentions"]["user_ids"] == ["@actual_general_live:localhost"]
 
     def test_format_message_rejects_stale_generated_full_mxid_after_drift(self, tmp_path: Path) -> None:
         """After username drift, stale generated full MXIDs should stay literal."""
@@ -717,8 +717,8 @@ class TestMentionParsing:
         assert mentions == ["@actual_mindroom_dev:localhost"]
         assert processed == "@actual_mindroom_dev:localhost can you look at this?"
 
-    def test_generated_localpart_for_prefixed_agent_key_does_not_resolve(self) -> None:
-        """Generated-looking localparts are not aliases for prefixed config keys."""
+    def test_generated_localpart_for_prefixed_agent_key_resolves(self) -> None:
+        """Generated aliases also work for entity keys that start with mindroom_."""
         runtime_paths = _default_runtime_paths()
         config = _bind_config(
             runtime_paths,
@@ -730,8 +730,8 @@ class TestMentionParsing:
         text = "@mindroom_mindroom_dev help"
         processed, mentions, _markdown = _parse_mentions_in_text(text, config)
 
-        assert mentions == []
-        assert processed == "@mindroom_mindroom_dev help"
+        assert mentions == ["@actual_mindroom_dev:localhost"]
+        assert processed == "@actual_mindroom_dev:localhost help"
 
     def test_prefixed_agent_key_alias_survives_persisted_username_drift(self, tmp_path: Path) -> None:
         """Configured entity keys remain stable mention aliases after username drift."""
@@ -801,14 +801,14 @@ class TestMentionParsing:
         assert mentions == ["@actual_mindroom_calculator:localhost"]
         assert processed == "@actual_mindroom_calculator:localhost help"
 
-    def test_uppercase_generated_looking_mentions_do_not_resolve_without_exact_alias(self) -> None:
-        """Generated-looking aliases do not resolve through prefix stripping."""
+    def test_uppercase_generated_looking_mentions_resolve_case_insensitively(self) -> None:
+        """Generated aliases resolve with the same case-insensitive matching as direct aliases."""
         config = _make_config(_default_runtime_paths())
 
         processed, mentions, _markdown = _parse_mentions_in_text("@MINDROOM_calculator help", config)
 
-        assert mentions == []
-        assert processed == "@MINDROOM_calculator help"
+        assert mentions == ["@actual_calculator:localhost"]
+        assert processed == "@actual_calculator:localhost help"
 
     def test_case_insensitive_mentions(self) -> None:
         """Test that mentions are case-insensitive."""

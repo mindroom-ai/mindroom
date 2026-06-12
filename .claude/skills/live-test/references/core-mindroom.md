@@ -1,5 +1,8 @@
-## IMPORTANT: Tuwunel Already Running
-On this machine, the Matrix homeserver (Tuwunel/Conduwuit) is ALREADY RUNNING on localhost:8008. Do NOT start a new one. Skip `just local-matrix-up`. Use `MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false`.
+## IMPORTANT: Check for an Existing Homeserver First
+Some dev machines already run a Matrix homeserver (Tuwunel/Conduwuit) on localhost:8008; do not start a second one there.
+Probe first with `curl -s --max-time 5 http://localhost:8008/_matrix/client/versions`.
+If it responds, skip `just local-matrix-up`; if it does not, boot the Docker stack with `just local-matrix-up` (and `just local-matrix-down` when you are done).
+Either way, use `MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false`.
 
 # Core MindRoom Live Run
 

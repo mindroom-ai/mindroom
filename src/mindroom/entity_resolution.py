@@ -10,12 +10,11 @@ from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
-    managed_room_key_from_alias_localpart,
-    room_alias_localpart,
+    room_alias_identifier_candidates,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
@@ -143,14 +142,7 @@ def _add_room_alias_identifiers(
     room_alias: str,
     runtime_paths: RuntimePaths,
 ) -> None:
-    identifiers.append(room_alias)
-    localpart = room_alias_localpart(room_alias)
-    if localpart is None:
-        return
-    identifiers.append(localpart)
-    managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
-    if managed_room_key is not None:
-        identifiers.append(managed_room_key)
+    identifiers.extend(room_alias_identifier_candidates(room_alias, runtime_paths))
 
 
 def configured_routable_entity_ids_for_room(
@@ -366,8 +358,27 @@ def effective_entity_model_name(
     """Return the effective model for one entity in one room context."""
     if entity_name not in config.agents and entity_name not in config.teams and entity_name != ROUTER_AGENT_NAME:
         return "default"
-    if room_id is not None:
-        room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
-        if room_alias and room_alias in config.room_models:
-            return config.room_models[room_alias]
+    if room_override := resolve_room_scoped_model_override(config.room_models, room_id, runtime_paths):
+        return room_override
     return config.get_entity_model_name(entity_name)
+
+
+def resolve_room_scoped_model_override(
+    overrides: Mapping[str, str],
+    room_id: str | None,
+    runtime_paths: RuntimePaths,
+    *,
+    allow_raw_room_id: bool = False,
+) -> str | None:
+    """Return a model override keyed by persisted room key or alias."""
+    if room_id is None or not overrides:
+        return None
+    if allow_raw_room_id and room_id in overrides:
+        return overrides[room_id]
+    room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
+    if room_alias and room_alias in overrides:
+        return overrides[room_alias]
+    for room in matrix_state.matrix_state_for_runtime(runtime_paths).rooms.values():
+        if room.room_id == room_id and room.alias in overrides:
+            return overrides[room.alias]
+    return None

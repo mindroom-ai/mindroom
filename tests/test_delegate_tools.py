@@ -16,7 +16,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import IndexingSettings
+from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
@@ -68,6 +68,8 @@ def _fake_indexing_settings(base_id: str) -> IndexingSettings:
         git_skip_hidden="",
         git_include_patterns="",
         git_exclude_patterns="",
+        include_patterns="",
+        exclude_patterns="",
         include_extensions="",
         exclude_extensions="()",
     )

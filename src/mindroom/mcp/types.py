@@ -99,6 +99,7 @@ class MCPServerState:
     connected: bool = False
     stale: bool = False
     last_error: MCPError | None = None
+    consecutive_failures: int = 0
     refresh_task: asyncio.Task[None] | None = None
     refresh_revision: int = 0
     oauth_access_token_hash: str | None = None

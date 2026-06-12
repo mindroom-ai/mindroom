@@ -67,10 +67,7 @@ def _default_http_delete(url: str, headers: dict[str, str]) -> tuple[int, bytes]
 
 
 def create_openrouter_key(
-    *,
-    management_api_key: str,
-    plan: OpenRouterKeyPlan,
-    http_post: HttpPost = _default_http_post,
+    *, management_api_key: str, plan: OpenRouterKeyPlan, http_post: HttpPost = _default_http_post
 ) -> CreatedOpenRouterKey:
     """Create a monthly spending-limited OpenRouter API key."""
     if not management_api_key.strip():
@@ -81,17 +78,9 @@ def create_openrouter_key(
         raise OpenRouterError(msg)
 
     body = json.dumps(
-        {
-            "name": plan.name,
-            "limit": plan.monthly_limit_usd,
-            "limit_reset": "monthly",
-            "include_byok_in_limit": True,
-        }
+        {"name": plan.name, "limit": plan.monthly_limit_usd, "limit_reset": "monthly", "include_byok_in_limit": True}
     ).encode("utf-8")
-    headers = {
-        "Authorization": f"Bearer {management_api_key.strip()}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {management_api_key.strip()}", "Content-Type": "application/json"}
 
     status, response_body = http_post(OPENROUTER_KEYS_URL, headers, body)
     if status != 201:
@@ -121,10 +110,7 @@ def create_openrouter_key(
 
 
 def delete_openrouter_key(
-    *,
-    management_api_key: str,
-    key_hash: str,
-    http_delete: HttpDelete = _default_http_delete,
+    *, management_api_key: str, key_hash: str, http_delete: HttpDelete = _default_http_delete
 ) -> None:
     """Delete an OpenRouter API key by hash."""
     if not isinstance(management_api_key, str):
@@ -143,10 +129,7 @@ def delete_openrouter_key(
         raise OpenRouterError(msg)
 
     quoted_hash = urllib.parse.quote(key_hash, safe="")
-    headers = {
-        "Authorization": f"Bearer {management_api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {management_api_key}", "Content-Type": "application/json"}
     status, response_body = http_delete(f"{OPENROUTER_KEYS_URL}/{quoted_hash}", headers)
     if status != 200:
         error_detail = response_body.decode("utf-8", errors="replace")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -50,6 +51,18 @@ STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 _CANCELLING_LOGGED_TASKS: set[asyncio.Task[Any]] = set()
 _MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
 _MATRIX_SYNC_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS"
+_STALLED_RESTART_MAX_JITTER_SECONDS = 10.0
+
+
+def _stalled_restart_jitter_seconds() -> float:
+    """Return random extra delay for restarting one stalled sync loop.
+
+    A loop-wide stall trips every agent's watchdog in the same tick; restarting
+    all sync loops simultaneously triggers a thundering herd of initial syncs
+    that re-starves the loop and produces repeating stall/restart waves.
+    """
+    return random.uniform(0.0, _STALLED_RESTART_MAX_JITTER_SECONDS)  # noqa: S311
+
 
 __all__ = [
     "STARTUP_RETRY_INITIAL_DELAY_SECONDS",
@@ -69,6 +82,8 @@ __all__ = [
     "is_sync_restart_cancel",
     "log_cancelled_response",
     "log_cancelled_response_source",
+    "log_startup_phase_finished",
+    "log_startup_phase_started",
     "matrix_sync_startup_timeout_seconds",
     "request_task_cancel",
     "retry_delay_seconds",
@@ -355,6 +370,22 @@ def create_logged_task(
     return task
 
 
+def log_startup_phase_started(phase: str) -> float:
+    """Log and time one startup phase."""
+    logger.info("startup_phase_started", phase=phase)
+    return time.monotonic()
+
+
+def log_startup_phase_finished(phase: str, started_at: float, *, status: str = "completed") -> None:
+    """Log elapsed time for one startup phase."""
+    logger.info(
+        "startup_phase_finished",
+        phase=phase,
+        status=status,
+        elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+    )
+
+
 async def run_with_retry(
     step_name: str,
     operation: Callable[[], Awaitable[None]],
@@ -506,6 +537,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
     retry_count = 0
     while bot.running and (max_retries < 0 or retry_count < max_retries):
         iteration: _SyncIteration | None = None
+        stalled_restart = False
         try:
             logger.info("starting_sync_loop", agent=bot.agent_name)
             iteration = _SyncIteration.start(bot)
@@ -525,6 +557,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             break
         except _MatrixSyncStalledError:
             retry_count += 1
+            stalled_restart = True
             logger.warning("restarting_stalled_sync_loop", agent=bot.agent_name, retry_count=retry_count)
         except Exception:
             retry_count += 1
@@ -550,5 +583,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             initial_delay_seconds=5.0,
             max_delay_seconds=60.0,
         )
+        if stalled_restart:
+            wait_time += _stalled_restart_jitter_seconds()
         logger.info("restarting_sync_loop", agent=bot.agent_name, retry_count=retry_count, wait_seconds=wait_time)
         await asyncio.sleep(wait_time)

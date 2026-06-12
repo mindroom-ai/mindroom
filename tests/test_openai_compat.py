@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import json
 import re
@@ -40,9 +41,9 @@ from mindroom.api.openai_compat import (
     _ChatMessage,
     _convert_messages,
     _derive_session_id,
-    _extract_content_text,
     _is_error_response,
 )
+from mindroom.api.openai_request_parsing import _extract_content_text
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -51,7 +52,7 @@ from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import CompactionDecision, HistoryScope, ResolvedReplayPlan
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import IndexingSettings
+from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -112,6 +113,8 @@ def _fake_indexing_settings(base_id: str) -> IndexingSettings:
         git_skip_hidden="",
         git_include_patterns="",
         git_exclude_patterns="",
+        include_patterns="",
+        exclude_patterns="",
         include_extensions="",
         exclude_extensions="()",
     )
@@ -2055,6 +2058,30 @@ async def test_openai_completion_lock_releases_after_response_background() -> No
 
     assert events == ["background"]
     assert not completion_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_openai_completion_lock_is_shared_and_dropped_when_unreferenced(tmp_path: Path) -> None:
+    """Same-session requests share one lock; cache entries vanish once no request holds the lock."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data")
+    key = (str(runtime_paths.storage_root), "general", "session-1")
+
+    lock = openai_compat._openai_completion_lock(
+        runtime_paths=runtime_paths,
+        agent_name="general",
+        session_id="session-1",
+    )
+    same_session_lock = openai_compat._openai_completion_lock(
+        runtime_paths=runtime_paths,
+        agent_name="general",
+        session_id="session-1",
+    )
+    assert same_session_lock is lock
+    assert key in openai_compat._OPENAI_COMPLETION_LOCKS
+
+    del lock, same_session_lock
+    gc.collect()
+    assert key not in openai_compat._OPENAI_COMPLETION_LOCKS
 
 
 @pytest.mark.asyncio

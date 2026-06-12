@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import threading
@@ -14,6 +13,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, NotRequired, TypedDict
 
+from mindroom.file_locks import advisory_file_lock
 from mindroom.history import HistoryScope, HistoryScopeMetadata
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget, MessageTargetMetadata
@@ -437,12 +437,8 @@ class HandledTurnLedger:
     @contextmanager
     def _file_lock(self, *, exclusive: bool) -> typing.Iterator[None]:
         """Lock the ledger for cross-instance readers and writers."""
-        with self._responses_lock_file.open("a+") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with advisory_file_lock(self._responses_lock_file, exclusive=exclusive):
+            yield
 
     def _read_responses_file_locked(
         self,

@@ -14,9 +14,8 @@
 - [Teams](https://docs.mindroom.chat/configuration/teams/)
 - [Cultures](https://docs.mindroom.chat/configuration/cultures/)
 - [Router](https://docs.mindroom.chat/configuration/router/)
-- [Toolkits](https://docs.mindroom.chat/configuration/toolkits/)
 - [Overview](https://docs.mindroom.chat/tools/)
-- [Dynamic Toolkits](https://docs.mindroom.chat/tools/dynamic-toolkits/)
+- [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/)
 - [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/)
 - [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/)
 - [Web Search](https://docs.mindroom.chat/tools/web-search/)
@@ -63,6 +62,7 @@
 - [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/)
 - [Docker](https://docs.mindroom.chat/deployment/docker/)
 - [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/)
+- [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)
 - [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/)
 - [CLI Reference](https://docs.mindroom.chat/cli/)
 

@@ -24,12 +24,13 @@ from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.thread_utils import should_agent_respond
+from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
+    agent_response_should_respond,
     bind_runtime_paths,
     create_mock_room,
     dispatch_context_result,
@@ -922,8 +923,8 @@ class TestCommandHandling:
             return_value=dispatch_context_result(mock_context),
         )
 
-        # Mock should_agent_respond to return True
-        with patch("mindroom.turn_policy.should_agent_respond", return_value=True):
+        # Mock decide_agent_response to return a positive decision
+        with patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)):
             # Create a room and event with a regular message
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
             event = nio.RoomMessageText.from_dict(
@@ -1035,11 +1036,11 @@ class TestCommandHandling:
         ]
 
         # NOTE: In reality, when router sends an error without mentions,
-        # bot.py returns early and never calls should_agent_respond.
+        # bot.py returns early and never reaches individual response policy.
         # But we test what WOULD happen if it were called:
 
         # Test with single agent (finance only, router excluded from available_agents)
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
@@ -1054,7 +1055,7 @@ class TestCommandHandling:
         assert should_respond, "Single agent takes ownership after router error"
 
         # Test with multiple agents - nobody responds
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
@@ -1206,6 +1207,58 @@ class TestCommandHandling:
         assert not result.dispatch.envelope.origin.blocks_unmentioned_managed_sender
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
         assert "ignore_unmentioned_agent_event" not in debug_calls
+
+    @pytest.mark.asyncio
+    async def test_scheduled_agent_event_with_router_requester_survives_ingress_precheck(self) -> None:
+        """Scheduled self-authored events must reach dispatch instead of the self-message guard."""
+        agent_user = AgentMatrixUser(
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="General Agent",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        config = _runtime_bound_config(
+            Config(
+                agents={"general": AgentConfig(display_name="General Agent")},
+                router=RouterConfig(model="default"),
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
+            wrap_extracted_collaborators(bot)
+            bot.client = AsyncMock()
+            bot.client.user_id = "@mindroom_general:localhost"
+            sync_bot_runtime_state(bot)
+            bot.logger = MagicMock()
+            _sync_turn_policy_runtime(bot)
+
+            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+            event = nio.RoomMessageText.from_dict(
+                {
+                    "event_id": "$scheduled_task",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 1234567890,
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "⏰ [Automated Task]\nCheck the workloop status",
+                        SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                        ORIGINAL_SENDER_KEY: "@mindroom_router:localhost",
+                    },
+                },
+            )
+
+            result = bot._turn_controller._precheck_dispatch_event(room, event)
+
+        assert result is not None
+        assert result.requester_user_id == "@mindroom_router:localhost"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

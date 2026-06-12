@@ -940,12 +940,12 @@ class TestExtractMessageContextRoomMode:
         bot._conversation_cache.get_thread_history.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_extract_message_context_keeps_full_hydration_required_for_degraded_history(
+    async def test_extract_message_context_uses_strict_history_after_degraded_dispatch_read(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Degraded full-history reads should remain visible to later prompt preparation."""
+        """Degraded proven-thread dispatch reads should strict-refill before prompt preparation."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -978,11 +978,29 @@ class TestExtractMessageContextRoomMode:
             is_full_history=False,
             diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True},
         )
+        strict_history = thread_history_result(
+            [
+                ResolvedVisibleMessage.synthetic(
+                    sender="@assistant:localhost",
+                    body="prior reply",
+                    event_id="$reply:localhost",
+                    thread_id="$thread-root:localhost",
+                ),
+            ],
+            is_full_history=True,
+        )
 
-        with patch.object(
-            bot._conversation_cache,
-            "get_dispatch_thread_history",
-            AsyncMock(return_value=degraded_history),
+        with (
+            patch.object(
+                bot._conversation_cache,
+                "get_dispatch_thread_history",
+                AsyncMock(return_value=degraded_history),
+            ) as mock_dispatch_history,
+            patch.object(
+                bot._conversation_cache,
+                "get_strict_thread_history",
+                AsyncMock(return_value=strict_history),
+            ) as mock_strict_history,
         ):
             context_result = await bot._conversation_resolver.extract_dispatch_context(
                 room,
@@ -993,8 +1011,18 @@ class TestExtractMessageContextRoomMode:
 
         assert context.is_thread is True
         assert context.thread_id == "$thread-root:localhost"
-        assert context.thread_history is degraded_history
-        assert context.requires_model_history_refresh is True
+        assert context.thread_history is strict_history
+        assert context.requires_model_history_refresh is False
+        mock_dispatch_history.assert_awaited_once_with(
+            room.room_id,
+            "$thread-root:localhost",
+            caller_label="dispatch_hydration",
+        )
+        mock_strict_history.assert_awaited_once_with(
+            room.room_id,
+            "$thread-root:localhost",
+            caller_label="dispatch_hydration_strict_thread_fallback",
+        )
 
     @pytest.mark.parametrize("relation_type", ["m.replace", "m.annotation", "m.reference"])
     def test_build_message_target_plain_reply_relation_does_not_infer_thread_identity(

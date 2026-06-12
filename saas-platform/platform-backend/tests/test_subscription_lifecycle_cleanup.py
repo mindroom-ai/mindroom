@@ -122,8 +122,7 @@ async def test_cleanup_does_not_mark_instance_stopped_when_any_tenant_deployment
 
     with patch("backend.tasks.cleanup.ensure_supabase", return_value=supabase):
         with patch(
-            "backend.tasks.cleanup.run_kubectl",
-            new=AsyncMock(side_effect=[(0, "", ""), (1, "", "synapse error")]),
+            "backend.tasks.cleanup.run_kubectl", new=AsyncMock(side_effect=[(0, "", ""), (1, "", "synapse error")])
         ) as kubectl:
             result = await cleanup_unentitled_instances()
 

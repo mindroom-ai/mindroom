@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from mindroom import ai_runtime, model_loading
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import get_team_session
-from mindroom.agents import create_agent
+from mindroom.agents import create_agent, enable_all_history_replay
 from mindroom.ai import build_matrix_run_metadata, resolve_run_correlation_id
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.authorization import get_available_responders_in_room
@@ -62,8 +62,12 @@ from mindroom.llm_request_logging import (
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.state import get_room_alias_from_id
-from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
+from mindroom.media_fallback import (
+    append_inline_media_fallback_prompt,
+    build_model_media_route,
+    filter_media_inputs_for_route,
+    retry_media_inputs_after_failure,
+)
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.team_exact_members import (
@@ -577,16 +581,15 @@ async def _select_team_mode(
         agent_names=", ".join(agent_names),
     )
 
-    model = model_loading.get_model_instance(config, runtime_paths, "default")
-    agent = Agent(
-        name="TeamModeDecider",
-        role="Determine team mode",
-        model=model,
-        output_schema=_TeamModeDecision,
-        telemetry=False,
-    )
-
     try:
+        model = model_loading.get_model_instance(config, runtime_paths, "default")
+        agent = Agent(
+            name="TeamModeDecider",
+            role="Determine team mode",
+            model=model,
+            output_schema=_TeamModeDecision,
+            telemetry=False,
+        )
         response = await agent.arun(prompt, session_id="team_mode_decision")
         decision = response.content
         if isinstance(decision, _TeamModeDecision):
@@ -603,33 +606,32 @@ async def _select_team_mode(
         return TeamMode.COLLABORATE
 
 
-async def decide_team_formation(
-    agent: MatrixID,
+def decide_team_formation(
     tagged_agents: list[MatrixID],
     agents_in_thread: list[MatrixID],
     all_mentioned_in_thread: list[MatrixID],
     room: nio.MatrixRoom | None,
     runtime_paths: RuntimePaths,
-    message: str | None = None,
     config: Config | None = None,
-    use_ai_decision: bool = True,
     is_dm_room: bool = False,
     is_thread: bool = False,
     available_responders_in_room: list[MatrixID] | None = None,
     materializable_agent_names: set[str] | None = None,
 ) -> TeamResolution:
-    """Determine if a team should form and with which mode.
+    """Determine if a team should form, purely from mention, thread, and room context.
+
+    Team resolutions carry a heuristic provisional mode: COORDINATE when agents
+    are explicitly tagged (they likely have different roles), COLLABORATE when
+    agents come from thread history (likely discussing the same topic). The
+    execution layer may refine it with ``select_ad_hoc_team_mode``.
 
     Args:
-        agent: The agent calling this function
         tagged_agents: Raw agents explicitly mentioned in the current message
         agents_in_thread: Agents that have participated in the thread
         all_mentioned_in_thread: All agents ever mentioned in the thread
         room: The Matrix room object when room-membership visibility is available
         runtime_paths: Explicit runtime context for permissions and identity resolution
-        message: The user's message (for AI decision context)
-        config: Application configuration (for AI model access)
-        use_ai_decision: Whether to use AI for mode selection
+        config: Application configuration
         is_dm_room: Whether this is a DM room
         is_thread: Whether the current message is in a thread
         available_responders_in_room: Optional pre-filtered room responders for sender-visible availability
@@ -671,21 +673,23 @@ async def decide_team_formation(
     if resolution.outcome is not TeamOutcome.TEAM:
         return resolution
 
-    team_agents = resolution.eligible_members
-
-    is_first_agent = min(team_agents, key=lambda x: x.username) == agent
-    # Only do this AI call for the first agent to avoid duplication
-    if use_ai_decision and message and config and is_first_agent:
-        agent_names = [_team_member_name(mid, config, runtime_paths) for mid in team_agents]
-        mode = await _select_team_mode(message, agent_names, config, runtime_paths)
-    else:
-        # Fallback to hardcoded logic when AI decision is disabled or unavailable
-        # Use COORDINATE when agents are explicitly tagged (they likely have different roles)
-        # Use COLLABORATE when agents are from thread history (likely discussing same topic)
-        mode = TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE
-        logger.info("team_mode_selected_hardcoded", mode=mode.value)
-
+    mode = TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE
     return replace(resolution, mode=mode)
+
+
+async def select_ad_hoc_team_mode(
+    message: str,
+    team_agents: list[MatrixID],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> TeamMode:
+    """Select the collaboration mode for one ad-hoc team at execution time.
+
+    Team formation itself is pure; this AI refinement must run only where the
+    team response actually executes.
+    """
+    agent_names = [_team_member_name(agent_id, config, runtime_paths) for agent_id in team_agents]
+    return await _select_team_mode(message, agent_names, config, runtime_paths)
 
 
 def _team_member_name(
@@ -1199,12 +1203,6 @@ def materialize_exact_team_members(
             refresh_scheduler=refresh_scheduler,
             execution_identity=execution_identity,
         )
-        if knowledge_resolution.missing:
-            logger.warning(
-                "Knowledge bases not available for team agent",
-                agent_name=agent_name,
-                knowledge_bases=list(knowledge_resolution.missing),
-            )
         if unavailable_bases is not None:
             unavailable_bases.update(knowledge_resolution.unavailable)
         return create_agent(
@@ -1279,6 +1277,7 @@ def _create_team_instance(
     runtime_paths: RuntimePaths,
     team_display_name: str,
     fallback_team_id: str,
+    execution_identity: ToolExecutionIdentity | None,
     model_name: str | None = None,
     configured_team_name: str | None = None,
     history_storage: BaseDb | None = None,
@@ -1292,6 +1291,8 @@ def _create_team_instance(
         runtime_paths: Active runtime paths
         team_display_name: Human-readable Team name passed to Agno
         fallback_team_id: Stable fallback id when no team scope storage is available
+        execution_identity: Request execution identity used for provider-specific
+            model behavior such as codex prompt-cache keying
         model_name: Optional model name override
         configured_team_name: Optional configured team id for stable team-scope history
         history_storage: Optional already-open shared team history storage
@@ -1301,7 +1302,12 @@ def _create_team_instance(
         Configured Team instance
 
     """
-    model = model_loading.get_model_instance(config, runtime_paths, model_name or "default")
+    model = model_loading.get_model_instance(
+        config,
+        runtime_paths,
+        model_name or "default",
+        execution_identity=execution_identity,
+    )
     # Coordinate-mode tool calls run through the shared team model in v1.
     # Member-agent models are intentionally not wrapped here.
     ai_runtime.install_queued_message_notice_hook(
@@ -1335,8 +1341,8 @@ def _create_team_instance(
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
         add_history_to_context=True,
         add_session_summary_to_context=True,
-        num_history_runs=history_settings.policy.limit if history_settings.policy.mode == "runs" else None,
-        num_history_messages=history_settings.policy.limit if history_settings.policy.mode == "messages" else None,
+        num_history_runs=history_settings.policy.num_history_runs,
+        num_history_messages=history_settings.policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
         store_history_messages=False,
         show_members_responses=True,
@@ -1345,7 +1351,7 @@ def _create_team_instance(
         # Agno will automatically list members with their names, roles, and tools
     )
     if history_settings.policy.mode == "all":
-        team.num_history_runs = None
+        enable_all_history_replay(team)
     return team
 
 
@@ -1354,19 +1360,23 @@ def select_model_for_team(
     room_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    thread_id: str | None = None,
 ) -> str:
     """Get the appropriate model for a team in a specific room.
 
     Priority:
-    1. Room-specific model from room_models
-    2. Team's configured model
-    3. Global default model
+    1. Thread-specific model override
+    2. Room-specific model from room_models
+    3. Team's configured model
+    4. Global default model
 
     Args:
         team_name: Name of the team
         room_id: Matrix room ID
         config: Application configuration
         runtime_paths: Explicit runtime context for room alias resolution
+        thread_id: Optional resolved Matrix thread root for thread model overrides
 
     Returns:
         Model name to use
@@ -1375,15 +1385,10 @@ def select_model_for_team(
     model_name = config.resolve_runtime_model(
         entity_name=team_name,
         room_id=room_id,
+        thread_id=thread_id,
         runtime_paths=runtime_paths,
     ).model_name
-    room_alias = get_room_alias_from_id(room_id, runtime_paths)
-    if room_alias and room_alias in config.room_models:
-        logger.info("using_room_specific_team_model", team_name=team_name, room_alias=room_alias, model_name=model_name)
-    elif team_name in config.teams and config.teams[team_name].model:
-        logger.info("using_team_specific_model", team_name=team_name, model_name=model_name)
-    else:
-        logger.info("using_default_team_model", team_name=team_name)
+    logger.info("selected_team_model", team_name=team_name, model_name=model_name)
     return model_name
 
 
@@ -1397,6 +1402,7 @@ def build_materialized_team_instance(
     scope_context: ScopeSessionContext | None,
     model_name: str | None,
     configured_team_name: str | None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> Team:
     """Build one agno.Team instance for already-materialized members."""
     resolved_team_runtime_model = config.resolve_runtime_model(
@@ -1412,6 +1418,7 @@ def build_materialized_team_instance(
         runtime_paths=runtime_paths,
         team_display_name=team_label,
         fallback_team_id=team_label,
+        execution_identity=execution_identity,
         model_name=resolved_team_model_name,
         configured_team_name=configured_team_name,
         history_storage=scope_context.storage if scope_context is not None else None,
@@ -1464,6 +1471,7 @@ async def prepare_materialized_team_execution(
             entity_name=configured_team_name,
             active_model_name=active_model_name,
         ).context_window,
+        room_id=room_id,
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,
@@ -1585,6 +1593,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 scope_context=scope_context,
                 model_name=model_name,
                 configured_team_name=configured_team_name,
+                execution_identity=execution_identity,
             )
             prepared_execution = await prepare_materialized_team_execution(
                 scope_context=scope_context,
@@ -1615,6 +1624,10 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
             turn_recorder.set_run_metadata(run_metadata)
+            # Team runs flatten context messages to text, so media pinned to
+            # thread-history messages is re-collected onto the current turn.
+            context_media_inputs = ai_runtime.media_inputs_from_run_input(prepared_execution.messages)
+            media_inputs = context_media_inputs.merge(media_inputs)
             logger.info("executing_team_response", agent_count=len(agents), mode=mode.value)
             logger.info("team_prompt_preview", agents=agent_list, prompt_preview=prompt[:500])
 
@@ -1653,24 +1666,36 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
 
             response: object | None = None
             cleaned_response: RunOutput | TeamRunOutput | None = None
-            attempt_prompt = prompt
-            attempt_media_inputs = media_inputs
             inline_media_fallback_prompt = orchestrator.config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
+            media_route = build_model_media_route(team.model) if media_inputs.has_any() else None
+            media_filter = filter_media_inputs_for_route(media_route, media_inputs)
+            attempt_prompt = (
+                append_inline_media_fallback_prompt(
+                    prompt,
+                    fallback_prompt=inline_media_fallback_prompt,
+                )
+                if media_filter.removed_kinds
+                else prompt
+            )
+            attempt_media_inputs = media_filter.media_inputs
             try:
-                for retried_without_inline_media in (False, True):
+                for retried_after_media_fallback in (False, True):
                     response = None
                     cleaned_response = None
                     try:
                         response = await _run(attempt_prompt, attempt_media_inputs, attempt_run_id)
                     except Exception as e:
-                        if not retried_without_inline_media and should_retry_without_inline_media(
+                        retry_decision = retry_media_inputs_after_failure(
+                            media_route,
                             e,
                             attempt_media_inputs,
-                        ):
+                        )
+                        if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
-                                "Retrying team response without inline media after validation error",
+                                "Retrying team response after inline media validation error",
                                 agents=agent_list,
                                 error=str(e),
+                                removed_media_kinds=sorted(retry_decision.removed_kinds),
                             )
                             _scrub_team_retry_notice_state(
                                 scope_context=scope_context,
@@ -1680,7 +1705,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                                 prompt,
                                 fallback_prompt=inline_media_fallback_prompt,
                             )
-                            attempt_media_inputs = MediaInputs()
+                            attempt_media_inputs = retry_decision.media_inputs
                             attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
 
@@ -1691,14 +1716,17 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                         cleaned_response = response
                     if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
                         error_text = str(response.content or "Unknown team error")
-                        if not retried_without_inline_media and should_retry_without_inline_media(
+                        retry_decision = retry_media_inputs_after_failure(
+                            media_route,
                             error_text,
                             attempt_media_inputs,
-                        ):
+                        )
+                        if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
-                                "Retrying team response without inline media after errored run output",
+                                "Retrying team response after inline media errored run output",
                                 agents=agent_list,
                                 error=error_text,
+                                removed_media_kinds=sorted(retry_decision.removed_kinds),
                             )
                             _cleanup_team_notice_state(
                                 run_output=response,
@@ -1714,7 +1742,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                                 prompt,
                                 fallback_prompt=inline_media_fallback_prompt,
                             )
-                            attempt_media_inputs = MediaInputs()
+                            attempt_media_inputs = retry_decision.media_inputs
                             attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
                         logger.warning("Team response returned errored run output", agents=agent_list, error=error_text)
@@ -1992,6 +2020,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 scope_context=scope_context,
                 model_name=model_name,
                 configured_team_name=configured_team_name,
+                execution_identity=execution_identity,
             )
             prepared_execution = await prepare_materialized_team_execution(
                 scope_context=scope_context,
@@ -2023,10 +2052,22 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             run_metadata = prepared_execution.run_metadata
             turn_recorder.set_run_metadata(run_metadata)
             logger.info("team_streaming_setup", agents=agent_names, display_names=display_names)
-            media_inputs = media or MediaInputs()
-            attempt_prompt = prepared_prompt
-            attempt_media_inputs = media_inputs
+            # Team runs flatten context messages to text, so media pinned to
+            # thread-history messages is re-collected onto the current turn.
+            context_media_inputs = ai_runtime.media_inputs_from_run_input(prepared_execution.messages)
+            media_inputs = context_media_inputs.merge(media or MediaInputs())
             inline_media_fallback_prompt = orchestrator.config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
+            media_route = build_model_media_route(team.model) if media_inputs.has_any() else None
+            media_filter = filter_media_inputs_for_route(media_route, media_inputs)
+            attempt_prompt = (
+                append_inline_media_fallback_prompt(
+                    prepared_prompt,
+                    fallback_prompt=inline_media_fallback_prompt,
+                )
+                if media_filter.removed_kinds
+                else prepared_prompt
+            )
+            attempt_media_inputs = media_filter.media_inputs
 
             visible_per_member: dict[str, str] = {}
             visible_consensus: str = ""
@@ -2172,7 +2213,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 )
 
             try:
-                for retried_without_inline_media in (False, True):
+                for retried_after_media_fallback in (False, True):
                     canonical_per_member = dict.fromkeys(display_names, "")
                     visible_per_member = dict.fromkeys(display_names, "")
                     canonical_consensus = ""
@@ -2183,7 +2224,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     next_tool_index = 1
                     pending_tools = tool_tracker.pending_tools
                     emitted_output = False
-                    retry_requested = False
+                    media_fallback_retry_requested = False
 
                     ai_runtime.note_attempt_run_id(run_id_callback, attempt_run_id)
 
@@ -2223,7 +2264,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                 run_output=event,
                                 scope_context=scope_context,
                                 session_id=session_id,
-                                entity_name=team_label,
+                                entity_name=configured_team_name or team_label,
                             )
 
                             if is_cancelled_run_output(event):
@@ -2239,27 +2280,33 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
                             if is_errored_run_output(event):
                                 error_text = str(event.content or "Unknown team error")
+                                retry_decision = retry_media_inputs_after_failure(
+                                    media_route,
+                                    error_text,
+                                    attempt_media_inputs,
+                                )
                                 if (
-                                    not retried_without_inline_media
+                                    not retried_after_media_fallback
                                     and not (emitted_output or pending_tools or completed_tools)
-                                    and should_retry_without_inline_media(error_text, attempt_media_inputs)
+                                    and retry_decision.should_retry
                                 ):
                                     logger.warning(
-                                        "Retrying team streaming without inline media after errored run output",
+                                        "Retrying team streaming after inline media errored run output",
                                         agents=", ".join(agent_names),
                                         error=error_text,
+                                        removed_media_kinds=sorted(retry_decision.removed_kinds),
                                     )
                                     _scrub_team_retry_notice_state(
                                         scope_context=scope_context,
-                                        entity_name=team_label,
+                                        entity_name=configured_team_name or team_label,
                                     )
                                     attempt_prompt = append_inline_media_fallback_prompt(
                                         prepared_prompt,
                                         fallback_prompt=inline_media_fallback_prompt,
                                     )
-                                    attempt_media_inputs = MediaInputs()
+                                    attempt_media_inputs = retry_decision.media_inputs
                                     attempt_run_id = ai_runtime.next_retry_run_id(run_id)
-                                    retry_requested = True
+                                    media_fallback_retry_requested = True
                                     break
                                 yield get_user_friendly_error_message(Exception(error_text), team_label)
                                 return
@@ -2284,27 +2331,33 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
                         if isinstance(event, TeamRunErrorEvent):
                             error_text = event.content or "Unknown team error"
+                            retry_decision = retry_media_inputs_after_failure(
+                                media_route,
+                                error_text,
+                                attempt_media_inputs,
+                            )
                             if (
-                                not retried_without_inline_media
+                                not retried_after_media_fallback
                                 and not (emitted_output or pending_tools or completed_tools)
-                                and should_retry_without_inline_media(error_text, attempt_media_inputs)
+                                and retry_decision.should_retry
                             ):
                                 logger.warning(
-                                    "Retrying team streaming without inline media after team error",
+                                    "Retrying team streaming after inline media team error",
                                     agents=", ".join(agent_names),
                                     error=error_text,
+                                    removed_media_kinds=sorted(retry_decision.removed_kinds),
                                 )
                                 _scrub_team_retry_notice_state(
                                     scope_context=scope_context,
-                                    entity_name=team_label,
+                                    entity_name=configured_team_name or team_label,
                                 )
                                 attempt_prompt = append_inline_media_fallback_prompt(
                                     prepared_prompt,
                                     fallback_prompt=inline_media_fallback_prompt,
                                 )
-                                attempt_media_inputs = MediaInputs()
+                                attempt_media_inputs = retry_decision.media_inputs
                                 attempt_run_id = ai_runtime.next_retry_run_id(run_id)
-                                retry_requested = True
+                                media_fallback_retry_requested = True
                                 break
                             yield get_user_friendly_error_message(Exception(error_text), team_label)
                             return
@@ -2373,7 +2426,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                             chunk_tool_trace = tool_trace.copy() if show_tool_calls and tool_trace else None
                             yield StructuredStreamChunk(content=header + full_text, tool_trace=chunk_tool_trace)
 
-                    if retry_requested:
+                    if media_fallback_retry_requested:
                         continue
                     if emitted_output and reply_to_event_id:
                         _persist_bound_seen_event_ids(
@@ -2398,7 +2451,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     run_output=None,
                     scope_context=scope_context,
                     session_id=session_id,
-                    entity_name=team_label,
+                    entity_name=configured_team_name or team_label,
                 )
     except asyncio.CancelledError:
         turn_recorder.record_interrupted(
@@ -2447,6 +2500,7 @@ __all__ = [
     "prepare_materialized_team_execution",
     "resolve_configured_team",
     "resolve_live_shared_agent_names",
+    "select_ad_hoc_team_mode",
     "select_model_for_team",
     "team_response",
     "team_response_stream",

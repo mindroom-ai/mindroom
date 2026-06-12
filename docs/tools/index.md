@@ -49,12 +49,13 @@ See [MCP](../mcp.md) for the `mcp_servers` config and naming rules.
 - [Research Sources](research-sources.md) - ArXiv, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](ai-and-generation.md) - Image, video, speech, and transcription APIs.
 - [Media & Content](media-and-content.md) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging, thread tags and summaries, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging, thread tags, summaries, and model overrides, low-level Matrix API access, and attachment-aware workflows.
 - [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
 - [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, and task managers.
 - [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](memory-and-storage.md) - Explicit memory tools and external memory providers.
-- [Agent Orchestration](agent-orchestration.md) - Subagents, delegation, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Agent Orchestration](agent-orchestration.md) - Subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Dynamic Tools](dynamic-tools.md) - Per-tool lazy loading for optional agent capabilities.
 - [Automation & Platforms](automation-and-platforms.md) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](location-commerce-and-home.md) - Maps, weather, commerce, and Home Assistant.
 

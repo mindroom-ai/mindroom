@@ -30,6 +30,7 @@ from .matrix.media import (
     is_matrix_media_dispatch_event,
     is_video_message_event,
     media_mime_type,
+    media_payload_exceeds_limit,
     parse_matrix_media_dispatch_event_source,
     resolve_image_mime_type,
 )
@@ -70,6 +71,7 @@ class AttachmentRecord:
     thread_id: str | None = None
     source_event_id: str | None = None
     sender: str | None = None
+    event_timestamp: int | None = None
     size_bytes: int | None = None
     content_sha256: str | None = None
     created_at: str | None = None
@@ -86,6 +88,7 @@ class AttachmentRecord:
             "thread_id": self.thread_id,
             "source_event_id": self.source_event_id,
             "sender": self.sender,
+            "event_timestamp": self.event_timestamp,
             "size_bytes": self.size_bytes,
             "content_sha256": self.content_sha256,
             "created_at": self.created_at,
@@ -133,6 +136,52 @@ def _thread_history_message_in_scope(message: ResolvedVisibleMessage, thread_id:
     return thread_id in (message.thread_id, message.event_id)
 
 
+_MEDIA_MSGTYPES = frozenset({"m.audio", "m.file", "m.image", "m.video"})
+
+
+def _attachment_ids_for_visible_message(message: ResolvedVisibleMessage) -> list[str]:
+    """Return attachment IDs carried by one visible message.
+
+    MindRoom-sent messages reference attachments via content metadata; raw
+    media events map to the deterministic per-event attachment ID used at
+    registration time.
+    """
+    attachment_ids = parse_attachment_ids_from_event_source({"content": message.content})
+    if attachment_ids:
+        return attachment_ids
+    if message.content.get("msgtype") in _MEDIA_MSGTYPES and message.event_id:
+        return [_attachment_id_for_event(message.event_id)]
+    return []
+
+
+def _attachment_record_in_message_scope(
+    record: AttachmentRecord,
+    message: ResolvedVisibleMessage,
+    *,
+    room_id: str | None,
+) -> bool:
+    if room_id is not None and record.room_id != room_id:
+        return False
+    # A record belongs to the thread of the message that references it:
+    # thread members match by thread ID, thread roots by their own event ID,
+    # and room-level messages only see room-level (thread-less) records.
+    return record.thread_id in (message.thread_id, message.event_id)
+
+
+def attachment_records_for_visible_message(
+    storage_path: Path,
+    message: ResolvedVisibleMessage,
+    *,
+    room_id: str | None,
+) -> list[AttachmentRecord]:
+    """Resolve attachment records carried by one visible message, scoped to its room and thread."""
+    attachment_ids = _attachment_ids_for_visible_message(message)
+    if not attachment_ids:
+        return []
+    records = resolve_attachments(storage_path, attachment_ids)
+    return [record for record in records if _attachment_record_in_message_scope(record, message, room_id=room_id)]
+
+
 def unique_attachment_ids(attachment_ids: Iterable[str]) -> list[str]:
     """Return unique non-empty attachment IDs preserving first-seen order."""
     unique_ids: list[str] = []
@@ -151,11 +200,55 @@ def merge_attachment_ids(*attachment_id_lists: list[str]) -> list[str]:
     )
 
 
-def format_attachment_ids_prompt(attachment_ids: list[str]) -> str | None:
-    """Return attachment guidance prompt text when attachment IDs are available."""
-    if not attachment_ids:
+_MAX_RENDERED_FILENAME_LENGTH = 80
+
+
+def _sanitize_rendered_filename(filename: str) -> str:
+    """Neutralize newline/quote injection from attacker-controlled filenames."""
+    sanitized = "".join(char for char in filename if char.isprintable()).replace('"', "'").strip()
+    if len(sanitized) > _MAX_RENDERED_FILENAME_LENGTH:
+        sanitized = f"{sanitized[: _MAX_RENDERED_FILENAME_LENGTH - 1]}…"
+    return sanitized
+
+
+def _attachment_provenance_line(record: AttachmentRecord) -> str:
+    details: list[str] = [record.kind]
+    if record.filename:
+        details.append(f'"{_sanitize_rendered_filename(record.filename)}"')
+    if record.sender:
+        details.append(f"from {record.sender}")
+    if record.event_timestamp is not None:
+        timestamp = datetime.fromtimestamp(record.event_timestamp / 1000, UTC)
+        details.append(f"sent {timestamp.strftime('%Y-%m-%d %H:%M UTC')}")
+    if record.source_event_id:
+        details.append(f"event {record.source_event_id}")
+    return f"- {record.attachment_id} ({', '.join(details)})"
+
+
+def format_attachments_prompt(current_records: list[AttachmentRecord]) -> str | None:
+    """Render provenance for attachments sent with the current message.
+
+    Earlier attachments are not listed here; they are annotated in place on
+    the thread-history messages that carried them.
+    """
+    if not current_records:
         return None
-    return f"Available attachment IDs: {', '.join(attachment_ids)}. Use tool calls to inspect or process them."
+    lines = ["Attachments sent with the current message (use tool calls to inspect or process them by ID):"]
+    lines.extend(_attachment_provenance_line(record) for record in current_records)
+    return "\n".join(lines)
+
+
+def format_attachment_annotation(attachment_records: list[AttachmentRecord]) -> str | None:
+    """Render a compact inline annotation for attachments carried by one message."""
+    if not attachment_records:
+        return None
+    parts = [
+        f'{record.attachment_id} ({record.kind}, "{_sanitize_rendered_filename(record.filename)}")'
+        if record.filename
+        else f"{record.attachment_id} ({record.kind})"
+        for record in attachment_records
+    ]
+    return f"[attachments: {', '.join(parts)}]"
 
 
 def _attachments_dir(storage_path: Path) -> Path:
@@ -409,6 +502,7 @@ def register_local_attachment(
     thread_id: str | None = None,
     source_event_id: str | None = None,
     sender: str | None = None,
+    event_timestamp: int | None = None,
 ) -> AttachmentRecord | None:
     """Register a local file as an attachment and persist metadata."""
     if not local_path.is_file():
@@ -443,6 +537,7 @@ def register_local_attachment(
         thread_id=thread_id,
         source_event_id=source_event_id,
         sender=sender,
+        event_timestamp=event_timestamp,
         size_bytes=size_bytes,
         content_sha256=content_sha256,
         created_at=datetime.now(UTC).isoformat(),
@@ -483,10 +578,19 @@ async def _register_media_attachment(
     room_id: str,
     thread_id: str | None,
     sender: str,
+    event_timestamp: int | None,
     filename: str | None,
     kind: _AttachmentKind,
 ) -> AttachmentRecord | None:
     """Persist media bytes and register a scoped attachment record."""
+    if media_payload_exceeds_limit(media_bytes):
+        logger.warning(
+            "Matrix media attachment exceeds byte limit",
+            event_id=event_id,
+            kind=kind,
+            size_bytes=len(media_bytes) if media_bytes is not None else None,
+        )
+        return None
     local_media_path = await _store_media_bytes_locally_async(
         storage_path,
         event_id,
@@ -507,6 +611,7 @@ async def _register_media_attachment(
         thread_id=thread_id,
         source_event_id=event_id,
         sender=sender,
+        event_timestamp=event_timestamp,
     )
 
 
@@ -529,6 +634,7 @@ async def _register_file_or_video_attachment(
         room_id=room_id,
         thread_id=thread_id,
         sender=event.sender,
+        event_timestamp=event.server_timestamp,
         filename=_filename_for_media_event(event),
         kind=kind,
     )
@@ -561,6 +667,7 @@ async def _register_image_attachment(
         room_id=room_id,
         thread_id=thread_id,
         sender=event.sender,
+        event_timestamp=event.server_timestamp,
         filename=_filename_for_media_event(event),
         kind="image",
     )
@@ -575,6 +682,7 @@ async def register_audio_attachment(
     room_id: str,
     thread_id: str | None,
     sender: str,
+    event_timestamp: int | None = None,
     filename: str | None = None,
 ) -> AttachmentRecord | None:
     """Persist raw audio bytes and register them as an attachment record."""
@@ -586,6 +694,7 @@ async def register_audio_attachment(
         room_id=room_id,
         thread_id=thread_id,
         sender=sender,
+        event_timestamp=event_timestamp,
         filename=filename,
         kind="audio",
     )
@@ -620,6 +729,7 @@ def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord 
     thread_id = raw_payload.get("thread_id")
     source_event_id = raw_payload.get("source_event_id")
     sender = raw_payload.get("sender")
+    event_timestamp = raw_payload.get("event_timestamp")
     size_bytes = raw_payload.get("size_bytes")
     content_sha256 = raw_payload.get("content_sha256")
     created_at = raw_payload.get("created_at")
@@ -634,6 +744,7 @@ def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord 
         thread_id=thread_id if isinstance(thread_id, str) else None,
         source_event_id=source_event_id if isinstance(source_event_id, str) else None,
         sender=sender if isinstance(sender, str) else None,
+        event_timestamp=event_timestamp if isinstance(event_timestamp, int) else None,
         size_bytes=size_bytes if isinstance(size_bytes, int) else None,
         content_sha256=content_sha256 if isinstance(content_sha256, str) else None,
         created_at=created_at if isinstance(created_at, str) else None,

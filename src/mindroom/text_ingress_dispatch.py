@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
+from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.commands.parsing import command_parser
-from mindroom.constants import (
-    ATTACHMENT_IDS_KEY,
-    ORIGINAL_SENDER_KEY,
-    ROUTER_AGENT_NAME,
-    VOICE_RAW_AUDIO_FALLBACK_KEY,
-)
+from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.dispatch_handoff import (
     DispatchEvent,
     DispatchIngressMetadata,
@@ -25,14 +21,10 @@ from mindroom.dispatch_handoff import (
 )
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
 from mindroom.handled_turns import HandledTurnState
-from mindroom.inbound_turn_normalizer import (
-    BatchMediaAttachmentRequest,
-    DispatchPayload,
-    DispatchPayloadWithAttachmentsRequest,
-    TextNormalizationRequest,
-)
+from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
+from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
@@ -47,7 +39,6 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.commands.parsing import Command
-    from mindroom.conversation_resolver import MessageContext
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_controller import TurnController
@@ -171,7 +162,7 @@ async def _prepare_text_dispatch(
     hydrated_payload_metadata = payload_metadata_from_source(
         event.source,
         trust_internal_metadata=(
-            controller._should_trust_internal_payload_metadata(event)
+            controller.deps.ingress.should_trust_internal_payload_metadata(event)
             if trust_hydrated_internal_metadata is None
             else trust_hydrated_internal_metadata
         ),
@@ -184,7 +175,7 @@ async def _prepare_text_dispatch(
             hydrated_payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata
             if trust_hydrated_internal_metadata is not None
-            else controller._should_trust_internal_payload_metadata(event),
+            else controller.deps.ingress.should_trust_internal_payload_metadata(event),
         )
     )
     attach_dispatch_pipeline_timing(event.source, dispatch_timing)
@@ -250,7 +241,7 @@ def _parsed_command_for_event(
         return None
     if is_audio_message_event(event) or is_voice_event(
         event,
-        sender_is_trusted=controller._sender_is_trusted_for_ingress_metadata,
+        sender_is_trusted=controller.deps.ingress.sender_is_trusted_for_ingress_metadata,
     ):
         return None
     return command_parser.parse(event.body)
@@ -279,13 +270,14 @@ async def _blocked_before_plan(
     ):
         return True
 
+    may_be_superseded = prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
     if prepared.replay_guard.degraded:
         skips_turn = await controller._has_newer_unresponded_cached_thread_event(
             room_id=room.room_id,
             event=prepared.event,
             requester_user_id=requester_user_id,
             thread_id=prepared.replay_guard.thread_id,
-            source_kind=prepared.dispatch.envelope.source_kind,
+            may_be_superseded_by_newer_requester_turn=may_be_superseded,
         )
         if not skips_turn:
             controller.deps.logger.warning(
@@ -300,7 +292,7 @@ async def _blocked_before_plan(
             prepared.event,
             requester_user_id,
             prepared.replay_guard.history,
-            source_kind=prepared.dispatch.envelope.source_kind,
+            may_be_superseded_by_newer_requester_turn=may_be_superseded,
         )
     if skips_turn:
         controller._mark_source_events_responded(prepared.handled_turn)
@@ -369,48 +361,45 @@ async def _apply_turn_plan(
         conversation_target=prepared.dispatch.target,
     )
 
-    async def build_payload(context: MessageContext) -> DispatchPayload:
-        effective_thread_id = prepared.dispatch.target.resolved_thread_id
-        media_attachment_ids: list[str] = []
-        fallback_images = None
-        if media_events:
-            media_result = await controller.deps.normalizer.register_batch_media_attachments(
-                BatchMediaAttachmentRequest(
-                    room_id=room.room_id,
-                    thread_id=effective_thread_id,
-                    media_events=media_events,
-                ),
-            )
-            media_attachment_ids = media_result.attachment_ids
-            fallback_images = media_result.fallback_images
-        return await controller.deps.normalizer.build_dispatch_payload_with_attachments(
-            DispatchPayloadWithAttachmentsRequest(
-                room_id=room.room_id,
-                prompt=prepared.event.body,
-                current_attachment_ids=merge_attachment_ids(
-                    message_attachment_ids,
-                    media_attachment_ids,
-                ),
-                trusted_current_attachment_ids=trusted_attachment_ids,
-                thread_id=context.thread_id,
-                media_thread_id=effective_thread_id,
-                thread_history=context.thread_history,
-                fallback_images=fallback_images,
-            ),
-        )
-
-    await controller._execute_response_action(
-        room,
-        prepared.event,
-        prepared.dispatch,
-        plan.response_action,
-        build_payload,
-        processing_log="Processing",
-        dispatch_started_at=prepared.dispatch_started_at,
-        handled_turn=handled_turn,
-        matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
-        queued_notice_reservation=queued_notice_reservation,
+    payload_inputs = DispatchPayloadInputs(
+        message_attachment_ids=tuple(message_attachment_ids),
+        trusted_attachment_ids=tuple(trusted_attachment_ids),
+        media_events=tuple(media_events or ()),
     )
+
+    # The inbox handoff is complete once the runner takes the conversation's
+    # response lock; the response itself keeps running on a runner-owned task.
+    response_started = asyncio.Event()
+    response_task = controller.deps.response_runner.track_inbox_response(
+        controller._execute_response_action(
+            room,
+            prepared.event,
+            prepared.dispatch,
+            plan.response_action,
+            payload_inputs,
+            processing_log="Processing",
+            dispatch_started_at=prepared.dispatch_started_at,
+            handled_turn=handled_turn,
+            matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
+            queued_notice_reservation=queued_notice_reservation,
+            on_lifecycle_lock_acquired=response_started.set,
+        ),
+        name=f"inbox_response:{prepared.event.event_id}",
+    )
+    started_wait = asyncio.ensure_future(response_started.wait())
+    try:
+        await asyncio.wait({started_wait, response_task}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        started_wait.cancel()
+    if response_task.done() and not response_task.cancelled() and not response_started.is_set():
+        # Surface pre-lock failures to the caller's containment; post-lock
+        # failures (including a fast failure racing the FIRST_COMPLETED wait)
+        # belong to the runner-owned task. Pre-lock CANCELLATION is
+        # deliberately NOT surfaced: this coroutine was not itself cancelled,
+        # and re-raising CancelledError here would corrupt the gate drain's
+        # own cancellation state. The queued-notice reservation still cancels
+        # in dispatch_text_message's finally, which is the cleanup contract.
+        response_task.result()
 
 
 async def _execute_route_plan(

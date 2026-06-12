@@ -19,7 +19,7 @@ from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallC
 from mindroom.matrix.cache.thread_writes import ThreadOutboundWritePolicy
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.media_inputs import MediaInputs
-from mindroom.streaming_delivery import _queue_delivery_request
+from mindroom.streaming import _queue_delivery_request
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
 
 if TYPE_CHECKING:
@@ -50,7 +50,6 @@ async def test_stream_processing_marks_tool_call_started() -> None:
     with patch(
         "mindroom.ai.emit_timing_event",
         side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
-        create=True,
     ):
         chunks = [
             chunk
@@ -60,8 +59,10 @@ async def test_stream_processing_marks_tool_call_started() -> None:
                 show_tool_calls=True,
                 agent_name="code",
                 media_inputs=MediaInputs(),
-                retried_without_inline_media=False,
+                retried_after_media_fallback=False,
                 timing_scope="test",
+                media_route=None,
+                context_media_kinds=frozenset(),
             )
         ]
 
@@ -87,9 +88,8 @@ async def test_queue_delivery_request_marks_enqueued_delivery() -> None:
     delivery_queue: asyncio.Queue[object | None] = asyncio.Queue()
 
     with patch(
-        "mindroom.streaming_delivery.emit_timing_event",
+        "mindroom.streaming.emit_timing_event",
         side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
-        create=True,
     ):
         capture_completion = _queue_delivery_request(
             delivery_queue,
@@ -135,7 +135,6 @@ async def test_send_message_result_marks_prepare_and_send_phases() -> None:
         patch(
             "mindroom.matrix.client_delivery.emit_timing_event",
             side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
-            create=True,
         ),
     ):
         result = await send_message_result(
@@ -283,7 +282,6 @@ async def test_tool_hook_bridge_marks_hook_and_tool_entry() -> None:
     with patch(
         "mindroom.tool_system.tool_hooks.emit_timing_event",
         side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
-        create=True,
     ):
         result = await bridge("echo", echo, {"text": "hello"})
 

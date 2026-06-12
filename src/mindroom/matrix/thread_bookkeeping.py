@@ -4,6 +4,39 @@ Ownership map:
 - canonical resolution: `mindroom.matrix.thread_membership`
 - mutation/bookkeeping impact: this module
 - tool-facing root normalization: `mindroom.custom_tools.attachment_helpers`
+
+Who may mutate thread state, and how:
+
+1. This module never writes thread state.
+   It only classifies one mutation into ``MutationThreadImpact``: THREADED(thread_id), ROOM_LEVEL, or UNKNOWN.
+
+2. Mutation-driven thread-cache writes go through exactly one path:
+   the three write policies in ``mindroom.matrix.cache.thread_writes``
+   (``ThreadOutboundWritePolicy``, ``ThreadLiveWritePolicy``, ``ThreadSyncWritePolicy``),
+   which all resolve impact through this module's ``ThreadMutationResolver``,
+   apply it through ``mindroom.matrix.cache.thread_write_cache_ops.ThreadMutationCacheOps``,
+   and order every write through the per-room ``EventCacheWriteCoordinator`` barrier.
+   The only other thread-cache writer is the read-refill in
+   ``mindroom.matrix.client_thread_history``: after an authoritative homeserver fetch it stores the
+   snapshot through the guarded ``replace_thread_if_not_newer``, and it invalidates entries it proves
+   corrupt (unresolvable payloads or rows missing the thread root).
+   No code outside those two sites may call the event cache's thread-write methods.
+
+3. Custom tools may not write thread state.
+   A tool that sends or redacts Matrix events (see ``mindroom.custom_tools.matrix_api``) must resolve
+   impact pre-send via ``resolve_event_thread_impact_for_client`` or
+   ``resolve_redaction_thread_impact_for_client`` and refuse the Matrix operation when impact is UNKNOWN;
+   after a successful send it reports through ``ConversationCacheProtocol.notify_outbound_*``,
+   which routes into the same outbound write policy.
+
+4. The impact mapping is total and UNKNOWN fails closed:
+   THREADED means invalidate-then-append that one thread,
+   ROOM_LEVEL means no thread-cache change,
+   and UNKNOWN means the writer must invalidate the whole room's cached threads
+   (or, pre-send in tools, refuse the operation) because membership could not be proven.
+
+5. Redactions of reactions are always ROOM_LEVEL: removing an annotation cannot change any cached
+   thread's visible messages.
 """
 
 from __future__ import annotations
@@ -19,7 +52,6 @@ from mindroom.matrix.thread_membership import (
     ThreadResolution,
     ThreadResolutionState,
     ThreadRootProof,
-    fetch_event_info_for_client,
     page_event_info_counts_as_thread_child_proof,
     resolve_event_thread_membership,
     resolve_related_event_thread_membership,
@@ -27,6 +59,7 @@ from mindroom.matrix.thread_membership import (
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from mindroom.matrix.thread_room_scan import (
     RoomScanConversationCache,
+    fetch_event_info_for_client,
     fetch_event_info_from_conversation_cache,
     room_scan_membership_access_for_client,
 )

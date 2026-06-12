@@ -26,10 +26,11 @@ Use these tools when you need local execution, coding-oriented file access, ligh
 
 ## Common Setup Notes
 
-All ten tools on this page are exposed as `setup_type: none` in the live tool registry, so they do not require dashboard OAuth setup or credential forms before they appear as available.
+Most tools on this page are exposed as `setup_type: none` in the live tool registry, so they do not require dashboard OAuth setup or credential forms before they appear as available.
+`docker` is marked `setup_type: special` and `requires_config` because Docker daemon access is privileged host control.
 `src/mindroom/api/integrations.py` currently has no dedicated integration endpoints for them because they are local-runtime tools rather than OAuth-backed services.
 
-MindRoom's built-in default worker-routed set is `coding`, `file`, `python`, and `shell`.
+MindRoom's built-in default worker-routed set is `coding`, `docker`, `file`, `python`, and `shell`.
 You can override the effective routed set with `defaults.worker_tools` or `agents.<name>.worker_tools`.
 When `worker_scope` is unset, worker-routed calls still execute in the sandbox, but they use a fresh runtime per call instead of a persistent scoped worker.
 `worker_scope: shared` reuses one runtime per agent, `worker_scope: user` reuses one runtime per requester across that requester's agents, and `worker_scope: user_agent` reuses one runtime per requester-agent pair.
@@ -138,12 +139,14 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 ## [`shell`]
 
-`shell` runs argv-style commands and is MindRoom's most configurable execution tool for sandboxed command-line work.
+`shell` runs command strings or argv-style commands and is MindRoom's most configurable execution tool for sandboxed command-line work.
 
 ### What It Does
 
 `shell` exposes `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`.
-`run_shell_command()` expects a list of arguments, not a shell-parsed string.
+`run_shell_command()` accepts either a natural shell command string or a list of argv strings.
+Plain command strings and single-item argv lists that look shell-like run through `bash -lc`.
+Explicit multi-item argv lists run directly without shell parsing.
 If the command exits within `timeout`, the tool returns the last `tail` lines of stdout, or stderr on non-zero exit.
 Shell output is also capped to the most recent 51200 bytes, with a truncation notice when older output is dropped.
 If the timeout is exceeded, the process keeps running in the background and the tool returns a `shell:...` handle.
@@ -179,6 +182,7 @@ agents:
 ```
 
 ```python
+run_shell_command("git status --short", tail=50)
 run_shell_command(["git", "status", "--short"], tail=50)
 run_shell_command(["bash", "-lc", "sleep 300 && echo done"], timeout=2)
 check_shell_command("shell:abcd1234")
@@ -189,6 +193,7 @@ kill_shell_command("shell:abcd1234")
 
 - `extra_env_passthrough` only affects sandboxed `shell` calls and matches exported process env, not config-adjacent `.env` entries.
   MindRoom forwards no committed runtime `.env` values by default; matched values pass through except credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and names starting with `MINDROOM_SANDBOX_`.
+- Use explicit argv lists for commands that need exact argument boundaries.
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.
@@ -307,11 +312,13 @@ ls("src/mindroom")
 `docker` exposes container operations such as `list_containers()`, `run_container()`, `exec_in_container()`, `start_container()`, `stop_container()`, `remove_container()`, `get_container_logs()`, and `inspect_container()`.
 It also exposes image, volume, and network operations including `pull_image()`, `build_image()`, `tag_image()`, `list_volumes()`, `create_volume()`, `list_networks()`, and `connect_container_to_network()`.
 On startup, the toolkit checks common Docker socket locations and pings the Docker daemon.
-`docker` defaults to primary execution, so it normally runs beside the main agent process rather than in the worker sandbox.
+MindRoom marks `docker` as worker-routed by default because Docker daemon access is privileged host control.
+In hosted, multi-tenant, or default-unsandboxed deployments, Docker is unavailable unless a worker backend is configured or unsafe local execution is explicitly enabled for local development.
 
 ### Configuration
 
-This tool has no tool-specific inline configuration fields.
+Set `include_tools` to an optional list of Docker command functions to expose, or leave it empty to expose all Docker commands.
+The deployment must provide Docker daemon access to the selected worker runtime if Docker operations should be allowed.
 
 ### Example
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
@@ -54,10 +53,12 @@ from mindroom.streaming import (
     StreamingDeliveryError,
     StreamingResponse,
     clean_partial_reply_text,
+    strip_visible_tool_markers,
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity, stream_with_tool_execution_identity
 
@@ -96,8 +97,9 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+    from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.stop import StopManager
-    from mindroom.streaming_delivery import StreamInputChunk
+    from mindroom.streaming import StreamInputChunk
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -105,8 +107,6 @@ if TYPE_CHECKING:
 type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
-_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
-_VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 
 
 def _merge_response_extra_content(
@@ -134,35 +134,6 @@ def _split_delivery_tool_trace(
     return completed, interrupted
 
 
-def _strip_visible_tool_markers(text: str) -> str:
-    """Remove Matrix-visible tool markers from streamed text before replay persistence."""
-    lines = text.splitlines()
-    filtered_lines: list[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line):
-            filtered_lines.append(line)
-            index += 1
-            continue
-
-        index += 1
-        spacer_lines: list[str] = []
-        while index < len(lines) and not lines[index].strip():
-            spacer_lines.append(lines[index])
-            index += 1
-
-        if index < len(lines) and _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN.fullmatch(lines[index]):
-            filtered_lines.extend(spacer_lines)
-            index += 1
-            if index < len(lines) and not lines[index].strip():
-                index += 1
-            continue
-
-        filtered_lines.extend(spacer_lines)
-    return "\n".join(filtered_lines).rstrip()
-
-
 def _materialize_matrix_run_metadata(
     matrix_run_metadata: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -172,13 +143,18 @@ def _materialize_matrix_run_metadata(
     return dict(matrix_run_metadata)
 
 
-def _agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
+def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id: str | None) -> bool:
     """Return whether one agent can issue Matrix message actions."""
     try:
-        tool_names = config.get_agent_tools(agent_name)
+        surface = visible_tool_surface(
+            agent_name=agent_name,
+            config=config,
+            session_id=session_id,
+            enable_dynamic_tools_manager=False,
+        )
     except ValueError:
         return False
-    return "matrix_message" in tool_names
+    return "matrix_message" in {entry.name for entry in surface.runtime_tool_configs}
 
 
 def _append_matrix_prompt_context(
@@ -299,10 +275,11 @@ class ResponseRequest:
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     requires_model_history_refresh: bool = False
-    prepare_after_lock: Callable[[ResponseRequest], Awaitable[ResponseRequest]] | None = None
+    payload_preparation: ResponsePayloadPreparation | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
+    on_sync_restart_cancelled: Callable[[], None] | None = None
 
     @property
     def room_id(self) -> str:
@@ -351,6 +328,7 @@ class ResponseRunnerDeps:
     delivery_gateway: DeliveryGateway
     post_response_effects: PostResponseEffectsSupport
     state_writer: ConversationStateWriter
+    request_preparer: ResponsePayloadPreparer
 
 
 @dataclass(frozen=True)
@@ -376,6 +354,48 @@ class ResponseRunner:
         init=False,
     )
     _in_flight_response_count: int = field(default=0, init=False)
+    _inbox_response_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
+
+    def track_inbox_response(self, response: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+        """Own one detached inbox response until it completes or a drain settles it."""
+        task = asyncio.create_task(response, name=name)
+        self._inbox_response_tasks.add(task)
+        task.add_done_callback(self._finish_inbox_response_task)
+        return task
+
+    def _finish_inbox_response_task(self, task: asyncio.Task[None]) -> None:
+        self._inbox_response_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            self.deps.logger.error(
+                "inbox_response_task_failed",
+                task_name=task.get_name(),
+                exception_type=error.__class__.__name__,
+                error=str(error),
+            )
+
+    async def drain_inbox_responses(self, *, cancel_after_seconds: float | None = None) -> bool:
+        """Settle detached inbox responses: graceful drains await, bounded drains cancel.
+
+        Returns False when a bounded drain had to cancel or abandon running work.
+        A bounded drain may take up to two cancel_after_seconds windows: one
+        waiting for completion and one letting cancelled tasks run cleanup.
+        """
+        tasks = [task for task in self._inbox_response_tasks if not task.done()]
+        if not tasks:
+            return True
+        if cancel_after_seconds is None:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            return True
+        _done, pending = await asyncio.wait(tasks, timeout=cancel_after_seconds)
+        if not pending:
+            return True
+        for task in pending:
+            task.cancel()
+        await asyncio.wait(pending, timeout=cancel_after_seconds)
+        return False
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for response coordination."""
@@ -500,7 +520,7 @@ class ResponseRunner:
         tool_trace: Sequence[ToolTraceEntry],
     ) -> bool:
         """Capture canonical interrupted replay state from one failed stream delivery."""
-        partial_text = clean_partial_reply_text(_strip_visible_tool_markers(accumulated_text))
+        partial_text = clean_partial_reply_text(strip_visible_tool_markers(accumulated_text))
         completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
         if not partial_text:
             partial_text = recorder.assistant_text
@@ -738,9 +758,9 @@ class ResponseRunner:
         """Refresh thread history and rebuild any history-derived payload once locked."""
         try:
             request = await self._refresh_model_history_after_lock(request)
-            if request.prepare_after_lock is None:
+            if request.payload_preparation is None:
                 return request
-            return await request.prepare_after_lock(request)
+            return await self.deps.request_preparer.prepare(request)
         except Exception as exc:
             raise PostLockRequestPreparationError from exc
 
@@ -762,6 +782,30 @@ class ResponseRunner:
     def _correlation_id_for_request(self, request: ResponseRequest) -> str:
         """Resolve the correlation id for one request."""
         return request.correlation_id or request.reply_to_event_id or request.response_envelope.source_event_id
+
+    def _notify_sync_restart_cancelled(
+        self,
+        request: ResponseRequest,
+        final_outcome: FinalDeliveryOutcome,
+        *,
+        delivery_cancelled: bool,
+        delivery_failure_reason: str | None,
+    ) -> None:
+        """Tell the dispatcher when stall recovery interrupted a marked-handled turn.
+
+        Only turns that end as a visible interrupted note are reported: they get
+        recorded in the handled-turn ledger, so the post-restart sync replay
+        dedups them away and an explicit retry is their only recovery. Unmarked
+        turns are recovered by that replay instead; retrying them too would
+        answer twice.
+        """
+        if request.on_sync_restart_cancelled is None or not delivery_cancelled:
+            return
+        if not final_outcome.mark_handled:
+            return
+        if cancel_source_from_failure_reason(delivery_failure_reason) != "sync_restart":
+            return
+        request.on_sync_restart_cancelled()
 
     def _build_lifecycle(
         self,
@@ -884,6 +928,7 @@ class ResponseRunner:
             request.room_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+            thread_id=resolved_target.resolved_thread_id,
         )
         use_streaming = await should_use_streaming(
             self._client(),
@@ -902,7 +947,8 @@ class ResponseRunner:
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
         )
         include_matrix_prompt_context = any(
-            _agent_has_matrix_messaging_tool(self.deps.runtime.config, name) for name in agent_names
+            _agent_has_matrix_messaging_tool(self.deps.runtime.config, name, resolved_target.session_id)
+            for name in agent_names
         )
         model_message = _append_matrix_prompt_context(
             prepared_prompt,
@@ -1346,6 +1392,12 @@ class ResponseRunner:
                 persist_response_event_id=persist_response_event_id,
             ),
         )
+        self._notify_sync_restart_cancelled(
+            request,
+            final_outcome,
+            delivery_cancelled=delivery_cancelled,
+            delivery_failure_reason=delivery_failure_reason,
+        )
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
 
     async def run_cancellable_response(
@@ -1410,11 +1462,22 @@ class ResponseRunner:
         resolved_model_prompt = _append_matrix_prompt_context(
             request.model_prompt or request.prompt,
             target=resolved_target,
-            include_context=_agent_has_matrix_messaging_tool(self.deps.runtime.config, self.deps.agent_name),
+            include_context=_agent_has_matrix_messaging_tool(
+                self.deps.runtime.config,
+                self.deps.agent_name,
+                session_id,
+            ),
+        )
+        runtime_model = self.deps.runtime.config.resolve_runtime_model(
+            entity_name=self.deps.agent_name,
+            room_id=resolved_target.room_id,
+            thread_id=response_thread_id,
+            runtime_paths=self.deps.runtime_paths,
         )
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=request.user_id,
+            active_model_name=runtime_model.model_name,
             session_id=session_id,
             attachment_ids=request.attachment_ids,
             correlation_id=request.correlation_id,
@@ -1650,6 +1713,16 @@ class ResponseRunner:
                 )
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("streaming_complete")
+                if turn_recorder.outcome == "interrupted":
+                    self._persist_interrupted_recorder(
+                        recorder=turn_recorder,
+                        session_scope=self.deps.state_writer.history_scope(),
+                        session_id=runtime.session_id,
+                        execution_identity=runtime.tool_dispatch.execution_identity,
+                        run_id=run_id,
+                        is_team=False,
+                        response_event_id=request.existing_event_id,
+                    )
                 return transport_outcome
         except asyncio.CancelledError:
             self._persist_interrupted_recorder(
@@ -2309,4 +2382,10 @@ class ResponseRunner:
             raise
         if early_delivery_error is not None:
             raise early_delivery_error
+        self._notify_sync_restart_cancelled(
+            request,
+            final_outcome,
+            delivery_cancelled=delivery_cancelled,
+            delivery_failure_reason=delivery_failure_reason,
+        )
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None

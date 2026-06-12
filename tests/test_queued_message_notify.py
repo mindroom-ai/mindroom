@@ -67,6 +67,7 @@ from mindroom.post_response_effects import (
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_lifecycle import _QueuedMessageState
+from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
@@ -194,6 +195,7 @@ def _prepared_run(agent: object, *, prompt: str = "prompt") -> _PreparedAgentRun
         messages=(Message(role="user", content=prompt),),
         unseen_event_ids=[],
         prepared_history=MagicMock(),
+        runtime_model_name="default",
     )
 
 
@@ -205,6 +207,25 @@ def _message_context() -> MessageContext:
         thread_history=[],
         mentioned_agents=[],
         has_non_agent_mentions=False,
+    )
+
+
+def _payload_preparation(target: MessageTarget) -> ResponsePayloadPreparation:
+    """Build a minimal under-lock preparation carrier bound to ``target``."""
+    return ResponsePayloadPreparation(
+        dispatch=PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=_message_context(),
+            target=target,
+            correlation_id="$event",
+            envelope=_envelope(source_event_id="$event", target=target),
+        ),
+        prompt="hello",
+        action_kind="individual",
+        payload_inputs=DispatchPayloadInputs((), (), ()),
+        target_member_names=None,
+        dispatch_started_at=0.0,
+        context_ready_monotonic=0.0,
     )
 
 
@@ -764,7 +785,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         await asyncio.gather(*scheduled_tasks)
 
     mock_fetch.assert_awaited_once_with(conversation_cache, "!room:localhost", "$thread")
-    mock_generate.assert_awaited_once_with(thread_history, config, runtime_paths)
+    mock_generate.assert_awaited_once_with(thread_history, config, runtime_paths, model_name="default")
     mock_send.assert_awaited_once_with(
         client,
         "!room:localhost",
@@ -1196,7 +1217,7 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_generate_response_keeps_locked_target_when_prepare_after_lock_retargets(tmp_path: Path) -> None:
+async def test_generate_response_keeps_locked_target_when_payload_preparation_retargets(tmp_path: Path) -> None:
     """Post-lock request preparation may refresh context, but it must not retarget delivery."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -1206,10 +1227,11 @@ async def test_generate_response_keeps_locked_target_when_prepare_after_lock_ret
     observed_delivery_targets: list[MessageTarget | None] = []
     observed_lifecycle_targets: list[MessageTarget] = []
 
-    async def prepare_after_lock(request: ResponseRequest) -> ResponseRequest:
+    async def fake_prepare(request: ResponseRequest) -> ResponseRequest:
         return replace(
             request,
             response_envelope=_envelope(source_event_id="$event", target=retarget),
+            payload_preparation=None,
         )
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
@@ -1245,6 +1267,11 @@ async def test_generate_response_keeps_locked_target_when_prepare_after_lock_ret
     with (
         patch.object(coordinator, "_build_lifecycle", MagicMock(side_effect=fake_build_lifecycle)),
         patch.object(
+            coordinator.deps.request_preparer,
+            "prepare",
+            new=AsyncMock(side_effect=fake_prepare),
+        ),
+        patch.object(
             coordinator,
             "run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
@@ -1262,7 +1289,7 @@ async def test_generate_response_keeps_locked_target_when_prepare_after_lock_ret
                 prompt="hello",
                 user_id="@user:localhost",
                 response_envelope=_envelope(source_event_id="$event", target=stable_target),
-                prepare_after_lock=prepare_after_lock,
+                payload_preparation=_payload_preparation(stable_target),
             ),
         )
 
@@ -1342,7 +1369,7 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_keeps_locked_target_when_prepare_after_lock_retargets(tmp_path: Path) -> None:
+async def test_generate_team_response_keeps_locked_target_when_payload_preparation_retargets(tmp_path: Path) -> None:
     """Team response setup and delivery should keep the target selected before lock acquisition."""
     bot = _bot(tmp_path)
     bot.client = MagicMock()
@@ -1356,10 +1383,11 @@ async def test_generate_team_response_keeps_locked_target_when_prepare_after_loc
     observed_run_targets: list[MessageTarget] = []
     observed_delivery_targets: list[MessageTarget] = []
 
-    async def prepare_after_lock(request: ResponseRequest) -> ResponseRequest:
+    async def fake_prepare(request: ResponseRequest) -> ResponseRequest:
         return replace(
             request,
             response_envelope=_envelope(source_event_id="$event", target=retarget),
+            payload_preparation=None,
         )
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
@@ -1386,6 +1414,11 @@ async def test_generate_team_response_keeps_locked_target_when_prepare_after_loc
     with (
         patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=lifecycle)),
         patch.object(
+            coordinator.deps.request_preparer,
+            "prepare",
+            new=AsyncMock(side_effect=fake_prepare),
+        ),
+        patch.object(
             coordinator,
             "run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
@@ -1400,7 +1433,7 @@ async def test_generate_team_response_keeps_locked_target_when_prepare_after_loc
                 prompt="hello",
                 user_id="@user:localhost",
                 response_envelope=_envelope(source_event_id="$event", target=stable_target),
-                prepare_after_lock=prepare_after_lock,
+                payload_preparation=_payload_preparation(stable_target),
             ),
             team_agents=[],
             team_mode="coordinate",
@@ -2096,7 +2129,7 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
 
 @pytest.mark.asyncio
 async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecycle(tmp_path: Path) -> None:
-    """Cancellation before response lifecycle ownership should cancel the reservation."""
+    """A response task cancelled before lifecycle ownership still cancels the reservation."""
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
@@ -2123,7 +2156,6 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
                 "_execute_response_action",
                 new=AsyncMock(side_effect=asyncio.CancelledError),
             ),
-            pytest.raises(asyncio.CancelledError),
         ):
             await bot._turn_controller._dispatch_text_message(
                 room,
@@ -2423,25 +2455,21 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
         try:
             with (
                 patch.object(
-                    bot._turn_controller.deps.response_runner,
-                    "reserve_waiting_human_message",
-                    return_value=reservation,
-                ),
-                patch.object(
                     bot._turn_controller,
                     "_enqueue_for_dispatch",
                     new=AsyncMock(side_effect=asyncio.CancelledError),
                 ),
                 pytest.raises(asyncio.CancelledError),
             ):
-                await bot._turn_controller._enqueue_active_thread_follow_up(
+                await bot._turn_controller._enqueue_prepared_text_for_dispatch(
                     room=room,
-                    event=event,
-                    target=target,
+                    prepared_event=event,
+                    dispatch_event=event,
                     envelope=envelope,
+                    coalescing_thread_id="$thread",
                     requester_user_id="@user:localhost",
                     reservation_owner=reservation_owner,
-                    coalescing_key=active_follow_up_coalescing_key(room.room_id, "$thread"),
+                    queued_notice_reservation=reservation,
                 )
         finally:
             await reservation_owner.release()
@@ -3049,6 +3077,7 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
             runtime_paths=runtime_paths,
             team_display_name="Queued Notice Team",
             fallback_team_id="queued-notice-team",
+            execution_identity=None,
         )
         messages = [Message(role="user", content="hello")]
         team.model.format_function_call_results(

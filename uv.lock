@@ -44,7 +44,7 @@ wheels = [
 
 [[package]]
 name = "agno"
-version = "2.5.13"
+version = "2.6.12"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "docstring-parser" },
@@ -61,9 +61,9 @@ dependencies = [
     { name = "typer" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/71/00/9af194faecbc5a4443cf05c490671c50d11e6dbeaac2ecf491e519797004/agno-2.5.13.tar.gz", hash = "sha256:166ca92d760ae43902862a239e6d64ab85bc625562e49937b37d1d920c68e009", size = 1829242, upload-time = "2026-04-01T01:30:50.329Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8a/89/1aa528cb570ef8990edb9f73a266f654ab2d4c61a8cf4a3ae9112be4bacb/agno-2.6.12.tar.gz", hash = "sha256:fe2a81851a639a56bf10833ef5fadca35b8b0e5f2ff202fdf00bd96dffac2ca6", size = 2120343, upload-time = "2026-06-05T19:04:05.092Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/65/0af18e9c8c47c6e20945828b1d41c36b9dc50e17b69acaec42f99882f87e/agno-2.5.13-py3-none-any.whl", hash = "sha256:d2c3ff3f97783dd40bf1f5dbf62418bfc8020f45d5714125e419dba6157c4f38", size = 2177916, upload-time = "2026-04-01T01:30:48.077Z" },
+    { url = "https://files.pythonhosted.org/packages/80/6b/e8237f78d2d81d803b4af81fdad7883219430d856dbc35f641b111e2efc6/agno-2.6.12-py3-none-any.whl", hash = "sha256:d0e442af28db8bbe94b01353a885a5deabef6079e3f2c3e279ec81546024288d", size = 2507813, upload-time = "2026-06-05T19:04:02.928Z" },
 ]
 
 [package.optional-dependencies]
@@ -2345,7 +2345,7 @@ wheels = [
 
 [[package]]
 name = "google-genai"
-version = "1.73.1"
+version = "2.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -2359,9 +2359,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3d/d8/40f5f107e5a2976bbac52d421f04d14fc221b55a8f05e66be44b2f739fe6/google_genai-1.73.1.tar.gz", hash = "sha256:b637e3a3b9e2eccc46f27136d470165803de84eca52abfed2e7352081a4d5a15", size = 530998, upload-time = "2026-04-14T21:06:19.153Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5b/52/0244e310812f3063d09d60b30ae29ab7df9343bd005744cd5eeaa6ba39b4/google_genai-2.8.0.tar.gz", hash = "sha256:37a9b3cb127d763e7f4ca47452ae3562c87728773bd1b149f7b559c239da2bc1", size = 564955, upload-time = "2026-06-03T22:55:38.397Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/65/af/508e0528015240d710c6763f7c89ff44fab9a94a80b4377e265d692cbfd6/google_genai-1.73.1-py3-none-any.whl", hash = "sha256:af2d2287d25e42a187de19811ef33beb2e347c7e2bdb4dc8c467d78254e43a2c", size = 783595, upload-time = "2026-04-14T21:06:17.464Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/de/747ad1aa49e902da9a4699081c282a1ed8ceed3b4d295fd99a6d286e09e4/google_genai-2.8.0-py3-none-any.whl", hash = "sha256:4da0a223a100f4b37f609a68b835e3326ab0fa313314dc0fd9d34e76ee293844", size = 832497, upload-time = "2026-06-03T22:55:36.598Z" },
 ]
 
 [[package]]
@@ -3735,6 +3735,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+agent-vault-access = [
+    { name = "httpx" },
+]
 agentql = [
     { name = "agentql" },
     { name = "playwright" },
@@ -3745,6 +3748,9 @@ apify = [
 arxiv = [
     { name = "arxiv" },
     { name = "pypdf" },
+]
+aws-bedrock = [
+    { name = "boto3" },
 ]
 aws-lambda = [
     { name = "boto3" },
@@ -3838,6 +3844,7 @@ fal = [
     { name = "fal-client" },
 ]
 file-generation = [
+    { name = "python-docx" },
     { name = "reportlab" },
 ]
 financial-datasets-api = [
@@ -4079,7 +4086,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agentql", marker = "extra == 'agentql'" },
-    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = "==2.5.13" },
+    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = "==2.6.12" },
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "anthropic", specifier = ">=0.70" },
@@ -4090,6 +4097,7 @@ requires-dist = [
     { name = "authlib", specifier = ">=1.6" },
     { name = "baidusearch", marker = "extra == 'baidusearch'" },
     { name = "beautifulsoup4", marker = "extra == 'website'" },
+    { name = "boto3", marker = "extra == 'aws-bedrock'", specifier = ">=1.40.8" },
     { name = "boto3", marker = "extra == 'aws-lambda'", specifier = ">=1.40.8" },
     { name = "boto3", marker = "extra == 'aws-ses'", specifier = ">=1.40.8" },
     { name = "browserbase", marker = "extra == 'browserbase'" },
@@ -4101,7 +4109,7 @@ requires-dist = [
     { name = "crawl4ai", marker = "extra == 'crawl4ai'", specifier = ">=0.7.3" },
     { name = "cron-descriptor", specifier = ">=1.4.5" },
     { name = "croniter", specifier = ">=6" },
-    { name = "cryptography", specifier = ">=47.0.0" },
+    { name = "cryptography", specifier = ">=47" },
     { name = "daytona", marker = "extra == 'daytona'" },
     { name = "ddgs", marker = "extra == 'duckduckgo'" },
     { name = "ddgs", marker = "extra == 'googlesearch'" },
@@ -4132,7 +4140,7 @@ requires-dist = [
     { name = "google-auth-oauthlib", marker = "extra == 'google-drive'", specifier = ">=1.2.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-sheets'", specifier = ">=1.2.2" },
     { name = "google-cloud-bigquery", marker = "extra == 'google-bigquery'" },
-    { name = "google-genai" },
+    { name = "google-genai", specifier = ">=2" },
     { name = "google-genai", marker = "extra == 'gemini'" },
     { name = "google-maps-places", marker = "extra == 'google-maps'" },
     { name = "google-search-results", marker = "extra == 'serpapi'", specifier = ">=2.4.2" },
@@ -4140,6 +4148,7 @@ requires-dist = [
     { name = "groq", specifier = ">=0.31" },
     { name = "groq", marker = "extra == 'groq'", specifier = ">=0.31" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'agent-vault-access'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'brandfetch'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'giphy'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'hackernews'", specifier = ">=0.27" },
@@ -4190,6 +4199,7 @@ requires-dist = [
     { name = "pygments", specifier = ">=2.20" },
     { name = "pyjwt", specifier = ">=2.8" },
     { name = "pypdf", marker = "extra == 'arxiv'" },
+    { name = "python-docx", marker = "extra == 'file-generation'", specifier = ">=1.2" },
     { name = "python-dotenv", specifier = ">=1" },
     { name = "pytz", marker = "extra == 'cal-com'" },
     { name = "pyyaml", specifier = ">=6" },
@@ -4214,7 +4224,7 @@ requires-dist = [
     { name = "requests", marker = "extra == 'zoom'" },
     { name = "resend", marker = "extra == 'resend'" },
     { name = "rich" },
-    { name = "scrapegraph-py", marker = "extra == 'scrapegraph'", specifier = "<2" },
+    { name = "scrapegraph-py", marker = "extra == 'scrapegraph'", specifier = ">=2.1" },
     { name = "sentence-transformers", marker = "extra == 'sentence-transformers'" },
     { name = "slack-sdk", marker = "extra == 'slack'" },
     { name = "spider-client", marker = "extra == 'spider'" },
@@ -4237,7 +4247,7 @@ requires-dist = [
     { name = "youtube-transcript-api", marker = "extra == 'youtube'" },
     { name = "zep-cloud", marker = "extra == 'zep'", specifier = ">=3.3" },
 ]
-provides-extras = ["agentql", "airflow", "apify", "arxiv", "attachments", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browserbase", "cal-com", "calculator", "cartesia", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "dalle", "daytona", "delegate", "desi-vocal", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "e2b", "eleven-labs", "email", "exa", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-drive", "google-maps", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-e2ee", "matrix-message", "matrix-room", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "resend", "scheduler", "scrapegraph", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "subagents", "supabase", "tavily", "telegram", "thread-summary", "thread-tags", "todoist", "trafilatura", "trello", "twilio", "unsplash", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
+provides-extras = ["agent-vault-access", "agentql", "airflow", "apify", "approved-egress", "arxiv", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browserbase", "cal-com", "calculator", "cartesia", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "dalle", "daytona", "delegate", "desi-vocal", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "eleven-labs", "email", "exa", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-drive", "google-maps", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-e2ee", "matrix-message", "matrix-room", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "report-publishing", "resend", "scheduler", "scrapegraph", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "subagents", "supabase", "tavily", "telegram", "thread-model", "thread-summary", "thread-tags", "todoist", "trafilatura", "trello", "twilio", "unsplash", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -6985,6 +6995,20 @@ wheels = [
 ]
 
 [[package]]
+name = "python-docx"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "lxml", version = "5.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "lxml", version = "6.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a9/f7/eddfe33871520adab45aaa1a71f0402a2252050c14c7e3009446c8f4701c/python_docx-1.2.0.tar.gz", hash = "sha256:7bc9d7b7d8a69c9c02ca09216118c86552704edc23bac179283f2e38f86220ce", size = 5723256, upload-time = "2025-06-16T20:46:27.921Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/00/1e03a4989fa5795da308cd774f05b704ace555a70f9bf9d3be057b680bcf/python_docx-1.2.0-py3-none-any.whl", hash = "sha256:3fd478f3250fbbbfd3b94fe1e985955737c145627498896a8a6bf81f4baf66c7", size = 252987, upload-time = "2025-06-16T20:46:22.506Z" },
+]
+
+[[package]]
 name = "python-dotenv"
 version = "1.2.2"
 source = { registry = "https://pypi.org/simple" }
@@ -7747,19 +7771,15 @@ wheels = [
 
 [[package]]
 name = "scrapegraph-py"
-version = "1.47.0"
+version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
-    { name = "beautifulsoup4" },
+    { name = "httpx" },
     { name = "pydantic" },
-    { name = "python-dotenv" },
-    { name = "requests" },
-    { name = "toonify" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5f/b4/9196574ac53c6c94fb311824e3f6e5e13191620fb9a09b056daf0e77a19d/scrapegraph_py-1.47.0.tar.gz", hash = "sha256:4794820d9dcdba2c6ee22b4ad0975843a10adb65e4831e680f846067e13c5aa9", size = 340039, upload-time = "2026-04-18T13:50:01.084Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0d/4b/8b165cfb0d6b564cc69e4f58270bb54f2457c68d5c0fc648d547e3d0e207/scrapegraph_py-2.1.0.tar.gz", hash = "sha256:c4d1ed4d0c11c5c10e999d310ce1146f62809a91292b3d07d69b40c2a0954d75", size = 4876208, upload-time = "2026-04-21T12:53:48.428Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e4/60/fefc1221b49b3910cd91751c98f14d5a4a5ea6d0fb8e51b63e246bdd1acf/scrapegraph_py-1.47.0-py3-none-any.whl", hash = "sha256:7edb0c095a6d6280c05aee22503672350ed9dd7c289354affeee06dc3323819c", size = 50968, upload-time = "2026-04-18T13:49:59.773Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/22/1d4b1430af1c007b095c4a4bd2af062d581e87be89a36166ab318d3e5224/scrapegraph_py-2.1.0-py3-none-any.whl", hash = "sha256:9bd9a6f6c30d44d362afc873aba61fd8cf066c62fe8dd83f0eb16f3d666c66ff", size = 15590, upload-time = "2026-04-21T12:53:43.662Z" },
 ]
 
 [[package]]
@@ -8396,18 +8416,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/19/75/241269d1da26b624c0d5e110e8149093c759b7a286138f4efd61a60e75fe/tomli_w-1.2.0.tar.gz", hash = "sha256:2dd14fac5a47c27be9cd4c976af5a12d87fb1f0b4512f81d69cce3b35ae25021", size = 7184, upload-time = "2025-01-15T12:07:24.262Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/18/c86eb8e0202e32dd3df50d43d7ff9854f8e0603945ff398974c1d91ac1ef/tomli_w-1.2.0-py3-none-any.whl", hash = "sha256:188306098d013b691fcadc011abd66727d3c414c571bb01b1a174ba8c983cf90", size = 6675, upload-time = "2025-01-15T12:07:22.074Z" },
-]
-
-[[package]]
-name = "toonify"
-version = "1.6.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "tiktoken" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ce/53/409a1dd7bcb52c74da019994cb866e875d0bf9020b89c7fcfcdea2866ce3/toonify-1.6.0.tar.gz", hash = "sha256:57bf6fbc9d73e463e8773c491123b233b0c79482235e0c27b908b4e58b54ec77", size = 30106, upload-time = "2026-02-06T16:00:02.622Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ab/b9/a72f55448e2c52c3a5167892b5d0db16506a9d6e8131a1d85694fdfbdb2e/toonify-1.6.0-py3-none-any.whl", hash = "sha256:7998a72c48d8dadd2f339bae78011fd30b9a90efde69a8abd8a3665c4107dd83", size = 28730, upload-time = "2026-02-06T16:00:01.071Z" },
 ]
 
 [[package]]

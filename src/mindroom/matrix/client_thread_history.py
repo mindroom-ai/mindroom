@@ -1,4 +1,35 @@
-"""Thread-history reads and reconstruction helpers."""
+"""Thread-history reads and reconstruction helpers.
+
+Cache-trust rules (each encodes a shipped regression fix; do not weaken them):
+
+1. A cached thread snapshot is served only when ``thread_cache_rejection_reason`` accepts its durable
+   state: the state row exists, ``validated_at`` is set, and neither ``invalidated_at`` nor
+   ``room_invalidated_at`` is at or after ``validated_at`` (see
+   ``mindroom.matrix.cache.thread_cache_helpers`` for the age and restart rules).
+
+2. Cached rows that do not include the thread-root event are never served: both the trusted-read path
+   and the stale-fallback path refuse such rows and invalidate the entry, and a fresh homeserver fetch
+   missing the root is never stored (PR #741).
+
+3. Cache repopulation is guarded against write races: every store passes the fetch start time to
+   ``replace_thread_if_not_newer``, so a fetch that raced with a thread or room invalidation cannot bury
+   the newer stale marker (PR #716).
+
+4. Stale fallback exists only on the advisory path: ``fetch_thread_history`` may serve stale cached rows
+   when a refetch fails, labelled ``stale_cache`` source with the degraded flag set.
+   The dispatch fetchers (``fetch_dispatch_thread_history``, ``fetch_dispatch_thread_snapshot``) never
+   serve stale rows; on refetch failure they raise.
+
+5. Reconstruction is canonical: membership of scanned events is decided by
+   ``resolve_thread_ids_for_event_infos`` over the page-local relation graph (same rules as live
+   resolution), edits collapse into their originals and never appear as standalone messages, and
+   ordering follows ``thread_projection`` (root first, then timestamp, with same-timestamp relation
+   ancestors before descendants).
+
+6. The room scan requests both ``m.room.message`` and ``m.room.encrypted`` timeline events so nio can
+   decrypt threads in encrypted rooms (PR #878), pages backwards until the root event is seen, and
+   raises ``ThreadRoomScanRootNotFoundError`` when the scan drains without finding it.
+"""
 
 from __future__ import annotations
 

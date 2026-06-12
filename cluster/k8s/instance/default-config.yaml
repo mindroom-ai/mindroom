@@ -245,8 +245,8 @@ agents:
       and update MEMORY.md with what is worth keeping long-term. Remove outdated information.'
     - Ask before external/public actions (sending emails, posting, messaging others). Ask before destructive operations (rm,
       overwriting files). Read files and explore freely without asking.
-    - Before answering questions about prior conversations, decisions, people, or preferences, use search_knowledge_base to
-      search memory files. Do not guess from incomplete context; search first.
+    - Before answering questions about prior conversations, decisions, people, or preferences, use search_memories to search
+      memory files. Do not guess from incomplete context; search first.
     include_default_tools: false
     learning: false
     context_files:
@@ -257,8 +257,6 @@ agents:
     - ./openclaw_data/MEMORY.md
     - ./openclaw_data/TOOLS.md
     - ./openclaw_data/HEARTBEAT.md
-    knowledge_bases:
-    - openclaw_memory
     model: opus
     role: OpenClaw-style personal assistant with persistent file-based identity and memory.
     rooms:
@@ -268,6 +266,7 @@ agents:
     tools:
     - file
     - shell
+    - memory
     - scheduler
     - duckduckgo
     - website
@@ -355,6 +354,7 @@ agents:
     tools: []
 authorization:
   default_room_access: false
+  config_command_enabled: false
   global_users:
   - '@test:m-test-4.mindroom.chat'
   room_permissions: {}
@@ -368,10 +368,6 @@ defaults:
   learning_mode: always
   markdown: true
   show_stop_button: true
-knowledge_bases:
-  openclaw_memory:
-    path: ./openclaw_data/memory
-    watch: true
 memory:
   embedder:
     provider: openai
@@ -383,6 +379,11 @@ memory:
       model: gpt-5.4-nano
       temperature: 0.1
       top_p: 1
+  search:
+    mode: semantic
+    include:
+    - memory/**/*.md
+    include_entrypoint: false
 models:
   default:
     provider: openrouter

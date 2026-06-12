@@ -11,6 +11,8 @@ MindRoom can be deployed in various ways depending on your needs.
 | Method | Best For |
 |--------|----------|
 | [Hosted Matrix + local MindRoom](hosted-matrix.md) | Simplest setup: run only `uvx mindroom run` locally |
+| [Sandbox Proxy Isolation](sandbox-proxy.md) | Run MindRoom locally while execution tools run in isolated workers |
+| [Approved Egress](approved-egress.md) | Require static allowlists or human approval before Kubernetes workers reach external hostnames |
 | Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
 | [Docker (single container)](docker.md) | Single MindRoom runtime or when you already have Matrix |
 | [Kubernetes](kubernetes.md) | Multi-tenant SaaS, production |
@@ -50,6 +52,7 @@ Generate the pair code in `https://chat.mindroom.chat` under:
 `Settings -> Local MindRoom`.
 
 See [Hosted Matrix deployment](hosted-matrix.md) for the full walkthrough.
+If you want worker-routed execution tools like `coding`, `docker`, `file`, `python`, and `shell` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](sandbox-proxy.md).
 
 ### Full Stack (recommended)
 

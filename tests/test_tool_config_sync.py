@@ -13,7 +13,15 @@ from mindroom.constants import RuntimePaths
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolManagedInitArg
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-SKIP_CUSTOM = {"homeassistant", "gmail", "google_calendar", "google_drive", "google_sheets", "openclaw_compat"}
+SKIP_CUSTOM = {
+    "agent_vault_access",
+    "homeassistant",
+    "gmail",
+    "google_calendar",
+    "google_drive",
+    "google_sheets",
+    "openclaw_compat",
+}
 IGNORED_AGNO_PARAMS = {
     # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
     "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
@@ -21,6 +29,10 @@ IGNORED_AGNO_PARAMS = {
     "slack": {"ssl"},
     # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.
     "yfinance": {"session"},
+}
+IGNORED_EXTRA_CONFIG_FIELDS = {
+    # DockerTools accepts toolkit options through **kwargs, so inspect.signature cannot see include_tools.
+    "docker": {"include_tools"},
 }
 
 
@@ -99,7 +111,7 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
     config_field_names = set(config_field_map.keys())
 
     missing_fields = agno_param_names - config_field_names
-    extra_fields = config_field_names - agno_param_names
+    extra_fields = config_field_names - agno_param_names - IGNORED_EXTRA_CONFIG_FIELDS.get(tool_name, set())
 
     # Build error message if there are issues
     errors = []

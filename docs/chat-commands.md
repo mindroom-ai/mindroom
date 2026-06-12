@@ -17,7 +17,8 @@ Commands start with `!` and are handled by the router agent.
 | `!list_schedules` | List pending scheduled tasks |
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
-| `!config <operation>` | View and modify configuration |
+| `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
+| `!config <operation>` | View and modify configuration (disabled by default, admin only when enabled) |
 | `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
 ## Who Handles Commands
@@ -34,6 +35,9 @@ Commands are subject to the same authorization rules as normal messages.
 The sender must be authorized to interact with MindRoom entities in the room (via `global_users`, `room_permissions`, or `default_room_access`).
 See [Authorization](authorization.md) for details.
 
+`!config` is disabled by default.
+Set `authorization.config_command_enabled: true` to enable it.
+When enabled, callers must be in `authorization.global_users`.
 For `!config set`, only the user who requested the change can confirm or cancel it via reactions.
 Pending config changes expire after 24 hours.
 
@@ -51,7 +55,7 @@ Display available commands or get detailed help on a specific topic.
 !help edit_schedule
 ```
 
-**Topics:** `schedule`, `config`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
+**Topics:** `schedule`, `config`, `model`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
 
 ### `!hi`
 
@@ -142,9 +146,29 @@ Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel 
 
 **Aliases:** `!editschedule`, `!edit-schedule`
 
+### `!model`
+
+Show or switch the model that every agent, team, and the router uses in the current thread.
+
+```
+!model
+!model list
+!model opus
+!model reset
+```
+
+`!model` and `!model list` show the current override and the available model names.
+Model names come from the `models:` section of `config.yaml`.
+The override applies from the next message in the thread and survives restarts.
+Other threads and rooms keep their configured models; room-wide overrides are configured via `room_models` in `config.yaml`.
+Agents can also switch the thread model themselves when they have the `thread_model` tool.
+
 ### `!config`
 
 View and modify MindRoom configuration from chat.
+This command is disabled by default.
+Set `authorization.config_command_enabled: true` to enable it.
+When enabled, only users in `authorization.global_users` can use it.
 Changes are validated against the Pydantic config schema before applying.
 
 **View configuration:**
@@ -160,7 +184,7 @@ Changes are validated against the Pydantic config schema before applying.
 
 ```
 !config set agents.analyst.display_name "Research Expert"
-!config set models.default.id gpt-5.4
+!config set models.default.id gpt-5.5
 !config set defaults.markdown false
 !config set timezone America/New_York
 ```

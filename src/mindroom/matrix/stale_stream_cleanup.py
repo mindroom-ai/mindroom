@@ -55,10 +55,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _ROOM_HISTORY_PAGE_SIZE = 100
-# Startup cleanup runs before this process starts its Matrix sync loop, so it cannot
-# clobber streams created by the same process. The remaining race is another
-# concurrently running instance cleaning up a message during a long provider/tool stall
-# where no new chunks arrive for a while, so keep a generous recency guard here.
+# Startup cleanup receives a pre-sync cutoff and ignores messages at or after
+# that timestamp, so post-sync cleanup cannot clobber streams created by this
+# process. The remaining race is another concurrently running instance cleaning
+# up a message during a long provider/tool stall where no new chunks arrive for
+# a while, so keep a generous recency guard here.
 _STALE_STREAM_RECENCY_GUARD_MS = 10_000
 # Restart cleanup should only touch messages from the current outage window.
 # Older interrupted replies are better left untouched than unexpectedly edited
@@ -142,6 +143,7 @@ async def cleanup_stale_streaming_messages(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
+    startup_cutoff_ms: int | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
     """Clean stale in-progress bot messages across currently joined rooms."""
     joined_room_ids = await get_joined_rooms(client)
@@ -162,6 +164,7 @@ async def cleanup_stale_streaming_messages(
                 config=config,
                 runtime_paths=runtime_paths,
                 conversation_cache=conversation_cache,
+                startup_cutoff_ms=startup_cutoff_ms,
             )
             cleaned_count += room_cleaned_count
             interrupted_threads.extend(room_interrupted_threads)
@@ -247,6 +250,7 @@ async def _cleanup_room_stale_streaming_messages(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
+    startup_cutoff_ms: int | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
     """Clean stale bot messages in one room."""
     current_time_ms = int(time.time() * 1000)
@@ -276,7 +280,11 @@ async def _cleanup_room_stale_streaming_messages(
 
     for target_event_id, state in candidate_items:
         assert state.latest_body is not None  # guaranteed by filter above
-        if _is_outside_startup_cleanup_window(state.latest_timestamp, now_ms=current_time_ms):
+        if _is_outside_startup_cleanup_window(
+            state.latest_timestamp,
+            now_ms=current_time_ms,
+            startup_cutoff_ms=startup_cutoff_ms,
+        ):
             continue
 
         interrupted = None
@@ -1453,12 +1461,29 @@ def _is_cleanup_candidate(state: _MessageState) -> bool:
     return state.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
 
 
-def _is_outside_startup_cleanup_window(timestamp_ms: int, *, now_ms: int) -> bool:
+def _is_outside_startup_cleanup_window(
+    timestamp_ms: int,
+    *,
+    now_ms: int,
+    startup_cutoff_ms: int | None = None,
+) -> bool:
     """Return whether startup cleanup should ignore one event by age."""
-    return _is_recent_timestamp(timestamp_ms, now_ms=now_ms) or _is_older_than_cleanup_window(
-        timestamp_ms,
-        now_ms=now_ms,
+    return (
+        _is_at_or_after_startup_cutoff(timestamp_ms, startup_cutoff_ms=startup_cutoff_ms)
+        or _is_recent_timestamp(
+            timestamp_ms,
+            now_ms=now_ms,
+        )
+        or _is_older_than_cleanup_window(
+            timestamp_ms,
+            now_ms=now_ms,
+        )
     )
+
+
+def _is_at_or_after_startup_cutoff(timestamp_ms: int, *, startup_cutoff_ms: int | None) -> bool:
+    """Return whether a message may have been created by the current process."""
+    return startup_cutoff_ms is not None and timestamp_ms >= startup_cutoff_ms
 
 
 def _is_recent_timestamp(timestamp_ms: int, *, now_ms: int | None = None) -> bool:

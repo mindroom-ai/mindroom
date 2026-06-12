@@ -30,6 +30,7 @@ _FILE_OR_VIDEO_MESSAGE_EVENT_TYPES = (*_FILE_MESSAGE_EVENT_TYPES, *_VIDEO_MESSAG
 _AUDIO_MESSAGE_EVENT_TYPES = (nio.RoomMessageAudio, nio.RoomEncryptedAudio)
 _MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*_IMAGE_MESSAGE_EVENT_TYPES, *_FILE_OR_VIDEO_MESSAGE_EVENT_TYPES)
 MATRIX_MEDIA_EVENT_TYPES = (*_MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *_AUDIO_MESSAGE_EVENT_TYPES)
+_matrix_media_max_bytes = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,11 @@ def upload_content_uri(upload_result: object) -> str | None:
     if isinstance(upload_response, nio.UploadResponse) and upload_response.content_uri:
         return str(upload_response.content_uri)
     return None
+
+
+def media_payload_exceeds_limit(media_bytes: bytes | None) -> bool:
+    """Return whether a Matrix media payload exceeds the runtime ingestion cap."""
+    return media_bytes is not None and len(media_bytes) > _matrix_media_max_bytes
 
 
 async def upload_media_bytes(
@@ -213,6 +219,55 @@ def _decrypt_encrypted_media_bytes(
         return None
 
 
+def _media_payload_exceeds_limit_for_event(
+    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
+    media_bytes: bytes,
+    *,
+    stage: str,
+) -> bool:
+    if not media_payload_exceeds_limit(media_bytes):
+        return False
+    logger.warning(
+        "Matrix media payload exceeds byte limit",
+        event_id=_event_id_for_log(event),
+        stage=stage,
+        size_bytes=len(media_bytes),
+        limit_bytes=_matrix_media_max_bytes,
+    )
+    return True
+
+
+def _validated_download_body(
+    response: object,
+    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
+) -> bytes | None:
+    if isinstance(response, nio.DownloadError):
+        logger.error("Media download failed", event_id=_event_id_for_log(event), error=str(response))
+        return None
+    if not isinstance(response, nio.DownloadResponse):
+        logger.error("Media download returned invalid response", event_id=_event_id_for_log(event), error=str(response))
+        return None
+    body = response.body
+    if not isinstance(body, bytes):
+        logger.error("Media download returned non-bytes payload", event_id=_event_id_for_log(event))
+        return None
+    if _media_payload_exceeds_limit_for_event(event, body, stage="download"):
+        return None
+    return body
+
+
+def _decrypt_validated_media_bytes(
+    event: nio.RoomEncryptedMedia,
+    encrypted_bytes: bytes,
+) -> bytes | None:
+    decrypted_bytes = _decrypt_encrypted_media_bytes(event, encrypted_bytes)
+    if decrypted_bytes is None:
+        return None
+    if _media_payload_exceeds_limit_for_event(event, decrypted_bytes, stage="decrypt"):
+        return None
+    return decrypted_bytes
+
+
 async def download_media_bytes(
     client: nio.AsyncClient,
     event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
@@ -224,13 +279,10 @@ async def download_media_bytes(
         logger.exception("Error downloading media")
         return None
 
-    if isinstance(response, nio.DownloadError):
-        logger.error("Media download failed", event_id=_event_id_for_log(event), error=str(response))
-        return None
-    if not isinstance(response.body, bytes):
-        logger.error("Media download returned non-bytes payload", event_id=_event_id_for_log(event))
+    downloaded_bytes = _validated_download_body(response, event)
+    if downloaded_bytes is None:
         return None
 
     if isinstance(event, nio.RoomEncryptedMedia):
-        return _decrypt_encrypted_media_bytes(event, response.body)
-    return response.body
+        return _decrypt_validated_media_bytes(event, downloaded_bytes)
+    return downloaded_bytes

@@ -25,7 +25,9 @@ import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
+from mindroom import file_locks
 from mindroom.api import config_lifecycle, main
+from mindroom.api import knowledge as knowledge_api
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
@@ -33,6 +35,7 @@ from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import write_index_metadata_payload
+from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.manager import (
     KnowledgeManager,
     git_checkout_present,
@@ -188,7 +191,11 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     _VectorDb.collections = {}
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _Knowledge)
-    monkeypatch.setattr("mindroom.knowledge.manager._create_embedder", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("mindroom.knowledge.manager.create_configured_embedder", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("mindroom.knowledge.indexing_config.ChromaDb", _VectorDb)
+    monkeypatch.setattr("mindroom.knowledge.registry.ChromaDb", _VectorDb)
+    monkeypatch.setattr("mindroom.knowledge.registry.Knowledge", _Knowledge)
+    monkeypatch.setattr("mindroom.knowledge.registry.create_configured_embedder", lambda *_args, **_kwargs: object())
     knowledge_registry._published_indexes.clear()
     knowledge_utils._refresh_scheduled_at.clear()
     knowledge_refresh_runner._refresh_locks.clear()
@@ -218,8 +225,8 @@ def _create_idle_refresh_lock(key: knowledge_registry.KnowledgeSourceRoot) -> No
     knowledge_refresh_runner._release_refresh_lock_for_key(key, entry)
 
 
-def _test_indexing_settings(base_id: str = "docs") -> knowledge_manager_module.IndexingSettings:
-    return knowledge_manager_module.IndexingSettings(
+def _test_indexing_settings(base_id: str = "docs") -> IndexingSettings:
+    return IndexingSettings(
         base_id=base_id,
         storage_root="storage",
         knowledge_path=f"knowledge/{base_id}",
@@ -236,6 +243,8 @@ def _test_indexing_settings(base_id: str = "docs") -> knowledge_manager_module.I
         git_skip_hidden="",
         git_include_patterns="",
         git_exclude_patterns="",
+        include_patterns="",
+        exclude_patterns="",
         include_extensions="",
         exclude_extensions="()",
     )
@@ -303,10 +312,10 @@ def test_load_published_index_state_preserves_file_mode_from_settings(tmp_path: 
     assert state.collection is None
 
 
-def _identity(requester_id: str) -> ToolExecutionIdentity:
+def _identity(requester_id: str, *, agent_name: str = "helper") -> ToolExecutionIdentity:
     return ToolExecutionIdentity(
         channel="matrix",
-        agent_name="helper",
+        agent_name=agent_name,
         requester_id=requester_id,
         room_id="!room:localhost",
         thread_id=None,
@@ -433,7 +442,6 @@ def test_file_mode_knowledge_skips_semantic_lookup_and_refresh(
     )
 
     assert resolution.knowledge is None
-    assert resolution.missing == ()
     assert resolution.unavailable == {}
     get_published_index.assert_not_called()
     scheduler.is_refreshing.assert_not_called()
@@ -502,7 +510,7 @@ async def test_file_mode_refresh_publishes_source_metadata_without_vector_collec
     )
     runtime_paths = runtime_paths_for(config)
     embedder_factory = MagicMock(return_value=object())
-    monkeypatch.setattr(knowledge_manager_module, "_create_embedder", embedder_factory)
+    monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", embedder_factory)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -1393,6 +1401,42 @@ def test_knowledge_file_listing_filters_unsupported_extensions_before_filesystem
     monkeypatch.setattr(Path, "resolve", _resolve)
 
     assert list_knowledge_files(config, "docs", docs_path) == []
+
+
+def test_local_knowledge_file_listing_prunes_literal_include_prefixes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local include globs should avoid walking unrelated source trees."""
+    docs_path = tmp_path / "workspace"
+    memory_dir = docs_path / "memory"
+    unrelated_dir = docs_path / "docs" / "deep"
+    memory_dir.mkdir(parents=True)
+    unrelated_dir.mkdir(parents=True)
+    memory_file = memory_dir / "2026-06-02.md"
+    unrelated_file = unrelated_dir / "runbook.md"
+    memory_file.write_text("Indexed memory.\n", encoding="utf-8")
+    unrelated_file.write_text("Unrelated markdown.\n", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    config.knowledge_bases["docs"] = KnowledgeBaseConfig(
+        path=str(docs_path),
+        include_extensions=[".md"],
+        include_patterns=["memory/**/*.md"],
+    )
+
+    walked_roots: list[Path] = []
+    original_walk = knowledge_manager_module.os.walk
+
+    def recording_walk(top: object, *args: object, **kwargs: object) -> object:
+        walked_roots.append(Path(top))
+        return original_walk(top, *args, **kwargs)
+
+    monkeypatch.setattr(knowledge_manager_module.os, "walk", recording_walk)
+
+    files = list_knowledge_files(config, "docs", docs_path)
+
+    assert files == [memory_file.resolve()]
+    assert walked_roots == [memory_dir.resolve()]
 
 
 @pytest.mark.asyncio
@@ -2304,9 +2348,7 @@ def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
     assert key.indexing_settings.chunk_size == "5000"
     assert key.indexing_settings.chunk_overlap == "0"
     assert key.indexing_settings.repo_identity == credential_free_url_identity("https://example.com/org/repo.git")
-    assert knowledge_manager_module.IndexingSettings.from_metadata(key.indexing_settings.to_metadata()) == (
-        key.indexing_settings
-    )
+    assert IndexingSettings.from_metadata(key.indexing_settings.to_metadata()) == key.indexing_settings
     changed_repo_identity = replace(key.indexing_settings, repo_identity="https://example.com/other/repo.git")
     assert not knowledge_registry.published_index_settings_compatible(key.indexing_settings, changed_repo_identity)
 
@@ -2999,39 +3041,40 @@ async def test_mutation_lock_uses_cross_process_source_lock(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_cross_process_file_lock_waiter_closes_unacquired_handle(
+async def test_cancelled_async_file_lock_waiter_closes_unacquired_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cancelled file-lock waiter must not leak a handle that can later acquire the lock."""
-    source_root = knowledge_registry.KnowledgeSourceRoot(storage_root="/storage", knowledge_path="/storage/docs")
-    handle = object()
+    lock_path = Path("/storage/docs.lock")
     opened = asyncio.Event()
-    closed: list[object] = []
-    released: list[object] = []
+    closed: list[FakeLockFile] = []
+    released: list[int] = []
 
-    def _open(_source_root: knowledge_registry.KnowledgeSourceRoot) -> object:
+    class FakeLockFile:
+        def fileno(self) -> int:
+            return 123
+
+        def close(self) -> None:
+            closed.append(self)
+
+    handle = FakeLockFile()
+
+    def _open(_lock_path: Path) -> FakeLockFile:
         opened.set()
         return handle
 
-    def _try_acquire(_handle: object) -> bool:
-        assert _handle is handle
-        return False
-
-    def _close(_handle: object) -> None:
-        closed.append(_handle)
-
-    def _release(_handle: object) -> None:
-        released.append(_handle)
+    def _flock(file_descriptor: int, flags: int) -> None:
+        assert file_descriptor == 123
+        if flags & file_locks.fcntl.LOCK_EX:
+            raise BlockingIOError
+        released.append(flags)
 
     async def _wait_for_file_lock() -> None:
-        async with knowledge_refresh_runner._acquire_refresh_file_lock(source_root):
+        async with file_locks.async_exclusive_file_lock(lock_path, poll_seconds=0.001):
             pytest.fail("lock waiter unexpectedly acquired the file lock")
 
-    monkeypatch.setattr(knowledge_refresh_runner, "_REFRESH_FILE_LOCK_POLL_SECONDS", 0.001)
-    monkeypatch.setattr(knowledge_refresh_runner, "_open_refresh_file_lock_sync", _open)
-    monkeypatch.setattr(knowledge_refresh_runner, "_try_acquire_refresh_file_lock_sync", _try_acquire)
-    monkeypatch.setattr(knowledge_refresh_runner, "_close_refresh_file_lock_sync", _close)
-    monkeypatch.setattr(knowledge_refresh_runner, "_release_refresh_file_lock_sync", _release)
+    monkeypatch.setattr(file_locks, "_open_lock_file", _open)
+    monkeypatch.setattr(file_locks.fcntl, "flock", _flock)
 
     waiter = asyncio.create_task(_wait_for_file_lock())
     await opened.wait()
@@ -4867,6 +4910,140 @@ def test_index_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
 
     assert key_a.base_id == key_b.base_id == "docs"
     assert key_a != key_b
+
+
+def test_shared_knowledge_path_named_memory_stays_config_relative(tmp_path: Path) -> None:
+    """A shared KB named like memory should not bind to agent file-memory workspaces."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "openclaw": AgentConfig(
+                    display_name="OpenClaw",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+                "mindroom_spouse": AgentConfig(
+                    display_name="MindRoom Spouse",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+            },
+            models={},
+            knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
+            memory={"backend": "file", "file": {"path": "./memory"}},
+        ),
+        runtime_paths,
+    )
+
+    dashboard_root = knowledge_api._knowledge_root(config, "daily_memory", runtime_paths, create=True)
+    shared_key = resolve_published_index_key("daily_memory", config=config, runtime_paths=runtime_paths, create=True)
+    openclaw_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost", agent_name="openclaw"),
+        create=True,
+    )
+    spouse_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost", agent_name="mindroom_spouse"),
+        create=True,
+    )
+
+    assert dashboard_root == runtime_paths.config_dir / "memory"
+    assert Path(shared_key.knowledge_path) == runtime_paths.config_dir / "memory"
+    assert Path(openclaw_key.knowledge_path) == runtime_paths.config_dir / "memory"
+    assert Path(spouse_key.knowledge_path) == runtime_paths.config_dir / "memory"
+    assert {shared_key, openclaw_key, spouse_key} == {shared_key}
+    assert not (runtime_paths.storage_root / "agents" / "openclaw" / "workspace" / "memory").exists()
+    assert not (runtime_paths.storage_root / "agents" / "mindroom_spouse" / "workspace" / "memory").exists()
+
+
+def test_shared_relative_knowledge_base_keeps_non_memory_path_config_relative(tmp_path: Path) -> None:
+    """Ordinary shared relative knowledge paths should stay config-relative."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                memory_backend="file",
+                knowledge_bases=["docs"],
+            ),
+        },
+        models={},
+        knowledge_bases={"docs": KnowledgeBaseConfig(path="./knowledge_docs")},
+        memory={"backend": "file", "file": {"path": "./memory"}},
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+
+    key = resolve_published_index_key(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost"),
+        create=True,
+    )
+
+    assert Path(key.knowledge_path) == runtime_paths.config_dir / "knowledge_docs"
+
+
+def test_shared_literal_dollar_path_stays_config_relative(tmp_path: Path) -> None:
+    """Literal dollar signs in path names should stay ordinary config-relative knowledge paths."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                memory_backend="file",
+                knowledge_bases=["daily_memory"],
+            ),
+        },
+        models={},
+        knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./notes$archive")},
+        memory={"backend": "file", "file": {"path": "./notes$archive"}},
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+
+    key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost"),
+        create=True,
+    )
+
+    assert Path(key.knowledge_path) == runtime_paths.config_dir / "notes$archive"
+
+
+def test_file_memory_agent_without_configured_file_path_keeps_shared_base_config_relative(tmp_path: Path) -> None:
+    """Agent-level file memory does not make arbitrary shared paths workspace-relative."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                memory_backend="file",
+                knowledge_bases=["daily_memory"],
+            ),
+        },
+        models={},
+        knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
+        memory={"backend": "mem0"},
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+
+    key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost"),
+        create=True,
+    )
+
+    assert Path(key.knowledge_path) == runtime_paths.config_dir / "memory"
 
 
 @pytest.mark.asyncio

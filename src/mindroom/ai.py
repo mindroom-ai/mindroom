@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 from uuid import uuid4
 
 from agno.db.base import SessionType
@@ -65,8 +66,14 @@ from mindroom.llm_request_logging import (
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
-from mindroom.media_fallback import should_retry_without_inline_media
-from mindroom.media_inputs import MediaInputs
+from mindroom.media_fallback import (
+    ModelMediaRoute,
+    build_model_media_route,
+    filter_media_inputs_for_route,
+    retry_media_inputs_after_failure,
+    unsupported_media_kinds_for_route,
+)
+from mindroom.media_inputs import MediaInputs, MediaKind
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed
@@ -77,6 +84,7 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
+    from agno.models.base import Model
 
     from mindroom.config.main import Config
     from mindroom.history import CompactionLifecycle
@@ -139,6 +147,10 @@ class _PreparedAgentRun:
     messages: tuple[Message, ...]
     unseen_event_ids: list[str]
     prepared_history: PreparedHistoryState
+    # Configured model name resolved at preparation time. Run metadata must use
+    # this snapshot instead of re-resolving, because the per-thread override
+    # store can change mid-run (for example via the thread_model tool).
+    runtime_model_name: str
 
     @property
     def prompt_text(self) -> str:
@@ -149,6 +161,77 @@ class _PreparedAgentRun:
     def run_input(self) -> list[Message]:
         """Return a deep-copied mutable message list for one provider call."""
         return ai_runtime.copy_run_input(self.messages)
+
+
+@dataclass
+class _MediaAttempt:
+    """Per-attempt media routing state shared by the blocking and streaming agent runs."""
+
+    context_media_kinds: frozenset[MediaKind]
+    media_route: ModelMediaRoute | None
+    removed_media_kinds: frozenset[MediaKind]
+    attempt_prompt: list[Message]
+    attempt_media_inputs: MediaInputs
+    attempt_run_id: str | None
+
+    @property
+    def remaining_context_media_kinds(self) -> frozenset[MediaKind]:
+        """Return the context media kinds still present after fallback removals."""
+        return self.context_media_kinds - self.removed_media_kinds
+
+    @classmethod
+    def initial(
+        cls,
+        run_input: list[Message],
+        media_inputs: MediaInputs,
+        model: Model | None,
+        *,
+        fallback_prompt: str,
+        run_id: str | None,
+    ) -> _MediaAttempt:
+        """Route media for the first attempt and build its prompt and inputs."""
+        context_media_kinds = ai_runtime.media_inputs_from_run_input(run_input).kinds()
+        media_route = build_model_media_route(model) if media_inputs.has_any() or context_media_kinds else None
+        media_filter = filter_media_inputs_for_route(media_route, media_inputs)
+        removed_media_kinds = media_filter.removed_kinds | (
+            unsupported_media_kinds_for_route(media_route) & context_media_kinds
+        )
+        attempt_prompt = (
+            ai_runtime.append_inline_media_fallback_to_run_input(
+                run_input,
+                fallback_prompt=fallback_prompt,
+                removed_kinds=removed_media_kinds,
+            )
+            if removed_media_kinds
+            else ai_runtime.copy_run_input(run_input)
+        )
+        return cls(
+            context_media_kinds=context_media_kinds,
+            media_route=media_route,
+            removed_media_kinds=removed_media_kinds,
+            attempt_prompt=attempt_prompt,
+            attempt_media_inputs=media_filter.media_inputs,
+            attempt_run_id=run_id,
+        )
+
+    def retry(
+        self,
+        run_input: list[Message],
+        *,
+        fallback_prompt: str,
+        extra_removed_kinds: frozenset[MediaKind],
+        retry_media_inputs: MediaInputs,
+        run_id: str | None,
+    ) -> None:
+        """Apply one media-fallback retry: widen removed kinds and rebuild the attempt prompt."""
+        self.removed_media_kinds = self.removed_media_kinds | extra_removed_kinds
+        self.attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(
+            run_input,
+            fallback_prompt=fallback_prompt,
+            removed_kinds=self.removed_media_kinds,
+        )
+        self.attempt_media_inputs = retry_media_inputs
+        self.attempt_run_id = ai_runtime.next_retry_run_id(run_id)
 
 
 def _prompt_current_sender_id(user_id: str | None, *, include_openai_compat_guidance: bool) -> str | None:
@@ -212,7 +295,9 @@ class _StreamingAttemptState:
     request_metric_totals: dict[str, int] = field(default_factory=empty_request_metric_totals)
     first_token_latency: float | None = None
     first_token_logged: bool = False
-    retry_requested: bool = False
+    media_fallback_retry_requested: bool = False
+    media_fallback_retry_inputs: MediaInputs | None = None
+    media_fallback_removed_kinds: frozenset[MediaKind] = frozenset()
     user_error: Exception | None = None
     stream_exception: Exception | None = None
 
@@ -244,6 +329,39 @@ def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = Tr
             response_parts.append("\n\n".join(tool_sections))
 
     return "\n".join(response_parts) if response_parts else ""
+
+
+def _run_error_event_text(event: RunErrorEvent) -> str:
+    """Return the best available error text for an Agno streaming error event."""
+    if event.content:
+        return event.content
+
+    additional_message = _run_error_additional_message(event.additional_data or {})
+    if additional_message:
+        return additional_message
+
+    details = []
+    if event.error_type:
+        details.append(f"type={event.error_type}")
+    if event.error_id:
+        details.append(f"id={event.error_id}")
+    if details:
+        return f"Agent run failed ({', '.join(details)})"
+
+    return "Agent run failed without provider error details"
+
+
+def _run_error_additional_message(data: object) -> str | None:
+    if isinstance(data, str):
+        stripped = data.strip()
+        return stripped or None
+    if isinstance(data, Mapping):
+        mapping = cast("Mapping[object, object]", data)
+        for key in ("message", "error", "detail"):
+            message = _run_error_additional_message(mapping.get(key))
+            if message:
+                return message
+    return None
 
 
 def _extract_replayable_response_text(response: RunOutput) -> str:
@@ -401,23 +519,34 @@ def resolve_run_correlation_id(
 def _request_stream_retry(
     state: _StreamingAttemptState,
     *,
-    retried_without_inline_media: bool,
+    retried_after_media_fallback: bool,
+    media_route: ModelMediaRoute | None,
     media_inputs: MediaInputs,
+    context_media_kinds: frozenset[MediaKind],
     error: Exception | str,
     log_message: str,
     agent_name: str,
 ) -> bool:
     """Set retry flag when inline-media fallback should be attempted."""
-    if retried_without_inline_media or _stream_attempt_has_progress(state):
+    if retried_after_media_fallback or _stream_attempt_has_progress(state):
         # Once any stream content is emitted, retrying would duplicate partial output.
         return False
-    if not should_retry_without_inline_media(error, media_inputs):
+    retry_decision = retry_media_inputs_after_failure(
+        media_route,
+        error,
+        media_inputs,
+        extra_present_kinds=context_media_kinds,
+    )
+    if not retry_decision.should_retry:
         return False
-    state.retry_requested = True
+    state.media_fallback_retry_requested = True
+    state.media_fallback_retry_inputs = retry_decision.media_inputs
+    state.media_fallback_removed_kinds = retry_decision.removed_kinds
     logger.warning(
         log_message,
         agent=agent_name,
         error=str(error),
+        removed_media_kinds=sorted(retry_decision.removed_kinds),
     )
     return True
 
@@ -655,6 +784,7 @@ async def _prepare_agent_and_prompt(
     scope_context: ScopeSessionContext | None = None,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     room_id: str | None = None,
+    thread_id: str | None = None,
     knowledge: Knowledge | None = None,
     include_interactive_questions: bool = True,
     reply_to_event_id: str | None = None,
@@ -697,6 +827,7 @@ async def _prepare_agent_and_prompt(
     runtime_model = config.resolve_runtime_model(
         entity_name=agent_name,
         room_id=room_id,
+        thread_id=thread_id,
         runtime_paths=runtime_paths,
     )
     resolved_session_id = session_id
@@ -739,6 +870,7 @@ async def _prepare_agent_and_prompt(
         runtime_paths=runtime_paths,
         config=config,
         room_id=room_id,
+        thread_id=thread_id,
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
         compaction_outcomes_collector=compaction_outcomes_collector,
@@ -783,6 +915,7 @@ async def _prepare_agent_and_prompt(
         messages=run_messages,
         unseen_event_ids=unseen_event_ids,
         prepared_history=prepared_history,
+        runtime_model_name=runtime_model.model_name,
     )
 
 
@@ -893,7 +1026,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     unseen_event_ids: list[str] = []
     metadata: dict[str, Any] | None = None
     run_extra_content: dict[str, Any] | None = None
-    attempt_run_id = run_id
+    attempt: _MediaAttempt | None = None
     try:
         try:
             _assert_agent_target(agent_name, config)
@@ -924,6 +1057,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     scope_context,
                     thread_history,
                     room_id,
+                    thread_id,
                     knowledge,
                     include_interactive_questions=include_interactive_questions,
                     reply_to_event_id=reply_to_event_id,
@@ -975,11 +1109,16 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 turn_recorder.set_run_metadata(metadata)
 
             response: RunOutput | None = None
-            attempt_prompt = ai_runtime.copy_run_input(run_input)
-            attempt_media_inputs = media_inputs
+            attempt = _MediaAttempt.initial(
+                run_input,
+                media_inputs,
+                agent.model,
+                fallback_prompt=inline_media_fallback_prompt,
+                run_id=run_id,
+            )
 
             try:
-                for retried_without_inline_media in (False, True):
+                for retried_after_media_fallback in (False, True):
                     response = None
                     try:
                         if pipeline_timing is not None:
@@ -995,37 +1134,42 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 correlation_id=resolved_correlation_id,
                                 prompt=prompt,
                                 model_prompt=model_prompt,
-                                attempt_prompt=attempt_prompt,
+                                attempt_prompt=attempt.attempt_prompt,
                                 metadata=metadata,
                             ),
                         ):
                             response = await _run_cached_agent_attempt(
                                 agent,
-                                attempt_prompt,
+                                attempt.attempt_prompt,
                                 session_id,
                                 user_id=user_id,
-                                run_id=attempt_run_id,
+                                run_id=attempt.attempt_run_id,
                                 run_id_callback=run_id_callback,
-                                media=attempt_media_inputs,
+                                media=attempt.attempt_media_inputs,
                                 metadata=metadata,
                                 timing_scope=timing_scope,
                             )
                     except Exception as e:
-                        if not retried_without_inline_media and should_retry_without_inline_media(
+                        retry_decision = retry_media_inputs_after_failure(
+                            attempt.media_route,
                             e,
-                            attempt_media_inputs,
-                        ):
+                            attempt.attempt_media_inputs,
+                            extra_present_kinds=attempt.remaining_context_media_kinds,
+                        )
+                        if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
-                                "Retrying AI response without inline media after validation error",
+                                "Retrying AI response after inline media validation error",
                                 agent=agent_name,
                                 error=str(e),
+                                removed_media_kinds=sorted(retry_decision.removed_kinds),
                             )
-                            attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(
+                            attempt.retry(
                                 run_input,
                                 fallback_prompt=inline_media_fallback_prompt,
+                                extra_removed_kinds=retry_decision.removed_kinds,
+                                retry_media_inputs=retry_decision.media_inputs,
+                                run_id=run_id,
                             )
-                            attempt_media_inputs = MediaInputs()
-                            attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
 
                         logger.exception("Error generating AI response", agent=agent_name)
@@ -1033,27 +1177,31 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
 
                     if response.status == RunStatus.error:
                         error_text = str(response.content or "Unknown agent error")
-                        if not retried_without_inline_media and should_retry_without_inline_media(
+                        retry_decision = retry_media_inputs_after_failure(
+                            attempt.media_route,
                             error_text,
-                            attempt_media_inputs,
-                        ):
+                            attempt.attempt_media_inputs,
+                            extra_present_kinds=attempt.remaining_context_media_kinds,
+                        )
+                        if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
-                                "Retrying AI response without inline media after errored run output",
+                                "Retrying AI response after inline media errored run output",
                                 agent=agent_name,
                                 error=error_text,
+                                removed_media_kinds=sorted(retry_decision.removed_kinds),
                             )
-                            attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(
+                            attempt.retry(
                                 run_input,
                                 fallback_prompt=inline_media_fallback_prompt,
+                                extra_removed_kinds=retry_decision.removed_kinds,
+                                retry_media_inputs=retry_decision.media_inputs,
+                                run_id=run_id,
                             )
-                            attempt_media_inputs = MediaInputs()
-                            attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
 
                         logger.warning("AI response returned errored run output", agent=agent_name, error=error_text)
 
-                    if response.status is not RunStatus.cancelled:
-                        break
+                    break
 
                 assert response is not None
             finally:
@@ -1069,22 +1217,19 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 tool_trace_collector.extend(_extract_tool_trace(response))
             if run_metadata_collector is not None:
                 run_metadata = build_ai_run_metadata_content(
-                    agent_name=agent_name,
                     config=config,
-                    runtime_paths=runtime_paths,
+                    model_name=prepared_run.runtime_model_name,
                     run_id=response.run_id,
                     session_id=response.session_id or session_id,
                     status=response.status,
                     model=response.model,
                     model_provider=response.model_provider,
-                    room_id=room_id,
                     metrics=response.metrics,
                     context_input_tokens=prepared_run.prepared_history.estimated_context_tokens,
                     tool_count=len(response.tools) if response.tools is not None else 0,
                     prepared_history=prepared_run.prepared_history,
                 )
-                if run_metadata:
-                    run_metadata_collector.update(run_metadata)
+                run_metadata_collector.update(run_metadata)
 
             if response.status == RunStatus.cancelled:
                 partial_text = _extract_interrupted_partial_text(
@@ -1103,7 +1248,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     persist_interrupted_replay(
                         scope_context=scope_context,
                         session_id=response.session_id or session_id,
-                        run_id=response.run_id or attempt_run_id or str(uuid4()),
+                        run_id=response.run_id or attempt.attempt_run_id or str(uuid4()),
                         user_message=prompt,
                         partial_text=partial_text,
                         completed_tools=completed_tools,
@@ -1150,7 +1295,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             persist_interrupted_replay(
                 scope_context=scope_context,
                 session_id=session_id,
-                run_id=attempt_run_id or str(uuid4()),
+                run_id=(attempt.attempt_run_id if attempt is not None else run_id) or str(uuid4()),
                 user_message=prompt,
                 partial_text="",
                 completed_tools=[],
@@ -1184,8 +1329,10 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     show_tool_calls: bool,
     agent_name: str,
     media_inputs: MediaInputs,
-    retried_without_inline_media: bool,
+    retried_after_media_fallback: bool,
     timing_scope: str,
+    media_route: ModelMediaRoute | None,
+    context_media_kinds: frozenset[MediaKind],
     state_updated: Callable[[], None] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
@@ -1259,13 +1406,15 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
                 return
 
             if isinstance(event, RunErrorEvent):
-                error_text = event.content or "Unknown agent error"
+                error_text = _run_error_event_text(event)
                 if _request_stream_retry(
                     state,
-                    retried_without_inline_media=retried_without_inline_media,
+                    retried_after_media_fallback=retried_after_media_fallback,
+                    media_route=media_route,
                     media_inputs=media_inputs,
+                    context_media_kinds=context_media_kinds,
                     error=error_text,
-                    log_message="Retrying streaming AI response without inline media after run error",
+                    log_message="Retrying streaming AI response after inline media run error",
                     agent_name=agent_name,
                 ):
                     return
@@ -1277,10 +1426,12 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     except Exception as e:
         if _request_stream_retry(
             state,
-            retried_without_inline_media=retried_without_inline_media,
+            retried_after_media_fallback=retried_after_media_fallback,
+            media_route=media_route,
             media_inputs=media_inputs,
+            context_media_kinds=context_media_kinds,
             error=e,
-            log_message="Retrying streaming AI response without inline media after stream exception",
+            log_message="Retrying streaming AI response after inline media stream exception",
             agent_name=agent_name,
         ):
             return
@@ -1392,7 +1543,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     unseen_event_ids: list[str] = []
     metadata: dict[str, Any] | None = None
     run_extra_content: dict[str, Any] | None = None
-    attempt_run_id = run_id
+    attempt: _MediaAttempt | None = None
     prepared_context_input_tokens: int | None = None
     state = _StreamingAttemptState()
 
@@ -1427,6 +1578,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     scope_context,
                     thread_history,
                     room_id,
+                    thread_id,
                     knowledge,
                     include_interactive_questions=include_interactive_questions,
                     reply_to_event_id=reply_to_event_id,
@@ -1479,8 +1631,13 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             if turn_recorder is not None:
                 turn_recorder.set_run_metadata(metadata)
 
-            attempt_prompt = ai_runtime.copy_run_input(run_input)
-            attempt_media_inputs = media_inputs
+            attempt = _MediaAttempt.initial(
+                run_input,
+                media_inputs,
+                agent.model,
+                fallback_prompt=inline_media_fallback_prompt,
+                run_id=run_id,
+            )
             state = _StreamingAttemptState()
 
             def _sync_live_turn_recorder() -> None:
@@ -1494,13 +1651,13 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 )
 
             try:
-                for retried_without_inline_media in (False, True):
+                for retried_after_media_fallback in (False, True):
                     state = _StreamingAttemptState()
 
                     try:
                         if pipeline_timing is not None:
                             pipeline_timing.mark("model_request_sent", overwrite=True)
-                        ai_runtime.note_attempt_run_id(run_id_callback, attempt_run_id)
+                        ai_runtime.note_attempt_run_id(run_id_callback, attempt.attempt_run_id)
                         request_context = _attempt_request_log_context(
                             agent_id=agent_name,
                             session_id=session_id,
@@ -1511,19 +1668,19 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             correlation_id=resolved_correlation_id,
                             prompt=prompt,
                             model_prompt=model_prompt,
-                            attempt_prompt=attempt_prompt,
+                            attempt_prompt=attempt.attempt_prompt,
                             metadata=metadata,
                         )
                         with bind_llm_request_log_context(**request_context):
                             prepared_input = ai_runtime.attach_media_to_run_input(
-                                attempt_prompt,
-                                attempt_media_inputs,
+                                attempt.attempt_prompt,
+                                attempt.attempt_media_inputs,
                             )
                             stream_generator = agent.arun(
                                 prepared_input,
                                 session_id=session_id,
                                 user_id=user_id,
-                                run_id=attempt_run_id,
+                                run_id=attempt.attempt_run_id,
                                 stream=True,
                                 stream_events=True,
                                 metadata=metadata,
@@ -1537,8 +1694,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             state=state,
                             show_tool_calls=show_tool_calls,
                             agent_name=agent_name,
-                            media_inputs=attempt_media_inputs,
-                            retried_without_inline_media=retried_without_inline_media,
+                            media_route=attempt.media_route,
+                            media_inputs=attempt.attempt_media_inputs,
+                            context_media_kinds=attempt.remaining_context_media_kinds,
+                            retried_after_media_fallback=retried_after_media_fallback,
                             timing_scope=timing_scope,
                             state_updated=_sync_live_turn_recorder,
                             pipeline_timing=pipeline_timing,
@@ -1547,38 +1706,61 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     except Exception as e:
                         if _request_stream_retry(
                             state,
-                            retried_without_inline_media=retried_without_inline_media,
-                            media_inputs=attempt_media_inputs,
+                            retried_after_media_fallback=retried_after_media_fallback,
+                            media_route=attempt.media_route,
+                            media_inputs=attempt.attempt_media_inputs,
+                            context_media_kinds=attempt.remaining_context_media_kinds,
                             error=e,
-                            log_message="Retrying streaming AI response without inline media after validation error",
+                            log_message="Retrying streaming AI response after inline media validation error",
                             agent_name=agent_name,
                         ):
-                            attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(
+                            attempt.retry(
                                 run_input,
                                 fallback_prompt=inline_media_fallback_prompt,
+                                extra_removed_kinds=state.media_fallback_removed_kinds,
+                                retry_media_inputs=state.media_fallback_retry_inputs or MediaInputs(),
+                                run_id=run_id,
                             )
-                            attempt_media_inputs = MediaInputs()
-                            attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
                         logger.exception("Error starting streaming AI response")
                         yield get_user_friendly_error_message(e, agent_name)
                         return
 
-                    if state.retry_requested:
-                        attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(
+                    if state.media_fallback_retry_requested:
+                        attempt.retry(
                             run_input,
                             fallback_prompt=inline_media_fallback_prompt,
+                            extra_removed_kinds=state.media_fallback_removed_kinds,
+                            retry_media_inputs=state.media_fallback_retry_inputs or MediaInputs(),
+                            run_id=run_id,
                         )
-                        attempt_media_inputs = MediaInputs()
-                        attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                         continue
 
-                    if state.user_error is not None:
-                        yield get_user_friendly_error_message(state.user_error, agent_name)
-                        return
-
-                    if state.stream_exception is not None:
-                        yield get_user_friendly_error_message(state.stream_exception, agent_name)
+                    run_error = state.user_error or state.stream_exception
+                    if run_error is not None:
+                        if state.assistant_text or state.completed_tools or state.pending_tools:
+                            interrupted_tools = [pending.trace_entry for pending in state.pending_tools]
+                            if turn_recorder is not None:
+                                turn_recorder.record_interrupted(
+                                    run_metadata=metadata,
+                                    assistant_text=state.assistant_text,
+                                    completed_tools=state.completed_tools,
+                                    interrupted_tools=interrupted_tools,
+                                )
+                            elif not standalone_interrupted_replay_persisted:
+                                persist_interrupted_replay(
+                                    scope_context=scope_context,
+                                    session_id=session_id,
+                                    run_id=attempt.attempt_run_id or str(uuid4()),
+                                    user_message=prompt,
+                                    partial_text=state.assistant_text,
+                                    completed_tools=state.completed_tools,
+                                    interrupted_tools=interrupted_tools,
+                                    run_metadata=metadata,
+                                    is_team=False,
+                                )
+                                standalone_interrupted_replay_persisted = True
+                        yield get_user_friendly_error_message(run_error, agent_name)
                         return
 
                     if state.cancelled_run_event is not None:
@@ -1596,15 +1778,13 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 state.observed_request_metric_fields,
                             )
                             cancelled_metadata = build_ai_run_metadata_content(
-                                agent_name=agent_name,
                                 config=config,
-                                runtime_paths=runtime_paths,
+                                model_name=prepared_run.runtime_model_name,
                                 run_id=state.cancelled_run_event.run_id,
                                 session_id=state.cancelled_run_event.session_id or session_id,
                                 status=RunStatus.cancelled,
                                 model=state.latest_model_id,
                                 model_provider=state.latest_model_provider,
-                                room_id=room_id,
                                 metrics=fallback_metrics,
                                 context_input_tokens=prepared_context_input_tokens,
                                 context_raw_input_tokens=state.latest_request_input_tokens,
@@ -1613,13 +1793,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 tool_count=state.observed_tool_calls,
                                 prepared_history=prepared_run.prepared_history,
                             )
-                            if cancelled_metadata:
-                                run_metadata_collector.update(cancelled_metadata)
+                            run_metadata_collector.update(cancelled_metadata)
                         if turn_recorder is None:
                             persist_interrupted_replay(
                                 scope_context=scope_context,
                                 session_id=state.cancelled_run_event.session_id or session_id,
-                                run_id=state.cancelled_run_event.run_id or attempt_run_id or str(uuid4()),
+                                run_id=state.cancelled_run_event.run_id or attempt.attempt_run_id or str(uuid4()),
                                 user_message=prompt,
                                 partial_text=state.assistant_text,
                                 completed_tools=state.completed_tools,
@@ -1646,9 +1825,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         fallback_metrics,
                     )
                     run_metadata = build_ai_run_metadata_content(
-                        agent_name=agent_name,
                         config=config,
-                        runtime_paths=runtime_paths,
+                        model_name=prepared_run.runtime_model_name,
                         run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
                         session_id=(
                             state.completed_run_event.session_id
@@ -1659,7 +1837,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         status=final_status,
                         model=state.latest_model_id,
                         model_provider=state.latest_model_provider,
-                        room_id=room_id,
                         metrics=usage_metrics,
                         metrics_fallback=usage_metrics_fallback,
                         context_input_tokens=prepared_context_input_tokens,
@@ -1673,8 +1850,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         ),
                         prepared_history=prepared_run.prepared_history,
                     )
-                    if run_metadata:
-                        run_metadata_collector.update(run_metadata)
+                    run_metadata_collector.update(run_metadata)
                 if turn_recorder is not None:
                     final_visible_body = state.assistant_text or state.canonical_final_body_candidate or ""
                     turn_recorder.record_completed(
@@ -1713,7 +1889,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             persist_interrupted_replay(
                 scope_context=scope_context,
                 session_id=session_id,
-                run_id=attempt_run_id or str(uuid4()),
+                run_id=(attempt.attempt_run_id if attempt is not None else run_id) or str(uuid4()),
                 user_message=prompt,
                 partial_text=state.assistant_text,
                 completed_tools=state.completed_tools,

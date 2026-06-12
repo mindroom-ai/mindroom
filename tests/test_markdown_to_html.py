@@ -355,6 +355,15 @@ def test_data_uri_attributes_are_stripped() -> None:
     assert 'href="data:' not in html
 
 
+def test_malformed_ipv6_url_attribute_is_dropped_without_crashing() -> None:
+    """A URL with an unbalanced IPv6 bracket must not abort the whole render (ISSUE-230)."""
+    html = markdown_to_html('<a href="http://[">x</a>\n<img src="http://[" alt="safe">')
+    assert "<a>x</a>" in html
+    assert 'href="http://["' not in html
+    assert 'alt="safe"' in html
+    assert 'src="http://["' not in html
+
+
 @pytest.mark.parametrize(
     ("raw_html", "expected_fragment", "forbidden_fragment"),
     [

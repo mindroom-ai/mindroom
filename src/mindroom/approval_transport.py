@@ -77,6 +77,10 @@ class ApprovalMatrixTransport:
     event_cache_provider: Callable[[], ConversationEventCache]
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _cache_write_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
+    _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
+    _startup_cleanup_done: bool = field(default=False, init=False, repr=False)
+    _startup_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     def capture_runtime_loop(self) -> None:
         """Remember the runtime loop that owns Matrix client I/O."""
@@ -400,10 +404,43 @@ class ApprovalMatrixTransport:
         )
         return False
 
+    def reset_startup_cleanup_gate(self) -> None:
+        """Reset one-shot startup approval cleanup state for a fresh runtime start."""
+        self._startup_router_ready_for_cleanup = False
+        self._startup_runtime_support_ready_for_cleanup = False
+        self._startup_cleanup_done = False
+
+    async def mark_startup_runtime_support_ready(self) -> None:
+        """Record that approval runtime support can now perform startup cleanup."""
+        self._startup_runtime_support_ready_for_cleanup = True
+        await self._run_startup_cleanup_if_ready()
+
     async def handle_bot_ready(self, bot: _ApprovalTransportBot) -> None:
-        """Discard orphaned approval cards once the router finishes first sync."""
+        """Record router first sync and run startup approval cleanup once all gates are ready."""
         if bot.agent_name != ROUTER_AGENT_NAME or not bot.running or bot.client is None:
             return
+        self._startup_router_ready_for_cleanup = True
+        await self._run_startup_cleanup_if_ready()
+
+    async def _run_startup_cleanup_if_ready(self) -> None:
+        if (
+            self._startup_cleanup_done
+            or not self._startup_router_ready_for_cleanup
+            or not self._startup_runtime_support_ready_for_cleanup
+        ):
+            return
+        async with self._startup_cleanup_lock:
+            if (
+                self._startup_cleanup_done
+                or not self._startup_router_ready_for_cleanup
+                or not self._startup_runtime_support_ready_for_cleanup
+            ):
+                return
+            await self._discard_orphaned_approval_cards_on_startup()
+            self._startup_cleanup_done = True
+
+    async def _discard_orphaned_approval_cards_on_startup(self) -> None:
+        """Discard orphaned approval cards once startup approval gates are ready."""
         config = self.config_provider()
         if config is None:
             return

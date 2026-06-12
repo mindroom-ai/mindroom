@@ -212,6 +212,103 @@ async def test_response_attempt_adds_stop_button_for_online_user_and_removes_it_
 
 
 @pytest.mark.asyncio
+async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
+    """Cancelling the awaiting chain must cancel the attempt task with the same provenance."""
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    runner, _delivery_gateway, _stop_manager = _runner()
+    inner_started = asyncio.Event()
+    inner_cancel_args: list[tuple[object, ...]] = []
+    cancellation_reasons: list[str] = []
+
+    async def response_function(_message_id: str | None) -> None:
+        inner_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            inner_cancel_args.append(exc.args)
+            raise
+
+    outer = asyncio.create_task(
+        runner.run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=response_function,
+                existing_event_id="$existing",
+                on_cancelled=cancellation_reasons.append,
+            ),
+        ),
+    )
+    await inner_started.wait()
+    outer.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+    assert await outer == "$existing"
+
+    assert cancellation_reasons == ["sync_restart_cancelled"]
+    assert inner_cancel_args == [(SYNC_RESTART_CANCEL_MSG,)]
+
+
+@pytest.mark.asyncio
+async def test_attempt_task_error_during_forwarded_cancellation_is_logged() -> None:
+    """An attempt task that errors while unwinding the forced cancel must be reported."""
+    runner, _delivery_gateway, _stop_manager = _runner()
+    inner_started = asyncio.Event()
+
+    async def misbehaving_attempt() -> None:
+        inner_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            msg = "cleanup failed during cancellation"
+            raise RuntimeError(msg) from None
+
+    task = asyncio.create_task(misbehaving_attempt())
+    await inner_started.wait()
+    await runner._forward_cancel_to_attempt_task(task, asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG))
+
+    error_calls = runner.deps.logger.error.call_args_list
+    assert len(error_calls) == 1
+    assert error_calls[0].args == ("Response attempt task failed while unwinding forwarded cancellation",)
+    assert error_calls[0].kwargs["error"] == "cleanup failed during cancellation"
+
+
+@pytest.mark.asyncio
+async def test_timed_out_attempt_task_failure_is_logged_when_it_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A straggler outliving the forwarded-cancel wait must still report its eventual failure."""
+    monkeypatch.setattr(response_attempt_module, "_FORWARDED_CANCEL_WAIT_SECONDS", 0.01)
+    runner, _delivery_gateway, _stop_manager = _runner()
+    inner_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stubborn_attempt() -> None:
+        inner_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Resist the forwarded cancel past the wait timeout, then fail.
+            await release.wait()
+            msg = "late cleanup failure"
+            raise RuntimeError(msg) from None
+
+    task = asyncio.create_task(stubborn_attempt())
+    await inner_started.wait()
+    await runner._forward_cancel_to_attempt_task(task, asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG))
+
+    runner.deps.logger.warning.assert_called_once()
+    runner.deps.logger.error.assert_not_called()
+
+    release.set()
+    with pytest.raises(RuntimeError, match="late cleanup failure"):
+        await task
+    await asyncio.sleep(0)  # Let the done callback run.
+
+    error_calls = runner.deps.logger.error.call_args_list
+    assert len(error_calls) == 1
+    assert error_calls[0].args == ("Response attempt task failed while unwinding forwarded cancellation",)
+    assert error_calls[0].kwargs["error"] == "late cleanup failure"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("cancel_args", "expected_reason", "log_method", "log_message"),
     [

@@ -39,8 +39,8 @@ class TestAdminAccountDeletion:
 
     @pytest.fixture
     def mock_uninstall_instance(self):
-        """Mock uninstall_instance function."""
-        with patch("backend.routes.admin.uninstall_instance") as mock:
+        """Mock the provisioner service uninstall function."""
+        with patch("backend.services.provisioner_service.uninstall_instance") as mock:
             mock.return_value = {"success": True}
             yield mock
 
@@ -104,8 +104,10 @@ class TestAdminAccountDeletion:
         assert response.status_code == 200
         assert response.json() == {"data": {"id": "account_123"}}
 
-        # Verify uninstall was called for both instances
+        # Verify uninstall was called for both instances with their instance ids
         assert mock_uninstall_instance.call_count == 2
+        mock_uninstall_instance.assert_any_call(1)
+        mock_uninstall_instance.assert_any_call(2)
 
     def test_delete_account_not_found(self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock):
         """Test deleting non-existent account."""
@@ -178,7 +180,7 @@ class TestAdminAccountDeletion:
         self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock
     ):
         """Test that account deletion continues even if instance deprovisioning fails."""
-        with patch("backend.routes.admin.uninstall_instance") as mock_uninstall:
+        with patch("backend.services.provisioner_service.uninstall_instance") as mock_uninstall:
             # Make uninstall fail
             mock_uninstall.side_effect = Exception("Kubernetes API error")
 

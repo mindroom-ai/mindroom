@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import threading
 import time
@@ -10,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.file_locks import advisory_file_lock
 from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
@@ -768,17 +768,15 @@ def test_concurrent_cross_instance_writes_wait_for_lock_and_merge(temp_dir: Path
         _record_handled_turn(tracker_b, ["$second"], response_event_id="$response-b")
         writer_finished.set()
 
-    with tracker_a._responses_lock_file.open("a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    with advisory_file_lock(tracker_a._responses_lock_file):
         writer_thread = threading.Thread(target=write_second_turn)
         writer_thread.start()
         assert writer_started.wait(timeout=5.0)
         time.sleep(0.05)
         assert not writer_finished.is_set()
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        assert writer_finished.wait(timeout=5.0)
-        writer_thread.join(timeout=1.0)
-        assert not writer_thread.is_alive()
+    assert writer_finished.wait(timeout=5.0)
+    writer_thread.join(timeout=1.0)
+    assert not writer_thread.is_alive()
 
     tracker_c = HandledTurnLedger("test_cross_instance_lock", base_path=temp_dir)
     assert _get_response_event_id(tracker_c, "$first") == "$response-a"

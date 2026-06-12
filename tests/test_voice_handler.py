@@ -398,6 +398,18 @@ class TestVoiceHandler:
         mock_download.assert_awaited_once_with(client, event)
 
     @pytest.mark.asyncio
+    async def test_download_audio_returns_none_when_media_cap_rejects_payload(self) -> None:
+        """Voice downloads should inherit Matrix media byte caps from the shared helper."""
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomMessageAudio)
+
+        with patch("mindroom.voice_handler.download_media_bytes", new=AsyncMock(return_value=None)) as mock_download:
+            result = await voice_handler._download_audio(client, event)
+
+        assert result is None
+        mock_download.assert_awaited_once_with(client, event)
+
+    @pytest.mark.asyncio
     async def test_prepare_voice_message_clears_inflight_task_after_failed_download(self, tmp_path: Path) -> None:
         """Failed normalization should not leave stale in-flight task entries behind."""
         config = _runtime_bound_config(Config(authorization={"default_room_access": True}))

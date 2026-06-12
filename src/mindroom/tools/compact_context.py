@@ -26,5 +26,6 @@ register_builtin_tool_metadata(
         icon_color="text-amber-500",
         config_fields=[],
         dependencies=[],
+        function_names=("compact_context",),
     ),
 )

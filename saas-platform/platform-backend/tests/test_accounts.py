@@ -1,6 +1,7 @@
 """Comprehensive HTTP API tests for accounts endpoints."""
 
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -8,6 +9,32 @@ from backend.deps import verify_user
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from main import app
+
+
+MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase/migrations"
+BASELINE_MIGRATION_SQL = MIGRATIONS_DIR / "000_consolidated_complete_schema.sql"
+ACCOUNT_GRANTS_MIGRATION_SQL = MIGRATIONS_DIR / "002_restrict_account_grants.sql"
+
+
+def assert_account_grants_restricted(sql: str) -> None:
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE accounts TO authenticated;" not in sql
+    assert "REVOKE INSERT, UPDATE ON TABLE accounts FROM authenticated;" in sql
+    assert (
+        "GRANT UPDATE (full_name, company_name, consent_marketing, consent_analytics, consent_updated_at) "
+        "ON TABLE accounts TO authenticated;"
+    ) in sql
+    for privileged_column in ("tier", "is_admin", "status", "stripe_customer_id", "deleted_at"):
+        assert f"GRANT UPDATE ({privileged_column}) ON TABLE accounts TO authenticated;" not in sql
+
+
+def test_accounts_baseline_migration_restricts_authenticated_updates_to_profile_columns() -> None:
+    """Fresh databases restrict authenticated writes to profile fields."""
+    assert_account_grants_restricted(BASELINE_MIGRATION_SQL.read_text(encoding="utf-8"))
+
+
+def test_accounts_incremental_migration_restricts_existing_authenticated_grants() -> None:
+    """Existing databases receive the same account grant restriction."""
+    assert_account_grants_restricted(ACCOUNT_GRANTS_MIGRATION_SQL.read_text(encoding="utf-8"))
 
 
 class TestAccountsEndpoints:
@@ -269,13 +296,7 @@ class TestAccountsEndpoints:
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
             "subscriptions": [
-                {
-                    "id": "sub_1",
-                    "account_id": "acc_test_123",
-                    "tier": "byok",
-                    "status": "cancelled",
-                    "instances": [],
-                },
+                {"id": "sub_1", "account_id": "acc_test_123", "tier": "byok", "status": "cancelled", "instances": []},
                 {
                     "id": "sub_2",
                     "account_id": "acc_test_123",

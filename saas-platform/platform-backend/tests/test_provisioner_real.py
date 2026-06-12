@@ -16,7 +16,7 @@ from hypothesis.stateful import RuleBasedStateMachine, rule, invariant, initiali
 os.environ["PLATFORM_DOMAIN"] = "test.mindroom.chat"
 os.environ["ENVIRONMENT"] = "test"
 
-from backend.routes import provisioner  # noqa: E402
+from backend.services import provisioner_service  # noqa: E402
 
 
 class TestProvisionerCommandValidation:
@@ -57,18 +57,6 @@ class TestProvisionerCommandValidation:
     @pytest.mark.asyncio
     async def test_helm_install_command_validates_required_values(self):
         """Verify Helm command includes all required values."""
-        # Set environment before importing to ensure correct values
-        os.environ["PLATFORM_DOMAIN"] = "test.mindroom.chat"
-        os.environ["ENVIRONMENT"] = "test"
-
-        # Force reimport to pick up environment variables
-        import sys
-
-        if "backend.config" in sys.modules:
-            del sys.modules["backend.config"]
-        if "backend.routes.provisioner" in sys.modules:
-            del sys.modules["backend.routes.provisioner"]
-
         from backend.routes.provisioner import provision_instance
 
         captured_helm_args = []
@@ -86,9 +74,16 @@ class TestProvisionerCommandValidation:
                 operations.append("secret")
             return (0, "Success", "")
 
-        with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
-            with patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command):
-                with patch("backend.routes.provisioner.run_kubectl", side_effect=capture_kubectl_command):
+        with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"),
+            patch.multiple(
+                "backend.services.provisioner_service",
+                PROVISIONER_API_KEY="test-key",
+                INSTANCE_BASE_DOMAIN="test.mindroom.chat",
+            ),
+        ):
+            with patch("backend.services.provisioner_service.run_helm", side_effect=capture_helm_command):
+                with patch("backend.services.provisioner_service.run_kubectl", side_effect=capture_kubectl_command):
                     with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
                         # Minimal mocking - just database
                         mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
@@ -147,7 +142,7 @@ class TestProvisionerCommandValidation:
 
     def test_instance_secrets_are_stable_and_instance_scoped(self):
         """Provisioner-derived instance secrets should be stable without being shared across tenants."""
-        provisioner_module = importlib.import_module("backend.routes.provisioner")
+        provisioner_module = importlib.import_module("backend.services.provisioner_service")
         with patch.multiple(
             provisioner_module,
             INSTANCE_CREDENTIALS_ENCRYPTION_SECRET="root-secret",
@@ -175,11 +170,9 @@ class TestProvisionerCommandValidation:
             captured["manifest"] = json.loads(path.read_text(encoding="utf-8"))
             return (0, "Success", "")
 
-        with patch.object(provisioner, "run_kubectl", side_effect=capture_kubectl_command):
-            await provisioner._apply_instance_secret(
-                "123",
-                "mindroom-instances",
-                {"credentials_encryption_key": "secret-key-value"},
+        with patch.object(provisioner_service, "run_kubectl", side_effect=capture_kubectl_command):
+            await provisioner_service._apply_instance_secret(
+                "123", "mindroom-instances", {"credentials_encryption_key": "secret-key-value"}
             )
 
         assert captured["mode"] == 0o600
@@ -204,8 +197,9 @@ class TestProvisionerCommandValidation:
             return (0, "Success", "")
 
         with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"),
             patch.multiple(
-                "backend.routes.provisioner",
+                "backend.services.provisioner_service",
                 PROVISIONER_API_KEY="test-key",
                 INSTANCE_BASE_DOMAIN="local",
                 INSTANCE_STORAGE_CLASS_NAME="standard",
@@ -232,18 +226,15 @@ class TestProvisionerCommandValidation:
                 INSTANCE_MATRIX_OIDC_CLIENT_ID="mindroom-synapse",
                 INSTANCE_MATRIX_OIDC_CLIENT_SECRET="matrix-client-secret",
             ),
-            patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command),
-            patch("backend.routes.provisioner.run_kubectl", side_effect=capture_kubectl_command),
-            patch("backend.routes.provisioner.wait_for_deployment_ready", return_value=True),
+            patch("backend.services.provisioner_service.run_helm", side_effect=capture_helm_command),
+            patch("backend.services.provisioner_service.run_kubectl", side_effect=capture_kubectl_command),
+            patch("backend.services.provisioner_service.wait_for_deployment_ready", return_value=True),
             patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
         ):
             mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
 
             await provision_instance(
-                None,
-                {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
-                "Bearer test-key",
-                None,
+                None, {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"}, "Bearer test-key", None
             )
 
         helm_args = captured_helm_args[0]
@@ -325,14 +316,15 @@ class TestProvisionerCommandValidation:
             return (0, "", "")
 
         with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"),
             patch.multiple(
-                "backend.routes.provisioner",
+                "backend.services.provisioner_service",
                 PROVISIONER_API_KEY="test-key",
                 INSTANCE_STORAGE_CLASS_NAME="hcloud-volumes",
             ),
-            patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command),
-            patch("backend.routes.provisioner.run_kubectl", side_effect=capture_kubectl_command),
-            patch("backend.routes.provisioner.wait_for_deployment_ready", return_value=True),
+            patch("backend.services.provisioner_service.run_helm", side_effect=capture_helm_command),
+            patch("backend.services.provisioner_service.run_kubectl", side_effect=capture_kubectl_command),
+            patch("backend.services.provisioner_service.wait_for_deployment_ready", return_value=True),
             patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
         ):
             mock_sb.return_value.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "1"}])
@@ -363,9 +355,12 @@ class TestProvisionerCommandValidation:
             captured_kubectl_args.append((args, namespace))
             return (0, "Success", "")
 
-        with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
-            with patch("backend.routes.provisioner.run_kubectl", side_effect=capture_kubectl):
-                with patch("backend.routes.provisioner.check_deployment_exists", return_value=True):
+        with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"),
+            patch("backend.services.provisioner_service.PROVISIONER_API_KEY", "test-key"),
+        ):
+            with patch("backend.services.provisioner_service.run_kubectl", side_effect=capture_kubectl):
+                with patch("backend.services.provisioner_service.check_deployment_exists", return_value=True):
                     await stop_instance_provisioner(None, 123, "Bearer test-key")
 
         assert captured_kubectl_args == [
@@ -521,13 +516,16 @@ class TestProvisionerErrorRecovery:
                 return (0, "Rolled back", "")
             return (0, "Success", "")
 
-        with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
-            with patch("backend.routes.provisioner.run_helm", side_effect=helm_with_failure):
+        with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"),
+            patch("backend.services.provisioner_service.PROVISIONER_API_KEY", "test-key"),
+        ):
+            with patch("backend.services.provisioner_service.run_helm", side_effect=helm_with_failure):
                 with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
                     mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
                     mock_sb.return_value.table().update().eq().execute.return_value = Mock()
 
-                    with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+                    with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                         mock_kubectl.return_value = (0, "Success", "")
 
                         with pytest.raises(Exception):
@@ -554,9 +552,12 @@ class TestProvisionerErrorRecovery:
                 namespace_deleted = True
             return (0, "Success", "")
 
-        with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
-            with patch("backend.routes.provisioner.run_kubectl", side_effect=track_namespace_operations):
-                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+        with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"),
+            patch("backend.services.provisioner_service.PROVISIONER_API_KEY", "test-key"),
+        ):
+            with patch("backend.services.provisioner_service.run_kubectl", side_effect=track_namespace_operations):
+                with patch("backend.services.provisioner_service.run_helm") as mock_helm:
                     # Make Helm fail after namespace creation
                     mock_helm.return_value = (1, "", "Deployment failed")
 
@@ -699,8 +700,11 @@ class TestProvisionerRealScenarios:
         """Test when namespace exceeds resource quotas."""
         from backend.routes.provisioner import provision_instance
 
-        with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
-            with patch("backend.routes.provisioner.run_helm") as mock_helm:
+        with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"),
+            patch("backend.services.provisioner_service.PROVISIONER_API_KEY", "test-key"),
+        ):
+            with patch("backend.services.provisioner_service.run_helm") as mock_helm:
                 # Real Kubernetes quota error
                 mock_helm.return_value = (
                     1,
@@ -709,7 +713,7 @@ class TestProvisionerRealScenarios:
                 )
 
                 with (
-                    patch("backend.routes.provisioner.run_kubectl", return_value=(0, "Success", "")),
+                    patch("backend.services.provisioner_service.run_kubectl", return_value=(0, "Success", "")),
                     patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
                 ):
                     mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
@@ -780,19 +784,22 @@ class TestProvisionerObservability:
         from backend.routes.provisioner import provision_instance
 
         # Capture logs
-        with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
-            with patch("backend.routes.provisioner.logger") as mock_logger:
+        with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"),
+            patch("backend.services.provisioner_service.PROVISIONER_API_KEY", "test-key"),
+        ):
+            with patch("backend.services.provisioner_service.logger") as mock_logger:
                 with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
                     mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
                     mock_sb.return_value.table().update().eq().execute.return_value = Mock()
 
-                    with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+                    with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                         mock_kubectl.return_value = (0, "Success", "")
 
-                        with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                        with patch("backend.services.provisioner_service.run_helm") as mock_helm:
                             mock_helm.return_value = (0, "Deployed", "")
 
-                            with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+                            with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
                                 mock_wait.return_value = True
 
                                 await provision_instance(
@@ -819,11 +826,14 @@ class TestProvisionerObservability:
         """Test that failures include enough context for debugging."""
         from backend.routes.provisioner import provision_instance
 
-        with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+        with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"),
+            patch("backend.services.provisioner_service.PROVISIONER_API_KEY", "test-key"),
+        ):
+            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                 mock_kubectl.return_value = (0, "Success", "")
 
-                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                with patch("backend.services.provisioner_service.run_helm") as mock_helm:
                     mock_helm.return_value = (1, "", "Connection refused")
 
                     with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:

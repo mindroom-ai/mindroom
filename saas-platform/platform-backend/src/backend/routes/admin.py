@@ -1,11 +1,10 @@
 """Admin-only routes for platform management."""
 
 from collections import defaultdict
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from backend.config import PROVISIONER_API_KEY, logger, stripe
+from backend.config import logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_admin
 from backend.models import (
     ActionResult,
@@ -23,14 +22,7 @@ from backend.models import (
     UpdateAccountStatusResponse,
 )
 from backend.pricing import PRICING_CONFIG_MODEL
-from backend.routes.provisioner import (
-    provision_instance,
-    restart_instance_provisioner,
-    start_instance_provisioner,
-    stop_instance_provisioner,
-    sync_instances,
-    uninstall_instance,
-)
+from backend.services import provisioner_service
 from backend.utils.audit import create_audit_log
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -103,26 +95,15 @@ async def get_admin_stats(request: Request, admin: Annotated[dict, Depends(verif
         raise HTTPException(status_code=500, detail="Failed to fetch statistics") from e
 
 
-# Generic proxy for instance management actions
-async def _proxy_to_provisioner(
-    request: Request,
-    provisioner_func: Callable,
-    instance_id: int,
-    admin: Annotated[dict, Depends(verify_admin)],  # noqa: ARG001
-) -> dict[str, Any]:
-    """Proxy request to provisioner with API key."""
-    return await provisioner_func(request, instance_id, f"Bearer {PROVISIONER_API_KEY}")
-
-
 @router.post("/admin/instances/{instance_id}/start", response_model=ActionResult)
 @limiter.limit("10/minute")
 async def admin_start_instance(
-    request: Request,
+    request: Request,  # noqa: ARG001
     instance_id: int,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
-    """Start an instance (admin proxy)."""
-    result = await _proxy_to_provisioner(request, start_instance_provisioner, instance_id, admin)
+    """Start an instance."""
+    result = await provisioner_service.start_instance(instance_id)
     audit_log_entry(account_id=admin["user_id"], action="start", resource_type="instance", resource_id=str(instance_id))
     return result
 
@@ -130,12 +111,12 @@ async def admin_start_instance(
 @router.post("/admin/instances/{instance_id}/stop", response_model=ActionResult)
 @limiter.limit("10/minute")
 async def admin_stop_instance(
-    request: Request,
+    request: Request,  # noqa: ARG001
     instance_id: int,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
-    """Stop an instance (admin proxy)."""
-    result = await _proxy_to_provisioner(request, stop_instance_provisioner, instance_id, admin)
+    """Stop an instance."""
+    result = await provisioner_service.stop_instance(instance_id)
     audit_log_entry(account_id=admin["user_id"], action="stop", resource_type="instance", resource_id=str(instance_id))
     return result
 
@@ -143,12 +124,12 @@ async def admin_stop_instance(
 @router.post("/admin/instances/{instance_id}/restart", response_model=ActionResult)
 @limiter.limit("10/minute")
 async def admin_restart_instance(
-    request: Request,
+    request: Request,  # noqa: ARG001
     instance_id: int,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
-    """Restart an instance (admin proxy)."""
-    result = await _proxy_to_provisioner(request, restart_instance_provisioner, instance_id, admin)
+    """Restart an instance."""
+    result = await provisioner_service.restart_instance(instance_id)
     audit_log_entry(
         account_id=admin["user_id"], action="restart", resource_type="instance", resource_id=str(instance_id)
     )
@@ -158,12 +139,12 @@ async def admin_restart_instance(
 @router.delete("/admin/instances/{instance_id}/uninstall", response_model=ActionResult)
 @limiter.limit("2/minute")
 async def admin_uninstall_instance(
-    request: Request,
+    request: Request,  # noqa: ARG001
     instance_id: int,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
-    """Uninstall an instance (admin proxy)."""
-    result = await _proxy_to_provisioner(request, uninstall_instance, instance_id, admin)
+    """Uninstall an instance."""
+    result = await provisioner_service.uninstall_instance(instance_id)
     audit_log_entry(
         account_id=admin["user_id"], action="uninstall", resource_type="instance", resource_id=str(instance_id)
     )
@@ -190,7 +171,7 @@ async def admin_provision_instance(
     if instance.get("status") not in ["deprovisioned", "error"]:
         raise HTTPException(status_code=400, detail="Instance must be deprovisioned or in error state to provision")
 
-    # Call provisioner with existing instance data
+    # Call the provisioner service with existing instance data
     data = {
         "subscription_id": instance.get("subscription_id"),
         "account_id": instance.get("account_id"),
@@ -198,10 +179,7 @@ async def admin_provision_instance(
         "instance_id": instance_id,  # Re-use existing instance ID
     }
 
-    # provision_instance expects: request, data, authorization, background_tasks
-    result = await provision_instance(
-        request=request, data=data, authorization=f"Bearer {PROVISIONER_API_KEY}", background_tasks=background_tasks
-    )
+    result = await provisioner_service.provision_instance(sb, data=data, background_tasks=background_tasks)
     audit_log_entry(
         account_id=admin["user_id"],
         action="provision",
@@ -214,9 +192,9 @@ async def admin_provision_instance(
 
 @router.post("/admin/sync-instances", response_model=SyncResult)
 @limiter.limit("5/minute")
-async def admin_sync_instances(request: Request, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008
-    """Sync instance states between database and Kubernetes (admin proxy)."""
-    result = await sync_instances(request, f"Bearer {PROVISIONER_API_KEY}")
+async def admin_sync_instances(request: Request, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
+    """Sync instance states between database and Kubernetes."""
+    result = await provisioner_service.sync_instances(ensure_supabase())
     audit_log_entry(
         account_id=admin["user_id"],
         action="sync",
@@ -591,8 +569,7 @@ async def admin_delete_account_complete(
         if instance.get("status") not in ["deprovisioned", "terminated"]:
             logger.info(f"Deprovisioning instance {instance_id} for account {account_id}")
             try:
-                # Call the uninstall endpoint via provisioner
-                await uninstall_instance(instance_id=instance_id, api_key=PROVISIONER_API_KEY)
+                await provisioner_service.uninstall_instance(instance_id)
             except Exception as e:
                 logger.error(f"Failed to deprovision instance {instance_id}: {e}")
                 # Continue with other instances even if one fails

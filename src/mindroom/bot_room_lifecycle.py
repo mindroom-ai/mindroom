@@ -248,15 +248,11 @@ class BotRoomLifecycle:
             self._logger().info("Ignored invite", room_id=room.room_id, sender=event.sender)
             return
 
-        room_alias = room.canonical_alias
-        if not isinstance(room_alias, str):
-            room_alias = None
         if not is_authorized_sender(
             event.sender,
             self._config(),
             room.room_id,
             self.deps.runtime_paths,
-            room_alias=room_alias,
         ):
             self._logger().debug(
                 "ignoring_invite_from_unauthorized_sender",

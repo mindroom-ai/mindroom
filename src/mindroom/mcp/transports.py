@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
+import httpx
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.message import SessionMessage
+
+from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, validate_server_fetch_url
 
 _ENV_REFERENCE_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
@@ -57,6 +61,26 @@ def _interpolate_mcp_headers(values: Mapping[str, str], runtime_paths: RuntimePa
     return {name: _interpolate_value(value, runtime_paths) for name, value in values.items()}
 
 
+def _server_fetch_mcp_http_client(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+    **_ignored: object,
+) -> httpx.AsyncClient:
+    """Create an MCP HTTP client that validates requests, redirects, and dialed addresses."""
+    kwargs: dict[str, Any] = {
+        "follow_redirects": True,
+        "transport": ServerFetchAsyncHTTPTransport(),
+    }
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    if headers is not None:
+        kwargs["headers"] = headers
+    if auth is not None:
+        kwargs["auth"] = auth
+    return httpx.AsyncClient(**kwargs)
+
+
 def _build_stdio_server_parameters(
     server_config: MCPServerConfig,
     runtime_paths: RuntimePaths | None = None,
@@ -100,15 +124,17 @@ async def _open_remote_transport(
     if server_config.url is None:
         msg = f"{transport} MCP servers require url"
         raise ValueError(msg)
+    url = await asyncio.to_thread(validate_server_fetch_url, server_config.url)
     headers = {
         **_interpolate_mcp_headers(server_config.headers, runtime_paths),
         **(dict(extra_headers) if extra_headers is not None else {}),
     }
     async with client(
-        server_config.url,
+        url,
         headers=headers,
         timeout=server_config.startup_timeout_seconds,
         sse_read_timeout=server_config.call_timeout_seconds,
+        httpx_client_factory=_server_fetch_mcp_http_client,
     ) as streams:
         yield cast("_TransportStreams", streams[:2])
 

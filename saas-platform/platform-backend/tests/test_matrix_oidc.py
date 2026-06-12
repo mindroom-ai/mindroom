@@ -38,10 +38,7 @@ def test_matrix_oidc_discovery_advertises_platform_issuer(monkeypatch) -> None:
     _patch_oidc(monkeypatch)
     client = TestClient(app)
 
-    response = client.get(
-        "/matrix-oidc/.well-known/openid-configuration",
-        headers={"host": "api.mindroom.chat"},
-    )
+    response = client.get("/matrix-oidc/.well-known/openid-configuration", headers={"host": "api.mindroom.chat"})
 
     assert response.status_code == 200
     body = response.json()
@@ -64,10 +61,7 @@ def test_matrix_oidc_authorize_redirects_anonymous_users_to_platform_login(monke
     }
 
     response = client.get(
-        "/matrix-oidc/authorize",
-        params=params,
-        headers={"host": "api.mindroom.chat"},
-        follow_redirects=False,
+        "/matrix-oidc/authorize", params=params, headers={"host": "api.mindroom.chat"}, follow_redirects=False
     )
 
     assert response.status_code == 307

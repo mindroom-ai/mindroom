@@ -43,6 +43,17 @@ if TYPE_CHECKING:
                 "Defaults to the active storage path's browser/ directory."
             ),
         ),
+        ConfigField(
+            name="allow_private_networks",
+            label="Allow Private Networks",
+            type="boolean",
+            required=False,
+            default=False,
+            description=(
+                "Allow browser navigation and page subresources to reach trusted private, local, or loopback "
+                "network addresses. Cloud metadata and link-local addresses stay blocked."
+            ),
+        ),
     ],
     function_names=("browser",),
 )

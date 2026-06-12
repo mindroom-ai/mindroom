@@ -22,9 +22,9 @@ export default function DashboardPage() {
   const router = useRouter()
 
   useEffect(() => {
-    // Ensure SSO cookie for instance access (no-op if not logged in)
+    // Ensure API-host SSO cookie for Matrix OIDC (no-op if not logged in)
     setSsoCookie().catch((e) => logger.warn('Failed to set SSO cookie', e))
-    // Refresh cookie periodically for longer sessions
+    // Refresh cookie periodically for longer hosted Matrix login sessions
     const id = setInterval(() => { setSsoCookie().catch((e) => logger.warn('Failed to refresh SSO cookie', e)) }, 15 * 60 * 1000)
 
     return () => clearInterval(id)

@@ -264,8 +264,8 @@ agents:
       files and explore freely without asking.
     - >-
       Before answering questions about prior conversations, decisions, people,
-      or preferences, use search_knowledge_base to search memory files. Do not
-      guess from incomplete context; search first.
+      or preferences, use search_memories to search memory files. Do not guess
+      from incomplete context; search first.
     include_default_tools: false
     learning: false
     context_files:
@@ -276,8 +276,6 @@ agents:
     - ./openclaw_data/MEMORY.md
     - ./openclaw_data/TOOLS.md
     - ./openclaw_data/HEARTBEAT.md
-    knowledge_bases:
-    - openclaw_memory
     model: opus
     role: OpenClaw-style personal assistant with persistent file-based identity
       and memory.
@@ -288,6 +286,7 @@ agents:
     tools:
     - file
     - shell
+    - memory
     - scheduler
     - duckduckgo
     - website
@@ -411,6 +410,7 @@ agents:
     tools: []
 authorization:
   default_room_access: false
+  config_command_enabled: false
   global_users:
   - '@test:m-test-4.mindroom.chat'
   room_permissions: {}
@@ -424,11 +424,6 @@ defaults:
   learning_mode: always
   markdown: true
   show_stop_button: true
-knowledge_bases:
-  openclaw_memory:
-    # Semantic search over historical OpenClaw workspace memory files.
-    path: ./openclaw_data/memory
-    watch: true
 memory:
   embedder:
     config:
@@ -441,6 +436,11 @@ memory:
       openai_base_url: http://llama.local/v1
       temperature: 0.1
     provider: openai
+  search:
+    mode: semantic
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
 models:
   # --- Local (llama.local) ---
   # llama-swap + llama.cpp, see https://github.com/basnijholt/dotfiles/blob/main/configs/nixos/hosts/pc/ai.nix
@@ -475,11 +475,11 @@ models:
     id: claude-sonnet-4-6
     provider: anthropic
   # --- OpenAI ---
-  gpt52:
-    id: gpt-5.2
+  gpt55:
+    id: gpt-5.5
     provider: openai
   gpt5mini:
-    id: gpt-5-mini
+    id: gpt-5.4-mini
     provider: openai
   # --- Google ---
   gemini_flash:

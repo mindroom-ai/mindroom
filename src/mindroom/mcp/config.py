@@ -110,6 +110,10 @@ class MCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = Field(default=True, description="Whether the server is active")
+    required: bool = Field(
+        default=False,
+        description="Block dependent agent startup while this server is unavailable instead of degrading",
+    )
     transport: MCPTransport = Field(description="Transport type")
     command: str | None = Field(default=None, description="Executable name for stdio transport")
     args: list[str] = Field(default_factory=list, description="Arguments for stdio transport")

@@ -1,98 +1,46 @@
-"""Unified credentials management API."""
+"""Unified credentials management API routes."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from mindroom.agent_policy import (
-    ResolvedAgentPolicy,
-    dashboard_credentials_supported_for_scope,
-    resolve_agent_policy_from_data,
+from mindroom.api.credential_responses import filter_credentials_for_response, filter_oauth_client_config_for_response
+from mindroom.api.credentials_oauth_policy import (
+    OAuthCredentialServices,
+    dashboard_credentials_for_save,
+    dashboard_may_edit_oauth_match,
+    is_client_config_service,
+    oauth_service_match,
+    oauth_services_for_request,
+    preserve_oauth_client_config_from_existing,
+    reject_oauth_api_key_read_field,
+    reject_oauth_api_key_write_field,
+    reject_oauth_client_config_copy,
+    reject_oauth_credentials_document,
+    reject_oauth_token_service,
+    validate_oauth_client_config_fields,
 )
-from mindroom.api import config_lifecycle
-from mindroom.authorization import is_sender_allowed_for_agent_credential_management
-from mindroom.config.main import Config
-from mindroom.credential_policy import (
-    OAUTH_CREDENTIAL_FIELDS,
-    credential_service_policy,
-    dashboard_may_edit_oauth_service,
-    filter_oauth_credential_fields,
-    is_oauth_client_config_service,
-    looks_like_oauth_credentials,
+from mindroom.api.credentials_target import (
+    RequestCredentialsTarget,
+    delete_credentials_for_target,
+    load_credentials_for_target,
+    primary_runtime_scoped_services_for_target,
+    request_may_target_scoped_credentials,
+    resolve_request_credentials_target,
+    save_credentials_for_target,
 )
-from mindroom.credentials import (
-    CredentialsManager,
-    delete_scoped_credentials,
-    get_runtime_credentials_manager,
-    list_worker_grantable_shared_services,
-    load_scoped_credentials,
-    load_worker_grantable_shared_credentials,
-    save_scoped_credentials,
-    validate_service_name,
-)
-from mindroom.matrix.identity import try_parse_historical_matrix_user_id
-from mindroom.oauth.providers import OAuthProviderError
-from mindroom.oauth.registry import load_oauth_providers_for_snapshot
-from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
-from mindroom.tool_system.worker_routing import (
-    ToolExecutionIdentity,
-    WorkerScope,
-    require_worker_key_for_scope,
-    resolve_worker_target,
-    unsupported_shared_only_integration_message,
-    unsupported_shared_only_integration_names,
-)
+from mindroom.credential_policy import credential_service_policy
+from mindroom.credentials import list_worker_grantable_shared_services, validate_service_name
+from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 
 if TYPE_CHECKING:
-    from mindroom.constants import RuntimePaths
-    from mindroom.oauth.providers import OAuthProvider
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.api.credentials_oauth_policy import OAuthCredentialServiceMatch
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
-_OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
-_PENDING_OAUTH_STATE_TTL_SECONDS = 600
-_OAUTH_TOKEN_CREDENTIALS_ERROR = "OAuth token credentials must be managed through the OAuth connect flow."  # noqa: S105
-_OAUTH_CLIENT_CONFIG_FIELDS = frozenset({"client_id", "client_secret", "redirect_uri"})
-_OAUTH_CLIENT_CONFIG_RESPONSE_FIELDS = _OAUTH_CLIENT_CONFIG_FIELDS - {"client_secret"}
-_PENDING_OAUTH_STATE_KIND = "dashboard_oauth_state"
-_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD = "none"  # noqa: S105
-
-
-@dataclass(frozen=True)
-class _PendingOAuthState:
-    """Pending OAuth connect request bound to one authenticated dashboard user."""
-
-    service: str
-    user_id: str
-    agent_name: str | None
-    execution_scope_override_provided: bool
-    execution_scope_override: WorkerScope | None
-    payload: dict[str, str] | None
-    code_verifier: str | None
-    created_at: float
-
-
-def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
-    """Remove internal metadata keys (prefixed with _) from credentials."""
-    return {k: v for k, v in credentials.items() if not k.startswith("_")}
-
-
-def _filter_credentials_for_response(credentials: dict[str, Any], *, is_oauth_service: bool) -> dict[str, Any]:
-    """Return credentials safe for dashboard config responses."""
-    filtered = _filter_internal_keys(credentials)
-    if not is_oauth_service and not looks_like_oauth_credentials(credentials):
-        return filtered
-    return filter_oauth_credential_fields(credentials)
-
-
-def _filter_oauth_client_config_for_response(credentials: dict[str, Any]) -> dict[str, Any]:
-    """Return OAuth app client config without client secret material."""
-    filtered = _filter_internal_keys(credentials)
-    return {key: value for key, value in filtered.items() if key in _OAUTH_CLIENT_CONFIG_RESPONSE_FIELDS}
 
 
 def _validated_service(service: str) -> str:
@@ -103,768 +51,11 @@ def _validated_service(service: str) -> str:
 
 
 @dataclass(frozen=True)
-class RequestCredentialsTarget:
-    """Resolved credential target for one dashboard/API request."""
-
-    runtime_paths: RuntimePaths
-    base_manager: CredentialsManager
-    target_manager: CredentialsManager
-    worker_scope: WorkerScope | None
-    agent_name: str | None
-    execution_identity: ToolExecutionIdentity | None
-    allowed_shared_services: frozenset[str] | None = None
-
-
-@dataclass(frozen=True)
-class _DashboardAgentExecutionScopeResolution:
-    """Resolved dashboard scope request for one agent selection."""
-
-    agent_name: str | None
-    persisted_policy: ResolvedAgentPolicy | None
-    persisted_execution_scope: WorkerScope | None
-    requested_execution_scope: WorkerScope | None
-    execution_scope_override_provided: bool
-    draft_scope_preview: bool
-
-
-@dataclass(frozen=True)
-class _OAuthCredentialServiceMatch:
-    """OAuth provider service role for one credentials API service name."""
-
-    provider: OAuthProvider
-    token_service: bool
-    tool_config_service: bool
-    client_config_service: bool
-
-
-@dataclass(frozen=True)
-class _OAuthCredentialServices:
-    """Classify dashboard credential services registered by OAuth providers."""
-
-    providers: dict[str, OAuthProvider]
-
-    def match(self, service: str) -> _OAuthCredentialServiceMatch | None:
-        """Return the OAuth role for one credential service, if registered."""
-        for provider in self.providers.values():
-            token_service = provider.credential_service == service
-            tool_config_service = provider.tool_config_service == service
-            client_config_service = service in provider.all_client_config_services
-            if token_service or tool_config_service or client_config_service:
-                return _OAuthCredentialServiceMatch(
-                    provider=provider,
-                    token_service=token_service,
-                    tool_config_service=tool_config_service,
-                    client_config_service=client_config_service,
-                )
-        return None
-
-    def reject_non_editable_services(self, services: tuple[str, ...]) -> None:
-        """Reject direct dashboard access to non-editable OAuth credential services."""
-        for service in services:
-            _reject_oauth_token_service(self.match(service))
-
-    def dashboard_may_show_service(self, service: str) -> bool:
-        """Return whether a service may appear in dashboard credential listings."""
-        match = self.match(service)
-        return match is None or _dashboard_may_edit_oauth_match(match)
-
-
-def _request_auth_user(request: Request) -> dict[str, Any] | None:
-    auth_user = request.scope.get("auth_user")
-    return auth_user if isinstance(auth_user, dict) else None
-
-
-def _require_auth_user_id(request: Request) -> str:
-    auth_user = _request_auth_user(request) or {}
-    user_id = auth_user.get("user_id")
-    if isinstance(user_id, str) and user_id:
-        return user_id
-    raise HTTPException(status_code=401, detail="Missing or invalid credentials")
-
-
-def _dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimePaths) -> str | None:
-    """Return the requester identity dashboard-scoped worker credentials should use."""
-    auth_user = _request_auth_user(request) or {}
-    if auth_user.get("auth_source") == "trusted_upstream":
-        matrix_user_id = auth_user.get("matrix_user_id")
-        return try_parse_historical_matrix_user_id(matrix_user_id) if isinstance(matrix_user_id, str) else None
-    owner_user_id = runtime_paths.env_value(_OWNER_MATRIX_USER_ID_ENV)
-    if owner_user_id:
-        return owner_user_id
-    user_id = auth_user.get("user_id")
-    return user_id if isinstance(user_id, str) and user_id else None
-
-
-def _reject_unbound_private_dashboard_requester(
-    execution_scope: WorkerScope,
-    execution_identity: ToolExecutionIdentity,
-) -> None:
-    if execution_scope not in {"user", "user_agent"}:
-        return
-    if try_parse_historical_matrix_user_id(execution_identity.requester_id):
-        return
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "Dashboard credential management for private user scopes requires a Matrix requester identity. "
-            "Set MINDROOM_OWNER_USER_ID to your Matrix user ID, or run MindRoom under Matrix authentication."
-        ),
-    )
-
-
-def issue_pending_oauth_state(
-    request: Request,
-    service: str,
-    agent_name: str | None = None,
-    *,
-    payload: dict[str, str] | None = None,
-    code_verifier: str | None = None,
-) -> str:
-    """Create an opaque OAuth state bound to the current user and target."""
-    user_id = _require_auth_user_id(request)
-    execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
-    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
-    return issue_opaque_oauth_state(
-        runtime_paths,
-        kind=_PENDING_OAUTH_STATE_KIND,
-        ttl_seconds=_PENDING_OAUTH_STATE_TTL_SECONDS,
-        data={
-            "service": service,
-            "user_id": user_id,
-            "agent_name": agent_name or "",
-            "execution_scope_override_provided": execution_scope_override_provided,
-            "execution_scope_override": execution_scope_override or "",
-            "payload": payload or {},
-            "code_verifier": code_verifier or "",
-        },
-    )
-
-
-def _consume_pending_oauth_request(request: Request, service: str, state: str) -> _PendingOAuthState:
-    """Consume and validate a previously issued dashboard OAuth state token."""
-    user_id = _require_auth_user_id(request)
-    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
-    try:
-        data = read_opaque_oauth_state(runtime_paths, kind=_PENDING_OAUTH_STATE_KIND, token=state)
-    except OAuthProviderError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if data.get("service") != service:
-        raise HTTPException(status_code=400, detail="OAuth state does not match this integration")
-    if data.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="OAuth state does not belong to the current user")
-    try:
-        consume_opaque_oauth_state(runtime_paths, kind=_PENDING_OAUTH_STATE_KIND, token=state)
-    except OAuthProviderError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    execution_scope_raw = data.get("execution_scope_override")
-    execution_scope_override = execution_scope_raw if execution_scope_raw in {"shared", "user", "user_agent"} else None
-    payload = data.get("payload")
-    code_verifier = data.get("code_verifier")
-    return _PendingOAuthState(
-        service=service,
-        user_id=user_id,
-        agent_name=data.get("agent_name") or None,
-        execution_scope_override_provided=data.get("execution_scope_override_provided") is True,
-        execution_scope_override=cast("WorkerScope | None", execution_scope_override),
-        payload=payload if isinstance(payload, dict) else None,
-        code_verifier=code_verifier if isinstance(code_verifier, str) and code_verifier else None,
-        created_at=0,
-    )
-
-
-def consume_pending_oauth_request(
-    request: Request,
-    service: str,
-    state: str,
-) -> _PendingOAuthState:
-    """Return the validated pending OAuth request for a callback."""
-    return _consume_pending_oauth_request(request, service, state)
-
-
-def build_dashboard_execution_identity(
-    request: Request,
-    agent_name: str,
-    *,
-    runtime_paths: RuntimePaths,
-) -> ToolExecutionIdentity:
-    """Build one dashboard-scoped execution identity for API credential and tool lookups.
-
-    This is a boundary helper for dashboard/API requests only.
-    It uses the authenticated dashboard user as the requester, not any Matrix sender,
-    and it exists solely so dashboard previews hit the same scoped-runtime seams as
-    live requests once an execution scope is chosen.
-    """
-    tenant_id = runtime_paths.env_value("CUSTOMER_ID")
-    account_id = runtime_paths.env_value("ACCOUNT_ID")
-    return ToolExecutionIdentity(
-        channel="matrix",
-        agent_name=agent_name,
-        requester_id=_dashboard_requester_id_for_request(request, runtime_paths),
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-        tenant_id=tenant_id,
-        account_id=account_id,
-    )
-
-
-def _dashboard_scope_label(
-    *,
-    config_labeled_scope: str,
-    execution_scope: WorkerScope | None,
-    execution_scope_override_provided: bool,
-) -> str:
-    """Return the user-facing scope label for one dashboard request."""
-    if execution_scope_override_provided:
-        if execution_scope is None:
-            return "execution_scope=unscoped"
-        return f"execution_scope={execution_scope}"
-    return config_labeled_scope
-
-
-def resolve_dashboard_execution_scope_override(
-    request: Request,
-) -> tuple[bool, WorkerScope | None]:
-    """Return the explicit dashboard execution-scope override, if one was provided."""
-    raw_execution_scope = request.query_params.get("execution_scope")
-    if raw_execution_scope is None or raw_execution_scope == "":
-        return False, None
-    if raw_execution_scope == "unscoped":
-        return True, None
-    if raw_execution_scope in {"shared", "user", "user_agent"}:
-        return True, cast("WorkerScope", raw_execution_scope)
-    raise HTTPException(
-        status_code=400,
-        detail=("Query parameter 'execution_scope' must be one of 'shared', 'user', 'user_agent', or 'unscoped'."),
-    )
-
-
-def resolve_dashboard_agent_execution_scope_request(
-    *,
-    config: Config,
-    agent_name: str | None,
-    execution_scope_override_provided: bool,
-    execution_scope_override: WorkerScope | None,
-    allow_draft_override: bool,
-) -> _DashboardAgentExecutionScopeResolution:
-    """Resolve one dashboard execution-scope request against persisted agent config.
-
-    Tools may preview draft execution scopes, but persistent credential writes must
-    stay bound to the saved config. This helper keeps that policy in one place.
-    """
-    if agent_name is None:
-        if execution_scope_override_provided:
-            raise HTTPException(
-                status_code=400,
-                detail="Query parameter 'execution_scope' requires agent_name on the dashboard API.",
-            )
-        return _DashboardAgentExecutionScopeResolution(
-            agent_name=None,
-            persisted_policy=None,
-            persisted_execution_scope=None,
-            requested_execution_scope=None,
-            execution_scope_override_provided=False,
-            draft_scope_preview=False,
-        )
-
-    if agent_name not in config.agents:
-        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
-
-    persisted_policy = resolve_agent_policy_from_data(
-        agent_name,
-        config.agents[agent_name],
-        default_worker_scope=config.defaults.worker_scope,
-        private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
-    )
-    persisted_execution_scope = persisted_policy.effective_execution_scope
-    requested_execution_scope = (
-        execution_scope_override if execution_scope_override_provided else persisted_execution_scope
-    )
-    draft_scope_preview = execution_scope_override_provided and requested_execution_scope != persisted_execution_scope
-    if draft_scope_preview and not allow_draft_override:
-        requested_scope_label = _dashboard_scope_label(
-            config_labeled_scope=persisted_policy.scope_label,
-            execution_scope=requested_execution_scope,
-            execution_scope_override_provided=True,
-        )
-        persisted_scope_label = persisted_policy.scope_label
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Save the configuration before managing credentials for agent '{agent_name}' with "
-                f"{requested_scope_label}. Persisted scope is {persisted_scope_label}."
-            ),
-        )
-    return _DashboardAgentExecutionScopeResolution(
-        agent_name=agent_name,
-        persisted_policy=persisted_policy,
-        persisted_execution_scope=persisted_execution_scope,
-        requested_execution_scope=requested_execution_scope,
-        execution_scope_override_provided=execution_scope_override_provided,
-        draft_scope_preview=draft_scope_preview,
-    )
-
-
-def require_agent_credential_management_authorized(
-    request: Request,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-) -> ToolExecutionIdentity:
-    """Require the dashboard requester to be allowed to manage one agent's credentials."""
-    execution_identity = build_dashboard_execution_identity(
-        request,
-        agent_name,
-        runtime_paths=runtime_paths,
-    )
-    requester_id = execution_identity.requester_id
-    if requester_id is None or not is_sender_allowed_for_agent_credential_management(
-        requester_id,
-        agent_name=agent_name,
-        config=config,
-    ):
-        raise HTTPException(status_code=403, detail=f"Not authorized to manage credentials for agent '{agent_name}'")
-    return execution_identity
-
-
-def _reject_raw_worker_targeting(request: Request) -> None:
-    for param_name in ("worker_key", "source_worker_key"):
-        if request.query_params.get(param_name):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Query parameter '{param_name}' is not supported on the dashboard credentials API. "
-                    "Use agent_name to resolve the scoped worker target."
-                ),
-            )
-
-
-def resolve_request_credentials_target(
-    request: Request,
-    *,
-    agent_name: str | None = None,
-    credentials_manager: CredentialsManager | None = None,
-    service_names: tuple[str, ...] = (),
-    execution_scope_override_provided: bool | None = None,
-    execution_scope_override: WorkerScope | None = None,
-    allow_private_scopes: bool = False,
-) -> RequestCredentialsTarget:
-    """Resolve the credential storage target for one authenticated dashboard request."""
-    _reject_raw_worker_targeting(request)
-    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
-
-    base_manager = credentials_manager or get_runtime_credentials_manager(runtime_paths)
-    if execution_scope_override_provided is None:
-        execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(
-            request,
-        )
-
-    # Plain dashboard credential reads/writes with no agent selection remain global and
-    # must not start depending on a persisted config file.
-    if agent_name is None and not execution_scope_override_provided:
-        return RequestCredentialsTarget(
-            runtime_paths=runtime_paths,
-            base_manager=base_manager,
-            target_manager=base_manager,
-            worker_scope=None,
-            agent_name=None,
-            execution_identity=None,
-            allowed_shared_services=None,
-        )
-
-    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
-    scope_request = resolve_dashboard_agent_execution_scope_request(
-        config=config,
-        agent_name=agent_name,
-        execution_scope_override_provided=execution_scope_override_provided,
-        execution_scope_override=execution_scope_override,
-        allow_draft_override=False,
-    )
-    if scope_request.agent_name is None:
-        return RequestCredentialsTarget(
-            runtime_paths=runtime_paths,
-            base_manager=base_manager,
-            target_manager=base_manager,
-            worker_scope=None,
-            agent_name=None,
-            execution_identity=None,
-            allowed_shared_services=None,
-        )
-    execution_identity = require_agent_credential_management_authorized(
-        request,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_name=scope_request.agent_name,
-    )
-    execution_scope = scope_request.requested_execution_scope
-    if execution_scope is None:
-        return RequestCredentialsTarget(
-            runtime_paths=runtime_paths,
-            base_manager=base_manager,
-            target_manager=base_manager,
-            worker_scope=None,
-            agent_name=scope_request.agent_name,
-            execution_identity=None,
-            allowed_shared_services=None,
-        )
-
-    scope_label = _dashboard_scope_label(
-        config_labeled_scope=(
-            scope_request.persisted_policy.scope_label if scope_request.persisted_policy is not None else "unscoped"
-        ),
-        execution_scope=execution_scope,
-        execution_scope_override_provided=execution_scope_override_provided,
-    )
-    if not allow_private_scopes and not dashboard_credentials_supported_for_scope(execution_scope):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Dashboard credential management does not support {scope_label} "
-                f"for agent '{scope_request.agent_name}'."
-            ),
-        )
-
-    unsupported_services = unsupported_shared_only_integration_names(list(service_names), execution_scope)
-    if unsupported_services:
-        raise HTTPException(
-            status_code=400,
-            detail=unsupported_shared_only_integration_message(
-                unsupported_services[0],
-                execution_scope,
-                agent_name=scope_request.agent_name,
-                scope_label=scope_label,
-            ),
-        )
-
-    _reject_unbound_private_dashboard_requester(execution_scope, execution_identity)
-    worker_key = require_worker_key_for_scope(
-        execution_scope,
-        execution_identity=execution_identity,
-        agent_name=scope_request.agent_name,
-        failure_message=f"Could not resolve worker credentials for agent '{scope_request.agent_name}'.",
-    )
-    return RequestCredentialsTarget(
-        runtime_paths=runtime_paths,
-        base_manager=base_manager,
-        target_manager=base_manager.for_worker(worker_key),
-        worker_scope=execution_scope,
-        agent_name=scope_request.agent_name,
-        execution_identity=execution_identity,
-        allowed_shared_services=config.get_worker_grantable_credentials(),
-    )
-
-
-def load_credentials_for_target(service: str, target: RequestCredentialsTarget) -> dict[str, Any] | None:
-    """Load credentials for the resolved target, including scoped overlays when needed."""
-    if _service_uses_primary_runtime_global_store(service, target):
-        return target.base_manager.load_credentials(service)
-    if target.worker_scope is None:
-        return target.target_manager.load_credentials(service)
-    if _service_uses_primary_runtime_store(service, target):
-        return load_scoped_credentials(
-            service,
-            credentials_manager=target.base_manager,
-            worker_target=worker_target_for_credentials_target(target),
-            allowed_shared_services=target.allowed_shared_services,
-        )
-
-    shared_manager = target.base_manager.shared_manager()
-    shared_credentials = load_worker_grantable_shared_credentials(
-        service,
-        shared_manager=shared_manager,
-        allowed_services=target.allowed_shared_services or frozenset(),
-    )
-    worker_credentials = target.target_manager.load_credentials(service)
-    if not shared_credentials and not isinstance(worker_credentials, dict):
-        return None
-    merged_credentials = dict(shared_credentials or {})
-    if isinstance(worker_credentials, dict):
-        merged_credentials.update(worker_credentials)
-    return merged_credentials or None
-
-
-def _service_uses_primary_runtime_store(service: str, target: RequestCredentialsTarget) -> bool:
-    policy = credential_service_policy(service, target.worker_scope)
-    return (
-        policy.uses_primary_runtime_global_credentials
-        or policy.uses_primary_runtime_scoped_credentials
-        or policy.uses_local_shared_credentials
-    )
-
-
-def _service_uses_primary_runtime_global_store(service: str, target: RequestCredentialsTarget) -> bool:
-    return credential_service_policy(service, target.worker_scope).uses_primary_runtime_global_credentials
-
-
-def worker_target_for_credentials_target(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:
-    """Resolve the worker target represented by one credentials request target."""
-    if target.worker_scope is None:
-        return None
-    return resolve_worker_target(
-        target.worker_scope,
-        target.agent_name,
-        execution_identity=target.execution_identity,
-    )
-
-
-def _save_credentials_for_target(service: str, credentials: dict[str, Any], target: RequestCredentialsTarget) -> None:
-    if _service_uses_primary_runtime_global_store(service, target):
-        target.base_manager.save_credentials(service, credentials)
-        return
-    if target.worker_scope is None or not _service_uses_primary_runtime_store(service, target):
-        target.target_manager.save_credentials(service, credentials)
-        return
-    save_scoped_credentials(
-        service,
-        credentials,
-        credentials_manager=target.base_manager,
-        worker_target=worker_target_for_credentials_target(target),
-    )
-
-
-def _primary_runtime_scoped_services_for_target(target: RequestCredentialsTarget) -> set[str]:
-    if target.worker_scope not in {"user", "user_agent"}:
-        return set()
-    if target.execution_identity is None or target.execution_identity.requester_id is None:
-        return set()
-    agent_name = target.agent_name if target.worker_scope == "user_agent" else None
-    scoped_manager = target.base_manager.for_primary_runtime_scope(
-        target.execution_identity.requester_id,
-        agent_name,
-    )
-    return {
-        service
-        for service in scoped_manager.list_services()
-        if credential_service_policy(service, target.worker_scope).uses_primary_runtime_scoped_credentials
-    }
-
-
-def _delete_credentials_for_target(service: str, target: RequestCredentialsTarget) -> None:
-    if _service_uses_primary_runtime_global_store(service, target):
-        target.base_manager.delete_credentials(service)
-        return
-    if target.worker_scope is None or not _service_uses_primary_runtime_store(service, target):
-        target.target_manager.delete_credentials(service)
-        return
-    delete_scoped_credentials(
-        service,
-        credentials_manager=target.base_manager,
-        worker_target=worker_target_for_credentials_target(target),
-    )
-
-
-def _request_may_target_scoped_credentials(request: Request, agent_name: str | None) -> bool:
-    return agent_name is not None or bool(request.query_params.get("execution_scope"))
-
-
-def _oauth_providers_for_request(request: Request) -> dict[str, OAuthProvider]:
-    snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    if snapshot.runtime_config is None and not snapshot.config_data:
-        snapshot.runtime_config = Config.model_validate({})
-    return load_oauth_providers_for_snapshot(snapshot)
-
-
-def _oauth_services_for_request(request: Request) -> _OAuthCredentialServices:
-    return _OAuthCredentialServices(providers=_oauth_providers_for_request(request))
-
-
-def _oauth_service_match(request: Request, service: str) -> _OAuthCredentialServiceMatch | None:
-    return _oauth_services_for_request(request).match(service)
-
-
-def _reject_oauth_token_service(
-    oauth_service_match: _OAuthCredentialServiceMatch | None,
-) -> None:
-    if oauth_service_match is None or _dashboard_may_edit_oauth_match(oauth_service_match):
-        return
-    raise HTTPException(status_code=400, detail=_OAUTH_TOKEN_CREDENTIALS_ERROR)
-
-
-def _dashboard_may_edit_oauth_match(oauth_service_match: _OAuthCredentialServiceMatch | None) -> bool:
-    if oauth_service_match is None:
-        return False
-    if oauth_service_match.client_config_service:
-        return True
-    return dashboard_may_edit_oauth_service(
-        token_service=oauth_service_match.token_service,
-        tool_config_service=oauth_service_match.tool_config_service,
-    )
-
-
-def _is_oauth_client_config_match(oauth_service_match: _OAuthCredentialServiceMatch | None) -> bool:
-    return oauth_service_match is not None and oauth_service_match.client_config_service
-
-
-def _is_oauth_client_config_service(
-    service: str,
-    oauth_service_match: _OAuthCredentialServiceMatch | None,
-) -> bool:
-    return _is_oauth_client_config_match(oauth_service_match) or is_oauth_client_config_service(service)
-
-
-def _reject_oauth_credentials_document(credentials: dict[str, Any]) -> None:
-    if not looks_like_oauth_credentials(credentials):
-        return
-    raise HTTPException(status_code=400, detail=_OAUTH_TOKEN_CREDENTIALS_ERROR)
-
-
-def _reject_oauth_api_key_read_field(
-    service: str,
-    oauth_service_match: _OAuthCredentialServiceMatch | None,
-    *,
-    key_name: str,
-) -> None:
-    if _is_oauth_client_config_service(service, oauth_service_match):
-        if key_name == "client_secret":
-            raise HTTPException(
-                status_code=400,
-                detail="OAuth client secret must be managed through the credentials document route.",
-            )
-        if key_name not in _OAUTH_CLIENT_CONFIG_RESPONSE_FIELDS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"OAuth client config field '{key_name}' is not readable through the API key route.",
-            )
-        return
-    if not _dashboard_may_edit_oauth_match(oauth_service_match):
-        return
-    if key_name not in OAUTH_CREDENTIAL_FIELDS:
-        return
-    raise HTTPException(
-        status_code=400,
-        detail=f"OAuth field '{key_name}' must be managed through the OAuth connect flow.",
-    )
-
-
-def _reject_oauth_api_key_write_field(
-    service: str,
-    oauth_service_match: _OAuthCredentialServiceMatch | None,
-    *,
-    key_name: str,
-) -> None:
-    if _is_oauth_client_config_service(service, oauth_service_match):
-        raise HTTPException(
-            status_code=400,
-            detail="OAuth client config credentials must be managed through the credentials document route.",
-        )
-    _reject_oauth_api_key_read_field(service, oauth_service_match, key_name=key_name)
-
-
-def _reject_oauth_client_config_copy(
-    source_service: str,
-    source_match: _OAuthCredentialServiceMatch | None,
-    destination_service: str,
-    destination_match: _OAuthCredentialServiceMatch | None,
-) -> None:
-    if not _is_oauth_client_config_service(
-        source_service,
-        source_match,
-    ) and not _is_oauth_client_config_service(destination_service, destination_match):
-        return
-    raise HTTPException(status_code=400, detail="OAuth client config credentials cannot be copied.")
-
-
-def _dashboard_credentials_for_save(
-    config_values: dict[str, Any],
-    *,
-    strip_oauth_fields: bool,
-) -> dict[str, Any]:
-    credentials = dict(config_values)
-    if strip_oauth_fields:
-        credentials = filter_oauth_credential_fields(credentials)
-    credentials["_source"] = "ui"
-    return credentials
-
-
-def _reject_non_client_config_fields(credentials: dict[str, Any]) -> None:
-    invalid_fields = sorted(
-        key for key in credentials if not key.startswith("_") and key not in _OAUTH_CLIENT_CONFIG_FIELDS
-    )
-    if invalid_fields:
-        raise HTTPException(
-            status_code=400,
-            detail=f"OAuth client config does not support fields: {', '.join(invalid_fields)}.",
-        )
-
-
-def _reject_invalid_client_config_field_values(credentials: dict[str, Any]) -> None:
-    redirect_uri = credentials.get("redirect_uri")
-    if redirect_uri is not None and not isinstance(redirect_uri, str):
-        raise HTTPException(status_code=400, detail="redirect_uri must be a string for OAuth client config.")
-
-
-def _require_or_preserve_oauth_client_config_field(
-    credentials: dict[str, Any],
-    existing_credentials: dict[str, Any],
-    field_name: str,
-) -> None:
-    submitted_value = credentials.get(field_name)
-    if isinstance(submitted_value, str) and submitted_value.strip():
-        return
-    existing_value = existing_credentials.get(field_name)
-    if isinstance(existing_value, str) and existing_value.strip():
-        credentials[field_name] = existing_value
-        return
-    raise HTTPException(status_code=400, detail=f"{field_name} is required for OAuth client config.")
-
-
-def _require_or_preserve_oauth_client_config_secret(
-    credentials: dict[str, Any],
-    existing_credentials: dict[str, Any],
-) -> None:
-    submitted_secret = credentials.get("client_secret")
-    if isinstance(submitted_secret, str) and submitted_secret.strip():
-        return
-    submitted_client_id = credentials.get("client_id")
-    existing_client_id = existing_credentials.get("client_id")
-    client_id_changed = (
-        isinstance(submitted_client_id, str)
-        and isinstance(existing_client_id, str)
-        and submitted_client_id.strip()
-        and existing_client_id.strip()
-        and submitted_client_id.strip() != existing_client_id.strip()
-    )
-    if client_id_changed:
-        raise HTTPException(status_code=400, detail="client_secret is required when client_id changes.")
-    _require_or_preserve_oauth_client_config_field(credentials, existing_credentials, "client_secret")
-
-
-def _preserve_optional_oauth_client_config_secret(
-    credentials: dict[str, Any],
-    existing_credentials: dict[str, Any],
-) -> None:
-    submitted_secret = credentials.get("client_secret")
-    if isinstance(submitted_secret, str) and submitted_secret.strip():
-        credentials["client_secret"] = submitted_secret.strip()
-        return
-    credentials.pop("client_secret", None)
-    submitted_client_id = credentials.get("client_id")
-    existing_client_id = existing_credentials.get("client_id")
-    if (
-        isinstance(submitted_client_id, str)
-        and isinstance(existing_client_id, str)
-        and submitted_client_id.strip() == existing_client_id.strip()
-    ):
-        existing_secret = existing_credentials.get("client_secret")
-        if isinstance(existing_secret, str) and existing_secret.strip():
-            credentials["client_secret"] = existing_secret
-
-
-def _oauth_client_config_secret_required(oauth_service_match: _OAuthCredentialServiceMatch | None) -> bool:
-    return (
-        oauth_service_match is None
-        or oauth_service_match.provider.token_endpoint_auth_method != _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD
-    )
-
-
-@dataclass(frozen=True)
 class _DashboardCredentialAccess:
     """Credential storage access for one dashboard request target."""
 
     target: RequestCredentialsTarget
-    oauth_services: _OAuthCredentialServices
+    oauth_services: OAuthCredentialServices
 
     @classmethod
     def resolve(
@@ -876,12 +67,12 @@ class _DashboardCredentialAccess:
         allow_private_scopes: bool = False,
     ) -> _DashboardCredentialAccess:
         """Resolve dashboard credential access for one request."""
-        oauth_services = _oauth_services_for_request(request)
+        oauth_services = oauth_services_for_request(request)
         # Token services are rejected below, but they still need target resolution
         # first so agent-scoped requests run authorization before route-specific 400s.
         oauth_service_requires_target_resolution = any(
             oauth_services.match(service) is not None for service in service_names
-        ) and _request_may_target_scoped_credentials(request, agent_name)
+        ) and request_may_target_scoped_credentials(request, agent_name)
         target = resolve_request_credentials_target(
             request,
             agent_name=agent_name,
@@ -891,17 +82,17 @@ class _DashboardCredentialAccess:
         oauth_services.reject_non_editable_services(service_names)
         return cls(target=target, oauth_services=oauth_services)
 
-    def match(self, service: str) -> _OAuthCredentialServiceMatch | None:
+    def match(self, service: str) -> OAuthCredentialServiceMatch | None:
         """Return the OAuth role for one credential service, if registered."""
         return self.oauth_services.match(service)
 
     def reject_token_service(self, service: str) -> None:
         """Reject direct dashboard access to OAuth token credentials."""
-        _reject_oauth_token_service(self.match(service))
+        reject_oauth_token_service(self.match(service))
 
     def reject_stored_oauth_credentials(self, credentials: dict[str, Any]) -> None:
         """Reject stored OAuth token documents returned through generic routes."""
-        _reject_oauth_credentials_document(credentials)
+        reject_oauth_credentials_document(credentials)
 
     def load(self, service: str) -> dict[str, Any] | None:
         """Load dashboard-visible credentials for one service."""
@@ -912,41 +103,35 @@ class _DashboardCredentialAccess:
         """Save dashboard-visible credentials for one service."""
         self.reject_token_service(service)
         try:
-            _save_credentials_for_target(service, credentials, self.target)
+            save_credentials_for_target(service, credentials, self.target)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def delete(self, service: str) -> None:
         """Delete dashboard-visible credentials for one service."""
         self.reject_token_service(service)
-        _delete_credentials_for_target(service, self.target)
+        delete_credentials_for_target(service, self.target)
 
     def response_credentials(self, service: str, credentials: dict[str, Any]) -> dict[str, Any]:
         """Return credentials filtered for dashboard responses."""
-        if _is_oauth_client_config_service(service, self.match(service)):
-            return _filter_oauth_client_config_for_response(credentials)
-        return _filter_credentials_for_response(
+        if is_client_config_service(service, self.match(service)):
+            return filter_oauth_client_config_for_response(credentials)
+        return filter_credentials_for_response(
             credentials,
-            is_oauth_service=_dashboard_may_edit_oauth_match(self.match(service)),
+            is_oauth_service=dashboard_may_edit_oauth_match(self.match(service)),
         )
 
     def credentials_for_save(self, service: str, config_values: dict[str, Any]) -> dict[str, Any]:
         """Return user-submitted credentials normalized for storage."""
         match = self.match(service)
-        credentials = _dashboard_credentials_for_save(
+        credentials = dashboard_credentials_for_save(
             config_values,
-            strip_oauth_fields=_dashboard_may_edit_oauth_match(match)
-            and not _is_oauth_client_config_service(service, match),
+            strip_oauth_fields=dashboard_may_edit_oauth_match(match) and not is_client_config_service(service, match),
         )
-        if _is_oauth_client_config_service(service, match):
-            _reject_non_client_config_fields(credentials)
-            _reject_invalid_client_config_field_values(credentials)
+        if is_client_config_service(service, match):
+            validate_oauth_client_config_fields(credentials)
             existing_credentials = load_credentials_for_target(service, self.target) or {}
-            _require_or_preserve_oauth_client_config_field(credentials, existing_credentials, "client_id")
-            if _oauth_client_config_secret_required(match):
-                _require_or_preserve_oauth_client_config_secret(credentials, existing_credentials)
-            else:
-                _preserve_optional_oauth_client_config_secret(credentials, existing_credentials)
+            preserve_oauth_client_config_from_existing(credentials, existing_credentials, match)
             return credentials
         return credentials
 
@@ -964,7 +149,7 @@ class _DashboardCredentialAccess:
             for service in self.target.base_manager.list_services()
             if credential_service_policy(service, self.target.worker_scope).uses_primary_runtime_global_credentials
         }
-        primary_runtime_services = _primary_runtime_scoped_services_for_target(self.target)
+        primary_runtime_services = primary_runtime_scoped_services_for_target(self.target)
         shared_manager = self.target.base_manager.shared_manager()
         shared_services = set(
             list_worker_grantable_shared_services(
@@ -1051,7 +236,7 @@ async def set_credentials(
 ) -> dict[str, str]:
     """Set multiple credentials for a service."""
     service = _validated_service(service)
-    _reject_oauth_credentials_document(payload.credentials)
+    reject_oauth_credentials_document(payload.credentials)
     access = _DashboardCredentialAccess.resolve(
         http_request,
         agent_name=agent_name,
@@ -1084,7 +269,7 @@ async def set_api_key(
         agent_name=agent_name,
         service_names=(service,),
     )
-    _reject_oauth_api_key_write_field(service, access.match(service), key_name=payload.key_name)
+    reject_oauth_api_key_write_field(service, access.match(service), key_name=payload.key_name)
 
     credentials = access.load(service) or {}
     access.reject_stored_oauth_credentials(credentials)
@@ -1111,11 +296,11 @@ async def get_api_key(
         service_names=(service,),
     )
     oauth_match = access.match(service)
-    _reject_oauth_api_key_read_field(service, oauth_match, key_name=key_name)
+    reject_oauth_api_key_read_field(service, oauth_match, key_name=key_name)
     credentials = access.load(service) or {}
     access.reject_stored_oauth_credentials(credentials)
     api_key = credentials.get(key_name)
-    if _is_oauth_client_config_service(service, oauth_match) and api_key is not None and not isinstance(api_key, str):
+    if is_client_config_service(service, oauth_match) and api_key is not None and not isinstance(api_key, str):
         raise HTTPException(
             status_code=400,
             detail=f"OAuth client config field '{key_name}' is not a readable string.",
@@ -1199,17 +384,17 @@ async def copy_credentials(
         agent_name=agent_name,
         service_names=(service, source_service),
     )
-    destination_match = _oauth_service_match(request, service)
-    source_match = _oauth_service_match(request, source_service)
-    _reject_oauth_client_config_copy(source_service, source_match, service, destination_match)
+    destination_match = oauth_service_match(request, service)
+    source_match = oauth_service_match(request, source_service)
+    reject_oauth_client_config_copy(source_service, source_match, service, destination_match)
     source_creds = access.load(source_service)
     destination_creds = access.load(service)
 
     if not source_creds:
         raise HTTPException(status_code=404, detail=f"No credentials found for {source_service}")
-    _reject_oauth_credentials_document(source_creds)
+    reject_oauth_credentials_document(source_creds)
     if destination_creds:
-        _reject_oauth_credentials_document(destination_creds)
+        reject_oauth_credentials_document(destination_creds)
 
     # Copy credentials, marking as UI-sourced
     target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}
@@ -1229,12 +414,12 @@ async def validate_credentials(
     service = _validated_service(service)
     # This is a placeholder - actual testing would depend on the service
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
-    _reject_oauth_token_service(_oauth_service_match(request, service))
+    reject_oauth_token_service(oauth_service_match(request, service))
     credentials = load_credentials_for_target(service, target)
 
     if not credentials:
         raise HTTPException(status_code=404, detail=f"No credentials found for {service}")
-    _reject_oauth_credentials_document(credentials)
+    reject_oauth_credentials_document(credentials)
 
     # For now, just check if credentials exist
     # In the future, we could implement actual validation per service

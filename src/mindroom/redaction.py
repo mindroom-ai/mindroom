@@ -47,15 +47,23 @@ _SECRET_KEYS: frozenset[str] = frozenset(
     {
         "access_token",
         "api_key",
+        "api_token",
+        "authentication_info",
         "authorization",
+        "auth_token",
+        "bearer_token",
         "client_secret",
         "cookie",
         "id_token",
         "password",
         "refresh_token",
         "secret",
+        "security_token",
+        "session_token",
         "set_cookie",
         "token",
+        "www_authenticate",
+        "x_token",
     },
 )
 _OAUTH_QUERY_KEYS: frozenset[str] = frozenset({"code", "state"})
@@ -78,6 +86,38 @@ _QUERY_CONTAINER_KEYS: frozenset[str] = frozenset({"query", "query_params", "que
 _SECRET_KEYS_SORTED = cast("tuple[str, ...]", tuple(sorted(_SECRET_KEYS, key=len, reverse=True)))
 _SECRET_KEY_VARIANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = tuple(
     (key, key.replace("_", ""), tuple(key.split("_"))) for key in _SECRET_KEYS_SORTED
+)
+_SECRET_CONTAINER_KEYS: frozenset[str] = frozenset(
+    {
+        "access_tokens",
+        "api_keys",
+        "api_tokens",
+        "auth_tokens",
+        "client_secrets",
+        "credentials",
+        "id_tokens",
+        "oauth_tokens",
+        "passwords",
+        "refresh_tokens",
+        "secrets",
+        "session_tokens",
+        "tokens",
+    },
+)
+_CONTEXT_SECRET_LABEL_KEYS: frozenset[str] = frozenset(
+    {
+        "header",
+        "key",
+        "name",
+    },
+)
+_CONTEXT_SECRET_VALUE_KEYS: frozenset[str] = frozenset(
+    {
+        "default",
+        "raw_value",
+        "secret_value",
+        "value",
+    },
 )
 _REDACTION_LOOKAHEAD_CHARS = 512
 
@@ -110,6 +150,10 @@ def _is_secret_key(value: object) -> bool:
     parts = tuple(part for part in normalized.split("_") if part)
     compact = normalized.replace("_", "")
     for key, compact_key, key_parts in _SECRET_KEY_VARIANTS:
+        if key == "token":
+            if normalized == key or compact == compact_key:
+                return True
+            continue
         if (
             normalized == key
             or normalized.endswith(f"_{key}")
@@ -123,6 +167,24 @@ def _is_secret_key(value: object) -> bool:
     return False
 
 
+def _is_secret_container_key(value: object) -> bool:
+    normalized = _normalize_key(value)
+    if normalized in _SECRET_CONTAINER_KEYS:
+        return True
+    return _is_secret_container_suffix_key(value)
+
+
+def _is_secret_container_suffix_key(value: object) -> bool:
+    normalized = _normalize_key(value)
+    if normalized in _SECRET_CONTAINER_KEYS:
+        return False
+    return any(key != "tokens" and normalized.endswith(f"_{key}") for key in _SECRET_CONTAINER_KEYS)
+
+
+def _is_sensitive_key(value: object) -> bool:
+    return _is_secret_key(value) or _is_secret_container_key(value)
+
+
 def _is_query_container(value: str | None) -> bool:
     return value is not None and _normalize_key(value) in _QUERY_CONTAINER_KEYS
 
@@ -130,6 +192,35 @@ def _is_query_container(value: str | None) -> bool:
 def _is_redacted_query_key(value: object) -> bool:
     normalized = _normalize_key(value)
     return _is_secret_key(value) or normalized in _OAUTH_QUERY_KEYS or normalized in _URL_QUERY_SECRET_KEYS
+
+
+def _is_context_secret_label_key(value: object) -> bool:
+    return _normalize_key(value) in _CONTEXT_SECRET_LABEL_KEYS
+
+
+def _is_context_secret_value_key(value: object) -> bool:
+    return _normalize_key(value) in _CONTEXT_SECRET_VALUE_KEYS
+
+
+def _mapping_has_secret_context_label(value: Mapping[object, object]) -> bool:
+    for key, item in value.items():
+        if not _is_context_secret_label_key(key):
+            continue
+        if isinstance(item, str) and _is_sensitive_key(item):
+            return True
+    return False
+
+
+def _should_force_redact_container_value(value: object) -> bool:
+    return value is not None and not isinstance(value, bool | int | float)
+
+
+def _should_redact_value_for_key(key: object, value: object) -> bool:
+    if _is_secret_key(key):
+        return True
+    if _is_secret_container_suffix_key(key):
+        return _should_force_redact_container_value(value)
+    return _is_secret_container_key(key)
 
 
 def _redact_matched_token(match: re.Match[str], group_name: str = "token") -> str:
@@ -172,7 +263,10 @@ def _redact_secret_assignment(match: re.Match[str]) -> str:
 
 
 def _redact_url(value: str) -> str:
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return value
     if parsed.scheme not in {"http", "https"}:
         return value
 
@@ -258,24 +352,29 @@ def _redact_mapping(
     max_string_length: int | None,
     max_collection_items: int | None,
     max_depth: int | None,
+    force_redact: bool,
 ) -> dict[str, _RedactedValue]:
     redacted: dict[str, _RedactedValue] = {}
+    has_secret_context_label = _mapping_has_secret_context_label(value)
     for index, (key, item) in enumerate(value.items()):
         if max_collection_items is not None and index >= max_collection_items:
             redacted["__truncated__"] = f"{len(value) - max_collection_items} more items"
             break
         key_text = _safe_str(key)
-        if _is_secret_key(key) or (_is_query_container(parent_key) and _is_redacted_query_key(key)):
-            redacted[key_text] = REDACTED
-        else:
-            redacted[key_text] = redact_sensitive_data(
-                item,
-                max_string_length=max_string_length,
-                max_collection_items=max_collection_items,
-                max_depth=max_depth,
-                _parent_key=key_text,
-                _depth=depth + 1,
-            )
+        redact_key = (
+            _should_redact_value_for_key(key, item)
+            or (_is_query_container(parent_key) and _is_redacted_query_key(key))
+            or (has_secret_context_label and _is_context_secret_value_key(key))
+        )
+        redacted[key_text] = redact_sensitive_data(
+            item,
+            max_string_length=max_string_length,
+            max_collection_items=max_collection_items,
+            max_depth=max_depth,
+            _parent_key=key_text,
+            _depth=depth + 1,
+            _force_redact=force_redact or redact_key,
+        )
     return redacted
 
 
@@ -287,6 +386,7 @@ def _redact_sequence(
     max_string_length: int | None,
     max_collection_items: int | None,
     max_depth: int | None,
+    force_redact: bool,
 ) -> list[_RedactedValue]:
     items = value if max_collection_items is None else value[:max_collection_items]
     redacted_items = [
@@ -297,12 +397,40 @@ def _redact_sequence(
             max_depth=max_depth,
             _parent_key=parent_key,
             _depth=depth + 1,
+            _force_redact=force_redact,
         )
         for item in items
     ]
     if max_collection_items is not None and len(value) > max_collection_items:
         redacted_items.append(_TRUNCATED)
     return redacted_items
+
+
+def _redact_scalar_value(
+    value: object,
+    *,
+    parent_key: str | None,
+    max_string_length: int | None,
+    force_redact: bool,
+) -> _RedactedValue:
+    if force_redact or (parent_key is not None and _should_redact_value_for_key(parent_key, value)):
+        redacted: _RedactedValue = REDACTED
+    elif isinstance(value, bytes):
+        redacted = "<bytes>"
+    elif isinstance(value, Path):
+        redacted = str(value)
+    elif isinstance(value, str):
+        if _is_query_container(parent_key):
+            redacted = _redact_query_fragment(value, max_length=max_string_length)
+        else:
+            redacted = redact_sensitive_text(value, max_length=max_string_length)
+    elif isinstance(value, float):
+        redacted = value if math.isfinite(value) else None
+    elif value is None or isinstance(value, bool | int):
+        redacted = value
+    else:
+        redacted = redact_sensitive_text(_safe_repr(value), max_length=max_string_length)
+    return redacted
 
 
 def redact_sensitive_data(
@@ -313,6 +441,7 @@ def redact_sensitive_data(
     max_depth: int | None = None,
     _parent_key: str | None = None,
     _depth: int = 0,
+    _force_redact: bool = False,
 ) -> _RedactedValue:
     """Recursively redact secret-bearing fields while preserving log shape."""
     if max_depth is not None and _depth >= max_depth:
@@ -327,6 +456,7 @@ def redact_sensitive_data(
             max_string_length=max_string_length,
             max_collection_items=max_collection_items,
             max_depth=max_depth,
+            force_redact=_force_redact,
         )
     elif isinstance(value, list | tuple | set | frozenset):
         redacted = _redact_sequence(
@@ -336,22 +466,15 @@ def redact_sensitive_data(
             max_string_length=max_string_length,
             max_collection_items=max_collection_items,
             max_depth=max_depth,
+            force_redact=_force_redact,
         )
-    elif isinstance(value, bytes):
-        redacted = "<bytes>"
-    elif isinstance(value, Path):
-        redacted = str(value)
-    elif isinstance(value, str):
-        if _is_query_container(_parent_key):
-            redacted = _redact_query_fragment(value, max_length=max_string_length)
-        else:
-            redacted = redact_sensitive_text(value, max_length=max_string_length)
-    elif isinstance(value, float):
-        redacted = value if math.isfinite(value) else None
-    elif value is None or isinstance(value, bool | int):
-        redacted = value
     else:
-        redacted = redact_sensitive_text(_safe_repr(value), max_length=max_string_length)
+        redacted = _redact_scalar_value(
+            value,
+            parent_key=_parent_key,
+            max_string_length=max_string_length,
+            force_redact=_force_redact,
+        )
     return redacted
 
 

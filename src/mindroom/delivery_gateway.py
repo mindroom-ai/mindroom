@@ -38,6 +38,7 @@ from mindroom.streaming import (
     build_cancelled_response_update,
     cancel_failure_reason,
     classify_cancel_source,
+    interactive_response_for_visible_body,
     send_streaming_response,
 )
 
@@ -57,7 +58,7 @@ if TYPE_CHECKING:
     )
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
-    from mindroom.streaming_delivery import StreamInputChunk
+    from mindroom.streaming import StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -344,43 +345,6 @@ class DeliveryGateway:
             msg = "Matrix client is not ready for response delivery"
             raise RuntimeError(msg)
         return client
-
-    def _current_stream_body(self, outcome: StreamTransportOutcome) -> str:
-        """Return the current streamed body snapshot used for hook and outcome decisions."""
-        return outcome.rendered_body or ""
-
-    def _visible_stream_event_id(self, outcome: StreamTransportOutcome) -> str | None:
-        """Return the streamed event id only when the stream showed real visible body text."""
-        if outcome.visible_body_state != "visible_body":
-            return None
-        return outcome.last_physical_stream_event_id
-
-    @staticmethod
-    def _interactive_response_for_visible_body(
-        visible_body: str,
-        *,
-        canonical_body_candidate: str | None,
-        stream_interactive_metadata: interactive.InteractiveMetadata | None = None,
-    ) -> interactive._InteractiveResponse:
-        """Return interactive metadata only when it belongs to the visible body."""
-        if stream_interactive_metadata is not None:
-            return interactive._InteractiveResponse(visible_body, stream_interactive_metadata)
-
-        visible_response = interactive.parse_and_format_interactive(visible_body, extract_mapping=True)
-        if visible_response.interactive_metadata is not None:
-            return visible_response
-
-        if canonical_body_candidate is None or canonical_body_candidate == visible_body:
-            return visible_response
-
-        canonical_response = interactive.parse_and_format_interactive(
-            canonical_body_candidate,
-            extract_mapping=True,
-        )
-        if canonical_response.interactive_metadata is not None and canonical_response.formatted_text == visible_body:
-            return canonical_response
-
-        return visible_response
 
     @staticmethod
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
@@ -1087,7 +1051,7 @@ class DeliveryGateway:
     ) -> FinalDeliveryOutcome | None:
         if event_id is None:
             return None
-        interactive_response = self._interactive_response_for_visible_body(
+        interactive_response = interactive_response_for_visible_body(
             response_text,
             canonical_body_candidate=canonical_body_candidate,
         )
@@ -1165,8 +1129,8 @@ class DeliveryGateway:
         stream_outcome = request.stream_transport_outcome
         try:
             streamed_event_id = stream_outcome.last_physical_stream_event_id
-            visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
-            streamed_text = self._current_stream_body(stream_outcome)
+            visible_stream_event_id = stream_outcome.visible_event_id
+            streamed_text = stream_outcome.visible_body_text
             final_body_candidate = stream_outcome.canonical_final_body_candidate or streamed_text
             if stream_outcome.terminal_status == "cancelled":
                 if (
@@ -1206,7 +1170,7 @@ class DeliveryGateway:
                         extra_content=request.extra_content,
                     )
 
-                visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
+                visible_stream_event_id = stream_outcome.visible_event_id
                 if visible_stream_event_id is not None:
                     return FinalDeliveryOutcome(
                         terminal_status="cancelled",
@@ -1258,7 +1222,7 @@ class DeliveryGateway:
                         failure_reason=failure_reason,
                     )
 
-                visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
+                visible_stream_event_id = stream_outcome.visible_event_id
                 if visible_stream_event_id is not None:
                     return FinalDeliveryOutcome(
                         terminal_status="error",
@@ -1453,7 +1417,7 @@ class DeliveryGateway:
                 )
 
             assert streamed_event_id is not None
-            interactive_response = self._interactive_response_for_visible_body(
+            interactive_response = interactive_response_for_visible_body(
                 streamed_text,
                 canonical_body_candidate=final_body_candidate,
                 stream_interactive_metadata=stream_outcome.interactive_metadata,
@@ -1470,11 +1434,11 @@ class DeliveryGateway:
                 interactive_metadata=interactive_response.interactive_metadata,
             )
         except asyncio.CancelledError:
-            visible_event_id = self._visible_stream_event_id(stream_outcome)
+            visible_event_id = stream_outcome.visible_event_id
             event_id = visible_event_id
             if event_id is None and request.existing_event_id is not None and not request.existing_event_is_placeholder:
                 event_id = request.existing_event_id
-            final_visible_body = self._current_stream_body(stream_outcome) if visible_event_id is not None else None
+            final_visible_body = stream_outcome.visible_body_text if visible_event_id is not None else None
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
                 event_id=event_id,
@@ -1489,11 +1453,11 @@ class DeliveryGateway:
                 "Unexpected error in finalize_streamed_response",
                 correlation_id=request.correlation_id,
             )
-            visible_event_id = self._visible_stream_event_id(stream_outcome)
+            visible_event_id = stream_outcome.visible_event_id
             event_id = visible_event_id
             if event_id is None and request.existing_event_id is not None and not request.existing_event_is_placeholder:
                 event_id = request.existing_event_id
-            final_visible_body = self._current_stream_body(stream_outcome) if visible_event_id is not None else None
+            final_visible_body = stream_outcome.visible_body_text if visible_event_id is not None else None
             return FinalDeliveryOutcome(
                 terminal_status="error",
                 event_id=event_id,

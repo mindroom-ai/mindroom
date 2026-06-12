@@ -30,7 +30,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
-from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps
+from mindroom.thread_utils import AgentResponseDecision
+from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps, _ResponderAvailability
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -321,7 +322,7 @@ def test_team_request_responder_filtering_uses_actual_member_ids(tmp_path: Path)
             ids["squad"],
             MatrixID.from_username("mindroom_missing", "localhost"),
         ],
-        materializable_agent_names={"worker"},
+        _ResponderAvailability(materializable_agent_names={"worker"}, live_entity_names=None),
     )
 
     assert filtered == [ids["worker"], ids["squad"]]
@@ -824,7 +825,7 @@ class TestRoutingRegression:
             content_with_metadata: dict[str, object] = {ORIGINAL_SENDER_KEY: original_sender, **content}
             if source_kind is not None:
                 content_with_metadata[SOURCE_KIND_KEY] = source_kind
-            return router_bot._turn_controller._requester_user_id(
+            return router_bot._ingress_validator.requester_user_id(
                 sender=router_sender,
                 source={"content": content_with_metadata},
             )
@@ -1006,9 +1007,12 @@ class TestRoutingRegression:
         with (
             patch(
                 "mindroom.turn_policy.decide_team_formation",
-                new=AsyncMock(return_value=TeamResolution.none()),
+                new=MagicMock(return_value=TeamResolution.none()),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_agent_respond,
+            patch(
+                "mindroom.turn_policy.decide_agent_response",
+                return_value=AgentResponseDecision(True),
+            ) as mock_decide_agent_response,
         ):
             action = await alpha_bot._turn_policy.resolve_response_action(
                 _policy_dispatch(
@@ -1019,7 +1023,6 @@ class TestRoutingRegression:
                     body="can anyone help?",
                 ),
                 room,
-                "can anyone help?",
                 False,
                 has_active_response_for_target=alpha_bot._response_runner.has_active_response_for_target,
             )
@@ -1027,7 +1030,7 @@ class TestRoutingRegression:
         assert action.kind == "individual"
         candidate_names = [
             entity_name_for_id(candidate, test_config, runtime_paths)
-            for candidate in mock_should_agent_respond.call_args.kwargs["available_responders_in_room"]
+            for candidate in mock_decide_agent_response.call_args.kwargs["available_responders_in_room"]
         ]
         assert candidate_names == ["alpha"]
 
@@ -1101,7 +1104,6 @@ class TestRoutingRegression:
                 body="ops, help",
             ),
             room,
-            "ops, help",
             False,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )

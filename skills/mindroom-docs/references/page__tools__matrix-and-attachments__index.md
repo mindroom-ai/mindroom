@@ -1,17 +1,18 @@
 # Matrix & Attachments
 
-Use these tools to work inside the active Matrix room and thread, send follow-up messages, manage thread tags and summaries, and reuse files that belong to the current conversation.
+Use these tools to work inside the active Matrix room and thread, send follow-up messages, manage thread tags, summaries, and model overrides, and reuse files that belong to the current conversation.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `matrix-and-attachments` group.
-Use these tools when you need to send or inspect Matrix messages, manage thread tags or summaries, or handle attachment IDs that are scoped to the current room and thread.
+Use these tools when you need to send or inspect Matrix messages, manage thread tags, summaries, or model overrides, or handle attachment IDs that are scoped to the current room and thread.
 
 ## Tools On This Page
 
 - [`matrix_message`] - Send, reply, react, read, edit, or inspect Matrix conversation context.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
 - [`thread_summary`] - Set or update a Matrix thread summary from the current room and thread context.
+- [`thread_model`] - Show, switch, or reset the model override for the current Matrix thread.
 - [`matrix_api`] - Use a low-level Matrix event and state API with explicit room and event IDs.
 - [`attachments`] - List, inspect, and register context-scoped attachment IDs for later tool calls.
 
@@ -20,7 +21,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 These tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation.
 `matrix_message` implies `attachments` through `Config.IMPLIED_TOOLS`, so enabling `matrix_message` makes the `attachments` toolkit available even when you do not list it separately.
 Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run.
-Current source in this worktree exposes `matrix_message`, `thread_tags`, `thread_summary`, `matrix_api`, and `attachments` in this area.
+Current source in this worktree exposes `matrix_message`, `thread_tags`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
 
 ## [`matrix_message`]
 
@@ -166,6 +167,45 @@ set_thread_summary(
 - The tool writes a normal Matrix notice event, so the updated summary remains visible in the thread timeline.
 - Automatic thread summaries still exist, but this tool gives an agent an explicit override path when a human asks for a manual summary refresh.
 
+## [`thread_model`]
+
+`thread_model` lets agents show, switch, or reset the model override for the current Matrix thread, mirroring the `!model` chat command.
+
+### What It Does
+
+`thread_model` exposes `get_thread_model()`, `switch_thread_model(model_name)`, and `reset_thread_model()`.
+All three functions require an active thread context and return an error outside a thread.
+`switch_thread_model` accepts a configured model name from the `models:` section of `config.yaml` and rejects unknown names with the available model list.
+The override applies to all agents and teams in the thread, persists across restarts, and takes effect from the next message; the current response keeps the model it started with.
+`get_thread_model` returns the active override and the available model names.
+When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports `override: null` plus a `stale_override` field instead of an active override.
+`reset_thread_model` removes the override so agents use their configured models again.
+
+### Configuration
+
+This tool has no tool-specific inline configuration fields.
+
+### Example
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - thread_model
+```
+
+```python
+get_thread_model()
+switch_thread_model("opus")
+reset_thread_model()
+```
+
+### Notes
+
+- The override is stored per thread root in `mindroom_data/tracking/thread_models.json`.
+- Users can manage the same override with the `!model` chat command; see [Chat Commands](https://docs.mindroom.chat/chat-commands/).
+- An explicit `active_model_name` (for example a delegated child run) still beats the thread override, and the thread override beats `room_models` and the authored entity model.
+
 ## [`matrix_api`]
 
 `matrix_api` exposes a small low-level Matrix API surface for explicit room, event, and state operations, including room-scoped search.
@@ -269,6 +309,7 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 
 Automatic thread summaries are still implemented in `src/mindroom/thread_summary.py` as bot runtime behavior.
 The summarizer posts one `m.notice` summary after a thread reaches the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
+Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides, and always omits temperature for Vertex Claude summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
 

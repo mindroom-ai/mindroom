@@ -140,7 +140,7 @@ Email: I'll compile and send every Friday
 
 ### 🔌 100+ Integrations
 Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, news APIs, financial data, and many more. Your agents can interact with all your tools.
-Native Matrix tools include `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` for room, thread, event, state, and room-search operations.
+Native Matrix tools include `matrix_message`, `matrix_room`, `thread_tags`, `thread_model`, and `matrix_api` for room, thread, event, state, and room-search operations.
 
 ### 📅 Automation & Scheduling
 - Daily check-ins from your mindfulness agent
@@ -157,6 +157,21 @@ Native Matrix tools include `matrix_message`, `matrix_room`, `thread_tags`, and 
 - **Developers** - Build on our platform, contribute agents, extend functionality
 
 ## Quick Start
+
+### macOS Menu Bar App
+
+MindRoom also ships as a macOS menu bar app for running the local MindRoom service without keeping a terminal open.
+The app bundles `uv`, installs the `mindroom` CLI with `uv tool install`, uses `~/.mindroom` for normal config and state, and manages the existing `mindroom service` launchd service.
+
+```bash
+brew install --cask mindroom-ai/tap/mindroom
+```
+
+Open **MindRoom** from `/Applications` or Spotlight.
+Use the menu bar item to install the MindRoom runtime, initialize the hosted `chat.mindroom.chat` config, pair with a code from the hosted chat UI, install the service, and open the dashboard.
+Self-hosted config and local-stack setup remain available from the same menu.
+
+See [macOS app guide](docs/installation/macos-app.md) for setup, updates, and uninstall instructions.
 
 ### Prerequisites
 - Python 3.12+
@@ -245,6 +260,7 @@ Plain replies that never reach threaded context still stay plain replies.
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
 - `!config <operation>` - Manage configuration
+- `!model [name|list|reset]` - Show or switch the model used in the current thread
 - `!hi` - Show welcome message
 
 <!-- OUTPUT:END -->
@@ -294,6 +310,7 @@ defaults:
 Add the `thread_summary` tool to an agent when you want it to write or refresh the one-line summary shown for a Matrix thread.
 `set_thread_summary` uses the current resolved thread context by default.
 Outside a resolved thread context, pass `thread_id` explicitly.
+Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
 
 `compress_tool_results` now defaults to `false`.
 On Anthropic and Vertex Claude models, enabling it can mutate replayed tool messages and invalidate prompt-cache prefixes.
@@ -408,7 +425,7 @@ Mix and match:
 ### Technical Stack
 - **Matrix**: Any homeserver (Synapse, Conduit, Dendrite, etc.)
 - **Agents**: Python with matrix-nio
-- **AI Models**: OpenAI, Anthropic, Ollama, or any provider
+- **AI Models**: OpenAI, Anthropic, Amazon Bedrock Claude, Ollama, or any provider
 - **Memory**: Mem0 + ChromaDB vector storage (persistent on disk)
 - **UI**: Web dashboard + any Matrix client
 

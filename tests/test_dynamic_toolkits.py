@@ -1,45 +1,31 @@
-"""Tests for dynamic toolkit loading."""
+"""Tests for per-tool dynamic loading."""
 
 from __future__ import annotations
 
 import json
-from copy import deepcopy
-from types import SimpleNamespace
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.agent._tools import determine_tools_for_model
-from agno.models.message import Message
-from agno.models.openai import OpenAIChat
-from agno.run.agent import RunOutput
-from agno.run.base import RunContext, RunStatus
-from agno.session.agent import AgentSession
 
-from mindroom.agent_storage import create_session_storage
-from mindroom.agents import create_agent
-from mindroom.ai import ai_response
-from mindroom.api.openai_compat import _build_team, _derive_session_id
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.agents import (
+    _build_dynamic_tooling_instruction_block,
+    _build_dynamic_tooling_state_suffix,
+    get_agent_toolkit_names,
+)
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
-from mindroom.execution_preparation import _PreparedExecutionContext
-from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.memory import MemoryPromptParts
-from mindroom.teams import materialize_exact_team_members
-from mindroom.thread_utils import create_session_id
+from mindroom.mcp.toolkit import bind_mcp_server_manager
+from mindroom.response_runner import _agent_has_matrix_messaging_tool
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
-from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
-from mindroom.tool_system.catalog import ToolConfigOverrideError
 from mindroom.tool_system.dynamic_toolkits import (
-    DynamicToolkitConflictError,
-    get_loaded_toolkits_for_session,
-    merge_runtime_tool_configs,
-    save_loaded_toolkits_for_session,
+    get_loaded_tools_for_session,
+    save_loaded_tools_for_session,
+    visible_tool_surface,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -48,7 +34,6 @@ if TYPE_CHECKING:
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    """Return explicit runtime paths for one isolated dynamic-toolkit test."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\n", encoding="utf-8")
     return resolve_runtime_paths(
@@ -62,8 +47,8 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 
 def _base_config_data() -> dict[str, object]:
-    """Return a minimal authored config payload for dynamic-toolkit tests."""
     return {
+        "defaults": {"tools": []},
         "agents": {
             "code": {
                 "display_name": "Code",
@@ -80,14 +65,13 @@ def _base_config_data() -> dict[str, object]:
 
 
 @pytest.fixture(autouse=True)
-def _clear_loaded_toolkits_state() -> Generator[None, None, None]:
-    dynamic_toolkits_module._loaded_toolkits.clear()
+def _clear_loaded_tools_state() -> Generator[None, None, None]:
+    dynamic_toolkits_module._loaded_tools.clear()
     yield
-    dynamic_toolkits_module._loaded_toolkits.clear()
+    dynamic_toolkits_module._loaded_tools.clear()
 
 
 def _validated_config(tmp_path: Path, raw: dict[str, object]) -> Config:
-    """Validate one raw config payload against an isolated runtime."""
     runtime_paths = _runtime_paths(tmp_path)
     config = Config.validate_with_runtime(raw, runtime_paths)
     persist_entity_accounts(config, runtime_paths)
@@ -95,1066 +79,691 @@ def _validated_config(tmp_path: Path, raw: dict[str, object]) -> Config:
 
 
 def _tool_payload(result: str) -> dict[str, object]:
-    """Parse one JSON tool result payload."""
     return json.loads(result)
 
 
-def _mock_openai_request(headers: dict[str, str] | None = None) -> MagicMock:
-    """Create a minimal Request-like object for session-id derivation tests."""
-    request = MagicMock()
-    request.headers = {key.lower(): value for key, value in (headers or {}).items()}
-    return request
-
-
-def _tool_schema_count(agent: object, *, session_id: str) -> int:
-    """Count the exported tool schemas for one fully built Agno agent."""
-    run_output = RunOutput(
-        run_id=f"run-{session_id}",
-        agent_id="code",
-        agent_name="Code",
-        session_id=session_id,
-        input="hello",
-        content="ok",
+def _runtime_tool_configs(
+    *,
+    agent_name: str,
+    config: Config,
+    loaded_tools: list[str],
+    enable_dynamic_tools_manager: bool,
+) -> list[EffectiveToolConfig]:
+    return list(
+        visible_tool_surface(
+            agent_name=agent_name,
+            config=config,
+            loaded_tools=loaded_tools,
+            enable_dynamic_tools_manager=enable_dynamic_tools_manager,
+        ).runtime_tool_configs,
     )
-    run_context = RunContext(run_id=f"run-{session_id}", session_id=session_id)
-    session = AgentSession(session_id=session_id, agent_id="code", created_at=1, updated_at=1)
-    processed_tools = agent.get_tools(run_output, run_context, session)
-    tools_for_model = determine_tools_for_model(
-        agent=agent,
-        model=agent.model,
-        processed_tools=processed_tools,
-        run_response=run_output,
-        run_context=run_context,
-        session=session,
-    )
-    return len(tools_for_model or [])
 
 
-def test_config_accepts_dynamic_toolkit_agent_references(tmp_path: Path) -> None:
-    """Agents may reference configured toolkits through allowed and initial lists."""
+def test_config_accepts_inline_deferred_tool_flags(tmp_path: Path) -> None:
+    """Inline tool entries should carry dynamic loading flags and preserve overrides."""
     raw = _base_config_data()
-    raw["toolkits"] = {
-        "development": {
-            "description": "Coding tools",
-            "tools": ["shell", "file"],
-        },
-    }
-    raw["agents"]["code"]["allowed_toolkits"] = ["development"]
-    raw["agents"]["code"]["initial_toolkits"] = ["development"]
-
-    config = Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
-
-    assert list(config.toolkits) == ["development"]
-    assert config.agents["code"].allowed_toolkits == ["development"]
-    assert config.agents["code"].initial_toolkits == ["development"]
-
-
-def test_config_rejects_unknown_allowed_toolkit_reference(tmp_path: Path) -> None:
-    """Unknown toolkit references should fail with an explicit config path."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["allowed_toolkits"] = ["development"]
-
-    with pytest.raises(ValueError, match=r"Unknown toolkit 'development'") as exc_info:
-        Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
-
-    assert "agents.code.allowed_toolkits[0]" in str(exc_info.value)
-
-
-def test_config_rejects_unknown_initial_toolkit_reference(tmp_path: Path) -> None:
-    """Unknown initial toolkits should fail with an explicit config path."""
-    raw = _base_config_data()
-    raw["toolkits"] = {"development": {"tools": ["shell"]}}
-    raw["agents"]["code"]["allowed_toolkits"] = ["development"]
-    raw["agents"]["code"]["initial_toolkits"] = ["research"]
-
-    with pytest.raises(ValueError, match=r"Unknown toolkit 'research'") as exc_info:
-        Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
-
-    assert "agents.code.initial_toolkits[0]" in str(exc_info.value)
-
-
-def test_config_rejects_initial_toolkits_outside_allowed_toolkits(tmp_path: Path) -> None:
-    """initial_toolkits must stay within allowed_toolkits."""
-    raw = _base_config_data()
-    raw["toolkits"] = {
-        "development": {"tools": ["shell"]},
-        "research": {"tools": ["duckduckgo"]},
-    }
-    raw["agents"]["code"]["allowed_toolkits"] = ["development"]
-    raw["agents"]["code"]["initial_toolkits"] = ["research"]
-
-    with pytest.raises(ValueError, match="initial_toolkits must be a subset of allowed_toolkits") as exc_info:
-        Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
-
-    assert "agents.code.initial_toolkits" in str(exc_info.value)
-
-
-def test_config_rejects_duplicate_tool_entries_inside_one_toolkit(tmp_path: Path) -> None:
-    """Toolkit definitions should reject duplicate authored tool entries."""
-    raw = _base_config_data()
-    raw["toolkits"] = {"development": {"tools": ["shell", "shell"]}}
-
-    with pytest.raises(ValueError, match="Duplicate toolkit tools are not allowed: shell"):
-        Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
-
-
-@pytest.mark.parametrize("reserved_tool", ["delegate", "dynamic_tools", "self_config"])
-def test_config_rejects_reserved_control_plane_tools_in_toolkits(
-    tmp_path: Path,
-    reserved_tool: str,
-) -> None:
-    """Toolkits may not include control-plane tools that are injected specially."""
-    raw = _base_config_data()
-    raw["toolkits"] = {"development": {"tools": [reserved_tool]}}
-
-    with pytest.raises(ValueError, match=rf"reserved control-plane tool '{reserved_tool}'") as exc_info:
-        Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
-
-    assert f"toolkits.development.tools[0].{reserved_tool}" in str(exc_info.value)
-
-
-def test_config_rejects_toolkit_tools_that_are_not_runtime_loadable(tmp_path: Path) -> None:
-    """Dynamic toolkits should only allow tools that resolve through the normal registry."""
-    raw = _base_config_data()
-    raw["toolkits"] = {"development": {"tools": ["memory"]}}
-
-    with pytest.raises(ValueError, match=r"'memory' is not supported") as exc_info:
-        Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
-
-    assert "toolkits.development.tools[0].memory" in str(exc_info.value)
-
-
-def test_config_rejects_scope_incompatible_dynamic_toolkits_for_isolating_scope(tmp_path: Path) -> None:
-    """Agents with isolating worker scopes must not allow shared-only dynamic toolkits."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {"mail": {"tools": ["homeassistant"]}}
-    raw["agents"]["code"]["worker_scope"] = "user"
-    raw["agents"]["code"]["allowed_toolkits"] = ["mail"]
-
-    with pytest.raises(ValueError, match=r"code -> toolkit 'mail' -> homeassistant \(worker_scope=user\)"):
-        Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
-
-
-def test_get_toolkit_tool_configs_expands_implied_tools(tmp_path: Path) -> None:
-    """Toolkit resolution should preserve the existing implied-tool expansion rules."""
-    raw = _base_config_data()
-    raw["toolkits"] = {
-        "messaging": {
-            "tools": ["matrix_message"],
-        },
-    }
-
-    config = Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
-
-    assert [entry.name for entry in config.get_toolkit_tool_configs("messaging")] == [
-        "matrix_message",
-        "attachments",
-        "matrix_room",
-    ]
-
-
-def test_get_toolkit_tool_configs_expands_openclaw_compat_bundle(tmp_path: Path) -> None:
-    """Dynamic toolkits should accept the registered OpenClaw compat bundle entry."""
-    raw = _base_config_data()
-    raw["toolkits"] = {
-        "compat": {
-            "tools": ["openclaw_compat"],
-        },
-    }
-
-    config = Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
-
-    assert [entry.name for entry in config.get_toolkit_tool_configs("compat")] == [
-        "openclaw_compat",
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         "shell",
-        "coding",
-        "duckduckgo",
-        "website",
-        "browser",
-        "scheduler",
-        "subagents",
-        "matrix_message",
-        "attachments",
-        "matrix_room",
+        {"coding": {"defer": True, "initial": True, "restrict_to_base_dir": False}},
+        {"name": "searxng", "defer": True, "overrides": {"fixed_max_results": 10}},
+    ]
+
+    config = _validated_config(tmp_path, raw)
+
+    entries = config.agents["code"].tools
+    assert [(entry.name, entry.defer, entry.initial) for entry in entries] == [
+        ("shell", False, False),
+        ("coding", True, True),
+        ("searxng", True, False),
+    ]
+    assert entries[1].overrides == {"restrict_to_base_dir": False}
+    assert entries[2].overrides == {"fixed_max_results": 10}
+    assert config.authored_model_dump()["agents"]["code"]["tools"] == [
+        "shell",
+        {"coding": {"restrict_to_base_dir": False, "defer": True, "initial": True}},
+        {"searxng": {"fixed_max_results": 10, "defer": True}},
     ]
 
 
-def test_config_round_trips_toolkits_in_authored_dump(tmp_path: Path) -> None:
-    """Authored serialization should preserve toolkit definitions."""
+def test_config_rejects_invalid_lazy_flag_locations(tmp_path: Path) -> None:
+    """Lazy flags should be valid only on per-agent deferred tool entries."""
     raw = _base_config_data()
-    raw["toolkits"] = {
-        "development": {
-            "description": "Coding tools",
-            "tools": [{"shell": {"shell_path_prepend": "/tmp/bin"}}, "file"],  # noqa: S108
-        },
-    }
+    raw["agents"]["code"]["tools"] = [{"shell": {"initial": True}}]  # type: ignore[index]
+    with pytest.raises(ValueError, match="initial=true requires defer=true"):
+        _validated_config(tmp_path, raw)
 
-    config = Config.validate_with_runtime(deepcopy(raw), _runtime_paths(tmp_path))
-
-    assert config.authored_model_dump()["toolkits"] == raw["toolkits"]
-
-
-def test_config_accepts_and_round_trips_mcp_servers(tmp_path: Path) -> None:
-    """The config schema should preserve authored MCP server definitions."""
     raw = _base_config_data()
-    raw["mcp_servers"] = {
-        "filesystem": {
-            "transport": "stdio",
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
-        },
-    }
+    raw["defaults"] = {"tools": [{"shell": {"defer": True}}]}
+    with pytest.raises(ValueError, match=r"defaults\.tools does not support defer or initial flags: shell"):
+        _validated_config(tmp_path, raw)
 
-    config = Config.validate_with_runtime(deepcopy(raw), _runtime_paths(tmp_path))
-
-    assert config.mcp_servers["filesystem"].transport == "stdio"
-    assert config.mcp_servers["filesystem"].command == "npx"
-    assert config.mcp_servers["filesystem"].args == ["-y", "@modelcontextprotocol/server-filesystem", "."]
-    assert config.authored_model_dump()["mcp_servers"] == raw["mcp_servers"]
-
-
-def test_config_rejects_invalid_mcp_server_name(tmp_path: Path) -> None:
-    """MCP server names should follow the same identifier rules as agents and teams."""
     raw = _base_config_data()
-    raw["mcp_servers"] = {
-        "filesystem-server": {
-            "transport": "stdio",
-            "command": "npx",
-        },
-    }
+    raw["defaults"] = {"tools": [{"shell": {"defer": False}}]}
+    with pytest.raises(ValueError, match=r"defaults\.tools does not support defer or initial flags: shell"):
+        _validated_config(tmp_path, raw)
+
+    raw = _base_config_data()
+    raw["defaults"] = {"tools": [{"shell": {"initial": False}}]}
+    with pytest.raises(ValueError, match=r"defaults\.tools does not support defer or initial flags: shell"):
+        _validated_config(tmp_path, raw)
+
+
+@pytest.mark.parametrize("lazy_flag", ["defer", "initial"])
+def test_config_rejects_lazy_flags_inside_named_tool_overrides(tmp_path: Path, lazy_flag: str) -> None:
+    """Lazy-loading control flags belong at tool-entry level, not inside overrides."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"name": "shell", "overrides": {lazy_flag: True}}]  # type: ignore[index]
 
     with pytest.raises(
         ValueError,
-        match=r"Agent, team, and MCP server names must be alphanumeric/underscore only",
-    ) as exc_info:
-        Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
-
-    assert "filesystem-server" in str(exc_info.value)
+        match=rf"Tool control flags must be declared at the tool-entry level, not inside overrides: {lazy_flag}",
+    ):
+        _validated_config(tmp_path, raw)
 
 
-def test_dynamic_toolkit_override_normalization_uses_mcp_specific_validation(tmp_path: Path) -> None:
-    """Dynamic toolkit merging should reject invalid MCP override payloads consistently."""
+@pytest.mark.parametrize("tool_name", ["delegate", "dynamic_tools", "self_config"])
+def test_config_rejects_deferred_control_plane_tools(tmp_path: Path, tool_name: str) -> None:
+    """Control-plane tools are injected by runtime policy and cannot be lazy-loading units."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{tool_name: {"defer": True}}]  # type: ignore[index]
+    with pytest.raises(
+        ValueError,
+        match=(
+            rf"agents\.code\.tools: '{tool_name}' is a control-plane tool and cannot be deferred; "
+            r"defer/initial are only valid on runtime tools\."
+        ),
+    ):
+        _validated_config(tmp_path, raw)
+
+
+@pytest.mark.parametrize(
+    "lazy_flags",
+    [
+        {"defer": True},
+        {"initial": True},
+        {"defer": "true"},
+        {"defer": 1},
+        {"defer": False},
+        {"initial": False},
+    ],
+)
+def test_config_rejects_deferred_tool_presets(tmp_path: Path, lazy_flags: dict[str, object]) -> None:
+    """Presets are bundles and must not be dynamic-loading units."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"openclaw_compat": lazy_flags}]  # type: ignore[index]
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"agents\.code\.tools: 'openclaw_compat' is a preset and cannot be deferred; "
+            r"defer/initial are only valid on individual tools\."
+        ),
+    ):
+        _validated_config(tmp_path, raw)
+
+
+def test_config_rejects_default_tool_preset_lazy_flag_presence(tmp_path: Path) -> None:
+    """Preset lazy-flag presence should be rejected in defaults too."""
+    raw = _base_config_data()
+    raw["defaults"] = {"tools": [{"openclaw_compat": {"defer": False}}]}
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"defaults\.tools: 'openclaw_compat' is a preset and cannot be deferred; "
+            r"defer/initial are only valid on individual tools\."
+        ),
+    ):
+        _validated_config(tmp_path, raw)
+
+
+def test_config_rejects_constructed_deferred_tool_preset(tmp_path: Path) -> None:
+    """Post-coercion validation should reject already-normalized preset entries."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [ToolConfigEntry(name="openclaw_compat", defer=True)]  # type: ignore[index]
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"agents\.code\.tools: 'openclaw_compat' is a preset and cannot be deferred; "
+            r"defer/initial are only valid on individual tools\."
+        ),
+    ):
+        _validated_config(tmp_path, raw)
+
+
+def test_effective_tool_configs_keep_defer_initial_and_authored_order(tmp_path: Path) -> None:
+    """Effective configs should keep lazy flags after default and agent merges."""
+    raw = _base_config_data()
+    raw["defaults"] = {"tools": ["shell", "sleep"]}
+    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True, "initial": True}}]  # type: ignore[index]
+
+    config = _validated_config(tmp_path, raw)
+
+    entries = config.get_agent_tool_configs("code")
+    assert [(entry.name, entry.defer, entry.initial, entry.authored_order) for entry in entries] == [
+        ("shell", True, True, 0),
+        ("sleep", False, False, 1),
+    ]
+
+
+def test_loaded_state_is_agent_and_session_scoped_for_matrix_threads(tmp_path: Path) -> None:
+    """Agents and Matrix threads should not share loaded dynamic tools."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
+    raw["agents"]["worker"] = {
+        "display_name": "Worker",
+        "role": "Also writes code",
+        "tools": [{"shell": {"defer": True}}],
+    }
+    config = _validated_config(tmp_path, raw)
+
+    save_loaded_tools_for_session(
+        agent_name="code",
+        session_id="!room:example.org:$event-a",
+        loaded_tools=["shell"],
+    )
+
+    assert get_loaded_tools_for_session(
+        agent_name="code",
+        config=config,
+        session_id="!room:example.org:$event-a",
+    ) == ["shell"]
+    assert (
+        get_loaded_tools_for_session(
+            agent_name="code",
+            config=config,
+            session_id="!room:example.org:$event-b",
+        )
+        == []
+    )
+    assert (
+        get_loaded_tools_for_session(
+            agent_name="worker",
+            config=config,
+            session_id="!room:example.org:$event-a",
+        )
+        == []
+    )
+    assert dynamic_toolkits_module._loaded_tools[("code", "!room:example.org:$event-a")] == ["shell"]
+
+
+def test_loaded_state_is_isolated_by_scope_and_persists_for_same_agent_scope(tmp_path: Path) -> None:
+    """One agent should keep dynamic tool state isolated per normalized scope."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    save_loaded_tools_for_session(agent_name="code", session_id="thread-a", loaded_tools=["shell"])
+
+    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == ["shell"]
+    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-b") == []
+
+
+def test_initial_deferred_tools_seed_loaded_state_and_expand_implied_runtime_tools(tmp_path: Path) -> None:
+    """Initial deferred tools should seed loaded state and expand implied runtime tools."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"matrix_message": {"defer": True, "initial": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    loaded = get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a")
+    runtime_names = [
+        entry.name
+        for entry in _runtime_tool_configs(
+            agent_name="code",
+            config=config,
+            loaded_tools=loaded,
+            enable_dynamic_tools_manager=False,
+        )
+    ]
+
+    assert loaded == ["matrix_message"]
+    assert runtime_names == ["matrix_message", "attachments", "matrix_room"]
+    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+
+
+def test_new_initial_deferred_tool_is_loaded_for_existing_session_after_reload(tmp_path: Path) -> None:
+    """Existing loaded state should union current config initial tools after hot reload."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == []
+    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+
+    reloaded_raw = _base_config_data()
+    reloaded_raw["agents"]["code"]["tools"] = [{"shell": {"defer": True, "initial": True}}]  # type: ignore[index]
+    reloaded_config = _validated_config(tmp_path, reloaded_raw)
+    manager = DynamicToolsToolkit(agent_name="code", config=reloaded_config, session_id="thread-a")
+
+    assert get_loaded_tools_for_session(agent_name="code", config=reloaded_config, session_id="thread-a") == ["shell"]
+    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+    assert _tool_payload(manager.load_tool("shell"))["status"] == "already_loaded"
+    assert _tool_payload(manager.unload_tool("shell"))["status"] == "sticky"
+    assert get_loaded_tools_for_session(agent_name="code", config=reloaded_config, session_id="thread-a") == ["shell"]
+    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+
+
+def test_get_agent_toolkit_names_matches_sessionless_dynamic_tool_manager_visibility(tmp_path: Path) -> None:
+    """Sessionless toolkit-name introspection should not advertise unavailable mutation tools."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    assert "dynamic_tools" not in get_agent_toolkit_names("code", config)
+    assert "dynamic_tools" in get_agent_toolkit_names("code", config, session_id="thread-a")
+
+
+def test_sessionless_initial_deferred_tools_are_runtime_visible_without_manager(tmp_path: Path) -> None:
+    """Sessionless agent construction should expose initial tools without enabling mutation tools."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"sleep": {"defer": True, "initial": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    loaded = get_loaded_tools_for_session(agent_name="code", config=config, session_id=None)
+    runtime_names = [
+        entry.name
+        for entry in _runtime_tool_configs(
+            agent_name="code",
+            config=config,
+            loaded_tools=loaded,
+            enable_dynamic_tools_manager=False,
+        )
+    ]
+
+    assert loaded == ["sleep"]
+    assert runtime_names == ["sleep"]
+
+
+def test_eager_preset_expansion_preserves_default_concrete_tool_overrides(tmp_path: Path) -> None:
+    """Concrete default tool overrides should own preset-expanded children."""
+    raw = _base_config_data()
+    raw["defaults"] = {"tools": [{"shell": {"shell_path_prepend": "/run/wrappers/bin"}}]}
+    raw["agents"]["code"]["tools"] = ["openclaw_compat"]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    runtime_configs = _runtime_tool_configs(
+        agent_name="code",
+        config=config,
+        loaded_tools=[],
+        enable_dynamic_tools_manager=False,
+    )
+    overrides_by_name = {entry.name: entry.tool_config_overrides for entry in runtime_configs}
+
+    assert overrides_by_name["shell"] == {"shell_path_prepend": "/run/wrappers/bin"}
+    assert overrides_by_name["coding"] == {}
+
+
+def test_loaded_deferred_concrete_tool_preserves_override_over_preset_child(tmp_path: Path) -> None:
+    """Concrete deferred tool entries should own preset-expanded children once loaded."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        "openclaw_compat",
+        {"shell": {"defer": True, "extra_env_passthrough": "FOO_*"}},
+    ]
+    config = _validated_config(tmp_path, raw)
+
+    unloaded_configs = _runtime_tool_configs(
+        agent_name="code",
+        config=config,
+        loaded_tools=[],
+        enable_dynamic_tools_manager=False,
+    )
+    save_loaded_tools_for_session(agent_name="code", session_id="thread-a", loaded_tools=["shell"])
+    loaded_configs = _runtime_tool_configs(
+        agent_name="code",
+        config=config,
+        loaded_tools=get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a"),
+        enable_dynamic_tools_manager=False,
+    )
+    unloaded_names = [entry.name for entry in unloaded_configs]
+    loaded_overrides_by_name = {entry.name: entry.tool_config_overrides for entry in loaded_configs}
+
+    assert "openclaw_compat" in unloaded_names
+    assert "shell" not in unloaded_names
+    assert loaded_overrides_by_name["shell"] == {"extra_env_passthrough": "FOO_*"}
+
+
+def test_loaded_parent_keeps_implied_child_when_child_is_separately_deferred(tmp_path: Path) -> None:
+    """A loaded deferred parent should expose its expanded children even if one child is separately unloaded."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"matrix_message": {"defer": True}},
+        {"attachments": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+
+    unloaded_names = [
+        entry.name
+        for entry in _runtime_tool_configs(
+            agent_name="code",
+            config=config,
+            loaded_tools=[],
+            enable_dynamic_tools_manager=False,
+        )
+    ]
+    loaded_names = [
+        entry.name
+        for entry in _runtime_tool_configs(
+            agent_name="code",
+            config=config,
+            loaded_tools=["matrix_message"],
+            enable_dynamic_tools_manager=False,
+        )
+    ]
+
+    assert unloaded_names == []
+    assert loaded_names == ["matrix_message", "attachments", "matrix_room"]
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        ["openclaw_compat", {"matrix_message": {"defer": True}}],
+        [{"matrix_message": {"defer": True}}, "openclaw_compat"],
+    ],
+)
+def test_deferred_concrete_tool_gates_implied_children_over_preset_in_any_order(
+    tmp_path: Path,
+    tools: list[object],
+) -> None:
+    """A deferred concrete tool should own its full implied expansion over eager preset children."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = tools  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    unloaded_names = [
+        entry.name
+        for entry in _runtime_tool_configs(
+            agent_name="code",
+            config=config,
+            loaded_tools=[],
+            enable_dynamic_tools_manager=False,
+        )
+    ]
+    loaded_names = [
+        entry.name
+        for entry in _runtime_tool_configs(
+            agent_name="code",
+            config=config,
+            loaded_tools=["matrix_message"],
+            enable_dynamic_tools_manager=False,
+        )
+    ]
+
+    assert "matrix_message" not in unloaded_names
+    assert "attachments" not in unloaded_names
+    assert "matrix_room" not in unloaded_names
+    assert "matrix_message" in loaded_names
+    assert "attachments" in loaded_names
+    assert "matrix_room" in loaded_names
+
+
+def test_runtime_selection_hides_unloaded_deferred_tools(tmp_path: Path) -> None:
+    """Runtime tool selection should expose only eager and loaded deferred tools."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["sleep", {"shell": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    unloaded_names = [
+        entry.name
+        for entry in _runtime_tool_configs(
+            agent_name="code",
+            config=config,
+            loaded_tools=[],
+            enable_dynamic_tools_manager=True,
+        )
+    ]
+    loaded_names = [
+        entry.name
+        for entry in _runtime_tool_configs(
+            agent_name="code",
+            config=config,
+            loaded_tools=["shell"],
+            enable_dynamic_tools_manager=True,
+        )
+    ]
+
+    assert unloaded_names == ["sleep", "dynamic_tools"]
+    assert loaded_names == ["sleep", "shell", "dynamic_tools"]
+
+
+def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initial(tmp_path: Path) -> None:
+    """The manager should list, search, load, unload, and protect sticky tools."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"shell": {"defer": True, "initial": True}},
+        {"sleep": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
+
+    listed = _tool_payload(manager.list_tools())
+    assert listed["loaded_tools"] == ["shell"]
+    assert listed["tools"] == [
+        {
+            "description": "Execute shell commands and scripts",
+            "loaded": True,
+            "name": "shell",
+            "sticky": True,
+        },
+        {
+            "description": "Sleep utility for introducing delays and pauses in execution",
+            "loaded": False,
+            "name": "sleep",
+            "sticky": False,
+        },
+    ]
+
+    search_payload = _tool_payload(manager.tool_search("sleep"))
+    assert [match["name"] for match in search_payload["matches"]] == ["sleep"]
+
+    assert _tool_payload(manager.load_tool("sleep"))["status"] == "loaded"
+    assert _tool_payload(manager.load_tool("sleep"))["status"] == "already_loaded"
+    assert _tool_payload(manager.unload_tool("shell"))["status"] == "sticky"
+    assert _tool_payload(manager.unload_tool("sleep"))["status"] == "unloaded"
+    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+    assert _tool_payload(manager.unload_tool("sleep"))["status"] == "not_loaded"
+
+
+def test_dynamic_tools_manager_catalog_responses_use_one_loaded_state_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manager catalog payloads should not mix loaded state from multiple reads."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"shell": {"defer": True}},
+        {"sleep": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
+    loaded_snapshots = iter([["shell"], ["sleep"]])
+
+    monkeypatch.setattr(manager, "_loaded_tools", lambda: next(loaded_snapshots))
+
+    payload = _tool_payload(manager.list_tools())
+
+    assert payload["loaded_tools"] == ["shell"]
+    assert {entry["name"]: entry["loaded"] for entry in payload["tools"]} == {
+        "shell": True,
+        "sleep": False,
+    }
+
+    loaded_snapshots = iter([["shell"], ["sleep"]])
+    monkeypatch.setattr(manager, "_loaded_tools", lambda: next(loaded_snapshots))
+
+    search_payload = _tool_payload(manager.tool_search("sleep"))
+
+    assert search_payload["loaded_tools"] == ["shell"]
+    assert search_payload["matches"] == [
+        {
+            "description": "Sleep utility for introducing delays and pauses in execution",
+            "loaded": False,
+            "name": "sleep",
+            "sticky": False,
+        },
+    ]
+
+
+def test_dynamic_tools_manager_concurrent_loads_do_not_drop_updates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent load_tool calls should merge with current state under the state lock."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"shell": {"defer": True}},
+        {"sleep": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
+    barrier = Barrier(2)
+    original_loaded_tools = manager._loaded_tools
+
+    def blocked_loaded_tools() -> list[str]:
+        loaded_tools = original_loaded_tools()
+        barrier.wait(timeout=5)
+        return loaded_tools
+
+    monkeypatch.setattr(manager, "_loaded_tools", blocked_loaded_tools)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(manager.load_tool, ("shell", "sleep")))
+
+    assert {_tool_payload(result)["status"] for result in results} == {"loaded"}
+    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == [
+        "shell",
+        "sleep",
+    ]
+
+
+def test_dynamic_tools_manager_concurrent_load_collision_uses_latest_state(tmp_path: Path) -> None:
+    """Concurrent load_tool calls should validate combined provider-visible state under the lock."""
     raw = _base_config_data()
     raw["mcp_servers"] = {
         "demo": {
             "transport": "stdio",
-            "command": "python",
-            "args": ["-c", "print(0)"],
+            "command": "npx",
         },
     }
-    raw["agents"]["code"]["tools"] = ["mcp_demo"]
-    config = _validated_config(tmp_path, raw)
-    ensure_tool_registry_loaded(_runtime_paths(tmp_path), config)
-
-    with pytest.raises(ToolConfigOverrideError, match="include_tools and exclude_tools overlap"):
-        dynamic_toolkits_module._normalize_effective_tool_config_overrides(
-            "mcp_demo",
-            {
-                "include_tools": ["echo"],
-                "exclude_tools": ["echo"],
-            },
-        )
-
-
-def test_dynamic_toolkit_session_initializes_from_initial_toolkits(tmp_path: Path) -> None:
-    """First session access should persist the configured initial toolkit set."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {
-        "development": {"tools": ["shell"]},
-        "research": {"tools": ["duckduckgo"]},
-    }
-    raw["agents"]["code"]["allowed_toolkits"] = ["research", "development"]
-    raw["agents"]["code"]["initial_toolkits"] = ["development"]
-    config = _validated_config(tmp_path, raw)
-    loaded = get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1")
-
-    assert loaded == ["development"]
-    assert dynamic_toolkits_module._loaded_toolkits["session-1"] == ["development"]
-
-
-def test_dynamic_toolkit_session_isolation_is_per_session_id(tmp_path: Path) -> None:
-    """Different session IDs should not share loaded toolkit state."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {
-        "development": {"tools": ["shell"]},
-        "research": {"tools": ["duckduckgo"]},
-    }
-    raw["agents"]["code"]["allowed_toolkits"] = ["development", "research"]
-    config = _validated_config(tmp_path, raw)
-
-    save_loaded_toolkits_for_session(
-        session_id="session-a",
-        loaded_toolkits=["research"],
-    )
-    save_loaded_toolkits_for_session(
-        session_id="session-b",
-        loaded_toolkits=["development"],
-    )
-
-    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-a") == [
-        "research",
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"mcp_demo": {"defer": True}},
+        {"shell": {"defer": True}},
     ]
-    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-b") == [
-        "development",
-    ]
-
-
-def test_dynamic_toolkit_room_level_matrix_messages_share_room_scoped_state(tmp_path: Path) -> None:
-    """Room-level Matrix turns should share toolkit state even when event ids differ."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {
-        "research": {"tools": ["duckduckgo"]},
-    }
-    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
     config = _validated_config(tmp_path, raw)
-    first_session_id = create_session_id("!room:example.org", "$event-a:example.org")
-    second_session_id = create_session_id("!room:example.org", "$event-b:example.org")
+    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
 
-    save_loaded_toolkits_for_session(
-        session_id=first_session_id,
-        loaded_toolkits=["research"],
+    class _FakeMCPManager:
+        def mcp_tool_unavailable_messages_for_loaded_tools(
+            self,
+            _agent_name: str,
+            _loaded_tools: list[str],
+        ) -> list[str]:
+            return []
+
+        def function_name_collision_messages_for_loaded_tools(
+            self,
+            _agent_name: str,
+            loaded_tools: list[str],
+        ) -> list[str]:
+            if {"mcp_demo", "shell"} <= set(loaded_tools):
+                return ["MCP/local collision"]
+            return []
+
+    bind_mcp_server_manager(_FakeMCPManager())  # type: ignore[arg-type]
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = [_tool_payload(result) for result in executor.map(manager.load_tool, ("mcp_demo", "shell"))]
+    finally:
+        bind_mcp_server_manager(None)
+
+    assert {payload["status"] for payload in results} == {"loaded", "function_name_collision"}
+    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") in (
+        ["mcp_demo"],
+        ["shell"],
     )
 
-    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id=second_session_id) == [
-        "research",
-    ]
-    assert dynamic_toolkits_module._loaded_toolkits["!room:example.org"] == ["research"]
 
-
-def test_dynamic_toolkit_session_reorders_loaded_toolkits_to_allowed_order(tmp_path: Path) -> None:
-    """Persisted toolkit names should be canonicalized to allowed_toolkits order."""
+def test_scope_incompatible_deferred_tools_reject_at_config_and_runtime(tmp_path: Path) -> None:
+    """Scope-incompatible deferred tools should be rejected before schema exposure."""
     raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {
-        "development": {"tools": ["shell"]},
-        "research": {"tools": ["duckduckgo"]},
-    }
-    raw["agents"]["code"]["allowed_toolkits"] = ["development", "research"]
-    config = _validated_config(tmp_path, raw)
-    save_loaded_toolkits_for_session(
-        session_id="session-1",
-        loaded_toolkits=["research", "development"],
-    )
-
-    loaded = get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1")
-
-    assert loaded == ["development", "research"]
-    assert dynamic_toolkits_module._loaded_toolkits["session-1"] == ["development", "research"]
-
-
-def test_dynamic_toolkit_session_drops_stale_toolkit_refs(tmp_path: Path) -> None:
-    """Removed or disallowed toolkit names should be scrubbed from in-memory state."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {
-        "development": {"tools": ["shell"]},
-        "research": {"tools": ["duckduckgo"]},
-    }
-    raw["agents"]["code"]["allowed_toolkits"] = ["development", "research"]
-    config = _validated_config(tmp_path, raw)
-    save_loaded_toolkits_for_session(
-        session_id="session-1",
-        loaded_toolkits=["stale", "research"],
-    )
-
-    loaded = get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1")
-
-    assert loaded == ["research"]
-    assert dynamic_toolkits_module._loaded_toolkits["session-1"] == ["research"]
-
-
-def test_dynamic_toolkit_merge_deduplicates_static_and_dynamic_tools(tmp_path: Path) -> None:
-    """A dynamically loaded tool should not duplicate an identical static definition."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["agents"]["code"]["include_default_tools"] = False
-    raw["agents"]["code"]["tools"] = ["shell"]
-    raw["agents"]["code"]["allowed_toolkits"] = ["development"]
-    raw["agents"]["code"]["initial_toolkits"] = ["development"]
-    raw["toolkits"] = {
-        "development": {
-            "tools": ["shell", "file"],
-        },
-    }
-    config = _validated_config(tmp_path, raw)
-
-    merged_tool_configs = merge_runtime_tool_configs(
-        agent_name="code",
-        config=config,
-        loaded_toolkits=["development"],
-        enable_dynamic_tools_manager=False,
-    )
-
-    assert [entry.name for entry in merged_tool_configs] == [
-        "shell",
-        "file",
-    ]
-
-
-def test_dynamic_toolkit_merge_rejects_conflicting_overrides(tmp_path: Path) -> None:
-    """Loading a toolkit should fail when it redefines an active tool incompatibly."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["agents"]["code"]["include_default_tools"] = False
-    raw["agents"]["code"]["tools"] = [{"shell": {"shell_path_prepend": "/static/bin"}}]
-    raw["agents"]["code"]["allowed_toolkits"] = ["development"]
-    raw["agents"]["code"]["initial_toolkits"] = ["development"]
-    raw["toolkits"] = {
-        "development": {
-            "tools": [{"shell": {"shell_path_prepend": "/dynamic/bin"}}],
-        },
-    }
-    config = _validated_config(tmp_path, raw)
-
-    with pytest.raises(DynamicToolkitConflictError, match="conflicts on tool 'shell'") as exc_info:
-        merge_runtime_tool_configs(
-            agent_name="code",
-            config=config,
-            loaded_toolkits=["development"],
-            enable_dynamic_tools_manager=False,
-        )
-
-    assert exc_info.value.toolkit_name == "development"
-    assert exc_info.value.tool_name == "shell"
-
-
-def test_dynamic_toolkit_merge_accepts_equivalent_static_and_dynamic_overrides(tmp_path: Path) -> None:
-    """Equivalent authored override forms should not conflict across static and dynamic sources."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["agents"]["code"]["include_default_tools"] = False
-    raw["agents"]["code"]["tools"] = [{"shell": {"shell_path_prepend": ["/a", "/b"]}}]
-    raw["agents"]["code"]["allowed_toolkits"] = ["development"]
-    raw["agents"]["code"]["initial_toolkits"] = ["development"]
-    raw["toolkits"] = {
-        "development": {
-            "tools": [{"shell": {"shell_path_prepend": "/a, /b"}}],
-        },
-    }
-    config = _validated_config(tmp_path, raw)
-
-    merged_tool_configs = merge_runtime_tool_configs(
-        agent_name="code",
-        config=config,
-        loaded_toolkits=["development"],
-        enable_dynamic_tools_manager=False,
-    )
-
-    assert [entry.name for entry in merged_tool_configs] == ["shell"]
-    assert merged_tool_configs[0].tool_config_overrides == {"shell_path_prepend": "/a, /b"}
-
-
-def test_dynamic_toolkit_merge_accepts_equivalent_dynamic_overrides(tmp_path: Path) -> None:
-    """Equivalent authored override forms should not conflict across dynamic toolkits."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["agents"]["code"]["include_default_tools"] = False
-    raw["agents"]["code"]["allowed_toolkits"] = ["first", "second"]
-    raw["agents"]["code"]["initial_toolkits"] = ["first", "second"]
-    raw["toolkits"] = {
-        "first": {
-            "tools": [{"shell": {"shell_path_prepend": ["/a", "/b"]}}],
-        },
-        "second": {
-            "tools": [{"shell": {"shell_path_prepend": "/a, /b"}}],
-        },
-    }
-    config = _validated_config(tmp_path, raw)
-
-    merged_tool_configs = merge_runtime_tool_configs(
-        agent_name="code",
-        config=config,
-        loaded_toolkits=["first", "second"],
-        enable_dynamic_tools_manager=False,
-    )
-
-    assert [entry.name for entry in merged_tool_configs] == ["shell"]
-    assert merged_tool_configs[0].tool_config_overrides == {"shell_path_prepend": "/a, /b"}
-
-
-def test_team_members_with_same_session_id_share_dynamic_toolkit_state(tmp_path: Path) -> None:
-    """In-memory toolkit state is shared by session_id across agent rebuilds."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {"research": {"tools": ["sleep"]}}
-    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
-    raw["agents"]["worker"] = {
-        "display_name": "Worker",
-        "role": "Help with work",
-        "allowed_toolkits": ["research"],
-    }
-    config = _validated_config(tmp_path, raw)
-
-    save_loaded_toolkits_for_session(
-        session_id="team-session",
-        loaded_toolkits=["research"],
-    )
-
-    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="team-session") == ["research"]
-    assert get_loaded_toolkits_for_session(agent_name="worker", config=config, session_id="team-session") == [
-        "research",
-    ]
-
-
-def test_dynamic_tools_manager_lists_allowed_toolkits_with_loaded_and_sticky_state(tmp_path: Path) -> None:
-    """list_toolkits should expose the allowed catalog and current session state."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {
-        "development": {"description": "Code tools", "tools": ["sleep"]},
-        "research": {"description": "Search tools", "tools": ["duckduckgo"]},
-    }
-    raw["agents"]["code"]["allowed_toolkits"] = ["development", "research"]
-    raw["agents"]["code"]["initial_toolkits"] = ["development"]
-    config = _validated_config(tmp_path, raw)
-    manager = DynamicToolsToolkit(
-        agent_name="code",
-        config=config,
-        session_id="session-1",
-    )
-
-    payload = _tool_payload(manager.list_toolkits())
-
-    assert payload["status"] == "ok"
-    assert payload["loaded_toolkits"] == ["development"]
-    assert payload["toolkits"] == [
+    raw["agents"]["code"].update(  # type: ignore[union-attr]
         {
-            "description": "Code tools",
-            "loaded": True,
-            "name": "development",
-            "sticky": True,
-            "tool_names": ["sleep"],
+            "worker_scope": "user",
+            "tools": [{"homeassistant": {"defer": True}}],
         },
-        {
-            "description": "Search tools",
-            "loaded": False,
-            "name": "research",
-            "sticky": False,
-            "tool_names": ["duckduckgo"],
-        },
-    ]
-
-
-def test_dynamic_tools_manager_load_and_unload_cycle_returns_structured_statuses(tmp_path: Path) -> None:
-    """load_tools and unload_tools should persist changes with explicit outcome categories."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {
-        "research": {"tools": ["duckduckgo"]},
-    }
-    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
-    config = _validated_config(tmp_path, raw)
-    manager = DynamicToolsToolkit(
-        agent_name="code",
-        config=config,
-        session_id="session-1",
     )
+    with pytest.raises(
+        ValueError,
+        match=r"code -> deferred tool 'homeassistant' -> homeassistant \(worker_scope=user\)",
+    ) as exc_info:
+        _validated_config(tmp_path, raw)
+    error_message = str(exc_info.value)
+    assert "code -> deferred tool 'homeassistant' -> homeassistant (worker_scope=user)" in error_message
+    assert "code -> homeassistant (worker_scope=user)" not in error_message
 
-    loaded_payload = _tool_payload(manager.load_tools("research"))
-    already_loaded_payload = _tool_payload(manager.load_tools("research"))
-    unloaded_payload = _tool_payload(manager.unload_tools("research"))
-    not_loaded_payload = _tool_payload(manager.unload_tools("research"))
-
-    assert loaded_payload["status"] == "loaded"
-    assert loaded_payload["loaded_toolkits"] == ["research"]
-    assert loaded_payload["takes_effect"] == "next_request"
-    assert already_loaded_payload["status"] == "already_loaded"
-    assert already_loaded_payload["loaded_toolkits"] == ["research"]
-    assert unloaded_payload["status"] == "unloaded"
-    assert unloaded_payload["loaded_toolkits"] == []
-    assert unloaded_payload["takes_effect"] == "next_request"
-    assert not_loaded_payload["status"] == "not_loaded"
-    assert not_loaded_payload["loaded_toolkits"] == []
-    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1") == []
-
-
-def test_dynamic_tools_manager_reports_unknown_not_allowed_and_conflict_statuses(tmp_path: Path) -> None:
-    """load_tools should surface validation and merge failures without mutating state."""
     raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["agents"]["code"]["include_default_tools"] = False
-    raw["agents"]["code"]["tools"] = [{"shell": {"shell_path_prepend": "/static/bin"}}]
-    raw["agents"]["code"]["allowed_toolkits"] = ["development"]
-    raw["toolkits"] = {
-        "development": {"tools": [{"shell": {"shell_path_prepend": "/dynamic/bin"}}]},
-        "research": {"tools": ["duckduckgo"]},
-    }
+    raw["agents"]["code"]["tools"] = [{"homeassistant": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
-    manager = DynamicToolsToolkit(
-        agent_name="code",
-        config=config,
-        session_id="session-1",
-    )
+    config.agents["code"].worker_scope = "user"
+    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
 
-    unknown_payload = _tool_payload(manager.load_tools("missing"))
-    not_allowed_payload = _tool_payload(manager.load_tools("research"))
-    conflict_payload = _tool_payload(manager.load_tools("development"))
-
-    assert unknown_payload["status"] == "unknown"
-    assert not_allowed_payload["status"] == "not_allowed"
-    assert conflict_payload["status"] == "conflict"
-    assert conflict_payload["conflicting_tool"] == "shell"
-    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1") == []
-
-
-def test_dynamic_tools_manager_rejects_scope_incompatible_toolkit_loads(tmp_path: Path) -> None:
-    """load_tools should reject toolkits whose contents cannot run for the agent scope."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {
-        "mail": {"tools": ["homeassistant"]},
-    }
-    raw["agents"]["code"]["allowed_toolkits"] = ["mail"]
-    config = _validated_config(tmp_path, raw)
-    config.agents["code"].worker_scope = "user_agent"
-    manager = DynamicToolsToolkit(
-        agent_name="code",
-        config=config,
-        session_id="session-1",
-    )
-
-    payload = _tool_payload(manager.load_tools("mail"))
+    payload = _tool_payload(manager.load_tool("homeassistant"))
 
     assert payload["status"] == "scope_incompatible"
-    assert payload["scope_label"] == "worker_scope=user_agent"
-    assert payload["toolkit"] == "mail"
     assert payload["unsupported_tools"] == ["homeassistant"]
-    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1") == []
+    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == []
 
 
-def test_dynamic_tools_manager_refuses_to_unload_sticky_initial_toolkits(tmp_path: Path) -> None:
-    """initial_toolkits should remain sticky at runtime."""
+def test_matrix_metadata_injection_is_loaded_state_aware(tmp_path: Path) -> None:
+    """Matrix prompt metadata should appear only when matrix_message is loaded."""
     raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {
-        "development": {"tools": ["sleep"]},
-    }
-    raw["agents"]["code"]["allowed_toolkits"] = ["development"]
-    raw["agents"]["code"]["initial_toolkits"] = ["development"]
+    raw["agents"]["code"]["tools"] = [{"matrix_message": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
-    manager = DynamicToolsToolkit(
-        agent_name="code",
-        config=config,
-        session_id="session-1",
-    )
 
-    payload = _tool_payload(manager.unload_tools("development"))
+    assert not _agent_has_matrix_messaging_tool(config, "code", "thread-a")
 
-    assert payload["status"] == "sticky"
-    assert payload["loaded_toolkits"] == ["development"]
-    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1") == [
-        "development",
+    save_loaded_tools_for_session(agent_name="code", session_id="thread-a", loaded_tools=["matrix_message"])
+
+    assert _agent_has_matrix_messaging_tool(config, "code", "thread-a")
+
+
+def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_path: Path) -> None:
+    """Prompt catalog text should remain stable while loaded-state suffix changes."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"shell": {"defer": True, "initial": True}},
+        {"sleep": {"defer": True}},
     ]
-
-
-def test_create_agent_uses_session_loaded_dynamic_toolkits_and_injects_prompt_block(tmp_path: Path) -> None:
-    """create_agent should rebuild tools from the current session's loaded toolkit state."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["agents"]["code"]["include_default_tools"] = False
-    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
-    raw["toolkits"] = {
-        "research": {"description": "Search toolkit", "tools": ["sleep"]},
-    }
     config = _validated_config(tmp_path, raw)
-    runtime_paths = _runtime_paths(tmp_path)
-    model = MagicMock()
-    model.id = "gpt-4o-mini"
 
-    with (
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch("mindroom.agents.Agent") as mock_agent_class,
-    ):
-        create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            session_id="session-1",
-            include_interactive_questions=False,
-        )
-        initial_tools = mock_agent_class.call_args.kwargs["tools"]
-        initial_instructions = mock_agent_class.call_args.kwargs["instructions"]
-
-        manager = next(tool for tool in initial_tools if tool.name == "dynamic_tools")
-        assert _tool_payload(manager.load_tools("research"))["status"] == "loaded"
-
-        create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            session_id="session-1",
-            include_interactive_questions=False,
-        )
-        loaded_tools = mock_agent_class.call_args.kwargs["tools"]
-        loaded_instructions = mock_agent_class.call_args.kwargs["instructions"]
-
-    assert [tool.name for tool in initial_tools] == ["dynamic_tools"]
-    assert any("Currently loaded: (none)" in instruction for instruction in initial_instructions)
-    assert [tool.name for tool in loaded_tools] == ["sleep", "dynamic_tools"]
-    assert any("Currently loaded: research" in instruction for instruction in loaded_instructions)
-    loaded_instruction_text = "\n".join(str(instruction) for instruction in loaded_instructions)
-    assert "load_tools" in loaded_instruction_text
-    assert "unload_tools" in loaded_instruction_text
-    assert "next request" in loaded_instruction_text
-    assert "each member manages its own toolkit state" in loaded_instruction_text
-    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1") == [
-        "research",
-    ]
-
-
-def test_create_agent_without_session_id_skips_dynamic_tools_and_prompt_block(tmp_path: Path) -> None:
-    """Sessionless builds used by delegation should not expose the dead manager tool."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["agents"]["code"]["include_default_tools"] = False
-    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
-    raw["toolkits"] = {
-        "research": {"description": "Search toolkit", "tools": ["sleep"]},
-    }
-    config = _validated_config(tmp_path, raw)
-    runtime_paths = _runtime_paths(tmp_path)
-    model = MagicMock()
-    model.id = "gpt-4o-mini"
-
-    with (
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch("mindroom.agents.Agent") as mock_agent_class,
-    ):
-        create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            session_id=None,
-            include_interactive_questions=False,
-            delegation_depth=1,
-        )
-
-    assert mock_agent_class.call_args.kwargs["tools"] == []
-    assert not any(
-        "## Dynamic Toolkits" in str(instruction) for instruction in mock_agent_class.call_args.kwargs["instructions"]
-    )
-
-
-def test_create_agent_reuses_saved_in_memory_toolkits_across_calls(tmp_path: Path) -> None:
-    """Saving one session's loaded toolkits should affect the next create_agent call for that session."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["agents"]["code"]["include_default_tools"] = False
-    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
-    raw["toolkits"] = {
-        "research": {"tools": ["sleep"]},
-    }
-    config = _validated_config(tmp_path, raw)
-    runtime_paths = _runtime_paths(tmp_path)
-    model = MagicMock()
-    model.id = "gpt-4o-mini"
-
-    save_loaded_toolkits_for_session(session_id="session-1", loaded_toolkits=["research"])
-
-    with (
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch("mindroom.agents.Agent") as mock_agent_class,
-    ):
-        create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            session_id="session-1",
-            include_interactive_questions=False,
-        )
-
-    assert [tool.name for tool in mock_agent_class.call_args.kwargs["tools"]] == ["sleep", "dynamic_tools"]
-
-
-def test_create_agent_uses_dynamic_runtime_worker_routing(tmp_path: Path) -> None:
-    """Dynamically loaded worker tools should be routed through the runtime worker set."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["agents"]["code"]["include_default_tools"] = False
-    raw["agents"]["code"]["allowed_toolkits"] = ["development"]
-    raw["agents"]["code"]["initial_toolkits"] = ["development"]
-    raw["toolkits"] = {
-        "development": {"tools": ["shell"]},
-    }
-    config = _validated_config(tmp_path, raw)
-    runtime_paths = _runtime_paths(tmp_path)
-    model = MagicMock()
-    model.id = "gpt-4o-mini"
-
-    def _fake_toolkit(tool_name: str, **_kwargs: object) -> MagicMock:
-        toolkit = MagicMock()
-        toolkit.name = tool_name
-        return toolkit
-
-    with (
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch("mindroom.agents.build_agent_toolkit", side_effect=_fake_toolkit) as mock_build_agent_toolkit,
-        patch("mindroom.agents.prepend_tool_hook_bridge", side_effect=lambda toolkit, _bridge: toolkit),
-        patch("mindroom.agents.Agent"),
-    ):
-        create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            session_id="session-1",
-            include_interactive_questions=False,
-        )
-
-    worker_tools_by_tool = {
-        call.args[0]: call.kwargs["worker_tools"] for call in mock_build_agent_toolkit.call_args_list
-    }
-    assert worker_tools_by_tool["shell"] == ["shell"]
-    assert worker_tools_by_tool["dynamic_tools"] == ["shell"]
-
-
-def test_create_agent_tool_schema_count_grows_after_loading_toolkit(tmp_path: Path) -> None:
-    """Dynamic loading should increase exported tool schemas on the next rebuilt request."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["agents"]["code"]["include_default_tools"] = False
-    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
-    raw["toolkits"] = {
-        "research": {"tools": ["sleep"]},
-    }
-    config = _validated_config(tmp_path, raw)
-    runtime_paths = _runtime_paths(tmp_path)
-    before_agent = create_agent(
-        "code",
+    static_before = _build_dynamic_tooling_instruction_block(
         config,
-        runtime_paths,
-        execution_identity=None,
-        session_id="session-1",
-        include_interactive_questions=False,
-    )
-    save_loaded_toolkits_for_session(
-        session_id="session-1",
-        loaded_toolkits=["research"],
-    )
-    after_agent = create_agent(
         "code",
+        enable_dynamic_tools_manager=True,
+    )
+    suffix_before = _build_dynamic_tooling_state_suffix(
         config,
-        runtime_paths,
-        execution_identity=None,
-        session_id="session-1",
-        include_interactive_questions=False,
+        "code",
+        loaded_tools=("shell",),
+        enable_dynamic_tools_manager=True,
+    )
+    suffix_after = _build_dynamic_tooling_state_suffix(
+        config,
+        "code",
+        loaded_tools=("shell", "sleep"),
+        enable_dynamic_tools_manager=True,
+    )
+    static_after = _build_dynamic_tooling_instruction_block(
+        config,
+        "code",
+        enable_dynamic_tools_manager=True,
     )
 
-    before_count = _tool_schema_count(before_agent, session_id="session-1")
-    after_count = _tool_schema_count(after_agent, session_id="session-1")
-
-    assert [tool.name for tool in before_agent.tools] == ["dynamic_tools"]
-    assert [tool.name for tool in after_agent.tools] == ["sleep", "dynamic_tools"]
-    assert before_count == 3
-    assert after_count == 4
-
-
-@pytest.mark.asyncio
-async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path: Path) -> None:
-    """The non-streaming AI path should rebuild agents from the session-scoped toolkit state."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["agents"]["code"]["include_default_tools"] = False
-    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
-    raw["toolkits"] = {
-        "research": {"description": "Search toolkit", "tools": ["sleep"]},
-    }
-    config = _validated_config(tmp_path, raw)
-    runtime_paths = _runtime_paths(tmp_path)
-    save_loaded_toolkits_for_session(
-        session_id="session-1",
-        loaded_toolkits=["research"],
+    assert static_before == static_after
+    assert "shell - Execute shell commands" in static_before
+    assert suffix_before != suffix_after
+    assert (
+        suffix_after == "Dynamic tools currently loaded for this session: shell, sleep\n"
+        "Sticky initial dynamic tools that cannot be unloaded: shell"
     )
-    model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-    prepared_execution = _PreparedExecutionContext(
-        messages=(Message(role="user", content="enhanced prompt"),),
-        replay_plan=None,
-        unseen_event_ids=[],
-        replays_persisted_history=False,
-        compaction_outcomes=[],
-        compaction_decision=None,
-        compaction_reply_outcome="none",
-        prepared_context_tokens=None,
-        estimated_context_tokens=None,
-    )
-    run_output = MagicMock()
-    run_output.content = "ok"
-    run_output.tools = None
-    run_output.status = RunStatus.completed
-
-    with (
-        patch(
-            "mindroom.ai.build_memory_prompt_parts",
-            new_callable=AsyncMock,
-            return_value=MemoryPromptParts(),
-        ),
-        patch(
-            "mindroom.ai.prepare_agent_execution_context",
-            new_callable=AsyncMock,
-            return_value=prepared_execution,
-        ),
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=run_output) as mock_run,
-    ):
-        response = await ai_response(
-            agent_name="code",
-            prompt="Use the toolkit",
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            include_interactive_questions=False,
-        )
-
-    built_agent = mock_run.call_args.args[0]
-
-    assert response == "ok"
-    assert [tool.name for tool in built_agent.tools] == ["sleep", "dynamic_tools"]
-    assert any("Currently loaded: research" in str(instruction) for instruction in built_agent.instructions)
-
-
-def test_create_agent_uses_scope_context_storage(tmp_path: Path) -> None:
-    """The agent constructor should reuse the caller-provided history storage."""
-    config = _validated_config(tmp_path, _base_config_data())
-    runtime_paths = _runtime_paths(tmp_path)
-    storage = create_session_storage("code", config, runtime_paths, execution_identity=None)
-
-    try:
-        agent = create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            history_storage=storage,
-            include_interactive_questions=False,
-        )
-    finally:
-        storage.close()
-
-    assert agent.db is storage
-
-
-def test_team_builder_passes_team_session_id_to_create_agent(tmp_path: Path) -> None:
-    """Team member creation should share the team session id across member agents."""
-    config = _validated_config(tmp_path, _base_config_data())
-    runtime_paths = _runtime_paths(tmp_path)
-    execution_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="code",
-        requester_id="@user:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="team-session",
-    )
-
-    with (
-        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
-        patch("mindroom.teams.create_agent", return_value=MagicMock(name="CodeAgent")) as mock_create_agent,
-    ):
-        result = materialize_exact_team_members(
-            ["code"],
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        ).agents[0]
-
-    assert result is mock_create_agent.return_value
-    assert mock_create_agent.call_args.kwargs["session_id"] == "team-session"
-    assert mock_create_agent.call_args.kwargs["include_openai_compat_guidance"] is False
-
-
-def test_openai_team_builder_passes_session_id_to_member_agents(tmp_path: Path) -> None:
-    """OpenAI-compatible team requests should reuse one shared session id for all members."""
-    config = Config(
-        agents={
-            "code": AgentConfig(
-                display_name="Code",
-                role="Write code",
-                rooms=[],
-            ),
-        },
-        models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
-        router=RouterConfig(model="default"),
-        teams={
-            "dev": TeamConfig(
-                display_name="Dev",
-                role="Development team",
-                agents=["code"],
-                mode="coordinate",
-            ),
-        },
-    )
-    runtime_paths = _runtime_paths(tmp_path)
-    persist_entity_accounts(config, runtime_paths)
-
-    with (
-        patch("mindroom.teams.create_agent", return_value=MagicMock(name="CodeAgent")) as mock_create,
-        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
-        patch(
-            "mindroom.api.openai_compat.resolve_bound_team_scope_context",
-            create=True,
-            return_value=SimpleNamespace(scope=SimpleNamespace(scope_id="dev"), storage=MagicMock()),
-        ),
-        patch("agno.team.Team.__init__", return_value=None),
-    ):
-        _build_team(
-            "dev",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            session_id="openai-team-session",
-        )
-
-    assert mock_create.call_args.kwargs["session_id"] == "openai-team-session"
-    assert mock_create.call_args.kwargs["include_openai_compat_guidance"] is True
-
-
-def test_openai_derived_stable_session_id_preserves_dynamic_toolkit_state(tmp_path: Path) -> None:
-    """Stable OpenAI-compatible session ids should reuse the same in-memory toolkit state."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {"research": {"tools": ["duckduckgo"]}}
-    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
-    config = _validated_config(tmp_path, raw)
-
-    stable_sid = _derive_session_id("code", _mock_openai_request({"X-Session-Id": "chat-1"}))
-    save_loaded_toolkits_for_session(
-        session_id=stable_sid,
-        loaded_toolkits=["research"],
-    )
-
-    assert get_loaded_toolkits_for_session(
-        agent_name="code",
-        config=config,
-        session_id=_derive_session_id("code", _mock_openai_request({"X-Session-Id": "chat-1"})),
-    ) == ["research"]
-
-
-def test_openai_ephemeral_fallback_session_ids_do_not_share_dynamic_toolkit_state(tmp_path: Path) -> None:
-    """Derived fallback ids should remain per-request and not cross-contaminate state."""
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {"research": {"tools": ["duckduckgo"]}}
-    raw["agents"]["code"]["allowed_toolkits"] = ["research"]
-    config = _validated_config(tmp_path, raw)
-
-    first_sid = _derive_session_id("code", _mock_openai_request())
-    second_sid = _derive_session_id("code", _mock_openai_request())
-    save_loaded_toolkits_for_session(
-        session_id=first_sid,
-        loaded_toolkits=["research"],
-    )
-
-    assert first_sid != second_sid
-    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id=first_sid) == [
-        "research",
-    ]
-    assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id=second_sid) == []

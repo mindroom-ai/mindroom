@@ -135,6 +135,46 @@ def test_format_tool_combined_with_result() -> None:
     assert trace.truncated is False
 
 
+def test_format_tool_combined_redacts_sensitive_args_and_results() -> None:
+    """Tool trace previews must not expose credentials in Matrix metadata."""
+    _text, trace = format_tool_combined(
+        "custom_api",
+        {
+            "url": "https://api.example.test?token=query-secret",
+            "headers": {"Authorization": "Bearer auth-secret"},
+            "payload": {"api_keys": ["plain-secret-one"]},
+        },
+        {"status": "ok", "access_token": "result-secret", "safe": "kept"},
+    )
+
+    payload = build_tool_trace_content([trace])
+    rendered = render_tool_trace_for_context([trace])
+
+    assert payload is not None
+    trace_event = payload[_TOOL_TRACE_KEY]["events"][0]
+    assert "auth-secret" not in trace_event["args_preview"]
+    assert "plain-secret-one" not in trace_event["args_preview"]
+    assert "result-secret" not in trace_event["result_preview"]
+    assert "auth-secret" not in rendered
+    assert "plain-secret-one" not in rendered
+    assert "result-secret" not in rendered
+    assert "***redacted***" in trace_event["args_preview"]
+    assert "***redacted***" in trace_event["result_preview"]
+
+
+def test_format_tool_combined_redacts_key_value_secret_result() -> None:
+    """Tool result previews should redact key/value style secret containers."""
+    _text, trace = format_tool_combined(
+        "call_api",
+        {"path": "/v1"},
+        {"status": "ok", "credentials": [{"name": "client_secret", "value": "plain-client-secret"}]},
+    )
+
+    assert trace.result_preview is not None
+    assert "plain-client-secret" not in trace.result_preview
+    assert "***redacted***" in trace.result_preview
+
+
 def test_format_tool_combined_truncates_long_result() -> None:
     """Combined formatting should truncate long results."""
     text, trace = format_tool_combined("run_shell_command", {}, "done " + ("y" * 5000))
@@ -415,6 +455,25 @@ def test_build_tool_trace_content_preserves_all_events_for_v2_indexing() -> None
     assert "events_truncated" not in trace
 
 
+def test_build_tool_trace_content_redacts_raw_trace_entries() -> None:
+    """Trace metadata builder should redact entries even when caller supplied raw previews."""
+    payload = build_tool_trace_content(
+        [
+            ToolTraceEntry(
+                type="tool_call_completed",
+                tool_name="call_api",
+                args_preview="api_key=plain-arg-secret",
+                result_preview="token=plain-result-secret",
+            ),
+        ],
+    )
+
+    assert payload is not None
+    event = payload[_TOOL_TRACE_KEY]["events"][0]
+    assert event["args_preview"] == "api_key=***redacted***"
+    assert event["result_preview"] == "token=***redacted***"
+
+
 def test_render_tool_trace_for_context_pins_started_and_completed_format() -> None:
     """Renderer should emit the planned context marker format."""
     rendered = render_tool_trace_for_context(
@@ -454,6 +513,25 @@ def test_render_tool_trace_for_context_omits_missing_optional_fields() -> None:
     assert rendered == "[tool:save_file completed]"
 
 
+def test_render_tool_trace_for_context_redacts_raw_trace_entries() -> None:
+    """Context renderer should redact entries even when caller supplied raw previews."""
+    rendered = render_tool_trace_for_context(
+        [
+            ToolTraceEntry(
+                type="tool_call_completed",
+                tool_name="call_api",
+                args_preview="api_key=plain-arg-secret",
+                result_preview="token=plain-result-secret",
+            ),
+        ],
+    )
+
+    assert "plain-arg-secret" not in rendered
+    assert "plain-result-secret" not in rendered
+    assert "api_key=***redacted***" in rendered
+    assert "token=***redacted***" in rendered
+
+
 def test_format_tool_started_with_empty_args() -> None:
     """Tool start formatting should handle empty argument maps."""
     text, trace = _format_tool_started("save_file", {}, tool_index=1)
@@ -474,6 +552,35 @@ def test_format_tool_started_preserves_argument_order() -> None:
         },
     )
     assert trace.args_preview == "file_name=a.py, contents=print('x')"
+
+
+def test_format_tool_started_redacts_nested_secret_args() -> None:
+    """Tool args stored in trace metadata should be redacted before Matrix delivery."""
+    _text, trace = _format_tool_started(
+        "call_api",
+        {
+            "headers": {"Authorization": "Bearer auth-secret"},
+            "payload": [{"name": "OPENAI_API_KEY", "value": "plain-openai-secret"}],
+        },
+    )
+
+    assert trace.args_preview is not None
+    assert "auth-secret" not in trace.args_preview
+    assert "plain-openai-secret" not in trace.args_preview
+    assert "***redacted***" in trace.args_preview
+
+
+def test_format_tool_started_redacts_top_level_key_value_secret_args() -> None:
+    """Top-level label/value arg pairs should keep sibling context during redaction."""
+    _text, trace = _format_tool_started(
+        "set_env",
+        {"name": "OPENAI_API_KEY", "value": "my-custom-key-format"},
+    )
+
+    assert trace.args_preview is not None
+    assert "name=OPENAI_API_KEY" in trace.args_preview
+    assert "my-custom-key-format" not in trace.args_preview
+    assert "value=***redacted***" in trace.args_preview
 
 
 def test_complete_pending_tool_block_roundtrip_with_marker_id() -> None:

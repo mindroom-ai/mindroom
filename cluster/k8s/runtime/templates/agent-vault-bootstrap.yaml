@@ -1,0 +1,202 @@
+{{- if .Values.workers.kubernetes.agentVault.bootstrap.enabled }}
+{{- $av := .Values.workers.kubernetes.agentVault -}}
+{{- $bs := $av.bootstrap -}}
+{{- $accessTool := $av.accessTool -}}
+{{- $name := include "mindroom-runtime.agentVaultBootstrapName" . -}}
+{{- /* Target the same vault API the workers use, so bootstrap also works
+     against an externally managed Agent Vault (server.enabled=false). */ -}}
+{{- $addr := required "workers.kubernetes.agentVault.apiUrl is required when bootstrap is enabled" $av.apiUrl -}}
+{{- if not $av.workerCaConfigMapName -}}
+{{- fail "workers.kubernetes.agentVault.workerCaConfigMapName is required when bootstrap is enabled (the Job publishes the root CA into it)" -}}
+{{- end -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.agentVaultBootstrapLabels" . | nindent 4 }}
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.agentVaultBootstrapLabels" . | nindent 4 }}
+# `create` cannot be name-scoped in RBAC; everything else is restricted to
+# the exact objects the Job publishes.
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - {{ $av.workerCaConfigMapName }}
+    verbs:
+      - get
+      - update
+      - patch
+  {{- if $accessTool.enabled }}
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    resourceNames:
+      - {{ $accessTool.adminTokenSecret.name }}
+    verbs:
+      - get
+      - update
+      - patch
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.agentVaultBootstrapLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.agentVaultBootstrapLabels" . | nindent 4 }}
+spec:
+  # The finished Job is garbage-collected after 24h; the RBAC objects above are
+  # Helm-managed and stay. To force a re-run (the script is idempotent), delete
+  # the Job and `helm upgrade`, which re-applies it.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "mindroom-runtime.agentVaultBootstrapLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ $name }}
+      initContainers:
+        - name: bootstrap-owner
+          image: {{ include "mindroom-runtime.agentVaultBootstrapImage" . | quote }}
+          command:
+            - sh
+            - -ec
+          args:
+            - |
+              # Keep the CLI session in the init container's own filesystem so it
+              # is never exposed through the shared /work volume.
+              export HOME=/tmp/agent-vault-bootstrap-home
+              mkdir -p "$HOME"
+              addr="{{ $addr }}"
+              password="$(cat /bootstrap/{{ $bs.ownerPasswordSecretKey }})"
+              deadline=$(($(date +%s) + 180))
+              until wget -q -O /dev/null "$addr/health"; do
+                if [ "$(date +%s)" -ge "$deadline" ]; then
+                  echo "Agent Vault did not become ready" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              # The first login is expected to fail on a fresh instance (the
+              # owner does not exist yet), so capture it instead of spamming
+              # the log; if registration then fails too, surface both captures
+              # before the final unsuppressed login fails the Job with context.
+              if ! printf '%s\n' "$password" | agent-vault auth login \
+                --address "$addr" \
+                --email "$AGENT_VAULT_OWNER_EMAIL" \
+                --password-stdin >/tmp/login.log 2>&1; then
+                if ! printf '%s\n' "$password" | agent-vault auth register \
+                  --address "$addr" \
+                  --email "$AGENT_VAULT_OWNER_EMAIL" \
+                  --password-stdin >/tmp/register.log 2>&1; then
+                  cat /tmp/login.log /tmp/register.log >&2 || true
+                fi
+                printf '%s\n' "$password" | agent-vault auth login \
+                  --address "$addr" \
+                  --email "$AGENT_VAULT_OWNER_EMAIL" \
+                  --password-stdin
+              fi
+              # owner config set has no --address flag; it uses the session
+              # (and server address) persisted in $HOME by auth login.
+              agent-vault owner config set \
+                --invite-only={{ $bs.inviteOnly }} \
+                --allowed-domains "$AGENT_VAULT_ALLOWED_DOMAINS"
+              agent-vault ca fetch --address "$addr" > /work/ca.pem
+              test -s /work/ca.pem
+              {{- if $accessTool.enabled }}
+              # Owner-role agent for the agent_vault_access tool. Re-runs
+              # rotate the token; the control plane re-reads it from the
+              # mounted Secret per call, so rotation needs no restart.
+              if ! agent-vault agent create {{ $accessTool.adminAgentName | quote }} \
+                --token-only > /work/access-admin-token; then
+                agent-vault agent rotate {{ $accessTool.adminAgentName | quote }} \
+                  --token-only > /work/access-admin-token
+              fi
+              agent-vault agent set-role {{ $accessTool.adminAgentName | quote }} --role owner
+              test -s /work/access-admin-token
+              {{- end }}
+          env:
+            - name: AGENT_VAULT_OWNER_EMAIL
+              value: {{ required "workers.kubernetes.agentVault.ownerEmail is required when bootstrap is enabled" $av.ownerEmail | quote }}
+            - name: AGENT_VAULT_ALLOWED_DOMAINS
+              value: {{ $bs.allowedDomains | quote }}
+          resources:
+            {{- toYaml $bs.resources | nindent 12 }}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: bootstrap
+              mountPath: /bootstrap
+              readOnly: true
+      containers:
+        - name: publish-ca
+          image: {{ required "workers.kubernetes.agentVault.bootstrap.kubectlImage is required when bootstrap is enabled" $bs.kubectlImage | quote }}
+          command:
+            - sh
+            - -ec
+          args:
+            - |
+              kubectl -n "$POD_NAMESPACE" create configmap {{ $av.workerCaConfigMapName }} \
+                --from-file=ca.pem=/work/ca.pem \
+                --dry-run=client -o yaml | kubectl apply -f -
+              {{- if $accessTool.enabled }}
+              kubectl -n "$POD_NAMESPACE" create secret generic {{ $accessTool.adminTokenSecret.name }} \
+                --from-file={{ $accessTool.adminTokenSecret.key }}=/work/access-admin-token \
+                --dry-run=client -o yaml | kubectl apply -f -
+              {{- end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            {{- toYaml $bs.resources | nindent 12 }}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+              readOnly: true
+      volumes:
+        - name: work
+          emptyDir: {}
+        - name: bootstrap
+          secret:
+            secretName: {{ required "workers.kubernetes.agentVault.bootstrapSecretName is required when bootstrap is enabled" $av.bootstrapSecretName }}
+{{- end }}

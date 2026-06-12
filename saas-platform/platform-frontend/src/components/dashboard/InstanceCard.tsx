@@ -105,7 +105,7 @@ export function InstanceCard({
     }
   }
 
-  // Token passing handled by shared SSO cookie; open via plain link
+  // Tenant access is handled by the configured instance auth layer; open via plain link.
 
   // No instance yet - show provision card
   if (!instance) {

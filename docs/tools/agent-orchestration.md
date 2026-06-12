@@ -4,17 +4,19 @@ icon: lucide/wrench
 
 # Agent Orchestration
 
-Use these tools and presets to coordinate other agents, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
+Use these tools and presets to coordinate other agents, save reusable Dynamic Workflows, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `agent-orchestration` group.
-Use these tools when you need multi-agent coordination, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
+Use these tools when you need multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
 
 ## Tools On This Page
 
 - [`subagents`] - Spawn Matrix-backed sub-agent sessions and message them later by session key or label.
 - [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
+- [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
+- [`report_publishing`] - Publish authorized report artifacts through revocable public links.
 - [`config_manager`] - Inspect MindRoom config and create, update, validate, or template agents and teams.
 - [`self_config`] - Let an agent read and update only its own configuration.
 - [`openclaw_compat`] - Config-only preset that expands to native MindRoom tools.
@@ -22,13 +24,15 @@ Use these tools when you need multi-agent coordination, runtime config changes, 
 
 ## Common Setup Notes
 
-All six entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
+All eight entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
 Only [`claude_agent`] has tool-specific credential fields.
 [`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
 `agents.<name>.delegate_to` auto-enables [`delegate`] when the list is non-empty and the current delegation depth is below the hard limit of 3.
 `agents.<name>.allow_self_config` or `defaults.allow_self_config` auto-enables [`self_config`].
 [`config_manager`] and [`self_config`] both save changes by revalidating the full runtime config before rewriting `config.yaml`.
 [`subagents`] requires a live Matrix tool runtime context with `room_id`, `requester_id`, Matrix client access, and a writable storage path.
+[`dynamic_workflow`] requires a live tool runtime context, a writable storage path, and a configured agent model.
+[`report_publishing`] requires a live tool runtime context, a writable storage path, and an authorized report source.
 [`openclaw_compat`] is a config preset, not a runtime toolkit.
 `Config.expand_tool_names()` expands presets and implied tools while deduping and preserving order.
 For [`openclaw_compat`], that means `matrix_message` is added directly and `attachments` is added indirectly through `Config.IMPLIED_TOOLS`.
@@ -159,6 +163,202 @@ delegate_task(
 - Recursive delegation is supported, but only up to a maximum depth of 3.
 - Use [`subagents`] when you need an ongoing threaded workflow.
 - Use [`delegate`] when you need a synchronous specialist answer inside the current run.
+
+## [`dynamic_workflow`]
+
+`dynamic_workflow` lets an agent save a reusable workflow, publish immutable revisions, run the active revision, and inspect stored run records.
+
+### What It Does
+
+`dynamic_workflow` exposes `create_workflow()`, `validate_workflow()`, `update_workflow()`, `run_workflow()`, `get_workflow_run()`, `list_workflows()`, and `list_workflow_revisions()`.
+All calls return JSON strings with a `status` field and operation-specific payload data.
+Saved specs live under `MINDROOM_STORAGE_PATH/dynamic_workflows/`.
+Each update creates a new immutable `revisions/<revision>.yaml` file and updates the small `workflow.yaml` pointer file.
+Each run pins the active revision at start time, writes a `runs/<run_id>.json` record, and writes `report.md`, `report.html`, and `step_outputs.json` under that run's artifact directory.
+If `MINDROOM_PUBLIC_URL` is set, successful and failed run payloads include a private report URL under `/reports/private/...`.
+Private report routes authorize the dashboard requester against the run's `requested_by` identity.
+Use [`report_publishing`] to publish a completed Dynamic Workflow run report through a revocable public URL under `/reports/public/<slug>`.
+If `MINDROOM_PUBLIC_URL` is unset, the report artifacts are still persisted on disk and listed in the run payload.
+
+### Configuration
+
+Enable the tool by adding `dynamic_workflow` to the agent that should be allowed to create and run workflows.
+The current implementation supports agent-scoped workflows from agent tools.
+Room and tenant scopes are reserved for a future approval policy, so tool calls with `scope="room"` or `scope="tenant"` return an error today.
+
+```yaml
+agents:
+  coordinator:
+    display_name: Coordinator
+    role: Build and run reusable Dynamic Workflows
+    model: sonnet
+    tools:
+      - dynamic_workflow
+```
+
+### Spec Shape
+
+Workflow specs are declarative JSON/YAML objects with `schema_version: 1`.
+The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `participants`, `workflow`, `outputs`, and `permissions`.
+`kind` must be `workflow`.
+`inputs` supports an object schema with `required`, `properties`, property `type`, property `description`, and property `enum`.
+Participants can be `ephemeral_agent` or `room_agent`.
+An `ephemeral_agent` can declare `id`, `name`, `role`, `description`, `model`, `tools`, and `instructions`.
+Ephemeral participant `tools` may grant any registered tool except agent-infrastructure tools (`memory`, `delegate`, `self_config`, `compact_context`, `dynamic_workflow`, `dynamic_tools`).
+Every participant tool must also be listed in `permissions.tools`.
+Participant tool calls require per-call user approval in the originating room unless the tool is pre-approved by the caller's `dynamic_workflow` `allowed_tools` config.
+Setting `allowed_tools` to `["*"]` pre-approves every granted tool.
+A `room_agent` can declare `id`, `agent`, and an empty `tools` list.
+Room-agent participants must already be available to the requester in the current room, use their configured model, and run without tools, skills, knowledge, durable state, or preloaded context files.
+Step types are `transform_step`, `agent_step`, and `report_step`.
+`transform_step` renders a template without calling a model.
+`agent_step` renders a prompt and sends it to the selected participant.
+`report_step` renders Markdown report content from input and prior step outputs.
+Outputs declare `id`, `type`, and `from_step`.
+Output `type` may be `text`, `markdown`, `json`, or `html_report`.
+Permissions support runtime caps, model caps, and tool grants.
+`permissions.data` must keep `matrix_history`, `attachments`, and `knowledge_bases` disabled until approval-backed data grants exist.
+
+### Example
+
+```python
+create_workflow(
+    spec={
+        "schema_version": 1,
+        "id": "brief-report",
+        "name": "Brief Report",
+        "description": "Create a short HTML report from one topic.",
+        "kind": "workflow",
+        "inputs": {
+            "type": "object",
+            "required": ["topic"],
+            "properties": {"topic": {"type": "string"}},
+        },
+        "participants": [
+            {
+                "id": "writer",
+                "kind": "ephemeral_agent",
+                "name": "Report Writer",
+                "model": "claude-sonnet-4-6",
+                "tools": ["duckduckgo", "website"],
+            },
+        ],
+        "workflow": [
+            {
+                "id": "write",
+                "type": "agent_step",
+                "participant": "writer",
+                "prompt": "Research the web and write a concise cited report about {input.topic}.",
+            },
+        ],
+        "outputs": [{"id": "report_html", "type": "html_report", "from_step": "write"}],
+        "permissions": {
+            "max_runtime_seconds": 1800,
+            "max_concurrent_agents": 4,
+            "max_total_agents": 8,
+            "models": ["claude-sonnet-4-6"],
+            "tools": ["duckduckgo", "website"],
+            "data": {"matrix_history": "none", "attachments": "none", "knowledge_bases": []},
+        },
+    },
+    reason="initial report workflow",
+)
+run_workflow("brief-report", {"topic": "Agno factories"})
+list_workflows()
+get_workflow_run("brief-report", "run_...")
+```
+
+### Pre-approving participant tools
+
+Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to skip per-call approval for trusted tools.
+
+```yaml
+agents:
+  builder:
+    display_name: Workflow Builder
+    tools:
+      - dynamic_workflow:
+          allowed_tools: [duckduckgo, website]
+```
+
+Use `allowed_tools: ["*"]` to pre-approve every tool a workflow grants.
+Tools outside `allowed_tools` still run, but each call posts an approval card in the originating room and waits for the requester's decision.
+
+### Notes
+
+- Dynamic Workflow runs execute synchronously on the current tool call path today.
+- Long-running background workflow management, workflow-activation approval cards, Matrix history grants, attachment grants, and knowledge-base grants are future work.
+- Ephemeral agents can only use models allowed by both the workflow permissions and the caller's current model policy.
+- Granted tools run with the calling agent's tool routing (credentials, worker sandboxing, and egress proxying), and the tool-hook bridge applies plugin gating plus the per-call approval flow.
+- Room-agent participants can reuse only agents that normal room routing would expose to the requester.
+- Runtime caps are enforced for sync and async runs, and async runs are marked failed at the deadline even if participant cancellation is delayed.
+
+## [`report_publishing`]
+
+`report_publishing` lets an agent intentionally publish authorized report artifacts through revocable public links.
+
+### What It Does
+
+`report_publishing` exposes `publish_report()` and `revoke_public_report(slug)`.
+All calls return JSON strings with a `status` field and operation-specific payload data.
+The tool does not accept arbitrary filesystem paths.
+It publishes only registered source references that the current Matrix requester is authorized to read.
+The current source types are `dynamic_workflow_run` and `static_site`.
+Use `dynamic_workflow_run` to publish a completed Dynamic Workflow HTML report.
+Use `static_site` to publish a copied workspace directory that contains `index.html` and optional CSS, JavaScript, images, fonts, or JSON assets.
+A `static_site` source path may also point at one workspace HTML file, which is copied and served as `index.html`.
+The static site source path is workspace-relative and the published copy is stored under `MINDROOM_STORAGE_PATH/report_publishing/artifacts/<slug>/`.
+A static site snapshot may contain at most 200 files and 10 MiB of total data, and publishing fails with an explanatory error beyond either limit.
+Static site links serve under the trailing-slash form `/reports/public/<slug>/`, and the slash-less form redirects there so relative asset URLs resolve.
+JavaScript is allowed for static sites, but the public route serves static sites with a sandbox CSP that omits `allow-same-origin` and sets `connect-src 'none'`.
+That means scripts can drive local page interactivity, but they cannot act as logged-in MindRoom dashboard code or call MindRoom APIs.
+Published link records live under `MINDROOM_STORAGE_PATH/report_publishing/`.
+Public report links serve the registered artifact without dashboard authentication until `revoke_public_report(slug)` revokes the slug.
+The `slug` is the public-report identifier returned by `publish_report()`.
+If `MINDROOM_PUBLIC_URL` is set, successful publish payloads include the absolute public URL.
+
+### Configuration
+
+Enable the tool by adding `report_publishing` to any agent that should be allowed to publish report artifacts.
+
+```yaml
+agents:
+  coordinator:
+    display_name: Coordinator
+    role: Build workflows and publish report links
+    model: sonnet
+    tools:
+      - dynamic_workflow
+      - report_publishing
+```
+
+### Example
+
+```python
+publish_report(
+    source_type="dynamic_workflow_run",
+    source={"workflow_id": "brief-report", "run_id": "run_..."},
+    confirm_public=True,
+)
+publish_report(
+    source_type="static_site",
+    source={"path": "public-demo", "title": "Public Demo"},
+    confirm_public=True,
+)
+revoke_public_report("pub_...")
+```
+
+### Notes
+
+- `confirm_public=True` is required so accidental publish calls fail closed.
+- Dynamic Workflow source references default to `scope="agent"` and may include an explicit `scope`.
+- Static site publishing requires an agent workspace and publishes an immutable copy, so later workspace edits need a new `publish_report()` call.
+- An agent has a workspace when it uses `memory_backend: file` or a `private:` workspace configuration, and the source path resolves against that canonical workspace root.
+- Only the run requester or the user who published the link may revoke it.
+- Additional registered report sources can be added without changing Dynamic Workflow storage.
+- No extra proxy route is needed when `/reports/public/*` already reaches the MindRoom backend.
+- If the dashboard frontend and Python backend are split across upstreams, route `/reports/public/*` to the Python backend and do not put dashboard-login middleware on that path.
+- Set `MINDROOM_PUBLIC_URL` to the externally reachable dashboard origin, such as `https://mindroom.lab.mindroom.chat`, so publish payloads include clickable absolute URLs.
 
 ## [`config_manager`]
 
@@ -293,7 +493,8 @@ This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom 
 
 ### Configuration
 
-This preset has no inline configuration fields.
+This preset has no inline configuration fields and cannot use `defer` or `initial`.
+Configure individual member tools directly when they need lazy loading.
 
 ### Example
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -18,6 +17,7 @@ import nio
 
 from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.message_builder import build_reaction_content
 
@@ -46,6 +46,8 @@ class _InteractiveQuestion:
     thread_id: str | None
     options: dict[str, str]  # emoji/number -> value mapping
     creator_agent: str
+    question_text: str = ""
+    option_labels: dict[str, str] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
 
@@ -53,7 +55,9 @@ class _InteractiveQuestion:
 class InteractiveMetadata:
     """Registration metadata extracted from one interactive response."""
 
+    question_text: str
     option_map: dict[str, str]
+    option_labels: dict[str, str]
     options_list: tuple[dict[str, str], ...]
 
     @classmethod
@@ -61,12 +65,17 @@ class InteractiveMetadata:
         cls,
         option_map: dict[str, str] | None,
         options_list: Sequence[dict[str, str]] | None,
+        *,
+        question_text: str = "",
+        option_labels: dict[str, str] | None = None,
     ) -> InteractiveMetadata | None:
         """Return copied metadata when both interactive registration parts exist."""
         if not option_map or not options_list:
             return None
         return cls(
+            question_text=question_text,
             option_map=dict(option_map),
+            option_labels=dict(option_labels or {}),
             options_list=tuple(dict(item) for item in options_list),
         )
 
@@ -102,7 +111,9 @@ class InteractiveSelection:
     """One validated interactive question selection ready for execution."""
 
     question_event_id: str
+    question_text: str
     selection_key: str
+    selected_label: str
     selected_value: str
     thread_id: str | None
 
@@ -155,6 +166,10 @@ def _load_active_questions(payload: object) -> dict[str, _InteractiveQuestion]:
         if not isinstance(raw_options, dict):
             msg = "Interactive question options must be an object"
             raise TypeError(msg)
+        raw_option_labels = question_data.get("option_labels") or {}
+        if not isinstance(raw_option_labels, dict):
+            msg = "Interactive question option labels must be an object"
+            raise TypeError(msg)
         raw_thread_id = question_data.get("thread_id")
         raw_created_at = question_data["created_at"]
         if not isinstance(raw_created_at, int | float | str):
@@ -165,6 +180,10 @@ def _load_active_questions(payload: object) -> dict[str, _InteractiveQuestion]:
             thread_id=None if raw_thread_id is None else str(raw_thread_id),
             options={str(key): str(value) for key, value in cast("dict[object, object]", raw_options).items()},
             creator_agent=str(question_data["creator_agent"]),
+            question_text=str(question_data.get("question_text") or ""),
+            option_labels={
+                str(key): str(value) for key, value in cast("dict[object, object]", raw_option_labels).items()
+            },
             created_at=float(raw_created_at),
         )
     return questions
@@ -263,12 +282,8 @@ def _refresh_active_questions_locked() -> None:
         return
 
     try:
-        with _persistence_lock_file.open("a+") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
-            try:
-                persisted_questions = _load_persisted_questions()
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with advisory_file_lock(_persistence_lock_file, exclusive=False):
+            persisted_questions = _load_persisted_questions()
     except Exception as exc:
         logger.warning(
             "Failed to refresh persisted interactive questions; continuing with in-memory snapshot",
@@ -290,22 +305,18 @@ def _save_active_questions_locked() -> None:
 
     try:
         _persistence_file.parent.mkdir(parents=True, exist_ok=True)
-        with _persistence_lock_file.open("a+") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        with advisory_file_lock(_persistence_lock_file):
             try:
-                try:
-                    merged_questions = _apply_local_changes_locked(_load_persisted_questions())
-                except Exception as exc:
-                    merged_questions = dict(_active_questions)
-                    logger.warning(
-                        "Failed to read persisted interactive questions before save; rebuilding file from in-memory questions",
-                        path=str(_persistence_file),
-                        error=str(exc),
-                    )
-                _write_active_questions_atomically_locked(merged_questions)
-                _replace_active_questions_locked(merged_questions)
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                merged_questions = _apply_local_changes_locked(_load_persisted_questions())
+            except Exception as exc:
+                merged_questions = dict(_active_questions)
+                logger.warning(
+                    "Failed to read persisted interactive questions before save; rebuilding file from in-memory questions",
+                    path=str(_persistence_file),
+                    error=str(exc),
+                )
+            _write_active_questions_atomically_locked(merged_questions)
+            _replace_active_questions_locked(merged_questions)
     except Exception as exc:
         logger.warning(
             "Failed to persist interactive questions; continuing in-memory",
@@ -325,14 +336,10 @@ def init_persistence(storage_root: Path) -> None:
         _persistence_lock_file = persistence_lock_file
         try:
             persistence_file.parent.mkdir(parents=True, exist_ok=True)
-            with persistence_lock_file.open("a+") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                try:
-                    loaded_questions = _load_persisted_questions()
-                    _write_active_questions_atomically_locked(loaded_questions)
-                    _replace_active_questions_locked(loaded_questions)
-                finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            with advisory_file_lock(persistence_lock_file):
+                loaded_questions = _load_persisted_questions()
+                _write_active_questions_atomically_locked(loaded_questions)
+                _replace_active_questions_locked(loaded_questions)
         except Exception as exc:
             _active_questions = {}
             _dirty_question_ids.clear()
@@ -484,6 +491,7 @@ async def handle_reaction(
             return None
 
         selected_value = question.options[reaction_key]
+        selected_label = question.option_labels.get(reaction_key, selected_value)
 
         with bound_log_context(room_id=question.room_id, thread_id=question.thread_id):
             logger.info(
@@ -499,7 +507,9 @@ async def handle_reaction(
 
         return InteractiveSelection(
             question_event_id=event.reacts_to,
+            question_text=question.question_text,
             selection_key=reaction_key,
+            selected_label=selected_label,
             selected_value=selected_value,
             thread_id=question.thread_id,
         )
@@ -566,6 +576,7 @@ def _handle_text_response_locked(
             continue
 
         selected_value = question.options[message_text]
+        selected_label = question.option_labels.get(message_text, selected_value)
         with bound_log_context(room_id=room_id, thread_id=thread_id):
             logger.info(
                 "Received answer via text",
@@ -577,11 +588,32 @@ def _handle_text_response_locked(
             _save_active_questions_locked()
         return InteractiveSelection(
             question_event_id=question_event_id,
+            question_text=question.question_text,
             selection_key=message_text,
+            selected_label=selected_label,
             selected_value=selected_value,
             thread_id=question.thread_id,
         )
     return None
+
+
+def build_selection_prompt(selection: InteractiveSelection) -> str:
+    """Build the model prompt for one interactive option selection."""
+    payload = {
+        "question_event_id": selection.question_event_id,
+        "thread_id": selection.thread_id,
+        "question_text": selection.question_text,
+        "selected_option": {
+            "key": selection.selection_key,
+            "label": selection.selected_label,
+            "value": selection.selected_value,
+        },
+    }
+    return (
+        "The user selected an option for an earlier interactive question. "
+        "Use the question_event_id and question_text below to bind the selection to the correct question.\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)}"
+    )
 
 
 def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> _InteractiveResponse:
@@ -625,7 +657,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         return _InteractiveResponse(response_text)
 
     interactive_payload = cast("dict[str, object]", interactive_data)
-    question = interactive_payload.get("question", _DEFAULT_QUESTION)
+    question = str(interactive_payload.get("question") or _DEFAULT_QUESTION)
     options = cast("list[dict[str, str]]", interactive_payload.get("options", []))
 
     if not options:
@@ -636,6 +668,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
 
     option_lines = []
     option_map: dict[str, str] | None = {} if extract_mapping else None
+    option_labels: dict[str, str] | None = {} if extract_mapping else None
 
     for i, opt in enumerate(options, 1):
         emoji_char = opt.get("emoji", "❓")
@@ -646,6 +679,9 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
             value = opt.get("value", label.lower())
             option_map[emoji_char] = value
             option_map[str(i)] = value
+            if option_labels is not None:
+                option_labels[emoji_char] = label
+                option_labels[str(i)] = label
 
     # Combine everything into the final message
     message_parts = []
@@ -662,7 +698,12 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
 
     return _InteractiveResponse(
         final_text,
-        InteractiveMetadata.from_parts(option_map, options if extract_mapping else None),
+        InteractiveMetadata.from_parts(
+            option_map,
+            options if extract_mapping else None,
+            question_text=question,
+            option_labels=option_labels,
+        ),
     )
 
 
@@ -672,6 +713,9 @@ def register_interactive_question(
     thread_id: str | None,
     option_map: dict[str, str],
     agent_name: str,
+    *,
+    question_text: str = "",
+    option_labels: dict[str, str] | None = None,
 ) -> None:
     """Register an interactive question for tracking.
 
@@ -681,6 +725,8 @@ def register_interactive_question(
         thread_id: Thread ID if in a thread
         option_map: Mapping of emoji/number to values
         agent_name: The agent that created the question
+        question_text: The visible question text shown above the options
+        option_labels: Mapping of emoji/number to human option labels
 
     """
     with _thread_lock:
@@ -691,6 +737,8 @@ def register_interactive_question(
                 thread_id=thread_id,
                 options=option_map,
                 creator_agent=agent_name,
+                question_text=question_text,
+                option_labels=dict(option_labels or {}),
             ),
         )
         _save_active_questions_locked()
