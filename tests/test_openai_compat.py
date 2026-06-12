@@ -40,9 +40,9 @@ from mindroom.api.openai_compat import (
     _ChatMessage,
     _convert_messages,
     _derive_session_id,
-    _extract_content_text,
     _is_error_response,
 )
+from mindroom.api.openai_request_parsing import _extract_content_text
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig

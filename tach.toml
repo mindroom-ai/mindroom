@@ -431,19 +431,29 @@ path = "mindroom.api.openai_compat"
 depends_on = [
     "mindroom.agent_run_context",
     "mindroom.ai",
-    "mindroom.ai_run_metadata",
     "mindroom.api.config_lifecycle",
+    "mindroom.api.openai_request_parsing",
+    "mindroom.api.openai_streaming_protocol",
     "mindroom.constants",
     "mindroom.execution_preparation",
     "mindroom.history",
     "mindroom.knowledge",
     "mindroom.logging_config",
-    "mindroom.matrix.client_visible_messages",
-    "mindroom.metadata_merge",
     "mindroom.routing",
     "mindroom.teams",
-    "mindroom.tool_system.events",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.openai_streaming_protocol"
+depends_on = ["mindroom.tool_system.events"]
+
+[[modules]]
+path = "mindroom.api.openai_request_parsing"
+depends_on = [
+    "mindroom.api.openai_streaming_protocol",
+    "mindroom.constants",
+    "mindroom.matrix.client_visible_messages",
 ]
 
 [[modules]]
@@ -1608,7 +1618,7 @@ depends_on = [
     "mindroom.matrix.visible_body",
 ]
 visibility = [
-    "mindroom.api.openai_compat",
+    "mindroom.api.openai_request_parsing",
     "mindroom.commands.handler",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_room",
