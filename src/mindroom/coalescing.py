@@ -647,26 +647,24 @@ class CoalescingGate:
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
         debounce_seconds = max(self._debounce_seconds(), 0.0)
+        coalesce = coalesce_normal_events()
         if (
             debounce_seconds <= 0
             or self._is_shutting_down()
             or gate.drain_all_requested
-            or self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce_normal_events())
+            or self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce)
         ):
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
         quiet_deadline = (
             self._front_normal_run_latest_receipt_time(
                 gate,
-                coalesce_normal_events=coalesce_normal_events(),
+                coalesce_normal_events=coalesce,
                 debounce_seconds=debounce_seconds,
             )
             + debounce_seconds
         )
-        if self._has_barrier_after_front_normal_run(
-            gate,
-            coalesce_normal_events=coalesce_normal_events(),
-        ):
+        if self._has_barrier_after_front_normal_run(gate, coalesce_normal_events=coalesce):
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=quiet_deadline)
         gate.deadline = quiet_deadline
@@ -674,22 +672,20 @@ class CoalescingGate:
             deadline = gate.deadline or time.monotonic()
             if not await self._wait_for_deadline(gate, deadline):
                 return _DebounceWaitResult(quiet_deadline=quiet_deadline)
-            if self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce_normal_events()):
+            coalesce = coalesce_normal_events()
+            if self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce):
                 gate.deadline = time.monotonic()
                 return _DebounceWaitResult(quiet_deadline=gate.deadline)
             if (
                 self._is_shutting_down()
                 or gate.drain_all_requested
-                or self._has_barrier_after_front_normal_run(
-                    gate,
-                    coalesce_normal_events=coalesce_normal_events(),
-                )
+                or self._has_barrier_after_front_normal_run(gate, coalesce_normal_events=coalesce)
             ):
                 return _DebounceWaitResult(quiet_deadline=quiet_deadline)
             quiet_deadline = (
                 self._front_normal_run_latest_receipt_time(
                     gate,
-                    coalesce_normal_events=coalesce_normal_events(),
+                    coalesce_normal_events=coalesce,
                     debounce_seconds=debounce_seconds,
                 )
                 + debounce_seconds
