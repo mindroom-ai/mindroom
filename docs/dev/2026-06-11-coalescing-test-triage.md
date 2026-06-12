@@ -37,11 +37,24 @@ Rows marked ⚠A–⚠G reference the sign-off questions below.
 
 All seven questions below were approved as proposed, with two amendments:
 
-- **A** is accepted with one replacement behavior: a command that semantically targets a conversation that does not exist yet (e.g. a thread-reply `!command` whose parent root is still pending ingress) must fail visibly — a loud no-op telling the user the target is not ready — never silently act on the wrong scope and never silently drop. The deleted ordering tests are replaced by that visible-failure test. This new behavior lands in Phase 2 (L2), not Phase 1.
+- **A** is accepted with one replacement behavior: a command that semantically targets a conversation that does not exist yet (e.g. a thread-reply `!command` whose parent root is still pending ingress) must fail visibly — a loud no-op telling the user the target is not ready — never silently act on the wrong scope and never silently drop.
+  The deleted ordering tests are replaced by that visible-failure test.
+  This new behavior lands in Phase 2 (L2), not Phase 1.
 - **F** is accepted with observability: when a late-resolving follow-up misses the combined follow-up and becomes its own turn, emit a structured log event (`follow_up_missed_combined_turn`) so the frequency of the degradation is measurable.
 
 The 29 DELETEs and the INVERT are approved as written.
 Phase 1 remains strictly behavior-preserving for the KEEP invariants; A's visible-failure behavior and B's complementary room-mode test land in Phase 2 where their machinery lives.
+
+## Implementation outcome (post-implementation amendment)
+
+The phases landed conservatively relative to this table; every deviation keeps a stronger behavior than the plan required.
+
+- Seven DELETE rows were not executed because the tests still pass against the new design and their machinery partially survives until later cleanup: `test_active_follow_up_source_kind_is_not_coalescing_exempt`, `test_batch_construction_does_not_close_mixed_solo_metadata`, `test_room_level_messages_do_not_coalesce_during_upload_grace`, `test_upload_grace_requeue_removes_admissions_from_claimed_state`, `test_pending_dispatch_policy_preserves_active_followup_without_bypassing_modality`, `test_zero_debounce_immediate_flush_logs_pending_count_before_clearing`, and `test_zero_debounce_with_upload_grace_logs_scheduled_grace_outcome`.
+- The accepted degradations E and G never materialized: the deferred room-scope voice burst still dispatches as one turn, overlapping scheduled fires still buffer behind the in-flight first fire (now via the busy queue), and failed room voice still leaves surviving roots uncoalesced, so those tests kept their original stronger assertions.
+- Most MOVE rows landed as in-place rewrites against the owning layer's seam rather than physical relocations; suite reorganization by layer remains future work.
+- The new lane, busy-queue, runner-drain, and independence tests live in `tests/test_ingress_lanes.py`, which this table predates.
+
+The verdict totals above therefore describe the reviewed plan; the executed deletions number 22 of the approved 29, with the remainder retained as still-valid characterization.
 
 ## Original questions (as presented for sign-off)
 

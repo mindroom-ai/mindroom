@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -11,6 +12,7 @@ import pytest
 
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
+from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
@@ -785,3 +787,93 @@ async def test_cancelled_lane_worker_settles_remaining_slots() -> None:
     blocked.set()
     result = await gate.drain_all()
     assert result.completed is True
+
+
+@pytest.mark.asyncio
+async def test_abandoned_slot_does_not_deliver_after_late_readiness() -> None:
+    """A slot abandoned mid-readiness never delivers the payload the drain dropped."""
+    gate, batches = _gate(debounce_seconds=0.0)
+    close_count = 0
+
+    def close_metadata() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    pending = PendingEvent(
+        event=_plain_event("$late", "stubborn voice", 1_000_000),
+        room=_room(),
+        source_kind=VOICE_SOURCE_KIND,
+        dispatch_metadata=(PendingDispatchMetadata(kind="test", payload=object(), close=close_metadata),),
+    )
+
+    async def stubborn_ready() -> ReadyPendingEvent:
+        # Readiness that completes with a result despite cancellation, like STT
+        # finishing concurrently with a bounded drain's abandon.
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+        return ReadyPendingEvent(pending_event=pending)
+
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        slot,
+        key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+        source_event_id="$late",
+        source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(stubborn_ready()),
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    outcome = await gate.lanes.abandon_slot(slot, ready_timeout_seconds=0.1)
+    assert outcome.dropped_ready_count == 1
+
+    result = await gate.drain_all()
+    assert batches == []
+    assert close_count == 1
+    assert result.completed is True
+
+
+@pytest.mark.asyncio
+async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> None:
+    """A bounded runner drain cancels a stuck response, runs its cleanup once, and reports incomplete."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    started = asyncio.Event()
+    cleanup_count = 0
+
+    async def stuck_response() -> None:
+        nonlocal cleanup_count
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_count += 1
+
+    task = runner.track_inbox_response(stuck_response(), name="test_stuck_response")
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    assert await runner.drain_inbox_responses(cancel_after_seconds=0.05) is False
+    assert task.cancelled()
+    assert cleanup_count == 1
+    await asyncio.sleep(0)
+    assert not runner._inbox_response_tasks
+    assert await runner.drain_inbox_responses() is True
+
+
+@pytest.mark.asyncio
+async def test_failed_inbox_response_is_contained_and_unregistered(tmp_path: Path) -> None:
+    """A detached response that raises is logged, unregistered, and never poisons drains."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    async def failing_response() -> None:
+        msg = "response failed"
+        raise RuntimeError(msg)
+
+    task = runner.track_inbox_response(failing_response(), name="test_failing_response")
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert not runner._inbox_response_tasks
+    assert await runner.drain_inbox_responses() is True
+    assert await runner.drain_inbox_responses(cancel_after_seconds=0.05) is True

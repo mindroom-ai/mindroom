@@ -301,6 +301,12 @@ class IngressLanes:
         # (for example voice STT producing nothing), settled without delivery.
         if ready is None:
             return
+        if slot.released:
+            # A bounded drain abandoned this slot while its readiness resolved;
+            # the drain already counted it dropped and closed its metadata, so
+            # delivering now would dispatch work the drain reported as dropped.
+            close_ready_task_result_metadata(ready)
+            return
         ready.pending_event.enqueue_time = delivery.received_at
         try:
             await self._deliver(slot, delivery, ready)

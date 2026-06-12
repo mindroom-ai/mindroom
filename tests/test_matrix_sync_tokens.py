@@ -1091,3 +1091,20 @@ async def test_shutdown_in_flight_dispatch_cancellation_marks_drain_incomplete()
     assert dispatch_raised_self_cancel.is_set()
     assert result.completed is False
     assert result.dispatch_cancelled_count == 1
+
+
+@pytest.mark.asyncio
+async def test_shutdown_timeout_does_not_save_checkpoint_for_undrained_inbox_responses(tmp_path: Path) -> None:
+    """A stuck detached inbox response must block the certified shutdown checkpoint."""
+    bot = _agent_bot(tmp_path)
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_shutdown")
+    bot._coalescing_gate.drain_all = AsyncMock(return_value=CoalescingDrainResult(completed=True))
+    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=False)
+
+    await bot.prepare_for_sync_shutdown()
+
+    bot._response_runner.drain_inbox_responses.assert_awaited_once_with(cancel_after_seconds=5.0)
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_checkpoint is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None

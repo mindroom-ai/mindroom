@@ -16,8 +16,8 @@ from mindroom.coalescing_batch import (
     CoalescingKey,
     PendingEvent,
     build_coalesced_batch,
-    close_pending_event_metadata,
 )
+from mindroom.coalescing_cleanup import close_pending_event_metadata_once
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
@@ -1665,7 +1665,9 @@ class TurnController:
         try:
             handoff = build_dispatch_handoff(batch)
         except BaseException:
-            close_pending_event_metadata(list(batch.pending_events))
+            # Close-and-clear so the gate's segment owner cannot close the
+            # same metadata a second time when this exception reaches it.
+            close_pending_event_metadata_once(list(batch.pending_events))
             raise
         _consume_queued_notice_reservations_from_metadata(
             handoff.dispatch_metadata,
