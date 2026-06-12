@@ -26,6 +26,7 @@ from mindroom.entity_resolution import (
     entity_identity_registry,
     is_configured_room,
 )
+from mindroom.event_loop_stall import EventLoopStallDetector, start_event_loop_stall_detector
 from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
     ConfigReloadedContext,
@@ -1946,6 +1947,7 @@ async def main(  # noqa: PLR0915
     orchestrator_task: asyncio.Task[None] | None = None
     shutdown_wait_task: asyncio.Task[bool] | None = None
     api_task: asyncio.Task[None] | None = None
+    stall_detector: EventLoopStallDetector | None = None
 
     try:
         # Drop any stale worker manager before startup work builds the active runtime.
@@ -1953,6 +1955,8 @@ async def main(  # noqa: PLR0915
 
         # Configure logging before any background tasks or account setup begin.
         setup_logging(level=log_level, runtime_paths=runtime_paths)
+
+        stall_detector = start_event_loop_stall_detector(runtime_paths)
 
         logger.info("Syncing API keys from environment to CredentialsManager...")
         sync_env_to_credentials(runtime_paths=runtime_paths)
@@ -2034,6 +2038,8 @@ async def main(  # noqa: PLR0915
             if orchestrator is not None:
                 await orchestrator.stop()
         finally:
+            if stall_detector is not None:
+                stall_detector.stop()
             reset_matrix_sync_health()
             reset_runtime_state()
             shutdown_primary_worker_manager()
