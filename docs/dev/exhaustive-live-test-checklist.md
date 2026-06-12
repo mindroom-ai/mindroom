@@ -336,7 +336,7 @@ Expected outcome: Router echo is emitted at most once per voice event, reused ac
 
 ## 10. Memory, Knowledge, Workspaces, Private Roots, And Cultures
 
-Source anchors: `src/mindroom/agents.py`, `src/mindroom/memory/`, `src/mindroom/memory/auto_flush.py`, `src/mindroom/memory/config.py`, `src/mindroom/workspaces.py`, `src/mindroom/knowledge/manager.py`, `src/mindroom/knowledge/utils.py`, `src/mindroom/api/knowledge.py`.
+Source anchors: `src/mindroom/agents.py`, `src/mindroom/memory/`, `src/mindroom/memory/auto_flush.py`, `src/mindroom/memory/config.py`, `src/mindroom/workspaces.py`, `src/mindroom/knowledge/manager.py`, `src/mindroom/knowledge/file_listing.py`, `src/mindroom/knowledge/utils.py`, `src/mindroom/api/knowledge.py`.
 
 - [ ] `MEM-001` Use a runtime configured with `memory.backend: mem0`.
 Expected outcome: Agent memory persists across turns and later retrieval reflects the stored semantic memory state.

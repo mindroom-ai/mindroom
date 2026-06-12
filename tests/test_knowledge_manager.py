@@ -20,6 +20,7 @@ from agno.knowledge.document.base import Document
 from fastapi.testclient import TestClient
 from watchfiles import Change
 
+import mindroom.knowledge.file_listing as knowledge_file_listing_module
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
@@ -34,15 +35,14 @@ from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.index_metadata import write_index_metadata_payload
-from mindroom.knowledge.indexing_config import IndexingSettings
-from mindroom.knowledge.manager import (
-    KnowledgeManager,
+from mindroom.knowledge.file_listing import (
     git_checkout_present,
-    knowledge_source_signature,
     list_git_tracked_knowledge_files,
     list_knowledge_files,
 )
+from mindroom.knowledge.index_metadata import write_index_metadata_payload
+from mindroom.knowledge.indexing_config import IndexingSettings
+from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
 from mindroom.knowledge.redaction import credential_free_repo_url, credential_free_url_identity, redact_url_credentials
 from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
@@ -1425,13 +1425,13 @@ def test_local_knowledge_file_listing_prunes_literal_include_prefixes(
     )
 
     walked_roots: list[Path] = []
-    original_walk = knowledge_manager_module.os.walk
+    original_walk = knowledge_file_listing_module.os.walk
 
     def recording_walk(top: object, *args: object, **kwargs: object) -> object:
         walked_roots.append(Path(top))
         return original_walk(top, *args, **kwargs)
 
-    monkeypatch.setattr(knowledge_manager_module.os, "walk", recording_walk)
+    monkeypatch.setattr(knowledge_file_listing_module.os, "walk", recording_walk)
 
     files = list_knowledge_files(config, "docs", docs_path)
 
