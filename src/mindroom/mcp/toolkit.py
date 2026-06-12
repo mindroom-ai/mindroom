@@ -127,23 +127,27 @@ class MindRoomMCPToolkit(Toolkit):
         if self.server_config is None:
             return
         tool_prefix = resolved_mcp_tool_prefix(self.server_id, self.server_config)
+        # Before the requester signs in, these bridge functions are the only
+        # model-visible surface for the server, so the configured description
+        # is the model's only hint about what connecting would unlock.
+        suffix = f" {self.server_config.description}" if self.server_config.description else ""
         self.async_functions[f"{tool_prefix}_connection_status"] = Function(
             name=f"{tool_prefix}_connection_status",
-            description=f"Check whether MCP server '{self.server_id}' is connected for the current requester.",
+            description=f"Check whether MCP server '{self.server_id}' is connected for the current requester.{suffix}",
             parameters={"type": "object", "properties": {}},
             entrypoint=self._oauth_connection_status,
             skip_entrypoint_processing=True,
         )
         self.async_functions[f"{tool_prefix}_list_tools"] = Function(
             name=f"{tool_prefix}_list_tools",
-            description=f"List remote tools exposed by MCP server '{self.server_id}' for the current requester.",
+            description=f"List remote tools exposed by MCP server '{self.server_id}' for the current requester.{suffix}",
             parameters={"type": "object", "properties": {}},
             entrypoint=self._oauth_list_tools,
             skip_entrypoint_processing=True,
         )
         self.async_functions[f"{tool_prefix}_call_tool"] = Function(
             name=f"{tool_prefix}_call_tool",
-            description=f"Call one remote tool on MCP server '{self.server_id}' for the current requester.",
+            description=f"Call one remote tool on MCP server '{self.server_id}' for the current requester.{suffix}",
             parameters={
                 "type": "object",
                 "properties": {
