@@ -2186,6 +2186,46 @@ def test_kubernetes_backend_reconcile_uses_persisted_private_visibility(tmp_path
     assert expected_private_root in mount_paths
 
 
+def test_kubernetes_backend_reconcile_defers_user_agent_workers_without_persisted_visibility(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """User-agent workers without persisted visibility defer to ensure-time recreation without warning each pass."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="mind",
+    )
+    handle = backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=0.0)
+    backend.cleanup_idle_workers(now=80.0)
+    del apps_api.deployments[handle.worker_id].metadata.annotations[_ANNOTATION_PRIVATE_AGENT_NAMES]
+
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+
+    with caplog.at_level("WARNING", logger=kubernetes_backend_module.__name__):
+        reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+
+    assert reconciled == []
+    assert apps_api.deleted_names == []
+    assert len(apps_api.created_bodies) == 1
+    assert caplog.records == []
+
+
 def test_kubernetes_backend_config_reads_reconcile_pod_templates_from_env(tmp_path: Path) -> None:
     """Pod-template reconciliation defaults on and is disabled through runtime env."""
     config_dir = tmp_path / "cfg"

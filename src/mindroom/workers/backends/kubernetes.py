@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
-from mindroom.tool_system.worker_routing import worker_dir_name, worker_id_for_key
+from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_id_for_key
 from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
 from mindroom.workers.backends._lifecycle import mark_worker_failed, mark_worker_idle, touch_worker_lifecycle
 from mindroom.workers.models import (
@@ -555,6 +555,14 @@ class KubernetesWorkerBackend:
     ) -> WorkerHandle | None:
         annotations = dict(deployment.metadata.annotations or {})
         private_agent_names = resources.parse_private_agent_names_annotation(annotations)
+        if private_agent_names is None and resolved_worker_key_scope(handle.worker_key) == "user_agent":
+            # Deployments created before visibility persistence cannot be rebuilt
+            # deterministically; the ensure-time hash check recreates them on next use.
+            logger.debug(
+                "Deferring pod-template reconciliation for worker %r: no persisted private-agent visibility",
+                handle.worker_key,
+            )
+            return None
         state_subpath = self._state_subpath(handle.worker_key)
         try:
             drifted = self._resources.deployment_template_drifted(
