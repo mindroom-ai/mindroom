@@ -612,6 +612,46 @@ async def test_send_context_attachments_sends_attachment_ids(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_send_context_attachments_passes_as_voice_to_send_file_message(tmp_path: Path) -> None:
+    """Voice attachment sends should forward the opt-in flag to Matrix delivery."""
+    sample_file = tmp_path / "upload.wav"
+    sample_file.write_bytes(b"audio")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_voice",
+    )
+    assert attachment is not None
+
+    context = _tool_context(tmp_path, attachment_ids=("att_voice",))
+    with patch(
+        "mindroom.custom_tools.attachments.send_file_message",
+        new=AsyncMock(return_value="$file_evt"),
+    ) as mocked:
+        result, send_error = await send_context_attachments(
+            context,
+            attachment_ids=["att_voice"],
+            attachment_file_paths=[],
+            as_voice=True,
+        )
+
+    assert send_error is None
+    assert result is not None
+    assert result.attachment_event_ids == ["$file_evt"]
+    mocked.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        attachment.local_path,
+        config=context.config,
+        thread_id=context.resolved_thread_id,
+        latest_thread_event_id=context.resolved_thread_id,
+        conversation_cache=context.conversation_cache,
+        as_voice=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_send_context_attachments_reuses_latest_thread_event_id_for_multiple_files(tmp_path: Path) -> None:
     """Threaded attachment batches should resolve the latest event once and advance it locally."""
     first_file = tmp_path / "one.txt"

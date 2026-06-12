@@ -21,6 +21,7 @@ from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.media import upload_content_uri, upload_media_bytes
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_matrix_edit_content
+from mindroom.matrix.voice_message import VoiceMessagePayload, build_voice_message_payload, voice_event_extra_content
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
@@ -40,6 +41,17 @@ class DeliveredMatrixEvent:
 
     event_id: str
     content_sent: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedFileUpload:
+    """Local upload target plus event-facing names for one Matrix file message."""
+
+    upload_path: Path
+    mimetype: str
+    event_body: str
+    event_filename: str
+    voice_payload: VoiceMessagePayload | None
 
 
 def _sanitized_delivery_error_message(error: Exception) -> str:
@@ -65,6 +77,17 @@ def _log_matrix_delivery_exception(
         exception_type=error.__class__.__name__,
         error_message=_sanitized_delivery_error_message(error),
     )
+
+
+def _cleanup_voice_payload_source(voice_payload: VoiceMessagePayload) -> None:
+    try:
+        voice_payload.source_path.unlink(missing_ok=True)
+    except OSError as error:
+        logger.warning(
+            "matrix_voice_tempfile_cleanup_failed",
+            path=str(voice_payload.source_path),
+            exception_type=error.__class__.__name__,
+        )
 
 
 async def _send_prepared_room_message(
@@ -347,6 +370,95 @@ def _msgtype_for_mimetype(mimetype: str) -> str:
     return "m.file"
 
 
+async def _prepare_file_upload(
+    resolved_path: Path,
+    *,
+    caption: str | None,
+    as_voice: bool,
+) -> _PreparedFileUpload:
+    mimetype = _guess_mimetype(resolved_path)
+    voice_payload = await build_voice_message_payload(resolved_path) if as_voice else None
+    if voice_payload is None:
+        return _PreparedFileUpload(
+            upload_path=resolved_path,
+            mimetype=mimetype,
+            event_body=caption or resolved_path.name,
+            event_filename=resolved_path.name,
+            voice_payload=None,
+        )
+    if caption:
+        logger.debug("caption was ignored for voice message", path=str(resolved_path))
+    return _PreparedFileUpload(
+        upload_path=voice_payload.source_path,
+        mimetype=voice_payload.mimetype,
+        event_body="voice-message.ogg",
+        event_filename="voice-message.ogg",
+        voice_payload=voice_payload,
+    )
+
+
+def _file_message_info(
+    upload_payload: dict[str, Any],
+    *,
+    upload_path: Path,
+    mimetype: str,
+) -> dict[str, Any]:
+    info = upload_payload.get("info")
+    if isinstance(info, dict):
+        return info
+    return {"size": upload_path.stat().st_size, "mimetype": mimetype}
+
+
+def _add_thread_relation(
+    content: dict[str, Any],
+    *,
+    thread_id: str | None,
+    latest_thread_event_id: str | None,
+) -> None:
+    if thread_id is None:
+        return
+    if latest_thread_event_id is None:
+        msg = "latest_thread_event_id is required for thread fallback"
+        raise ValueError(msg)
+    content["m.relates_to"] = {
+        "rel_type": "m.thread",
+        "event_id": thread_id,
+        "is_falling_back": True,
+        "m.in_reply_to": {"event_id": latest_thread_event_id},
+    }
+
+
+def _build_file_message_content(
+    prepared: _PreparedFileUpload,
+    *,
+    upload_payload: dict[str, Any],
+    mxc_uri: str,
+    thread_id: str | None,
+    latest_thread_event_id: str | None,
+) -> dict[str, Any]:
+    info = _file_message_info(upload_payload, upload_path=prepared.upload_path, mimetype=prepared.mimetype)
+    msgtype = "m.audio" if prepared.voice_payload is not None else _msgtype_for_mimetype(prepared.mimetype)
+    content: dict[str, Any] = {
+        "msgtype": msgtype,
+        "body": prepared.event_body,
+        "info": info,
+    }
+    if prepared.voice_payload is not None:
+        info["duration"] = prepared.voice_payload.duration_ms
+        content["filename"] = prepared.event_filename
+        content.update(voice_event_extra_content(prepared.voice_payload))
+    elif msgtype == "m.file":
+        content["filename"] = prepared.event_filename
+
+    encrypted_file_payload = upload_payload.get("file")
+    if isinstance(encrypted_file_payload, dict):
+        content["file"] = encrypted_file_payload
+    else:
+        content["url"] = mxc_uri
+    _add_thread_relation(content, thread_id=thread_id, latest_thread_event_id=latest_thread_event_id)
+    return content
+
+
 async def send_file_message(
     client: nio.AsyncClient,
     room_id: str,
@@ -357,6 +469,7 @@ async def send_file_message(
     caption: str | None = None,
     latest_thread_event_id: str | None = None,
     conversation_cache: ConversationCacheProtocol | None = None,
+    as_voice: bool = False,
 ) -> str | None:
     """Upload a file and send it with the appropriate Matrix message type."""
     resolved_path = Path(file_path).expanduser().resolve()
@@ -366,48 +479,37 @@ async def send_file_message(
     if not _can_send_to_encrypted_room(client, room_id, operation="send_file_message"):
         return None
 
-    mimetype = _guess_mimetype(resolved_path)
-    mxc_uri, upload_payload = await _upload_file_as_mxc(client, room_id, resolved_path, mimetype=mimetype)
-    if mxc_uri is None or upload_payload is None:
-        return None
-
-    info = upload_payload.get("info")
-    if not isinstance(info, dict):
-        info = {"size": resolved_path.stat().st_size, "mimetype": mimetype}
-
-    msgtype = _msgtype_for_mimetype(mimetype)
-    content: dict[str, Any] = {
-        "msgtype": msgtype,
-        "body": caption or resolved_path.name,
-        "info": info,
-    }
-    if msgtype == "m.file":
-        content["filename"] = resolved_path.name
-    encrypted_file_payload = upload_payload.get("file")
-    if isinstance(encrypted_file_payload, dict):
-        content["file"] = encrypted_file_payload
-    else:
-        content["url"] = mxc_uri
-
-    if thread_id:
-        if latest_thread_event_id is None:
-            msg = "latest_thread_event_id is required for thread fallback"
-            raise ValueError(msg)
-        content["m.relates_to"] = {
-            "rel_type": "m.thread",
-            "event_id": thread_id,
-            "is_falling_back": True,
-            "m.in_reply_to": {"event_id": latest_thread_event_id},
-        }
-
-    delivered = await send_message_result(client, room_id, content, config=config)
-    if delivered is not None and conversation_cache is not None:
-        conversation_cache.notify_outbound_message(
+    prepared: _PreparedFileUpload | None = None
+    try:
+        prepared = await _prepare_file_upload(resolved_path, caption=caption, as_voice=as_voice)
+        mxc_uri, upload_payload = await _upload_file_as_mxc(
+            client,
             room_id,
-            delivered.event_id,
-            delivered.content_sent,
+            prepared.upload_path,
+            mimetype=prepared.mimetype,
         )
-    return delivered.event_id if delivered is not None else None
+        if mxc_uri is None or upload_payload is None:
+            return None
+
+        content = _build_file_message_content(
+            prepared,
+            upload_payload=upload_payload,
+            mxc_uri=mxc_uri,
+            thread_id=thread_id,
+            latest_thread_event_id=latest_thread_event_id,
+        )
+        delivered = await send_message_result(client, room_id, content, config=config)
+        if delivered is not None and conversation_cache is not None:
+            conversation_cache.notify_outbound_message(
+                room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
+        return delivered.event_id if delivered is not None else None
+    finally:
+        voice_payload = prepared.voice_payload if prepared is not None else None
+        if voice_payload is not None and voice_payload.cleanup:
+            _cleanup_voice_payload_source(voice_payload)
 
 
 def build_threaded_edit_content(
