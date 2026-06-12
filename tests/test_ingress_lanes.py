@@ -592,40 +592,70 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
     """Follow-ups queued behind a response that fails still dispatch as the follow-up turn."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
-    target = MessageTarget.resolve(room.room_id, "$thread", "$m0")
+    first = _text_event(event_id="$m1", body="first")
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = runner._lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
-    calls: list[CoalescedBatch] = []
+    first_locked = asyncio.Event()
+    fail_response = asyncio.Event()
+    generated: list[tuple[str, str]] = []
 
-    async def record_dispatch(batch: CoalescedBatch) -> None:
-        calls.append(batch)
+    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> None:
+        # The real lifecycle holds the response lock here; the first turn fails
+        # AFTER follow-ups queue, so the genuine exception path releases it.
+        generated.append((request.response_envelope.source_event_id, request.prompt))
+        if request.on_lifecycle_lock_acquired is not None:
+            request.on_lifecycle_lock_acquired()
+        if len(generated) == 1:
+            first_locked.set()
+            await fail_response.wait()
+            msg = "response generation failed"
+            raise RuntimeError(msg)
 
-    await lifecycle_lock.acquire()
-    queued_signal.begin_response_turn()
-    with patch.object(bot._turn_controller, "handle_coalesced_batch", new=AsyncMock(side_effect=record_dispatch)):
+    async def fake_prepare_dispatch(
+        _room: object,
+        event: object,
+        requester_user_id: str,
+        **_kwargs: object,
+    ) -> object:
+        dispatch = _prepared_dispatch(
+            event_id=event.event_id,
+            requester_user_id=requester_user_id,
+            body=event.body,
+            thread_id="$m1-thread",
+        )
+        return prepared_dispatch_result(dispatch)
+
+    with (
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=fake_prepare_dispatch),
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+        patch(
+            "mindroom.response_runner.ResponseRunner.generate_response_locked",
+            new=fake_generate_response_locked,
+        ),
+    ):
+        await bot._turn_controller.handle_text_event(room, first)
+        await asyncio.wait_for(first_locked.wait(), timeout=1.0)
+
         for event_id, sender in (("$f1", "@alice:localhost"), ("$f2", "@bob:localhost")):
             await _enqueue_for_dispatch(
                 bot,
-                _text_event(event_id=event_id, body="follow-up", sender=sender, thread_id="$thread"),
+                _text_event(event_id=event_id, body="follow-up", sender=sender, thread_id="$m1-thread"),
                 room,
                 source_kind="message",
                 requester_user_id=sender,
-                coalescing_key=CoalescingKey(room.room_id, "$thread", sender),
+                coalescing_key=CoalescingKey(room.room_id, "$m1-thread", sender),
             )
         await _wait_for(
             lambda: sum(len(entry.queue) for entry in bot._coalescing_gate._gates.values()) == 2,
         )
-        assert calls == []
+        assert len(generated) == 1
 
-        # A failing response releases its lifecycle exactly like a clean one;
-        # the queued follow-ups must survive the failure and flush together.
-        queued_signal.finish_response_turn()
-        lifecycle_lock.release()
+        fail_response.set()
 
-        await _wait_for(lambda: [list(batch.source_event_ids) for batch in calls] == [["$f1", "$f2"]])
-    assert calls[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+        await _wait_for(lambda: len(generated) == 2)
+        assert "$f1" in generated[1][1]
+        assert "$f2" in generated[1][1]
+        await runner.drain_inbox_responses()
 
 
 @pytest.mark.asyncio

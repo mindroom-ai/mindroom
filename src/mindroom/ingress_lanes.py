@@ -121,8 +121,8 @@ class IngressLanes:
         if slot.released or slot.closed:
             msg = "Cannot admit through a released ingress lane slot"
             raise IngressAdmissionClosedError(msg)
-        if ready_result is None and ready_task is None:
-            msg = "ready_task is required when ready_result is not provided"
+        if (ready_result is None) == (ready_task is None):
+            msg = "Provide exactly one of ready_result or ready_task"
             raise ValueError(msg)
         slot.delivery = LaneDelivery(
             key=key,

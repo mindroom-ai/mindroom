@@ -1,5 +1,6 @@
 """Test configuration and fixtures for MindRoom tests."""
 
+import asyncio
 import os
 import re
 import shutil
@@ -238,10 +239,24 @@ def requires_linux(
 
 
 async def drain_coalescing(*bots: RuntimeBot) -> None:
-    """Run queued coalescing dispatch and detached responses before asserting effects."""
+    """Drain gate batches and detached responses until both are quiescent.
+
+    A detached response settling during the runner drain can release its
+    lifecycle lock and flush a busy-conversation backlog into the gate, so a
+    single gate-then-runner pass is not a reliable barrier.
+    """
     for bot in bots:
-        await bot._coalescing_gate.drain_all()
-        await bot._response_runner.drain_inbox_responses()
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        while True:
+            # Concurrently: the gate drain may hold a busy conversation's
+            # backlog until its detached response goes idle, which only the
+            # runner drain settles.
+            await asyncio.gather(
+                bot._coalescing_gate.drain_all(),
+                runner.drain_inbox_responses(),
+            )
+            if not runner._inbox_response_tasks and not bot._coalescing_gate._gates:
+                break
 
 
 def _wait_for_postgres_container(database_url: str) -> None:
