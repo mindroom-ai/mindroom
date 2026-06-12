@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import weakref
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, cast
@@ -119,7 +120,15 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
-_OPENAI_COMPLETION_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
+# Per-session completion locks keep same-session /v1 completions from
+# interleaving Agno session writes and post-response history compaction.
+# The mapping holds weak references: every in-flight request keeps a strong
+# reference to its lock (locally and via the attached response finalizer),
+# so an entry lives exactly as long as some request for that session is
+# still running and the cache is bounded by in-flight concurrency.
+_OPENAI_COMPLETION_LOCKS: weakref.WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 
 def _openai_completion_lock(
@@ -128,18 +137,12 @@ def _openai_completion_lock(
     agent_name: str,
     session_id: str,
 ) -> asyncio.Lock:
+    """Return the shared lock serializing completions for one agent session."""
     key = (str(runtime_paths.storage_root), agent_name, session_id)
     lock = _OPENAI_COMPLETION_LOCKS.get(key)
-    if lock is not None:
-        return lock
-    if len(_OPENAI_COMPLETION_LOCKS) >= 100:
-        for candidate_key, candidate_lock in list(_OPENAI_COMPLETION_LOCKS.items()):
-            if len(_OPENAI_COMPLETION_LOCKS) < 100:
-                break
-            if not candidate_lock.locked():
-                _OPENAI_COMPLETION_LOCKS.pop(candidate_key, None)
-    lock = asyncio.Lock()
-    _OPENAI_COMPLETION_LOCKS[key] = lock
+    if lock is None:
+        lock = asyncio.Lock()
+        _OPENAI_COMPLETION_LOCKS[key] = lock
     return lock
 
 

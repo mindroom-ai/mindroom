@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import json
 import re
@@ -2057,6 +2058,30 @@ async def test_openai_completion_lock_releases_after_response_background() -> No
 
     assert events == ["background"]
     assert not completion_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_openai_completion_lock_is_shared_and_dropped_when_unreferenced(tmp_path: Path) -> None:
+    """Same-session requests share one lock; cache entries vanish once no request holds the lock."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data")
+    key = (str(runtime_paths.storage_root), "general", "session-1")
+
+    lock = openai_compat._openai_completion_lock(
+        runtime_paths=runtime_paths,
+        agent_name="general",
+        session_id="session-1",
+    )
+    same_session_lock = openai_compat._openai_completion_lock(
+        runtime_paths=runtime_paths,
+        agent_name="general",
+        session_id="session-1",
+    )
+    assert same_session_lock is lock
+    assert key in openai_compat._OPENAI_COMPLETION_LOCKS
+
+    del lock, same_session_lock
+    gc.collect()
+    assert key not in openai_compat._OPENAI_COMPLETION_LOCKS
 
 
 @pytest.mark.asyncio
