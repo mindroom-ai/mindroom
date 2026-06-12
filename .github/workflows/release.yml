@@ -42,6 +42,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Verify release metadata token
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_METADATA_PAT || secrets.PAT }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::RELEASE_METADATA_PAT or PAT secret is required to open the release metadata PR."
+            exit 1
+          fi
+          if ! TOKEN_LOGIN=$(gh api user --jq .login); then
+            echo "::error::The release metadata token (RELEASE_METADATA_PAT or PAT secret) was rejected by the GitHub API, most likely because it expired or was revoked. Rotate it in Settings -> Secrets and variables -> Actions, then re-run this workflow."
+            exit 1
+          fi
+          echo "Release metadata token authenticates as ${TOKEN_LOGIN}."
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.release_ref }}
