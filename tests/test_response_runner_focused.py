@@ -632,7 +632,7 @@ async def test_reserve_waiting_human_message_requires_active_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_queued_human_notice_is_registered_exactly_once(tmp_path: Path) -> None:  # noqa: ARG001
+async def test_queued_human_notice_is_registered_exactly_once() -> None:
     """A request arriving mid-turn registers one queued notice that drains when it owns the lock."""
     coordinator = ResponseLifecycleCoordinator()
     first_envelope = _queued_envelope("$first")
