@@ -76,6 +76,7 @@ Matrix sync callback
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
+| `event_loop_stall.py` | Native-thread event-loop stall detector that logs the blocking stack |
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
 | `team_exact_members.py` | Runtime resolution for exact team member materialization |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle, sync callbacks, and room behavior |
@@ -91,6 +92,7 @@ Matrix sync callback
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
+| `sync_restart_retry.py` | One-shot re-dispatch of responses cancelled by sync-restart recovery |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
 | `response_attempt.py` | Runs one visible response attempt with placeholder and stop tracking |
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |

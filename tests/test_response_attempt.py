@@ -247,6 +247,30 @@ async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
 
 
 @pytest.mark.asyncio
+async def test_attempt_task_error_during_forwarded_cancellation_is_logged() -> None:
+    """An attempt task that errors while unwinding the forced cancel must be reported."""
+    runner, _delivery_gateway, _stop_manager = _runner()
+    inner_started = asyncio.Event()
+
+    async def misbehaving_attempt() -> None:
+        inner_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            msg = "cleanup failed during cancellation"
+            raise RuntimeError(msg) from None
+
+    task = asyncio.create_task(misbehaving_attempt())
+    await inner_started.wait()
+    await runner._forward_cancel_to_attempt_task(task, asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG))
+
+    error_calls = runner.deps.logger.error.call_args_list
+    assert len(error_calls) == 1
+    assert error_calls[0].args == ("Response attempt task failed while unwinding forwarded cancellation",)
+    assert error_calls[0].kwargs["error"] == "cleanup failed during cancellation"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("cancel_args", "expected_reason", "log_method", "log_message"),
     [
