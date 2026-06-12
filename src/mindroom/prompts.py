@@ -13,6 +13,7 @@ __all__ = [
     "AVATAR_TEAM_SYSTEM_PROMPT",
     "CODEX_DEFAULT_INSTRUCTIONS",
     "COMPACTION_SUMMARY_PROMPT",
+    "COMPACTION_WARM_SUMMARY_INSTRUCTION",
     "CONTEXT_TRUNCATION_MARKER_TEMPLATE",
     "CURRENT_MESSAGE_PROMPT_INTRO",
     "DATETIME_CONTEXT_TEMPLATE",
@@ -285,6 +286,35 @@ Return only the summary text.
 Rules:
 - Preserve all still-relevant information from <previous_summary>.
 - Add only the new information from <new_conversation>.
+- Keep unchanged wording verbatim when it is still correct so future prompt prefixes remain stable.
+- Never paraphrase away exact technical details such as file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, or error text.
+- Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
+- Do not invent facts.
+- If a section has no content, write `None.`
+
+Write a plain-text summary in exactly this markdown structure:
+## Goal
+## Constraints
+## Progress
+## Decisions
+## Next Steps
+## Critical Context
+"""
+
+COMPACTION_WARM_SUMMARY_INSTRUCTION = """Stop and update the durable conversation handoff summary for a future model call.
+
+The conversation above this instruction contains only the runs that became old enough to compact in this pass.
+An optional <previous_summary> block below already contains everything summarized before this compaction.
+If no <previous_summary> block is present, there is no previous summary.
+
+Your job is to produce one merged handoff summary as plain text.
+Return only the summary text.
+Do not call any tools.
+Do not summarize your static instructions or tool definitions; summarize only the conversation.
+
+Rules:
+- Preserve all still-relevant information from <previous_summary>.
+- Add only the new information from the conversation above.
 - Keep unchanged wording verbatim when it is still correct so future prompt prefixes remain stable.
 - Never paraphrase away exact technical details such as file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, or error text.
 - Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
