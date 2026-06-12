@@ -287,7 +287,12 @@ def _resolve_thread_summary_model_name(
     *,
     entity_name: str | None = None,
 ) -> str:
-    """Return the model name for automatic thread summaries in one room."""
+    """Return the model name for automatic thread summaries in one room.
+
+    Precedence: room-scoped override (alias or raw room ID) > responding
+    entity's name as a ``room_thread_summary_models`` key (covers ad-hoc
+    rooms with no managed alias) > ``defaults.thread_summary_model``.
+    """
     if override := resolve_room_scoped_model_override(
         config.room_thread_summary_models,
         room_id,

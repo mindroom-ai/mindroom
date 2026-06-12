@@ -6173,6 +6173,7 @@ class TestAgentBot:
             runtime_paths=bot.runtime_paths,
             conversation_cache=bot._conversation_cache,
             message_count_hint=5,
+            entity_name=bot.agent_name,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
@@ -6284,6 +6285,7 @@ class TestAgentBot:
             runtime_paths=bot.runtime_paths,
             conversation_cache=bot._conversation_cache,
             message_count_hint=1,
+            entity_name=bot.agent_name,
         )
         mock_send_compaction_lifecycle_start.assert_awaited_once()
         compaction_notice_kwargs = mock_send_compaction_lifecycle_start.await_args.kwargs
