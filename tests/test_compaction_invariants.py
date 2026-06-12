@@ -7,7 +7,7 @@
 
 These tests exercise the owning interfaces directly, not the bot runtime.
 """
-# ruff: noqa: D102, D103, ANN201, TC003
+# ruff: noqa: D103, TC003
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from agno.agent import Agent
 from agno.models.anthropic import Claude
-from agno.models.base import Model
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
@@ -56,37 +55,10 @@ from mindroom.history.summary_call import (
 from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
-from tests.conftest import bind_runtime_paths, prepare_history_for_run_for_test
+from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 _HISTORY_SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
-
-
-class FakeModel(Model):
-    """Minimal non-Claude model for deterministic summary-call tests."""
-
-    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        return ModelResponse(content="ok")
-
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        return ModelResponse(content="ok")
-
-    def invoke_stream(self, *_args: object, **_kwargs: object):
-        yield ModelResponse(content="ok")
-
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object):
-        yield ModelResponse(content="ok")
-
-    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
-        return response
-
-    def _parse_provider_response_delta(
-        self,
-        response: ModelResponse,
-        *_args: object,
-        **_kwargs: object,
-    ) -> ModelResponse:
-        return response
 
 
 class _RecordingClaude(Claude):
