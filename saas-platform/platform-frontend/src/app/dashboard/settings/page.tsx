@@ -81,13 +81,12 @@ export default function SettingsPage() {
       setAccountInfo(account)
       // Check if account is pending deletion
       // Only consider it pending if deleted_at is actually set to a truthy value (not null, undefined, or empty string)
-      const isPending = account.status === 'pending_deletion' ||
-                       (account.deleted_at && account.deleted_at !== null && account.deleted_at !== '')
+      const isPending = account.status === 'pending_deletion' || Boolean(account.deleted_at)
       setIsDeletionPending(isPending)
       // Set consent preferences if available
       if (account.consent_marketing !== undefined) {
         setConsentSettings({
-          marketing: account.consent_marketing,
+          marketing: account.consent_marketing || false,
           analytics: account.consent_analytics || false
         })
       }

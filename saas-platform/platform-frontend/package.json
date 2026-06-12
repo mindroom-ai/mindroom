@@ -10,6 +10,8 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
+    "generate:api-types": "openapi-typescript openapi.json -o src/lib/api.generated.ts",
+    "check:api-types": "openapi-typescript openapi.json -o src/lib/api.generated.ts && git diff --exit-code -- src/lib/api.generated.ts",
     "screenshot": "nix-shell --run 'node take_screenshot.js' 2>/dev/null || node take_screenshot.js"
   },
   "dependencies": {
@@ -42,6 +44,7 @@
     "@types/react-dom": "^19.2.3",
     "jest": "^30.4.2",
     "jest-environment-jsdom": "^30.4.1",
+    "openapi-typescript": "^7.13.0",
     "puppeteer": "^25.0.4",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",

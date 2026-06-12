@@ -4,33 +4,8 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Check, ArrowLeft, Sparkles } from 'lucide-react'
 import { useSubscription } from '@/hooks/useSubscription'
-import { createCheckoutSession, getPricingConfig } from '@/lib/api'
+import { createCheckoutSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
-
-interface PricingPlan {
-  id: string
-  name: string
-  price_monthly: string
-  price_yearly: string
-  description: string
-  features: string[]
-  recommended?: boolean
-  included_ai_budget_usd?: number
-  requires_customer_provider_keys?: boolean
-  resource_profile?: 'small' | 'pro'
-  limits?: {
-    max_agents: number | string
-    max_messages_per_day: number | string
-    storage_gb: number | string
-  }
-}
-
-interface PricingConfig {
-  plans: Record<string, PricingPlan>
-  discounts?: {
-    annual_percentage: number
-  }
-}
 
 export default function UpgradePage() {
   const router = useRouter()
