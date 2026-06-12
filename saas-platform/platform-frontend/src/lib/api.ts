@@ -23,7 +23,6 @@ export type Instance = Instances['instances'][number]
 export type Provision = SuccessJson<'/my/instances/provision', 'post'>
 export type InstanceAction = SuccessJson<'/my/instances/{instance_id}/start', 'post'>
 export type PricingConfig = SuccessJson<'/pricing/config', 'get'>
-export type PricingPlan = PricingConfig['plans'][string]
 export type UrlResponse = SuccessJson<'/stripe/checkout', 'post'>
 
 export async function apiCall(
