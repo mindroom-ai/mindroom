@@ -337,7 +337,12 @@ class HandledTurnLedger:
         self._cleanup_old_events()
 
     def flush(self) -> None:
-        """Block until every scheduled ledger persist has reached disk."""
+        """Block until every scheduled ledger persist attempt has completed.
+
+        Persist failures are logged and swallowed (best-effort durability), so
+        completion means all queued write-behind attempts finished, not that
+        every record reached disk.
+        """
         with self._state.lock:
             self._wait_for_pending_persists_locked()
 

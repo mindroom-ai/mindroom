@@ -93,7 +93,7 @@ class TurnStore:
         self._ledger.warm()
 
     def flush(self) -> None:
-        """Block until recorded turn outcomes have been persisted to disk."""
+        """Block until queued turn-outcome persist attempts have completed (best-effort)."""
         self._ledger.flush()
 
     def record_turn(self, handled_turn: HandledTurnState) -> None:
