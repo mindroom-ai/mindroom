@@ -47,6 +47,7 @@ from mindroom.workers.runtime import (
     get_primary_worker_manager,
     primary_worker_backend_available,
     primary_worker_backend_name,
+    reconcile_drifted_worker_templates,
     serialized_kubernetes_worker_validation_snapshot,
 )
 
@@ -222,6 +223,13 @@ def _cleanup_workers_once(
             count=len(cleaned_workers),
             backend=worker_manager.backend_name,
         )
+    reconciled_workers = reconcile_drifted_worker_templates(worker_manager)
+    if reconciled_workers:
+        logger.info(
+            "Reconciled drifted worker pod templates",
+            count=len(reconciled_workers),
+            backend=worker_manager.backend_name,
+        )
     return len(cleaned_workers)
 
 
@@ -364,7 +372,9 @@ async def _reload_config_after_file_change(
     runtime_paths: constants.RuntimePaths,
 ) -> None:
     previous = _read_app_runtime_config_or_none(api_app)
-    loaded = config_lifecycle.load_config_into_app(runtime_paths, api_app)
+    # Config validation executes plugin modules and walks the filesystem;
+    # keep it off the event loop (#1260).
+    loaded = await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, api_app)
     if loaded:
         _reconcile_knowledge_mode_transitions(previous, api_app)
     await _sync_standalone_knowledge_watchers(api_app)
@@ -421,8 +431,8 @@ async def _watch_config(
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     runtime_paths = _app_runtime_paths(_app)
-    constants.ensure_writable_config_path(create_minimal=True, runtime_paths=runtime_paths)
-    config_lifecycle.load_config_into_app(runtime_paths, _app)
+    await asyncio.to_thread(constants.ensure_writable_config_path, create_minimal=True, runtime_paths=runtime_paths)
+    await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, _app)
     logger.info(
         "Initialized API runtime config",
         config_path=str(runtime_paths.config_path),
@@ -690,7 +700,8 @@ async def save_config(
 ) -> dict[str, bool]:
     """Save configuration to file."""
     previous = _read_request_runtime_config_or_none(request)
-    generation = config_lifecycle.replace_committed_config(
+    generation = await asyncio.to_thread(
+        config_lifecycle.replace_committed_config,
         request,
         new_config,
         error_prefix="Failed to save configuration",
@@ -774,7 +785,8 @@ async def update_agent(
     def mutate(candidate_config: dict[str, Any]) -> None:
         _upsert_section_entity(candidate_config, "agents", agent_id, agent_data)
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to save agent",
@@ -793,7 +805,8 @@ async def create_agent(
     def mutate(candidate_config: dict[str, Any]) -> str:
         return _create_section_entity(candidate_config, "agents", "new_agent", agent_data)
 
-    agent_id = config_lifecycle.write_committed_config(
+    agent_id = await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to create agent",
@@ -812,7 +825,8 @@ async def delete_agent(
     def mutate(candidate_config: dict[str, Any]) -> None:
         _delete_section_entity(candidate_config, "agents", agent_id, "Agent not found")
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to delete agent",
@@ -838,7 +852,8 @@ async def update_team(
     def mutate(candidate_config: dict[str, Any]) -> None:
         _upsert_section_entity(candidate_config, "teams", team_id, team_data)
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to save team",
@@ -857,7 +872,8 @@ async def create_team(
     def mutate(candidate_config: dict[str, Any]) -> str:
         return _create_section_entity(candidate_config, "teams", "new_team", team_data)
 
-    team_id = config_lifecycle.write_committed_config(
+    team_id = await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to create team",
@@ -876,7 +892,8 @@ async def delete_team(
     def mutate(candidate_config: dict[str, Any]) -> None:
         _delete_section_entity(candidate_config, "teams", team_id, "Team not found")
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to delete team",
@@ -907,7 +924,8 @@ async def update_model(
             candidate_config["models"] = {}
         candidate_config["models"][model_id] = model_data
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to save model",
@@ -935,7 +953,8 @@ async def update_room_models(
     def mutate(candidate_config: dict[str, Any]) -> None:
         candidate_config["room_models"] = room_models
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to save room models",

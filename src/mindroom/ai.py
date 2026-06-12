@@ -86,7 +86,7 @@ if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.history import CompactionLifecycle
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -824,32 +824,42 @@ async def _prepare_agent_and_prompt(
     )
     _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name=agent_name,
-        room_id=room_id,
-        thread_id=thread_id,
-        runtime_paths=runtime_paths,
-    )
     resolved_session_id = session_id
     if resolved_session_id is None and scope_context is not None and scope_context.session is not None:
         resolved_session_id = scope_context.session.session_id
 
     _mark_pipeline_timing(pipeline_timing, "agent_build_start")
-    agent = create_agent(
-        agent_name,
-        config,
-        runtime_paths,
-        session_id=resolved_session_id,
-        history_storage=scope_context.storage if scope_context is not None else None,
-        active_model_name=runtime_model.model_name,
-        knowledge=knowledge,
-        include_interactive_questions=include_interactive_questions,
-        include_openai_compat_guidance=include_openai_compat_guidance,
-        execution_identity=execution_identity,
-        delegation_depth=delegation_depth,
-        refresh_scheduler=refresh_scheduler,
-        timing_scope=timing_scope,
-    )
+
+    def _resolve_model_and_build_agent() -> tuple[ResolvedRuntimeModel, Agent]:
+        """Resolve the runtime model and build the agent off the event loop (#1260).
+
+        Both walk the filesystem per dispatch: thread-model overrides, workspace
+        scaffolding, context-file reads, and session storage opens.
+        """
+        runtime_model = config.resolve_runtime_model(
+            entity_name=agent_name,
+            room_id=room_id,
+            thread_id=thread_id,
+            runtime_paths=runtime_paths,
+        )
+        agent = create_agent(
+            agent_name,
+            config,
+            runtime_paths,
+            session_id=resolved_session_id,
+            history_storage=scope_context.storage if scope_context is not None else None,
+            active_model_name=runtime_model.model_name,
+            knowledge=knowledge,
+            include_interactive_questions=include_interactive_questions,
+            include_openai_compat_guidance=include_openai_compat_guidance,
+            execution_identity=execution_identity,
+            delegation_depth=delegation_depth,
+            refresh_scheduler=refresh_scheduler,
+            timing_scope=timing_scope,
+        )
+        return runtime_model, agent
+
+    runtime_model, agent = await asyncio.to_thread(_resolve_model_and_build_agent)
     _append_additional_context(agent, prompt_parts.session_preamble)
     if system_enrichment_items:
         _append_additional_context(

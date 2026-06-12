@@ -20,6 +20,7 @@ from agno.knowledge.document.base import Document
 from fastapi.testclient import TestClient
 from watchfiles import Change
 
+import mindroom.knowledge.file_listing as knowledge_file_listing_module
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
@@ -34,15 +35,14 @@ from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.index_metadata import write_index_metadata_payload
-from mindroom.knowledge.indexing_config import IndexingSettings
-from mindroom.knowledge.manager import (
-    KnowledgeManager,
+from mindroom.knowledge.file_listing import (
     git_checkout_present,
-    knowledge_source_signature,
     list_git_tracked_knowledge_files,
     list_knowledge_files,
 )
+from mindroom.knowledge.index_metadata import write_index_metadata_payload
+from mindroom.knowledge.indexing_config import IndexingSettings
+from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
 from mindroom.knowledge.redaction import credential_free_repo_url, credential_free_url_identity, redact_url_credentials
 from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
@@ -1425,18 +1425,87 @@ def test_local_knowledge_file_listing_prunes_literal_include_prefixes(
     )
 
     walked_roots: list[Path] = []
-    original_walk = knowledge_manager_module.os.walk
+    original_walk = knowledge_file_listing_module.os.walk
 
     def recording_walk(top: object, *args: object, **kwargs: object) -> object:
         walked_roots.append(Path(top))
         return original_walk(top, *args, **kwargs)
 
-    monkeypatch.setattr(knowledge_manager_module.os, "walk", recording_walk)
+    monkeypatch.setattr(knowledge_file_listing_module.os, "walk", recording_walk)
 
     files = list_knowledge_files(config, "docs", docs_path)
 
     assert files == [memory_file.resolve()]
     assert walked_roots == [memory_dir.resolve()]
+
+
+def test_extra_extensions_extend_default_semantic_set(tmp_path: Path) -> None:
+    """extra_extensions add to the default text-like set without replacing it."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "notes.md").write_text("hello", encoding="utf-8")
+    (docs_path / "slides.pptx").write_bytes(b"fake deck")
+    (docs_path / "blob.bin").write_bytes(b"binary")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    config.knowledge_bases["docs"] = KnowledgeBaseConfig(
+        path=str(docs_path),
+        extra_extensions=[".pptx"],
+    )
+
+    files = list_knowledge_files(config, "docs", docs_path)
+
+    assert files == [(docs_path / "notes.md").resolve(), (docs_path / "slides.pptx").resolve()]
+
+
+def test_extra_extensions_compose_with_include_and_exclude_extensions(tmp_path: Path) -> None:
+    """include_extensions stay an exact set, extras add on top, excludes win last."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "notes.md").write_text("hello", encoding="utf-8")
+    (docs_path / "readme.txt").write_text("hello", encoding="utf-8")
+    (docs_path / "slides.pptx").write_bytes(b"fake deck")
+    (docs_path / "report.pdf").write_bytes(b"fake report")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    config.knowledge_bases["docs"] = KnowledgeBaseConfig(
+        path=str(docs_path),
+        include_extensions=[".md"],
+        extra_extensions=[".pptx", ".pdf"],
+        exclude_extensions=[".pdf"],
+    )
+
+    files = list_knowledge_files(config, "docs", docs_path)
+
+    assert files == [(docs_path / "notes.md").resolve(), (docs_path / "slides.pptx").resolve()]
+
+
+@pytest.mark.asyncio
+async def test_reindex_skips_files_whose_reader_dependency_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing reader package skips the file loudly instead of failing the refresh."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "notes.md").write_text("indexed text", encoding="utf-8")
+    (docs_path / "slides.pptx").write_text("fake deck", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    config.knowledge_bases["docs"] = KnowledgeBaseConfig(
+        path=str(docs_path),
+        extra_extensions=[".pptx"],
+    )
+    original_get_reader = knowledge_manager_module.ReaderFactory.get_reader_for_extension
+
+    def failing_get_reader(extension: str) -> object:
+        if extension == ".pptx":
+            msg = "The `python-pptx` package is not installed."
+            raise ImportError(msg)
+        return original_get_reader(extension)
+
+    monkeypatch.setattr(knowledge_manager_module.ReaderFactory, "get_reader_for_extension", failing_get_reader)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+    assert await manager.reindex_all() == 1
+    assert manager._last_refresh_error == "Indexed 1 of 2 managed knowledge files"
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -216,7 +217,10 @@ async def build_memory_prompt_parts(
         logger.debug("Agent memories added", count=len(agent_memories))
 
     session_preamble = ""
-    agent_entrypoint = backend.load_entrypoint_context(
+    # The file backend reads the scoped MEMORY.md from disk; keep it off the
+    # event loop (#1260).
+    agent_entrypoint = await asyncio.to_thread(
+        backend.load_entrypoint_context,
         agent_name,
         storage_path,
         config,

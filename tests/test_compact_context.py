@@ -11,8 +11,6 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from agno.agent import Agent
-from agno.models.base import Model
-from agno.models.response import ModelResponse
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -43,6 +41,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
     TEST_PASSWORD,
+    FakeModel,
     bind_runtime_paths,
     delivered_matrix_side_effect,
     install_runtime_cache_support,
@@ -52,42 +51,11 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import Iterator
     from pathlib import Path
 
 
 COMPACT_CONTEXT_SUCCESS = "Compaction will run before the next reply in this conversation scope."
-
-
-class FakeModel(Model):
-    """Minimal model for tool/runtime tests."""
-
-    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        """Return one successful fake response."""
-        return ModelResponse(content="ok")
-
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        """Return one successful fake async response."""
-        return ModelResponse(content="ok")
-
-    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
-        """Yield one successful fake streaming response."""
-        yield ModelResponse(content="ok")
-
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
-        """Yield one successful fake async streaming response."""
-        yield ModelResponse(content="ok")
-
-    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
-        return response
-
-    def _parse_provider_response_delta(
-        self,
-        response: ModelResponse,
-        *_args: object,
-        **_kwargs: object,
-    ) -> ModelResponse:
-        return response
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -442,7 +410,7 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
                 return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
             ),
@@ -635,7 +603,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=summary_mock,
         ),
     ):
@@ -686,7 +654,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
                 return_value=SessionSummary(summary="single run summary", updated_at=datetime.now(UTC)),
             ),
@@ -759,7 +727,7 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
                 return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
             ),

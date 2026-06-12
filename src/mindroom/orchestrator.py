@@ -862,8 +862,8 @@ class _MultiAgentOrchestrator:
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
-        config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
-        hook_registry = self._build_hook_registry(config)
+        config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
+        hook_registry = await asyncio.to_thread(self._build_hook_registry, config)
         entity_names = configured_entity_names(config)
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)

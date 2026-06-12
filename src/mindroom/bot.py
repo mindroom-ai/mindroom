@@ -1310,7 +1310,10 @@ class AgentBot:
             self._restore_saved_sync_token()
             await self._set_avatar_if_available()
             await self._set_presence_with_model_info()
-            interactive.init_persistence(self.runtime_paths.storage_root)
+            # Both load tracking state under advisory file locks; keep that
+            # off the event loop so per-bot startup never stalls dispatch.
+            await asyncio.to_thread(self._turn_store.warm)
+            await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
 

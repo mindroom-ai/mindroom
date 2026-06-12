@@ -193,6 +193,76 @@ plugins:
   - /app/agent_data/content-bundles/policy-pack/plugins/policy-tools
 ```
 
+## Provider API Keys from Kubernetes Secrets
+
+The MindRoom runtime natively honors model-provider API key env vars such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
+At startup it syncs each value into its credential service, which stores it as `<storage.mountPath>/credentials/<provider>_credentials.json`.
+Use `providerCredentials` to bind those env vars to existing Kubernetes Secrets without writing any credential files yourself:
+
+```yaml
+providerCredentials:
+  - provider: openai
+    existingSecret: my-llm-secret
+    key: api-key
+  - provider: anthropic
+    existingSecret: my-llm-secret
+    key: anthropic-api-key
+```
+
+Supported provider names are `anthropic`, `azure`, `openai`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, and `ollama` (which expects a host URL instead of an API key).
+Each entry renders only a `secretKeyRef` env var on the runtime container, so no secret material passes through ConfigMaps or appears in rendered manifests.
+The chart rejects entries whose env var is also set through `env.extra`, but variables arriving through `env.envFrom` cannot be collision-checked because Secret and ConfigMap keys are not visible at template time.
+If an `env.envFrom` source contains the same variable name, the container-level `env` entry rendered by `providerCredentials` takes precedence in Kubernetes.
+Because the runtime writes the credential files itself, this path also works with encrypted credential storage (`workers.sandbox.credentialsEncryptionKey`), where externally written plaintext JSON files would be refused.
+
+Sync semantics follow the runtime's `_source` tracking:
+
+- Env-sourced credentials are refreshed on every startup, so rotating the Secret takes effect after a Deployment restart (env values from `secretKeyRef` are fixed at pod start).
+- Credentials saved through the dashboard (`_source: ui`) are never overwritten by env sync.
+- A pre-existing credential file without `_source: env`, for example one written manually or by a custom init container, is also left untouched; delete that file once when migrating to `providerCredentials`.
+
+Non-secret companion settings such as `OPENAI_BASE_URL` or `AZURE_OPENAI_ENDPOINT` are plain config and belong in `env.extra`.
+For credential services beyond the supported providers, the runtime accepts declared credential seeds through the `MINDROOM_CREDENTIAL_SEEDS_JSON` env var, whose JSON contains only env-var references while the secret values still arrive via `secretKeyRef` entries in `env.extra`:
+
+```yaml
+env:
+  extra:
+    - name: MY_GATEWAY_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: my-gateway-secret
+          key: api-key
+    - name: MINDROOM_CREDENTIAL_SEEDS_JSON
+      value: '[{"service": "my_gateway", "credentials": {"api_key": {"env": "MY_GATEWAY_API_KEY"}}}]'
+```
+
+## Control-Plane NetworkPolicy
+
+The chart can create an optional NetworkPolicy for the control-plane pod, so operators can restrict runtime API ingress to an edge proxy and known clients.
+The policy targets the runtime pods through the chart selector labels and allows the API port only from the configured peers.
+NetworkPolicy targets pods rather than Services, so each `apiIngressFrom` entry must match the actual client pods.
+A bare `podSelector` entry only matches pods in the release namespace, so combine `namespaceSelector` and `podSelector` in one entry for cross-namespace clients such as an ingress controller.
+
+```yaml
+networkPolicy:
+  create: true
+  apiIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: my-ingress
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: my-ingress
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: my-api-client
+```
+
+The API port follows `runtime.apiPort`, so the policy stays aligned with the Deployment without a separate port value.
+When `apiIngressFrom` is empty, the policy allows the API port from all sources while still denying other ingress to the pod.
+Use `networkPolicy.extraIngress` and `networkPolicy.extraEgress` for raw Kubernetes rules beyond the API rule.
+Setting any `extraEgress` entry adds `Egress` to `policyTypes`, so those rules must then cover every egress flow the runtime needs, such as DNS, the Matrix homeserver, model APIs, the event cache, workers, and the Kubernetes API server when `workers.backend` is `kubernetes`.
+
 ## Worker Egress Proxy
 
 For dedicated Kubernetes workers, the chart can either deploy the approved egress proxy or point workers at an existing HTTP proxy Service.
@@ -327,14 +397,18 @@ workers:
 ## Notes
 
 - The chart does not create ingress or a Matrix homeserver.
+- Set `networkPolicy.create: true` to restrict control-plane API ingress to known client pods.
 - The chart can create PostgreSQL for MindRoom's event cache, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
+- Use `providerCredentials` to feed model-provider API keys from existing Kubernetes Secrets into the runtime's credential service.
 - Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime and static runner sidecar receive the same Secret-backed key.
 - `workers.backend: static_runner` adds a sandbox-runner sidecar to the runtime pod.
 - `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments and Services on demand.
   In the release namespace, the chart stores derived worker tokens and optional credential-encryption keys as entries in one chart-created worker-auth Secret and grants only `get` and `patch` on that Secret.
   When `workers.kubernetes.namespace` points at a separate worker namespace, the chart uses per-worker auth Secrets and grants Secret CRUD only in that namespace.
   The chart can create the worker-manager RBAC and a worker NetworkPolicy.
+- With `workers.kubernetes.reconcilePodTemplates` (default `true`), each cleanup pass recreates scaled-down worker Deployments whose pod template (image, env, resources) drifted from the configured spec, so existing workers do not need manual recycling after upgrades.
+  Running workers are recreated on their next provisioning after they scale down.
 - If workers run in a different namespace, provide storage, service accounts, and network policy behavior that are valid for that namespace.
   Kubernetes owner references are only set by default for same-namespace workers.
   The sandbox proxy token secret is only needed by the primary runtime; dedicated worker pods receive per-worker derived runner tokens.

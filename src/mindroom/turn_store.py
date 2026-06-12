@@ -88,6 +88,10 @@ class TurnStore:
             base_path=Path(self.deps.tracking_base_path),
         )
 
+    def warm(self) -> None:
+        """Load the durable ledger from disk; call from a worker thread, not the event loop."""
+        self._ledger.warm()
+
     def record_turn(self, handled_turn: HandledTurnState) -> None:
         """Persist one terminal handled-turn outcome."""
         visible_echo_event_id = handled_turn.visible_echo_event_id or self.visible_echo_for_sources(

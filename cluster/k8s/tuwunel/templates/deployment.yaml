@@ -1,0 +1,169 @@
+{{- $rendersConfig := and .Values.config.create (not .Values.config.existingConfigMap) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mindroom-tuwunel.fullname" . }}
+  labels:
+    {{- include "mindroom-tuwunel.labels" . | nindent 4 }}
+  {{- with .Values.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # Tuwunel does not support horizontal scaling against one database.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "mindroom-tuwunel.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mindroom-tuwunel.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or $rendersConfig .Values.podAnnotations }}
+      annotations:
+        {{- if $rendersConfig }}
+        checksum/config: {{ include "mindroom-tuwunel.config" . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName | quote }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: tuwunel
+          image: {{ include "mindroom-tuwunel.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: TUWUNEL_CONFIG
+              value: {{ .Values.config.mountPath | quote }}
+            {{- with .Values.env.extra }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.env.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: matrix
+              containerPort: {{ .Values.tuwunel.port }}
+              protocol: TCP
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            {{- if .Values.probes.startup.custom }}
+            {{- toYaml .Values.probes.startup.custom | nindent 12 }}
+            {{- else }}
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: {{ .Values.probes.startup.port }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            {{- end }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            {{- if .Values.probes.readiness.custom }}
+            {{- toYaml .Values.probes.readiness.custom | nindent 12 }}
+            {{- else }}
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: {{ .Values.probes.readiness.port }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+            {{- end }}
+          {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            {{- if .Values.probes.liveness.custom }}
+            {{- toYaml .Values.probes.liveness.custom | nindent 12 }}
+            {{- else }}
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: {{ .Values.probes.liveness.port }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+            {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: {{ .Values.config.mountPath }}
+              subPath: {{ .Values.config.key }}
+              readOnly: true
+            - name: {{ include "mindroom-tuwunel.storageVolumeName" . }}
+              mountPath: {{ .Values.storage.mountPath }}
+            {{- if .Values.tuwunel.registrationToken.existingSecret }}
+            - name: registration-token
+              mountPath: {{ include "mindroom-tuwunel.registrationTokenDir" . }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.tuwunel.oidc.enabled }}
+            - name: oidc-client-secret
+              mountPath: {{ include "mindroom-tuwunel.oidcClientSecretDir" . }}
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "mindroom-tuwunel.configMapName" . }}
+        - name: {{ include "mindroom-tuwunel.storageVolumeName" . }}
+          persistentVolumeClaim:
+            claimName: {{ include "mindroom-tuwunel.storageClaimName" . }}
+        {{- if .Values.tuwunel.registrationToken.existingSecret }}
+        - name: registration-token
+          secret:
+            secretName: {{ .Values.tuwunel.registrationToken.existingSecret }}
+            items:
+              - key: {{ .Values.tuwunel.registrationToken.key }}
+                path: {{ .Values.tuwunel.registrationToken.key }}
+        {{- end }}
+        {{- if .Values.tuwunel.oidc.enabled }}
+        - name: oidc-client-secret
+          secret:
+            secretName: {{ .Values.tuwunel.oidc.clientSecret.existingSecret }}
+            items:
+              - key: {{ .Values.tuwunel.oidc.clientSecret.key }}
+                path: {{ .Values.tuwunel.oidc.clientSecret.key }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

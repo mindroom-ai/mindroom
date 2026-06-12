@@ -410,7 +410,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.knowledge.availability",
-    "mindroom.knowledge.manager",
+    "mindroom.knowledge.file_listing",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.status",
@@ -817,16 +817,24 @@ depends_on = ["mindroom.attachment_media"]
 [[modules]]
 path = "mindroom.history.compaction"
 depends_on = [
-    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.history.storage",
+    "mindroom.history.summary_call",
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.logging_config",
-    "mindroom.metadata_merge",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.history.summary_call"
+depends_on = [
+    "mindroom.cancellation",
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.timing",
 ]
 
 [[modules]]
@@ -842,6 +850,7 @@ path = "mindroom.history.storage"
 depends_on = [
     "mindroom.constants",
     "mindroom.history.types",
+    "mindroom.metadata_merge",
 ]
 
 [[modules]]
@@ -2447,7 +2456,7 @@ depends_on = [
 path = "mindroom.knowledge"
 depends_on = [
     "mindroom.knowledge.availability",
-    "mindroom.knowledge.manager",
+    "mindroom.knowledge.file_listing",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.knowledge.status",
     "mindroom.knowledge.utils",
@@ -2456,6 +2465,13 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.availability"
 depends_on = []
+
+[[modules]]
+path = "mindroom.knowledge.file_listing"
+depends_on = [
+    "mindroom.knowledge.redaction",
+    "mindroom.path_globs",
+]
 
 [[modules]]
 path = "mindroom.knowledge.index_metadata"
@@ -2489,10 +2505,10 @@ depends_on = [
     "mindroom.chunking",
     "mindroom.constants",
     "mindroom.embedding_factory",
+    "mindroom.knowledge.file_listing",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
-    "mindroom.path_globs",
 ]
 
 [[modules]]
@@ -2545,7 +2561,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.watch"
 depends_on = [
-    "mindroom.knowledge.manager",
+    "mindroom.knowledge.file_listing",
     "mindroom.knowledge.registry",
     "mindroom.logging_config",
 ]
@@ -2556,6 +2572,20 @@ expose = [
     "resolve_memory_backend",
 ]
 from = ["mindroom.memory._backend"]
+
+# Public seam for compaction summary calls: one model-configuration path, one
+# replaceable request builder (future warm-prefix builder, PR #861), and the
+# explicit budget-shrink retry policy. Tested in tests/test_compaction_invariants.py.
+[[interfaces]]
+expose = [
+    "DEFAULT_SUMMARY_RETRY_POLICY",
+    "SUMMARY_MAX_OUTPUT_TOKENS",
+    "SummaryRetryPolicy",
+    "build_summary_request_messages",
+    "configure_summary_model",
+    "generate_compaction_summary",
+]
+from = ["mindroom.history.summary_call"]
 
 [[interfaces]]
 expose = [
@@ -2992,6 +3022,7 @@ expose = [
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
     "default_worker_routed_tools",
+    "clear_resolved_tool_state_cache",
     "deserialize_tool_validation_snapshot",
     "export_tools_metadata",
     "get_tool_by_name",
@@ -3029,6 +3060,7 @@ expose = [
     "ToolValidationInfo",
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
+    "clear_resolved_tool_state_cache",
     "default_worker_routed_tools",
     "deserialize_tool_validation_snapshot",
     "ensure_tool_registry_loaded",

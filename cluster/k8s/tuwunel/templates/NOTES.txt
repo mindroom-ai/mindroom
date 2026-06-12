@@ -1,0 +1,14 @@
+MindRoom Tuwunel chart rendered.
+
+Service:
+  {{ include "mindroom-tuwunel.fullname" . }}:{{ .Values.service.port }}
+
+Configuration:
+  ConfigMap: {{ include "mindroom-tuwunel.configMapName" . }}
+  Storage PVC: {{ include "mindroom-tuwunel.storageClaimName" . }}
+
+Point the mindroom-runtime chart at this homeserver:
+  matrix:
+    homeserverUrl: http://{{ include "mindroom-tuwunel.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+For production use, provide tuwunel.serverName, a registration token Secret shared with the runtime chart, and ingress plus apex well-known delegation outside this chart.

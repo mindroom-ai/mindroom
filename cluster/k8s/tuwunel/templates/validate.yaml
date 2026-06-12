@@ -1,0 +1,37 @@
+{{- $rendersConfig := and .Values.config.create (not .Values.config.existingConfigMap) -}}
+{{- if $rendersConfig -}}
+{{- if not .Values.tuwunel.serverName -}}
+{{- fail "tuwunel.serverName is required when the chart renders tuwunel.toml" -}}
+{{- end -}}
+{{- if contains "://" .Values.tuwunel.serverName -}}
+{{- fail "tuwunel.serverName must be a bare domain such as example.com, not a URL" -}}
+{{- end -}}
+{{- if not .Values.tuwunel.listenAddresses -}}
+{{- fail "tuwunel.listenAddresses must contain at least one bind address" -}}
+{{- end -}}
+{{- if .Values.tuwunel.oidc.enabled -}}
+{{- if not .Values.tuwunel.oidc.brand -}}
+{{- fail "tuwunel.oidc.brand is required when tuwunel.oidc.enabled=true" -}}
+{{- end -}}
+{{- if not .Values.tuwunel.oidc.clientId -}}
+{{- fail "tuwunel.oidc.clientId is required when tuwunel.oidc.enabled=true" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.tuwunel.oidc.enabled -}}
+{{- if not .Values.tuwunel.oidc.clientSecret.existingSecret -}}
+{{- fail "tuwunel.oidc.clientSecret.existingSecret is required when tuwunel.oidc.enabled=true" -}}
+{{- end -}}
+{{- if not .Values.tuwunel.oidc.clientSecret.key -}}
+{{- fail "tuwunel.oidc.clientSecret.key is required when tuwunel.oidc.enabled=true" -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.tuwunel.registrationToken.existingSecret (not .Values.tuwunel.registrationToken.key) -}}
+{{- fail "tuwunel.registrationToken.key is required when tuwunel.registrationToken.existingSecret is set" -}}
+{{- end -}}
+{{- if and (not .Values.storage.create) (not .Values.storage.existingClaim) -}}
+{{- fail "storage.existingClaim or storage.create=true is required" -}}
+{{- end -}}
+{{- if and (not .Values.config.create) (not .Values.config.existingConfigMap) -}}
+{{- fail "config.existingConfigMap or config.create=true is required" -}}
+{{- end -}}

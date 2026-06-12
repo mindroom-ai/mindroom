@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "cluster/k8s/runtime/**"
+      - "cluster/k8s/tuwunel/**"
+      - "cluster/k8s/client/**"
       - ".github/workflows/publish-helm-charts.yml"
   workflow_dispatch:
     inputs:
@@ -17,6 +19,8 @@ env:
   REGISTRY: ghcr.io
   OWNER: ${{ github.repository_owner }}
   RUNTIME_CHART_DIR: cluster/k8s/runtime
+  TUWUNEL_CHART_DIR: cluster/k8s/tuwunel
+  CLIENT_CHART_DIR: cluster/k8s/client
 
 jobs:
   runtime-chart:
@@ -36,11 +40,13 @@ jobs:
 
       - name: Set chart version
         id: vars
+        env:
+          RELEASE_REF: ${{ inputs.release_ref }}
         run: |
           set -euo pipefail
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            release_ref="${{ inputs.release_ref }}"
+            release_ref="$RELEASE_REF"
             if [[ "$release_ref" != v* ]]; then
               echo "release_ref must be a tag starting with 'v', got '$release_ref'" >&2
               exit 1
@@ -91,6 +97,11 @@ jobs:
             --set eventCache.databaseUrl.existingSecret=existing-event-cache-secrets \
             --set eventCache.databaseUrl.key=DATABASE_URL \
             > "$render_dir/adoption.yaml"
+          helm template mindroom-runtime "$RUNTIME_CHART_DIR" \
+            --namespace mindroom \
+            --set networkPolicy.create=true \
+            --set 'networkPolicy.apiIngressFrom[0].podSelector.matchLabels.app=my-ingress' \
+            > "$render_dir/network-policy.yaml"
 
       - name: Package runtime chart
         run: |
@@ -113,4 +124,186 @@ jobs:
         run: |
           helm push \
             "dist/mindroom-runtime-${{ steps.vars.outputs.chart_version }}.tgz" \
+            "oci://$REGISTRY/$OWNER/charts"
+
+  tuwunel-chart:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref }}
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set chart version
+        id: vars
+        env:
+          RELEASE_REF: ${{ inputs.release_ref }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            release_ref="$RELEASE_REF"
+            if [[ "$release_ref" != v* ]]; then
+              echo "release_ref must be a tag starting with 'v', got '$release_ref'" >&2
+              exit 1
+            fi
+            chart_version="${release_ref#v}"
+            app_version="$release_ref"
+            publish="true"
+          else
+            chart_version="0.0.0-pr.${{ github.event.pull_request.number }}"
+            app_version="pr-${{ github.event.pull_request.number }}"
+            publish="false"
+          fi
+
+          {
+            echo "chart_version=$chart_version"
+            echo "app_version=$app_version"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Lint tuwunel chart
+        run: |
+          helm lint "$TUWUNEL_CHART_DIR" \
+            --set tuwunel.serverName=example.com
+
+      - name: Render tuwunel chart
+        run: |
+          render_dir="$(mktemp -d)"
+          helm template mindroom-tuwunel "$TUWUNEL_CHART_DIR" \
+            --namespace mindroom \
+            --set tuwunel.serverName=example.com \
+            > "$render_dir/default.yaml"
+          helm template mindroom-tuwunel "$TUWUNEL_CHART_DIR" \
+            --namespace mindroom \
+            --set tuwunel.serverName=example.com \
+            --set tuwunel.clientBaseUrl=https://matrix.example.com \
+            --set tuwunel.registrationToken.existingSecret=matrix-registration \
+            --set tuwunel.oidc.enabled=true \
+            --set tuwunel.oidc.brand=keycloak \
+            --set tuwunel.oidc.issuer=https://sso.example.com/realms/example \
+            --set tuwunel.oidc.clientId=tuwunel \
+            --set tuwunel.oidc.clientSecret.existingSecret=matrix-oidc \
+            > "$render_dir/oidc.yaml"
+          helm template mindroom-tuwunel "$TUWUNEL_CHART_DIR" \
+            --namespace mindroom \
+            --set config.existingConfigMap=tuwunel-config \
+            > "$render_dir/existing-configmap.yaml"
+
+      - name: Package tuwunel chart
+        run: |
+          mkdir -p dist
+          helm package "$TUWUNEL_CHART_DIR" \
+            --version "${{ steps.vars.outputs.chart_version }}" \
+            --app-version "${{ steps.vars.outputs.app_version }}" \
+            --destination dist
+
+      - name: Login to GitHub Container Registry
+        if: steps.vars.outputs.publish == 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login "$REGISTRY" \
+                --username "${{ github.actor }}" \
+                --password-stdin
+
+      - name: Push tuwunel chart
+        if: steps.vars.outputs.publish == 'true'
+        run: |
+          helm push \
+            "dist/mindroom-tuwunel-${{ steps.vars.outputs.chart_version }}.tgz" \
+            "oci://$REGISTRY/$OWNER/charts"
+
+  client-chart:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref }}
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set chart version
+        id: vars
+        env:
+          RELEASE_REF: ${{ inputs.release_ref }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            release_ref="$RELEASE_REF"
+            if [[ "$release_ref" != v* ]]; then
+              echo "release_ref must be a tag starting with 'v', got '$release_ref'" >&2
+              exit 1
+            fi
+            chart_version="${release_ref#v}"
+            app_version="$release_ref"
+            publish="true"
+          else
+            chart_version="0.0.0-pr.${{ github.event.pull_request.number }}"
+            app_version="pr-${{ github.event.pull_request.number }}"
+            publish="false"
+          fi
+
+          {
+            echo "chart_version=$chart_version"
+            echo "app_version=$app_version"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Lint client chart
+        run: helm lint "$CLIENT_CHART_DIR"
+
+      - name: Render client chart
+        run: |
+          render_dir="$(mktemp -d)"
+          helm template mindroom-client "$CLIENT_CHART_DIR" \
+            --namespace mindroom \
+            > "$render_dir/default.yaml"
+          helm template mindroom-client "$CLIENT_CHART_DIR" \
+            --namespace mindroom \
+            --set basePath=/mindroom \
+            --set rootServiceWorkerCleanup.enabled=true \
+            --set matrix.defaultServerName=matrix.example.com \
+            --set serviceWorker.enabled=false \
+            > "$render_dir/base-path.yaml"
+          helm template mindroom-client "$CLIENT_CHART_DIR" \
+            --namespace mindroom \
+            --set config.existingConfigMap=existing-client-config \
+            --set nginx.existingConfigMap=existing-client-nginx \
+            > "$render_dir/existing-configmaps.yaml"
+
+      - name: Package client chart
+        run: |
+          mkdir -p dist
+          helm package "$CLIENT_CHART_DIR" \
+            --version "${{ steps.vars.outputs.chart_version }}" \
+            --app-version "${{ steps.vars.outputs.app_version }}" \
+            --destination dist
+
+      - name: Login to GitHub Container Registry
+        if: steps.vars.outputs.publish == 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login "$REGISTRY" \
+                --username "${{ github.actor }}" \
+                --password-stdin
+
+      - name: Push client chart
+        if: steps.vars.outputs.publish == 'true'
+        run: |
+          helm push \
+            "dist/mindroom-client-${{ steps.vars.outputs.chart_version }}.tgz" \
             "oci://$REGISTRY/$OWNER/charts"

@@ -109,6 +109,32 @@
 {{- fail (printf "contentBundles[%d].seed.command is required when seed.enabled=true" $index) -}}
 {{- end -}}
 {{- end -}}
+{{- $providerCredentialEnvMap := include "mindroom-runtime.providerCredentialEnvMap" . | fromYaml -}}
+{{- $providerCredentialProviders := dict -}}
+{{- range $index, $entry := .Values.providerCredentials -}}
+{{- if not $entry.provider -}}
+{{- fail (printf "providerCredentials[%d].provider is required" $index) -}}
+{{- end -}}
+{{- if not (hasKey $providerCredentialEnvMap $entry.provider) -}}
+{{- fail (printf "providerCredentials[%d].provider %q is not supported; use one of: %s" $index $entry.provider (keys $providerCredentialEnvMap | sortAlpha | join ", ")) -}}
+{{- end -}}
+{{- if hasKey $providerCredentialProviders $entry.provider -}}
+{{- fail (printf "providerCredentials[%d].provider %q is used more than once" $index $entry.provider) -}}
+{{- end -}}
+{{- $_ := set $providerCredentialProviders $entry.provider true -}}
+{{- if not $entry.existingSecret -}}
+{{- fail (printf "providerCredentials[%d].existingSecret is required" $index) -}}
+{{- end -}}
+{{- if not $entry.key -}}
+{{- fail (printf "providerCredentials[%d].key is required" $index) -}}
+{{- end -}}
+{{- $envName := index $providerCredentialEnvMap $entry.provider -}}
+{{- range $extraEnv := $.Values.env.extra -}}
+{{- if eq (default "" $extraEnv.name) $envName -}}
+{{- fail (printf "providerCredentials[%d] and env.extra both set %s; remove one of them" $index $envName) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $egressProxyEnabled := or .Values.egressProxy.enabled .Values.approvedEgress.enabled -}}
 {{- $egressPolicyEnabled := and $egressProxyEnabled .Values.egressProxy.networkPolicy.create -}}
 {{- if and $egressProxyEnabled (ne .Values.workers.backend "kubernetes") -}}

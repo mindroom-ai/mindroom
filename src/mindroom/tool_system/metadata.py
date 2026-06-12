@@ -7,6 +7,8 @@ import functools
 import math
 import os
 import sys
+import threading
+import weakref
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -954,13 +956,58 @@ def _execute_validation_plugin_module(
     return validation_module_name
 
 
+_RESOLVED_TOOL_STATE_LOCK = threading.RLock()
+_RESOLVED_TOOL_STATE_CACHE: dict[tuple[int, bool], tuple[RuntimePaths, _ResolvedToolState]] = {}
+
+
+def clear_resolved_tool_state_cache() -> None:
+    """Drop cached per-config resolved tool state after live plugin registry changes."""
+    with _RESOLVED_TOOL_STATE_LOCK:
+        _RESOLVED_TOOL_STATE_CACHE.clear()
+
+
+def _evict_resolved_tool_state(cache_key: tuple[int, bool]) -> None:
+    with _RESOLVED_TOOL_STATE_LOCK:
+        _RESOLVED_TOOL_STATE_CACHE.pop(cache_key, None)
+
+
 def _resolved_tool_state_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
     *,
     tolerate_plugin_load_errors: bool = False,
 ) -> _ResolvedToolState:
-    """Return registry and metadata visible for one runtime config without mutating global state."""
+    """Return registry and metadata visible for one runtime config without mutating global state.
+
+    The state is computed once per config object and reused by every consumer
+    (authored-entry validation, the tools API, self-config tools, worker
+    snapshots): resolving it executes plugin modules and walks the filesystem,
+    so recomputing per consumer stalls the event loop (#1260). The lock also
+    serializes plugin validation, which temporarily rewires ``sys.modules``.
+    """
+    cache_key = (id(config), tolerate_plugin_load_errors)
+    with _RESOLVED_TOOL_STATE_LOCK:
+        cached = _RESOLVED_TOOL_STATE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == runtime_paths:
+            return cached[1]
+        resolved_state = _compute_resolved_tool_state_for_runtime(
+            runtime_paths,
+            config,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+        if cache_key not in _RESOLVED_TOOL_STATE_CACHE:
+            weakref.finalize(config, _evict_resolved_tool_state, cache_key)
+        _RESOLVED_TOOL_STATE_CACHE[cache_key] = (runtime_paths, resolved_state)
+        return resolved_state
+
+
+def _compute_resolved_tool_state_for_runtime(
+    runtime_paths: RuntimePaths,
+    config: Config,
+    *,
+    tolerate_plugin_load_errors: bool = False,
+) -> _ResolvedToolState:
+    """Resolve registry and metadata for one runtime config by executing its plugins."""
     import mindroom.tools  # noqa: F401, PLC0415
     from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
 

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.workers.backend import WorkerBackend
+    from mindroom.workers.models import WorkerHandle
 
 __all__ = [
     "PrimaryWorkerManagerLease",
@@ -33,6 +34,7 @@ __all__ = [
     "primary_worker_backend_available",
     "primary_worker_backend_is_dedicated",
     "primary_worker_backend_name",
+    "reconcile_drifted_worker_templates",
     "serialized_kubernetes_worker_validation_snapshot",
     "shutdown_primary_worker_manager",
 ]
@@ -114,9 +116,12 @@ def _worker_validation_snapshot_cache_key(
 
 
 def clear_worker_validation_snapshot_cache() -> None:
-    """Clear cached Kubernetes worker validation snapshots."""
+    """Clear cached worker validation snapshots and per-config resolved tool state."""
+    from mindroom.tool_system.catalog import clear_resolved_tool_state_cache  # noqa: PLC0415
+
     with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
         _WORKER_VALIDATION_SNAPSHOT_CACHE.clear()
+    clear_resolved_tool_state_cache()
 
 
 def serialized_kubernetes_worker_validation_snapshot(
@@ -171,6 +176,13 @@ def primary_worker_backend_name(runtime_paths: RuntimePaths) -> str:
 def primary_worker_backend_is_dedicated(runtime_paths: RuntimePaths) -> bool:
     """Return whether the configured backend provisions dedicated worker runtimes."""
     return primary_worker_backend_name(runtime_paths) in _DEDICATED_WORKER_BACKENDS
+
+
+def reconcile_drifted_worker_templates(worker_manager: WorkerBackend) -> list[WorkerHandle]:
+    """Reconcile drifted worker pod templates for backends that support reconciliation."""
+    if isinstance(worker_manager, KubernetesWorkerBackend):
+        return worker_manager.reconcile_drifted_workers()
+    return []
 
 
 def primary_worker_backend_available(
