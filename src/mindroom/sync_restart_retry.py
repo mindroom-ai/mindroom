@@ -10,6 +10,7 @@ most once; a retry that is itself interrupted is not requeued.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -58,5 +59,10 @@ class SyncRestartRetryQueue:
             logger.info("sync_restart_retry_started", source_event_id=key)
             try:
                 await retry()
+            except asyncio.CancelledError:
+                # The flush task is being torn down mid-retry; the key was already
+                # promoted to attempted, so log the dead end before propagating.
+                logger.warning("sync_restart_retry_cancelled", source_event_id=key)
+                raise
             except Exception:
                 logger.exception("sync_restart_retry_failed", source_event_id=key)

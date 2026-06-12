@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.response_runner import ResponseRequest, ResponseRunner
@@ -132,6 +134,37 @@ async def test_queue_flushes_in_registration_order() -> None:
 
     await queue.flush()
     assert runs == ["$first", "$second", "$third"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_flush_logs_in_flight_key_and_keeps_rest_pending() -> None:
+    """Cancelling a flush mid-retry must log the lost key, propagate, and keep later retries queued."""
+    queue = SyncRestartRetryQueue()
+    started = asyncio.Event()
+
+    async def hanging() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    async def later() -> None:
+        pass
+
+    queue.register("$in_flight", hanging)
+    queue.register("$later", later)
+    flush_task = asyncio.create_task(queue.flush())
+    await started.wait()
+
+    flush_task.cancel()
+    with capture_logs() as logs, pytest.raises(asyncio.CancelledError):
+        await flush_task
+
+    assert [entry["source_event_id"] for entry in logs if entry["event"] == "sync_restart_retry_cancelled"] == [
+        "$in_flight",
+    ]
+    # The interrupted key was already promoted to attempted and never requeues.
+    assert queue.register("$in_flight", hanging) is False
+    # The untouched retry survives for the next healthy sync response.
+    assert queue.has_pending
 
 
 @pytest.mark.asyncio
