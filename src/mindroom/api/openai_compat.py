@@ -880,7 +880,8 @@ async def _non_stream_team_completion(
         ) as opened_scope_context:
             scope_context = opened_scope_context
             try:
-                agents, team, mode = _build_team(
+                agents, team, mode = await asyncio.to_thread(
+                    _build_team,
                     team_name,
                     config,
                     runtime_paths,
@@ -1018,7 +1019,8 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         )
         try:
             with tool_execution_identity(execution_identity):
-                agents, team, mode = _build_team(
+                agents, team, mode = await asyncio.to_thread(
+                    _build_team,
                     team_name,
                     config,
                     runtime_paths,
