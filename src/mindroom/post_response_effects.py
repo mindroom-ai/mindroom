@@ -211,9 +211,7 @@ async def apply_post_response_effects(
         )
     else:  # noqa: PLR5501, RUF100
         if response_event_id is not None and (
-            (final_delivery_outcome.final_visible_body or "")
-            .rstrip()
-            .endswith("React with an emoji or type the number to respond.")
+            "React with an emoji or type the number to respond." in (final_delivery_outcome.final_visible_body or "")
             or final_delivery_outcome.interactive_metadata is not None
         ):
             deps.logger.warning(
