@@ -30,7 +30,8 @@ from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.dynamic_workflows.agno_adapter import build_agno_workflow_factory
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError, execute_workflow_spec
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
-from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
+from mindroom.dynamic_workflows.store import DynamicWorkflowStore
+from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_approval import ToolCallWorkflowOrigin, _matching_tool_approval_rule, _shutdown_approval_store
 from mindroom.tool_system.metadata import TOOL_METADATA

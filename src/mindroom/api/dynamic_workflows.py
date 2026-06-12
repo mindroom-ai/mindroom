@@ -10,7 +10,8 @@ from fastapi.responses import FileResponse
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.api.report_headers import set_report_headers
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
-from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowRun, DynamicWorkflowStore
+from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowStore
+from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 
 router = APIRouter(tags=["dynamic-workflows"])
 
