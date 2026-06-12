@@ -100,7 +100,7 @@ def _turn_record(
 
 def _edit_event(
     *,
-    original_event_id: str = ORIGINAL_EVENT_ID,
+    original_event_id: str | None = ORIGINAL_EVENT_ID,
     new_body: str = "what is 3+3?",
     sender: str = USER_ID,
     include_new_content: bool = True,
@@ -108,8 +108,9 @@ def _edit_event(
     content: dict[str, object] = {
         "body": f"* {new_body}",
         "msgtype": "m.text",
-        "m.relates_to": {"event_id": original_event_id, "rel_type": "m.replace"},
     }
+    if original_event_id is not None:
+        content["m.relates_to"] = {"event_id": original_event_id, "rel_type": "m.replace"}
     if include_new_content:
         content["m.new_content"] = {"body": new_body, "msgtype": "m.text"}
     source = {
@@ -312,6 +313,21 @@ async def test_coalesced_edit_with_incomplete_prompt_map_is_skipped(tmp_path: Pa
     await _handle_edit(harness, event, event_info)
 
     _assert_no_regeneration(harness)
+
+
+@pytest.mark.asyncio
+async def test_edit_without_original_event_id_returns_early(tmp_path: Path) -> None:
+    """An event without an m.replace relation never reaches context extraction or turn lookup."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event(original_event_id=None)
+    assert event_info.original_event_id is None
+
+    await _handle_edit(harness, event, event_info)
+
+    harness.resolver.extract_message_context.assert_not_awaited()
+    harness.turn_store.load_turn.assert_not_called()
+    _assert_no_regeneration(harness)
+    harness.logger.debug.assert_any_call("Edit event has no original event ID")
 
 
 @pytest.mark.asyncio
