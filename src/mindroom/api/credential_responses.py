@@ -18,7 +18,7 @@ def filter_credentials_for_response(credentials: dict[str, Any], *, is_oauth_ser
     filtered = _filter_internal_keys(credentials)
     if not is_oauth_service and not looks_like_oauth_credentials(credentials):
         return filtered
-    return filter_oauth_credential_fields(credentials)
+    return filter_oauth_credential_fields(filtered)
 
 
 def filter_oauth_client_config_for_response(credentials: dict[str, Any]) -> dict[str, Any]:
