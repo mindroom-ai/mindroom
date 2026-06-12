@@ -41,6 +41,10 @@ _DEFAULT_ALLOWLIST_PATH = "/etc/mindroom-egress/allowed-domains.txt"
 _MAX_DNS_NAME_LENGTH = 253
 _MAX_DNS_LABEL_LENGTH = 63
 _MIN_DNS_LABELS = 2
+# Defense-in-depth deny entries. ``canonical_hostname`` rejects bare
+# "localhost" earlier via the minimum-label check, so that entry is currently
+# redundant on that path; it stays as a backstop so relaxing label validation
+# can never re-admit it.
 _FORBIDDEN_HOSTNAMES = {
     "localhost",
     "metadata.google.internal",
@@ -167,7 +171,12 @@ def canonical_hostname(value: str) -> str:
 
 
 def is_hostname_allowed(hostname: str, policy: WorkerEgressPolicy) -> bool:
-    """Return whether one canonical hostname matches the policy's static allowlist."""
+    """Return whether one canonical hostname matches the policy's static allowlist.
+
+    ``hostname`` must already be canonicalized via :func:`canonical_hostname`;
+    non-canonical input is not normalized here and fails closed (``False``),
+    which at worst routes an already-allowed host through the grant flow.
+    """
     for entry in policy.static_allowlist:
         try:
             if entry.startswith("."):
