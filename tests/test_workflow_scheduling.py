@@ -24,13 +24,12 @@ from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
     SchedulingRuntime,
-    _build_scheduled_failure_content,
-    _execute_scheduled_workflow,
     _parse_workflow_schedule,
     _validate_conditional_workflow,
     _WorkflowParseError,
     schedule_task,
 )
+from mindroom.scheduling_executor import _build_scheduled_failure_content, execute_scheduled_workflow
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
@@ -463,7 +462,7 @@ class TestExecuteScheduledWorkflow:
                 ),
             ),
         ) as mock_send:
-            await _execute_scheduled_workflow(
+            await execute_scheduled_workflow(
                 client,
                 workflow,
                 config,
@@ -526,7 +525,7 @@ class TestExecuteScheduledWorkflow:
             ),
         ) as mock_send:
             conversation_cache = _conversation_cache()
-            await _execute_scheduled_workflow(
+            await execute_scheduled_workflow(
                 client,
                 workflow,
                 config,
@@ -593,7 +592,7 @@ class TestExecuteScheduledWorkflow:
                 ),
             ),
         ) as mock_send:
-            await _execute_scheduled_workflow(
+            await execute_scheduled_workflow(
                 client,
                 workflow,
                 config,
@@ -632,7 +631,7 @@ class TestExecuteScheduledWorkflow:
 
         with patch("mindroom.hooks.sender._send_message_result", new=mock_send):
             # Should not raise, but log error
-            await _execute_scheduled_workflow(
+            await execute_scheduled_workflow(
                 client,
                 workflow,
                 config,
@@ -674,10 +673,10 @@ class TestExecuteScheduledWorkflow:
                     ],
                 ),
             ) as mock_send,
-            patch("mindroom.scheduling.logger.info") as mock_info,
+            patch("mindroom.scheduling_executor.logger.info") as mock_info,
         ):
             conversation_cache = _conversation_cache(latest_thread_event_id="$latest123")
-            await _execute_scheduled_workflow(
+            await execute_scheduled_workflow(
                 client,
                 workflow,
                 config,
@@ -703,7 +702,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch("mindroom.hooks.sender._send_message_result", new=AsyncMock()) as mock_send:
-            await _execute_scheduled_workflow(
+            await execute_scheduled_workflow(
                 client,
                 workflow,
                 config,

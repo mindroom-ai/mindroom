@@ -976,7 +976,7 @@ depends_on = [
     "mindroom.orchestration.config_lifecycle",
     "mindroom.orchestration.runtime",
     "mindroom.runtime_support",
-    "mindroom.scheduling",
+    "mindroom.scheduling_executor",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
     "mindroom.tool_approval",
@@ -2005,11 +2005,18 @@ depends_on = [
 [[modules]]
 path = "mindroom.scheduling"
 depends_on = [
-    "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.matrix.client_delivery",
     "mindroom.model_loading",
+    "mindroom.scheduling_executor",
+]
+
+[[modules]]
+path = "mindroom.scheduling_executor"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.hooks",
 ]
 
 [[modules]]
@@ -2554,6 +2561,15 @@ from = ["mindroom.ai"]
 [[interfaces]]
 expose = ["get_model_instance"]
 from = ["mindroom.model_loading"]
+
+[[interfaces]]
+expose = [
+    "ScheduledWorkflowOutcome",
+    "execute_scheduled_workflow",
+    "send_scheduled_failure_notice",
+    "set_scheduling_hook_registry",
+]
+from = ["mindroom.scheduling_executor"]
 
 [[interfaces]]
 expose = [
