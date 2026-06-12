@@ -76,6 +76,7 @@ nginx:
 ```
 
 The ConfigMap must provide the server config under `nginx.key`, listening on `nginx.port`.
+The server config must keep serving `config.json` under the base path, which the default readiness and liveness probes request, or you must override `probes.readiness.custom` and `probes.liveness.custom`.
 When `rootServiceWorkerCleanup.enabled` is true, the same ConfigMap must also provide the cleanup worker script under `nginx.cleanupWorkerKey`.
 
 ## Notes
