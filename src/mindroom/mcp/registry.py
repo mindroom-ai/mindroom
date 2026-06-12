@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+from mindroom.logging_config import get_logger
 from mindroom.mcp.config import mcp_oauth_bridge_function_names, validate_mcp_tool_filter_overlap
 from mindroom.mcp.errors import MCPError
 from mindroom.mcp.oauth import mcp_oauth_provider_id
@@ -29,7 +30,11 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.mcp.config import MCPServerConfig
+    from mindroom.mcp.manager import MCPServerManager
+    from mindroom.mcp.types import MCPServerCatalog
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+
+logger = get_logger(__name__)
 
 _MCP_TOOL_PREFIX = "mcp_"
 _MCP_TOOL_NAMES: set[str] = set()
@@ -156,6 +161,25 @@ def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetada
     )
 
 
+def _available_catalog(
+    server_id: str,
+    server_config: MCPServerConfig,
+    manager: MCPServerManager,
+) -> MCPServerCatalog | None:
+    """Return the cached catalog, degrading to None when an optional server is unavailable."""
+    try:
+        return manager.get_catalog(server_id)
+    except MCPError as exc:
+        if server_config.required:
+            raise
+        logger.debug(
+            "MCP server unavailable; building toolkit without its tools",
+            server_id=server_id,
+            error=str(exc),
+        )
+        return None
+
+
 def _tool_factory(server_id: str, server_config: MCPServerConfig) -> Callable[[], type[Toolkit]]:
     def factory() -> type[Toolkit]:
         class BoundMindRoomMCPToolkit(MindRoomMCPToolkit):
@@ -173,7 +197,11 @@ def _tool_factory(server_id: str, server_config: MCPServerConfig) -> Callable[[]
                 super().__init__(
                     server_id=server_id,
                     manager=manager,
-                    catalog=manager.get_catalog(server_id) if manager is not None and not is_oauth else None,
+                    catalog=(
+                        _available_catalog(server_id, server_config, manager)
+                        if manager is not None and not is_oauth
+                        else None
+                    ),
                     tool_name=mcp_tool_name(server_id),
                     server_config=server_config,
                     include_tools=include_tools,

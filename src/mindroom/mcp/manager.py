@@ -46,6 +46,21 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# The cap matches STARTUP_RETRY_MAX_DELAY_SECONDS so a recovered required server
+# unblocks its dependent agents no slower than the bot-start retry loop did.
+_DISCOVERY_RETRY_INITIAL_DELAY_SECONDS = 5.0
+_DISCOVERY_RETRY_MAX_DELAY_SECONDS = 60.0
+
+
+def _discovery_retry_delay_seconds(consecutive_failures: int) -> float:
+    """Return the exponential-backoff delay before the next discovery retry."""
+    # Clamp the exponent so a long outage cannot overflow float conversion.
+    exponent = min(max(consecutive_failures - 1, 0), 10)
+    return min(
+        _DISCOVERY_RETRY_INITIAL_DELAY_SECONDS * 2**exponent,
+        _DISCOVERY_RETRY_MAX_DELAY_SECONDS,
+    )
+
 
 @dataclass(frozen=True)
 class _MCPSessionKey:
@@ -85,6 +100,10 @@ class MCPServerManager:
             if state.last_error is not None or (state.config.auth is None and state.catalog is None)
         }
 
+    def failed_required_server_ids(self) -> set[str]:
+        """Return failed servers configured to block dependent agent startup."""
+        return {server_id for server_id in self.failed_server_ids() if self._states[server_id].config.required}
+
     def get_catalog(self, server_id: str) -> MCPServerCatalog:
         """Return the cached catalog for one server."""
         state = self._require_state(server_id)
@@ -112,6 +131,7 @@ class MCPServerManager:
                 state = MCPServerState(server_id=server_id, config=server_config)
                 self._states[server_id] = state
             elif state.config != server_config:
+                await self._cancel_refresh_task(state)
                 async with state.lock:
                     await self._disconnect_state_when_idle(state)
                     await self._remove_scoped_server_states(server_id)
@@ -119,15 +139,19 @@ class MCPServerManager:
                     state.catalog = None
                     state.last_error = None
                     state.stale = True
+                    state.consecutive_failures = 0
                     state.semaphore = asyncio.Semaphore(server_config.max_concurrent_calls)
 
             if server_config.auth is not None:
                 state.stale = False
                 continue
 
+            retry_pending = state.refresh_task is not None and not state.refresh_task.done()
             if (
-                state.catalog is None or state.stale or state.last_error is not None or not state.connected
-            ) and await self._refresh_server_catalog(state, notify=False):
+                (state.catalog is None or state.stale or state.last_error is not None or not state.connected)
+                and not retry_pending
+                and await self._refresh_server_catalog(state, notify=False)
+            ):
                 changed_server_ids.add(server_id)
 
         invalid_server_ids = await self._validate_global_function_names()
@@ -140,18 +164,10 @@ class MCPServerManager:
         self._shutdown = True
         self._config = None
         for state in list(self._states.values()):
-            task = state.refresh_task
-            if task is not None:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-                state.refresh_task = None
+            await self._cancel_refresh_task(state)
             await self._disconnect_state_when_idle(state)
         for state in list(self._scoped_states.values()):
-            task = state.refresh_task
-            if task is not None:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-                state.refresh_task = None
+            await self._cancel_refresh_task(state)
             await self._disconnect_state_when_idle(state)
         self._states.clear()
         self._scoped_states.clear()
@@ -259,10 +275,7 @@ class MCPServerManager:
         state = self._scoped_states.pop(key, None)
         if state is None:
             return
-        task = state.refresh_task
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await self._cancel_refresh_task(state)
         await self._disconnect_state_when_idle(state)
 
     def _oauth_connection_required(
@@ -454,20 +467,31 @@ class MCPServerManager:
                 try:
                     catalog = await self._connect_and_discover(state, auth_headers=auth_headers)
                 except MCPError as exc:
+                    repeated_error = state.last_error is not None and str(state.last_error) == str(exc)
                     state.last_error = exc
                     state.connected = False
                     state.catalog = None
-                    logger.warning(
+                    state.consecutive_failures += 1
+                    log = logger.debug if repeated_error else logger.warning
+                    log(
                         "MCP server discovery failed",
                         server_id=state.server_id,
                         transport=state.config.transport,
                         error=str(exc),
+                        required=state.config.required,
+                        affected_entities=sorted(self._entities_referencing_server(state.server_id)),
+                        consecutive_failures=state.consecutive_failures,
+                    )
+                    self._schedule_refresh_task(
+                        state,
+                        delay_seconds=_discovery_retry_delay_seconds(state.consecutive_failures),
                     )
                     return False
 
                 state.catalog = catalog
                 state.connected = True
                 state.last_error = None
+                state.consecutive_failures = 0
                 changed = previous_hash != catalog.catalog_hash
                 should_notify_catalog_change = notify and changed and self._on_catalog_change is not None
         invalid_server_ids = await self._validate_global_function_names()
@@ -614,15 +638,26 @@ class MCPServerManager:
 
         return cast("MessageHandlerFnT", handle_message)
 
-    def _schedule_refresh_task(self, state: MCPServerState) -> None:
-        existing_task = state.refresh_task
+    def _entities_referencing_server(self, server_id: str) -> set[str]:
+        """Return configured entities whose tools reference one MCP server."""
+        config = self._config
+        if config is None:
+            return set()
+        return config.get_entities_referencing_tools({mcp_tool_name(server_id)})
+
+    def _schedule_refresh_task(self, state: MCPServerState, *, delay_seconds: float = 0.0) -> None:
         if self._shutdown or state.config.auth is not None:
             return
-        if existing_task is not None and not existing_task.done():
+        existing_task = state.refresh_task
+        if existing_task is not None and not existing_task.done() and existing_task is not asyncio.current_task():
             return
 
         async def refresh() -> None:
+            current_task = asyncio.current_task()
+            cancelled = False
             try:
+                if delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
                 changed = await self._refresh_server_catalog(state, notify=True)
                 if changed:
                     logger.info(
@@ -630,6 +665,9 @@ class MCPServerManager:
                         server_id=state.server_id,
                         transport=state.config.transport,
                     )
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
             except Exception as exc:
                 logger.warning(
                     "MCP server catalog refresh failed",
@@ -638,9 +676,12 @@ class MCPServerManager:
                     error=str(exc),
                 )
             finally:
-                state.refresh_task = None
-                if state.stale:
-                    self._schedule_refresh_task(state)
+                # A failed refresh schedules its own backoff retry from within this
+                # task, so only clear or reschedule when no replacement exists.
+                if state.refresh_task is current_task:
+                    state.refresh_task = None
+                    if state.stale and not cancelled:
+                        self._schedule_refresh_task(state)
 
         state.refresh_task = asyncio.create_task(refresh(), name=f"mcp_catalog_refresh:{state.server_id}")
 
@@ -648,10 +689,7 @@ class MCPServerManager:
         state = self._states.pop(server_id, None)
         if state is None:
             return
-        task = state.refresh_task
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await self._cancel_refresh_task(state)
         await self._remove_scoped_server_states(server_id)
         await self._disconnect_state_when_idle(state)
 
@@ -659,11 +697,18 @@ class MCPServerManager:
         scoped_keys = [key for key in self._scoped_states if key.server_id == server_id]
         for key in scoped_keys:
             state = self._scoped_states.pop(key)
-            task = state.refresh_task
-            if task is not None:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+            await self._cancel_refresh_task(state)
             await self._disconnect_state_when_idle(state)
+
+    @staticmethod
+    async def _cancel_refresh_task(state: MCPServerState) -> None:
+        task = state.refresh_task
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if state.refresh_task is task:
+            state.refresh_task = None
 
     async def _disconnect_state_when_idle(self, state: MCPServerState) -> None:
         async with state.call_lock.write():

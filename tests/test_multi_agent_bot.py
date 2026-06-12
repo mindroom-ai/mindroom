@@ -15276,7 +15276,7 @@ class TestMultiAgentOrchestrator:
         orchestrator.agent_bots = {"general": bot}
 
         with (
-            patch.object(orchestrator, "_retry_blocked_mcp_entities", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_entities_blocked_by_failed_mcp_servers", return_value=set()),
             patch.object(
                 orchestrator,
                 "_setup_rooms_and_memberships",

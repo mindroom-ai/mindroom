@@ -483,7 +483,10 @@ class _MultiAgentOrchestrator:
                     return
 
                 config = self.config
-                if config is not None and entity_name in await self._retry_blocked_mcp_entities({entity_name}, config):
+                if config is not None and entity_name in self._entities_blocked_by_failed_mcp_servers(
+                    {entity_name},
+                    config,
+                ):
                     start_status = False
                 else:
                     start_status = await self._try_start_bot_once(entity_name, bot)
@@ -581,11 +584,11 @@ class _MultiAgentOrchestrator:
         return await manager.sync_servers(config)
 
     def _entities_blocked_by_failed_mcp_servers(self, entity_names: set[str], config: Config) -> set[str]:
-        """Return entities whose required MCP servers are currently unavailable."""
+        """Return entities blocked because a required MCP server is currently unavailable."""
         manager = self._mcp_manager
         if manager is None:
             return set()
-        failed_server_ids = manager.failed_server_ids()
+        failed_server_ids = manager.failed_required_server_ids()
         if not failed_server_ids:
             return set()
         blocked_entities = config.get_entities_referencing_tools(
@@ -593,13 +596,21 @@ class _MultiAgentOrchestrator:
         )
         return blocked_entities & entity_names
 
-    async def _retry_blocked_mcp_entities(self, entity_names: set[str], config: Config) -> set[str]:
-        """Retry failed MCP discovery once before deferring dependent entity startup."""
-        blocked_entities = self._entities_blocked_by_failed_mcp_servers(entity_names, config)
-        if not blocked_entities:
-            return set()
-        await self._sync_mcp_manager(config)
-        return self._entities_blocked_by_failed_mcp_servers(entity_names, config)
+    def _log_mcp_degraded_entities(self, config: Config) -> None:
+        """Warn once per unavailable optional MCP server about entities running without its tools."""
+        manager = self._mcp_manager
+        if manager is None:
+            return
+        running_entities = {entity_name for entity_name, bot in self.agent_bots.items() if bot.running}
+        for server_id in sorted(manager.failed_server_ids() - manager.failed_required_server_ids()):
+            degraded_entities = config.get_entities_referencing_tools({mcp_tool_name(server_id)}) & running_entities
+            if not degraded_entities:
+                continue
+            logger.warning(
+                "Entities running without tools from unavailable MCP server",
+                server_id=server_id,
+                degraded_entities=sorted(degraded_entities),
+            )
 
     @staticmethod
     def _entity_display_name(config: Config, entity_name: str) -> str:
@@ -802,7 +813,7 @@ class _MultiAgentOrchestrator:
 
         config = self.config
         blocked_entities = (
-            await self._retry_blocked_mcp_entities({entity_name for entity_name, _ in entity_bots}, config)
+            self._entities_blocked_by_failed_mcp_servers({entity_name for entity_name, _ in entity_bots}, config)
             if config is not None
             else set()
         )
@@ -1048,6 +1059,7 @@ class _MultiAgentOrchestrator:
         )
 
         config = self._require_config()
+        self._log_mcp_degraded_entities(config)
         self._resolve_bot_room_aliases(started_bots, config)
         phase_started = log_startup_phase_started("bind_runtime_support")
         self._bind_started_runtime_support_services(started_bots)

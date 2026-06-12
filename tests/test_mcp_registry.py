@@ -10,6 +10,8 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
+from mindroom.mcp.errors import MCPTimeoutError
+from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import (
     _MCP_TOOL_NAMES,
     mcp_server_id_from_tool_name,
@@ -19,6 +21,7 @@ from mindroom.mcp.registry import (
     validate_mcp_agent_overrides,
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
+from mindroom.mcp.types import MCPServerState
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, SetupType, ToolStatus, get_tool_by_name
 from mindroom.tool_system.worker_routing import supports_tool_name_for_worker_scope
 
@@ -27,6 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.mcp.config import MCPServerConfig
 
 _BASE_TOOL_REGISTRY = {
     tool_name: factory for tool_name, factory in TOOL_REGISTRY.items() if not tool_name.startswith("mcp_")
@@ -336,6 +340,54 @@ def test_mcp_tool_registry_returns_empty_toolkit_without_bound_manager(tmp_path:
 
     assert toolkit.name == "mcp_demo"
     assert toolkit.async_functions == {}
+
+
+def _bind_failed_manager(tmp_path: Path, server_config: MCPServerConfig) -> None:
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    state = MCPServerState(server_id="demo", config=server_config)
+    state.last_error = MCPTimeoutError("demo", "MCP startup timed out after 60.0 seconds")
+    manager._states["demo"] = state
+    bind_mcp_server_manager(manager)
+
+
+def test_mcp_tool_registry_degrades_when_optional_server_unavailable(tmp_path: Path) -> None:
+    """A failed optional MCP server yields a toolkit without functions instead of an error."""
+    config = _config(tmp_path)
+    sync_mcp_tool_registry(config)
+    _bind_failed_manager(tmp_path, config.mcp_servers["demo"])
+
+    toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
+
+    assert toolkit.name == "mcp_demo"
+    assert toolkit.async_functions == {}
+
+
+def test_mcp_tool_registry_fails_when_required_server_unavailable(tmp_path: Path) -> None:
+    """A failed required MCP server keeps the old hard-fail toolkit behavior."""
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "required": True,
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["mcp_demo"],
+                },
+            },
+        },
+        _runtime_paths(tmp_path),
+    )
+    sync_mcp_tool_registry(config)
+    _bind_failed_manager(tmp_path, config.mcp_servers["demo"])
+
+    with pytest.raises(MCPTimeoutError, match="startup timed out"):
+        get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
 
 
 def test_mcp_tool_names_are_shared_only(tmp_path: Path) -> None:
