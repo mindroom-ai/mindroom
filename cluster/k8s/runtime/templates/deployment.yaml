@@ -361,6 +361,13 @@ spec:
                   name: {{ .Values.matrix.registrationToken.existingSecret }}
                   key: {{ .Values.matrix.registrationToken.key }}
             {{- end }}
+            {{- range $entry := .Values.providerCredentials }}
+            - name: {{ include "mindroom-runtime.providerCredentialEnvName" (list $ $entry) }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $entry.existingSecret }}
+                  key: {{ $entry.key }}
+            {{- end }}
             {{- with .Values.env.extra }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

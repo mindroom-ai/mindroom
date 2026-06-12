@@ -471,3 +471,25 @@ app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- $av := .Values.workers.kubernetes.agentVault -}}
 {{- required "workers.kubernetes.agentVault.bootstrap.image or cliImage is required when bootstrap is enabled" (default $av.cliImage $av.bootstrap.image) -}}
 {{- end -}}
+
+{{/*
+Provider API key env vars the runtime natively syncs into its credential
+service at startup. Mirrors PROVIDER_ENV_KEYS in src/mindroom/constants.py.
+*/}}
+{{- define "mindroom-runtime.providerCredentialEnvMap" -}}
+anthropic: ANTHROPIC_API_KEY
+azure: AZURE_OPENAI_API_KEY
+openai: OPENAI_API_KEY
+google: GOOGLE_API_KEY
+openrouter: OPENROUTER_API_KEY
+deepseek: DEEPSEEK_API_KEY
+cerebras: CEREBRAS_API_KEY
+groq: GROQ_API_KEY
+ollama: OLLAMA_HOST
+{{- end -}}
+
+{{- define "mindroom-runtime.providerCredentialEnvName" -}}
+{{- $entry := index . 1 -}}
+{{- $envMap := include "mindroom-runtime.providerCredentialEnvMap" (index . 0) | fromYaml -}}
+{{- index $envMap $entry.provider -}}
+{{- end -}}
