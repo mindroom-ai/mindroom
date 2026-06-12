@@ -390,7 +390,10 @@ class TestConcurrencySmoke:
         """Exactly one writer wins each generation and the final state is never torn."""
         before = _snapshot(loaded_app)
         writer_count = 4
-        barrier = threading.Barrier(writer_count)
+        # The constructor timeout applies to every wait(), so a writer that dies
+        # before reaching the barrier breaks it for the others immediately instead
+        # of letting them idle until pytest's global 60s timeout.
+        barrier = threading.Barrier(writer_count, timeout=10)
         outcomes: dict[str, str | int] = {}
 
         def write_marker(marker: str) -> None:
