@@ -91,6 +91,11 @@ jobs:
             --set eventCache.databaseUrl.existingSecret=existing-event-cache-secrets \
             --set eventCache.databaseUrl.key=DATABASE_URL \
             > "$render_dir/adoption.yaml"
+          helm template mindroom-runtime "$RUNTIME_CHART_DIR" \
+            --namespace mindroom \
+            --set networkPolicy.create=true \
+            --set 'networkPolicy.apiIngressFrom[0].podSelector.matchLabels.app=my-ingress' \
+            > "$render_dir/network-policy.yaml"
 
       - name: Package runtime chart
         run: |
