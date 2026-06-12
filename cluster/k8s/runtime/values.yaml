@@ -53,6 +53,26 @@ podDisruptionBudget:
   maxUnavailable: 1
   minAvailable: ""
 
+# Optional NetworkPolicy for the MindRoom control-plane pod.
+# When created, pod ingress is limited to the runtime API port from the configured peers.
+networkPolicy:
+  create: false
+  name: ""
+  # NetworkPolicyPeer entries allowed to reach the runtime API port, for example an edge proxy and known in-cluster clients.
+  # NetworkPolicy targets pods rather than Services, so selectors must match the client pods.
+  # Leave empty to allow the API port from all sources while still denying other ingress.
+  apiIngressFrom: []
+  # Example:
+  # apiIngressFrom:
+  #   - podSelector:
+  #       matchLabels:
+  #         app.kubernetes.io/name: my-ingress
+  # Raw Kubernetes NetworkPolicyIngressRule entries appended after the API rule.
+  extraIngress: []
+  # Raw Kubernetes NetworkPolicyEgressRule entries.
+  # Setting any entry adds Egress to policyTypes, so include every egress flow the runtime needs.
+  extraEgress: []
+
 runtime:
   apiHost: 0.0.0.0
   apiPort: 8765

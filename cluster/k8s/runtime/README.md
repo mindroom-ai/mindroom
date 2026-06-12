@@ -193,6 +193,29 @@ plugins:
   - /app/agent_data/content-bundles/policy-pack/plugins/policy-tools
 ```
 
+## Control-Plane NetworkPolicy
+
+The chart can create an optional NetworkPolicy for the control-plane pod, so operators can restrict runtime API ingress to an edge proxy and known clients.
+The policy targets the runtime pods through the chart selector labels and allows the API port only from the configured peers.
+NetworkPolicy targets pods rather than Services, so each `apiIngressFrom` entry must match the actual client pods.
+
+```yaml
+networkPolicy:
+  create: true
+  apiIngressFrom:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: my-ingress
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: my-api-client
+```
+
+The API port follows `runtime.apiPort`, so the policy stays aligned with the Deployment without a separate port value.
+When `apiIngressFrom` is empty, the policy allows the API port from all sources while still denying other ingress to the pod.
+Use `networkPolicy.extraIngress` and `networkPolicy.extraEgress` for raw Kubernetes rules beyond the API rule.
+Setting any `extraEgress` entry adds `Egress` to `policyTypes`, so those rules must then cover every egress flow the runtime needs, such as DNS, the Matrix homeserver, model APIs, the event cache, and workers.
+
 ## Worker Egress Proxy
 
 For dedicated Kubernetes workers, the chart can either deploy the approved egress proxy or point workers at an existing HTTP proxy Service.
@@ -327,6 +350,7 @@ workers:
 ## Notes
 
 - The chart does not create ingress or a Matrix homeserver.
+- Set `networkPolicy.create: true` to restrict control-plane API ingress to known client pods.
 - The chart can create PostgreSQL for MindRoom's event cache, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
 - Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime and static runner sidecar receive the same Secret-backed key.
