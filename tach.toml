@@ -1029,6 +1029,7 @@ visibility = [
 [[modules]]
 path = "mindroom.response_attempt"
 depends_on = [
+    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.logging_config",
@@ -1531,6 +1532,11 @@ path = "mindroom.cancellation"
 depends_on = []
 
 [[modules]]
+path = "mindroom.sync_restart_retry"
+depends_on = ["mindroom.logging_config"]
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.sync_bridge_state"
 depends_on = []
 visibility = [
@@ -1772,8 +1778,8 @@ path = "mindroom.bot"
 depends_on = [
     "mindroom.agents",
     "mindroom.approval_inbound",
-    "mindroom.bot_runtime_view",
     "mindroom.bot_room_lifecycle",
+    "mindroom.bot_runtime_view",
     "mindroom.commands.config_confirmation",
     "mindroom.constants",
     "mindroom.conversation_resolver",
@@ -1784,7 +1790,6 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge",
-    "mindroom.memory",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.conversation_cache",
@@ -1794,15 +1799,17 @@ depends_on = [
     "mindroom.matrix.state",
     "mindroom.matrix.users",
     "mindroom.matrix.visible_body",
+    "mindroom.memory",
     "mindroom.post_response_effects",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.scheduling",
+    "mindroom.sync_restart_retry",
     "mindroom.teams",
+    "mindroom.tool_approval",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
-    "mindroom.tool_approval",
     "mindroom.turn_controller",
     "mindroom.turn_policy",
     "mindroom.turn_store",

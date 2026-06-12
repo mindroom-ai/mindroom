@@ -279,6 +279,7 @@ class ResponseRequest:
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
+    on_sync_restart_cancelled: Callable[[], None] | None = None
 
     @property
     def room_id(self) -> str:
@@ -739,6 +740,30 @@ class ResponseRunner:
     def _correlation_id_for_request(self, request: ResponseRequest) -> str:
         """Resolve the correlation id for one request."""
         return request.correlation_id or request.reply_to_event_id or request.response_envelope.source_event_id
+
+    def _notify_sync_restart_cancelled(
+        self,
+        request: ResponseRequest,
+        final_outcome: FinalDeliveryOutcome,
+        *,
+        delivery_cancelled: bool,
+        delivery_failure_reason: str | None,
+    ) -> None:
+        """Tell the dispatcher when stall recovery interrupted a marked-handled turn.
+
+        Only turns that end as a visible interrupted note are reported: they get
+        recorded in the handled-turn ledger, so the post-restart sync replay
+        dedups them away and an explicit retry is their only recovery. Unmarked
+        turns are recovered by that replay instead; retrying them too would
+        answer twice.
+        """
+        if request.on_sync_restart_cancelled is None or not delivery_cancelled:
+            return
+        if not final_outcome.mark_handled:
+            return
+        if cancel_source_from_failure_reason(delivery_failure_reason) != "sync_restart":
+            return
+        request.on_sync_restart_cancelled()
 
     def _build_lifecycle(
         self,
@@ -1324,6 +1349,12 @@ class ResponseRunner:
                 interactive_agent_name=self.deps.agent_name,
                 persist_response_event_id=persist_response_event_id,
             ),
+        )
+        self._notify_sync_restart_cancelled(
+            request,
+            final_outcome,
+            delivery_cancelled=delivery_cancelled,
+            delivery_failure_reason=delivery_failure_reason,
         )
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
 
@@ -2309,4 +2340,10 @@ class ResponseRunner:
             raise
         if early_delivery_error is not None:
             raise early_delivery_error
+        self._notify_sync_restart_cancelled(
+            request,
+            final_outcome,
+            delivery_cancelled=delivery_cancelled,
+            delivery_failure_reason=delivery_failure_reason,
+        )
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None

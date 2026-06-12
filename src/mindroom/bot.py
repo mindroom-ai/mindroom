@@ -108,6 +108,7 @@ from .scheduling import (
     restore_scheduled_tasks,
 )
 from .startup_errors import PermanentStartupError
+from .sync_restart_retry import SyncRestartRetryQueue
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -317,6 +318,7 @@ class AgentBot:
         self.config_path = config_path
         self.logger = logger.bind(agent=self.agent_name)
         self.stop_manager = StopManager()
+        self._restart_retry_queue = SyncRestartRetryQueue()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -527,6 +529,7 @@ class AgentBot:
                 turn_store=self._turn_store,
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
+                restart_retry=self._restart_retry_queue,
             ),
         )
 
@@ -1165,6 +1168,15 @@ class AgentBot:
 
         if self._sync_shutting_down:
             return
+
+        if self._restart_retry_queue.has_pending:
+            # The sync loop is healthy again: re-dispatch turns whose responses
+            # were cancelled by stall recovery, once each.
+            create_background_task(
+                self._restart_retry_queue.flush(),
+                name=f"sync_restart_retry_{self.agent_name}",
+                owner=self._runtime_view,
+            )
 
         if isinstance(_response, nio.SyncResponse):
             restored_token_first_sync_response = (

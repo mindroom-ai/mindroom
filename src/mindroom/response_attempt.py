@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.cancellation import request_task_cancel
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import bound_log_context
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
     from mindroom.timing import DispatchPipelineTiming
 
 type _MatrixEventId = str
+
+_FORWARDED_CANCEL_WAIT_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -91,6 +94,23 @@ class ResponseAttemptRunner:
         )
         return user_is_online
 
+    async def _forward_cancel_to_attempt_task(self, task: asyncio.Task[None], exc: asyncio.CancelledError) -> None:
+        """Cancel the attempt task when the awaiting chain was cancelled instead.
+
+        Sync-restart recovery cancels the dispatch chain, not the attempt task it
+        awaits; without forwarding, the generation keeps running as an orphan and
+        races the cancelled-note delivery for the same visible message.
+        """
+        if task.done():
+            return
+        request_task_cancel(task, cancel_msg=str(exc.args[0]) if exc.args else None)
+        _done, pending = await asyncio.wait({task}, timeout=_FORWARDED_CANCEL_WAIT_SECONDS)
+        if pending:
+            self.deps.logger.warning(
+                "Response attempt task did not finish after forwarded cancellation",
+                task_name=task.get_name(),
+            )
+
     async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:
         """Run one response coroutine under visible message tracking."""
         if request.thinking_message is not None and request.existing_event_id is not None:
@@ -132,6 +152,7 @@ class ResponseAttemptRunner:
                 failure_reason = cancel_failure_reason(classify_cancel_source(exc))
                 if request.on_cancelled is not None:
                     request.on_cancelled(failure_reason)
+                await self._forward_cancel_to_attempt_task(task, exc)
                 log_cancelled_response(
                     self.deps.logger,
                     exc=exc,

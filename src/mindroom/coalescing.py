@@ -9,6 +9,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .cancellation import SYNC_RESTART_CANCEL_MSG, request_task_cancel
 from .coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
@@ -1616,7 +1617,9 @@ class _CoalescingDrainCoordinator:
         dropped_ready_count = 0
         for gate in self.gate._gates.values():
             if gate.drain_task is not None and not gate.drain_task.done():
-                gate.drain_task.cancel()
+                # Carry sync-restart provenance so cancelled in-flight responses can
+                # tell stall recovery apart from a user stop or a plain interruption.
+                request_task_cancel(gate.drain_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
                 self.context.result.dispatch_cancelled_count += 1
                 gate.drain_task = None
             admissions = [*gate.claimed_admissions, *gate.queue]

@@ -212,6 +212,41 @@ async def test_response_attempt_adds_stop_button_for_online_user_and_removes_it_
 
 
 @pytest.mark.asyncio
+async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
+    """Cancelling the awaiting chain must cancel the attempt task with the same provenance."""
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    runner, _delivery_gateway, _stop_manager = _runner()
+    inner_started = asyncio.Event()
+    inner_cancel_args: list[tuple[object, ...]] = []
+    cancellation_reasons: list[str] = []
+
+    async def response_function(_message_id: str | None) -> None:
+        inner_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            inner_cancel_args.append(exc.args)
+            raise
+
+    outer = asyncio.create_task(
+        runner.run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=response_function,
+                existing_event_id="$existing",
+                on_cancelled=cancellation_reasons.append,
+            ),
+        ),
+    )
+    await inner_started.wait()
+    outer.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+    await asyncio.wait({outer})
+
+    assert cancellation_reasons == ["sync_restart_cancelled"]
+    assert inner_cancel_args == [(SYNC_RESTART_CANCEL_MSG,)]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("cancel_args", "expected_reason", "log_method", "log_message"),
     [
