@@ -393,7 +393,11 @@ async def _apply_turn_plan(
         started_wait.cancel()
     if response_task.done() and not response_task.cancelled():
         # Surface pre-lock failures to the caller's containment; post-lock
-        # failures belong to the runner-owned task.
+        # failures belong to the runner-owned task. Pre-lock CANCELLATION is
+        # deliberately NOT surfaced: this coroutine was not itself cancelled,
+        # and re-raising CancelledError here would corrupt the gate drain's
+        # own cancellation state. The queued-notice reservation still cancels
+        # in dispatch_text_message's finally, which is the cleanup contract.
         response_task.result()
 
 

@@ -502,7 +502,9 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
     release_first_response = asyncio.Event()
     generated: list[str] = []
 
-    async def fake_generate_response(request: object) -> None:
+    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> None:
+        # The real lifecycle acquired the response lock before invoking this
+        # locked operation; only post-lock generation is faked here.
         generated.append(request.response_envelope.source_event_id)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
@@ -529,10 +531,9 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
         patch.object(bot._turn_controller, "_prepare_dispatch", new=fake_prepare_dispatch),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
-        patch.object(
-            bot._response_runner,
-            "generate_response",
-            new=AsyncMock(side_effect=fake_generate_response),
+        patch(
+            "mindroom.response_runner.ResponseRunner.generate_response_locked",
+            new=fake_generate_response_locked,
         ),
     ):
         await bot._turn_controller.handle_text_event(room, first)
