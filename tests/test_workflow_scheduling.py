@@ -29,7 +29,7 @@ from mindroom.scheduling import (
     _WorkflowParseError,
     schedule_task,
 )
-from mindroom.scheduling_executor import _build_scheduled_failure_content, execute_scheduled_workflow
+from mindroom.scheduling_executor import execute_scheduled_workflow, send_scheduled_failure_notice
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
@@ -543,8 +543,9 @@ class TestExecuteScheduledWorkflow:
         assert "m.relates_to" not in content
         assert content[ORIGINAL_SENDER_KEY] == "@user:server"
 
-    async def test_scheduled_failure_content_labels_latest_thread_lookup(self) -> None:
-        """Scheduled failure replies should attribute latest-thread lookups."""
+    async def test_scheduled_failure_notice_labels_latest_thread_lookup(self) -> None:
+        """Scheduled failure notices should attribute latest-thread lookups."""
+        config = _runtime_bound_config(Config())
         workflow = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC),
@@ -557,13 +558,28 @@ class TestExecuteScheduledWorkflow:
         target = MessageTarget.resolve("!room:server", "$thread123", None)
         conversation_cache = _conversation_cache(latest_thread_event_id="$latest456")
 
-        content = await _build_scheduled_failure_content(
-            workflow,
-            target,
-            "Workflow failed",
-            conversation_cache,
-        )
+        with patch(
+            "mindroom.hooks.sender._send_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$notice123",
+                    content_sent={"body": "sent"},
+                ),
+            ),
+        ) as mock_send:
+            await send_scheduled_failure_notice(
+                AsyncMock(),
+                workflow,
+                target,
+                "Workflow failed",
+                config,
+                conversation_cache,
+            )
 
+        mock_send.assert_awaited_once()
+        assert mock_send.await_args.args[1] == "!room:server"
+        content = mock_send.await_args.args[2]
+        assert content["body"] == "Workflow failed"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest456"
         conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
             "!room:server",
