@@ -30,6 +30,18 @@ def test_chart_provider_env_map_matches_provider_env_keys() -> None:
     assert _chart_provider_env_map() == PROVIDER_ENV_KEYS
 
 
+def test_docs_list_every_supported_provider() -> None:
+    """The enumerated provider lists in values.yaml and README.md must stay complete."""
+    values_marker = "# Supported providers mirror PROVIDER_ENV_KEYS in src/mindroom/constants.py:"
+    values_lines = (RUNTIME_CHART_DIR / "values.yaml").read_text(encoding="utf-8").splitlines()
+    values_list = values_lines[values_lines.index(values_marker) + 1]
+    readme_lines = (RUNTIME_CHART_DIR / "README.md").read_text(encoding="utf-8").splitlines()
+    readme_list = next(line for line in readme_lines if line.startswith("Supported provider names are "))
+    for provider in PROVIDER_ENV_KEYS:
+        assert provider in values_list, f"values.yaml provider list is missing {provider}"
+        assert f"`{provider}`" in readme_list, f"README provider list is missing {provider}"
+
+
 def _render_runtime_chart(*set_json_args: str) -> list[dict[str, Any]]:
     helm = shutil.which("helm")
     if helm is None:
