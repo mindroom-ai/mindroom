@@ -43,7 +43,6 @@ if TYPE_CHECKING:
 __all__ = [
     "CoalescingDrainResult",
     "CoalescingGate",
-    "GatePhase",
     "IngressAdmissionClosedError",
     "LaneSlot",
     "ReadyPendingEvent",
@@ -59,7 +58,7 @@ async def _allow_dispatch(_key: CoalescingKey) -> None:
     return
 
 
-class GatePhase(enum.Enum):
+class _GatePhase(enum.Enum):
     """Lifecycle phases for one coalescing gate."""
 
     DEBOUNCE = "debounce"
@@ -133,7 +132,7 @@ class _DrainContext:
 
 @dataclass
 class _GateEntry:
-    phase: GatePhase = GatePhase.DEBOUNCE
+    phase: _GatePhase = _GatePhase.DEBOUNCE
     queue: deque[_QueuedEvent] = field(default_factory=deque)
     claimed_admissions: list[_QueuedEvent] = field(default_factory=list)
     drain_task: asyncio.Task[None] | None = None
@@ -168,9 +167,14 @@ class CoalescingGate:
     only ready, conversation-assigned events to this gate. State machine per
     (room, thread, sender) key:
     IDLE (absent) -> DEBOUNCE -> flush -> IN_FLIGHT, while all undispatched
-    work remains in one FIFO queue. A batch ending in a text-like utterance is
-    complete and flushes immediately; a batch ending in media waits the
-    debounce window for more attachments or a trailing caption.
+    work remains in one FIFO queue. A live batch ending in a text-like
+    utterance is complete and flushes immediately; a live batch ending in
+    media waits the debounce window for more attachments or a trailing
+    caption (a continuous attachment stream extends the window without
+    bound). Follow-up backlogs queued behind an active response are exempt:
+    they flush as one combined turn as soon as the conversation idles, since
+    later ingress is admitted under the conversation's live key and could
+    never join the held backlog.
     """
 
     def __init__(
@@ -638,7 +642,7 @@ class CoalescingGate:
         a run ending in media keeps waiting for more attachments or a trailing
         caption until the window goes quiet or a barrier appears.
         """
-        gate.phase = GatePhase.DEBOUNCE
+        gate.phase = _GatePhase.DEBOUNCE
         if not gate.queue:
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
@@ -741,7 +745,7 @@ class CoalescingGate:
     ) -> str:
         """Dispatch a claimed batch."""
         flush_start = time.monotonic()
-        gate.phase = GatePhase.IN_FLIGHT
+        gate.phase = _GatePhase.IN_FLIGHT
         gate.deadline = None
         pending_count = len(pending_events)
         timing_scope = event_timing_scope(pending_events[-1].event.event_id)
@@ -785,7 +789,7 @@ class CoalescingGate:
                 flush_start=flush_start,
                 outcome=outcome,
             )
-            gate.phase = GatePhase.DEBOUNCE
+            gate.phase = _GatePhase.DEBOUNCE
             gate.deadline = None
 
     async def _dispatch_claimed_events(
@@ -950,7 +954,7 @@ class CoalescingGate:
         )
 
     async def _drain_gate(self, key: CoalescingKey, gate: _GateEntry) -> None:
-        """Own debounce, grace, and dispatch for one coalescing key."""
+        """Own debounce and dispatch for one coalescing key."""
         drain_start = time.monotonic()
         outcome = "finished"
         logger.debug(
@@ -993,7 +997,7 @@ class _CoalescingDrainCoordinator:
         cancelled_tasks: list[asyncio.Task[None]] = []
         for gate in self.gate._gates.values():
             task = gate.drain_task
-            if task is None or task.done() or gate.phase is GatePhase.IN_FLIGHT:
+            if task is None or task.done() or gate.phase is _GatePhase.IN_FLIGHT:
                 continue
             task.cancel()
             cancelled_tasks.append(task)
@@ -1056,7 +1060,7 @@ class _CoalescingDrainCoordinator:
         if not pending:
             return False, False
         if not any(
-            gate.drain_task in pending and gate.phase is GatePhase.IN_FLIGHT for gate in self.gate._gates.values()
+            gate.drain_task in pending and gate.phase is _GatePhase.IN_FLIGHT for gate in self.gate._gates.values()
         ):
             return False, True
         await self._abandon_gate_work_for_bounded_shutdown()

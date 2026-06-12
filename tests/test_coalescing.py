@@ -620,6 +620,50 @@ async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> No
 
 
 @pytest.mark.asyncio
+async def test_media_tailed_follow_up_backlog_flushes_immediately_at_idle() -> None:
+    """A follow-up backlog ending in media flushes at idle without a debounce wait.
+
+    Once the conversation idles, later ingress is admitted under the live key
+    and could never join the held backlog, so holding it would only add latency.
+    """
+    calls: list[list[str]] = []
+    idle = asyncio.Event()
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
+        if wait_key == key:
+            await idle.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+    )
+
+    await _admit_ready(
+        gate,
+        key,
+        PendingEvent(
+            event=_image_event("$img:localhost", 1_000_000),
+            room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            source_kind=IMAGE_SOURCE_KIND,
+            requester_user_id="@user:localhost",
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        ),
+    )
+    await asyncio.sleep(0.01)
+    assert calls == []
+
+    idle.set()
+    await _wait_for(lambda: calls == [["$img:localhost"]])
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
 async def test_different_thread_normal_gate_does_not_wait_behind_older_active_backlog() -> None:
     """Other-thread work must dispatch while this target's active backlog still waits."""
     batches: list[list[str]] = []

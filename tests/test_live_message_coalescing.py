@@ -2878,7 +2878,7 @@ async def test_shutdown_during_in_flight_dispatch_flushes_remaining_without_wait
             requester_user_id="@user:localhost",
         )
 
-        # Start shutdown — should wait for in-flight, then flush remaining without grace
+        # Start shutdown — should wait for in-flight, then flush remaining without waiting
         shutdown_task = asyncio.create_task(bot.prepare_for_sync_shutdown())
         await asyncio.sleep(0.01)
         assert shutdown_task.done() is False
