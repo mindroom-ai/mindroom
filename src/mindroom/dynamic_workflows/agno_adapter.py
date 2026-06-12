@@ -9,7 +9,7 @@ from agno.workflow import Step, Workflow, WorkflowFactory
 from agno.workflow.types import StepInput, StepOutput
 
 from mindroom.dynamic_workflows.runner import execute_workflow_step
-from mindroom.dynamic_workflows.store import validate_workflow_spec
+from mindroom.dynamic_workflows.validation import validate_workflow_spec
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

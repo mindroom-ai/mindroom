@@ -10,9 +10,8 @@ from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING
 
 from mindroom.dynamic_workflows.runner import async_execute_workflow_spec, execute_workflow_spec
-from mindroom.dynamic_workflows.store import (
+from mindroom.dynamic_workflows.validation import (
     DynamicWorkflowError,
-    DynamicWorkflowStore,
     validate_workflow_input,
     validate_workflow_spec,
     workflow_runtime_seconds,
@@ -22,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor, ParticipantExecutor
-    from mindroom.dynamic_workflows.store import DynamicWorkflowRun
+    from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowStore
 
 
 class _SyncWorkflowTimeoutError(TimeoutError):

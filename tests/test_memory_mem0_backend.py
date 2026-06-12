@@ -104,7 +104,7 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
         session_id="session-alice",
     )
 
-    with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
+    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
         await store_conversation_memory(
             "Alice-authored shared memory",
             "general",
@@ -160,7 +160,7 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
     assert worker_key is not None
 
     with (
-        patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance),
+        patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance),
         tool_execution_identity(execution_identity),
     ):
         await add_agent_memory(
@@ -319,7 +319,7 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
         del runtime_paths, timing_scope
         return FakeScopedMemory(scope_storage_path)
 
-    with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
+    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
         with tool_execution_identity(alice_identity):
             await store_conversation_memory(
                 "Alice-authored shared team memory",
@@ -401,7 +401,7 @@ async def test_mixed_private_team_mem0_member_crud_is_rejected(
         id_prefix = scope_storage_path.name.replace("/", "_") or "mem"
         return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=id_prefix))
 
-    with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
+    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
         await add_agent_memory("Shared calculator note", "calculator", storage_path, config, runtime_paths_for(config))
         calculator_memory_id = (
             await list_all_agent_memories("calculator", storage_path, config, runtime_paths_for(config), limit=10)
@@ -472,7 +472,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
     )
 
     with (
-        patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance),
+        patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance),
         tool_execution_identity(execution_identity),
     ):
         await store_conversation_memory(

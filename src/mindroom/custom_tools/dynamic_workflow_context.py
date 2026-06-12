@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 
-from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowRun, DynamicWorkflowStore
+from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowStore
+from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, build_execution_identity_from_runtime_context
 

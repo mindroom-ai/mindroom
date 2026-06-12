@@ -26,7 +26,7 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
-from mindroom.dynamic_workflows.store import DynamicWorkflowError
+from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_approval import ToolCallWorkflowOrigin
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded

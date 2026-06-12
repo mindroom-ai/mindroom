@@ -93,7 +93,8 @@ from mindroom.hooks import (
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import IndexingSettings, KnowledgeManager
+from mindroom.knowledge.indexing_config import IndexingSettings
+from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.utils import _KnowledgeResolution, _MultiKnowledgeVectorDb
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result

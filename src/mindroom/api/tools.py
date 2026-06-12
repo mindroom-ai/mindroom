@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from mindroom.agent_policy import dashboard_credentials_supported_for_scope
 from mindroom.api import config_lifecycle
-from mindroom.api.credentials import (
+from mindroom.api.dashboard_credential_scope import (
     require_agent_credential_management_authorized,
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
