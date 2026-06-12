@@ -9,6 +9,7 @@ team a requested model name maps to.
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
@@ -74,13 +75,18 @@ class ChatCompletionRequest(BaseModel):
 def parse_chat_completion_body(body: bytes) -> ChatCompletionRequest | JSONResponse:
     """Parse one chat completion request body, or return an OpenAI-style error.
 
-    Validates the raw bytes directly so invalid JSON and valid-but-non-object
+    Validates the decoded text directly so invalid JSON and valid-but-non-object
     JSON bodies (``null``, ``[]``, scalars) both surface as ValidationError
     and map to the same 400 response.
+
+    Decodes via ``json.detect_encoding`` (the helper ``json.loads`` uses for
+    bytes) so BOM-prefixed UTF-8 and UTF-16/UTF-32 bodies keep parsing, since
+    pydantic's JSON parser only accepts strict BOM-less UTF-8.
     """
     try:
-        return ChatCompletionRequest.model_validate_json(body)
-    except ValidationError:
+        text = body.decode(json.detect_encoding(body))
+        return ChatCompletionRequest.model_validate_json(text)
+    except (UnicodeDecodeError, ValidationError):
         return error_response(400, "Invalid request body")
 
 

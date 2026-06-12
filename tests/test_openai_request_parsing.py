@@ -76,6 +76,36 @@ class TestParseChatCompletionBody:
         )
         assert isinstance(parsed, ChatCompletionRequest)
 
+    def test_utf8_bom_body(self) -> None:
+        """A UTF-8 BOM-prefixed body parses (Windows/PowerShell and Java clients emit BOMs)."""
+        body = json.dumps({"model": "general", "messages": [{"role": "user", "content": "hi"}]})
+        parsed = parse_chat_completion_body(body.encode("utf-8-sig"))
+        assert isinstance(parsed, ChatCompletionRequest)
+        assert parsed.model == "general"
+
+    def test_utf16_and_utf32_bodies(self) -> None:
+        """UTF-16/UTF-32 bodies parse via json.detect_encoding, matching old json.loads behavior."""
+        body = json.dumps({"model": "general", "messages": [{"role": "user", "content": "hi"}]})
+        for encoding in ("utf-16", "utf-16-le", "utf-16-be", "utf-32"):
+            parsed = parse_chat_completion_body(body.encode(encoding))
+            assert isinstance(parsed, ChatCompletionRequest), encoding
+            assert parsed.model == "general"
+
+    def test_utf8_bom_invalid_and_non_object_bodies(self) -> None:
+        """BOM-prefixed invalid JSON and non-object JSON still return 400."""
+        for text in ("{not json", "null", "[]", "42"):
+            response = parse_chat_completion_body(text.encode("utf-8-sig"))
+            assert isinstance(response, JSONResponse), text
+            assert response.status_code == 400
+            assert _error_body(response)["message"] == "Invalid request body"
+
+    def test_undecodable_body(self) -> None:
+        """Bytes that cannot be decoded as detected encoding return 400."""
+        response = parse_chat_completion_body(b"\xff\xfe\xff{bad}")
+        assert isinstance(response, JSONResponse)
+        assert response.status_code == 400
+        assert _error_body(response)["message"] == "Invalid request body"
+
     def test_malformed_json(self) -> None:
         """Invalid JSON returns a 400 OpenAI-style error."""
         response = parse_chat_completion_body(b"{not json")
