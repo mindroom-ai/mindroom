@@ -57,7 +57,6 @@ from backend.config import (
     SUPABASE_URL,
     logger,
 )
-from backend.db_utils import update_instance_status
 from backend.deps import ensure_supabase
 from backend.k8s import (
     check_deployment_exists,
@@ -78,6 +77,7 @@ from backend.openrouter import (
 )
 from backend.pricing import get_plan_details
 from backend.process import run_helm
+from backend.services.instances_data import create_instance, list_instances, update_instance, update_instance_status
 from fastapi import BackgroundTasks, HTTPException
 
 _MATRIX_LOCALPART_ALLOWED_CHARS = frozenset("_-./=+abcdefghijklmnopqrstuvwxyz0123456789")
@@ -132,10 +132,7 @@ async def _background_mark_running_when_ready(instance_id: str, namespace: str =
         ready = await wait_for_deployment_ready(instance_id, namespace=namespace, timeout_seconds=600)
         if ready:
             try:
-                sb = ensure_supabase()
-                sb.table("instances").update({"status": "running", "updated_at": datetime.now(UTC).isoformat()}).eq(
-                    "instance_id", instance_id
-                ).execute()
+                update_instance(ensure_supabase(), instance_id, {"status": "running"})
             except Exception:
                 logger.warning("Background update: failed to mark instance %s as running", instance_id)
     except Exception:
@@ -402,24 +399,23 @@ def _stored_openrouter_key_hash(row: Mapping[str, Any] | None) -> str | None:
 
 def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
     """Persist non-secret OpenRouter key metadata for reuse and audit."""
-    sb.table("instances").update(
+    update_instance(
+        sb,
+        instance_id,
         {
             "openrouter_key_hash": created_key.hash,
             "openrouter_key_label": created_key.label,
             "openrouter_key_limit_usd": created_key.limit_usd,
             "openrouter_key_limit_reset": created_key.limit_reset,
             "openrouter_key_created_at": datetime.now(UTC).isoformat(),
-            "updated_at": datetime.now(UTC).isoformat(),
-        }
-    ).eq("instance_id", instance_id).execute()
+        },
+    )
 
 
 def _mark_instance_provision_error(sb: Any, instance_id: str, context: str) -> None:
     """Mark a failed provisioning attempt as error without hiding the original failure."""
     try:
-        sb.table("instances").update({"status": "error", "updated_at": datetime.now(UTC).isoformat()}).eq(
-            "instance_id", instance_id
-        ).execute()
+        update_instance(sb, instance_id, {"status": "error"})
     except Exception:
         logger.warning("Failed to update instance status to error after %s", context)
 
@@ -498,16 +494,11 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     if existing_instance_id:
         customer_id = str(existing_instance_id)
         try:
-            update_res = (
-                sb.table("instances")
-                .update({"status": "provisioning", "updated_at": datetime.now(UTC).isoformat()})
-                .eq("instance_id", customer_id)
-                .execute()
-            )
-            if not update_res.data:
+            updated_rows = update_instance(sb, customer_id, {"status": "provisioning"})
+            if not updated_rows:
                 msg = f"Instance {customer_id} not found"
                 raise HTTPException(status_code=404, detail=msg)  # noqa: TRY301
-            existing_instance_row = update_res.data[0]
+            existing_instance_row = updated_rows[0]
             logger.info("Re-provisioning existing instance %s", customer_id)
         except HTTPException:
             raise
@@ -518,25 +509,22 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         # Insert instance first to get a generated numeric instance_id (as text)
         try:
             now = datetime.now(UTC).isoformat()
-            insert_res = (
-                sb.table("instances")
-                .insert(
-                    {
-                        "subscription_id": subscription_id,
-                        "account_id": account_id,
-                        "status": "provisioning",
-                        "tier": tier,
-                        "created_at": now,
-                        "updated_at": now,
-                    }
-                )
-                .execute()
+            created_row = create_instance(
+                sb,
+                {
+                    "subscription_id": subscription_id,
+                    "account_id": account_id,
+                    "status": "provisioning",
+                    "tier": tier,
+                    "created_at": now,
+                    "updated_at": now,
+                },
             )
-            if not insert_res.data:
+            if not created_row:
                 msg = "Failed to insert instance"
                 raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
-            customer_id = insert_res.data[0]["instance_id"]
-            existing_instance_row = insert_res.data[0]
+            customer_id = created_row["instance_id"]
+            existing_instance_row = created_row
         except HTTPException:
             raise
         except Exception as e:
@@ -567,7 +555,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         sb, account_id=account_id, instance_id=customer_id, base_domain=base_domain
     )
     try:
-        sb.table("instances").update(
+        update_instance(
+            sb,
+            customer_id,
             {
                 "instance_url": frontend_url,
                 "frontend_url": frontend_url,
@@ -575,9 +565,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 "api_url": api_url,
                 "matrix_url": matrix_url,
                 "matrix_server_url": matrix_url,
-                "updated_at": datetime.now(UTC).isoformat(),
-            }
-        ).eq("instance_id", customer_id).execute()
+            },
+        )
     except Exception:
         logger.warning("Failed to update URLs for instance %s", customer_id)
 
@@ -723,9 +712,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
     ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)
     try:
-        sb.table("instances").update(
-            {"status": "running" if ready else "provisioning", "updated_at": datetime.now(UTC).isoformat()}
-        ).eq("instance_id", customer_id).execute()
+        update_instance(sb, customer_id, {"status": "running" if ready else "provisioning"})
     except Exception:
         logger.warning("Failed to update instance status after readiness poll")
 
@@ -851,8 +838,7 @@ async def sync_instances(sb: Any) -> dict[str, Any]:
     logger.info("Starting instance sync")
 
     try:
-        result = sb.table("instances").select("*").execute()
-        instances = result.data if result.data else []
+        instances = list_instances(sb)
 
         sync_results: dict[str, Any] = {"total": len(instances), "synced": 0, "errors": 0, "updates": []}
 

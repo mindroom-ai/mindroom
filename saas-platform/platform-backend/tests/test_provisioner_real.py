@@ -402,7 +402,7 @@ class TestProvisionerStateTransitions:
     def test_concurrent_state_changes_maintain_consistency(self):
         """Test that concurrent operations don't corrupt state."""
         import threading
-        from backend.db_utils import update_instance_status
+        from backend.services.instances_data import update_instance_status
 
         instance_id = 999
         results = []
@@ -425,7 +425,7 @@ class TestProvisionerStateTransitions:
             success = update_instance_status(instance_id, new_state)
             results.append((new_state, success))
 
-        with patch("backend.db_utils.ensure_supabase", return_value=_DummySB()):
+        with patch("backend.services.instances_data.ensure_supabase", return_value=_DummySB()):
             # Simulate concurrent updates
             threads = [
                 threading.Thread(target=update_state, args=("running",)),
