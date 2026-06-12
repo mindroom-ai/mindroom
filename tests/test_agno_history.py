@@ -61,8 +61,6 @@ from mindroom.history.compaction import (
     _emit_compaction_hook,
     _estimate_history_messages_tokens,
     _estimate_tool_definition_tokens,
-    _generate_compaction_summary,
-    _persist_compaction_progress,
     _rewrite_working_session_for_compaction,
     _strip_stale_anthropic_replay_fields,
     compact_scope_history,
@@ -88,10 +86,12 @@ from mindroom.history.runtime import (
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
     read_scope_state,
+    record_compaction_chunk,
     set_force_compaction_state,
     update_scope_seen_event_ids,
     write_scope_state,
 )
+from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
@@ -760,7 +760,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
                 return_value=SessionSummary(
                     summary="merged summary",
@@ -831,7 +831,7 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(side_effect=_summary_after_notice),
         ),
     ):
@@ -987,7 +987,7 @@ async def test_prepare_history_for_run_required_compaction_classifies_provider_t
             "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
-        patch("mindroom.history.compaction._generate_compaction_summary", new=AsyncMock(side_effect=TimeoutError)),
+        patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(side_effect=TimeoutError)),
     ):
         prepared = await prepare_history_for_run_for_test(
             agent=_agent(db=storage),
@@ -1017,10 +1017,10 @@ async def test_compaction_call_timeout_raises_runtime_error() -> None:
             return ModelResponse(content="merged summary")
 
     with (
-        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
+        patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
         pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
     ):
-        await _generate_compaction_summary(
+        await generate_compaction_summary(
             model=_SlowSummaryModel(id="summary-model", provider="fake"),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1032,7 +1032,7 @@ async def test_compaction_summary_uses_configured_system_prompt() -> None:
     """Compaction summaries should use the configured prompt text."""
     model = RecordingModel(id="summary-model", provider="fake")
 
-    await _generate_compaction_summary(
+    await generate_compaction_summary(
         model=model,
         summary_input="Current prompt",
         summary_prompt="Custom compaction instructions.",
@@ -1067,10 +1067,10 @@ async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_
     start = asyncio.get_running_loop().time()
 
     with (
-        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
+        patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
         pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
     ):
-        await _generate_compaction_summary(
+        await generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1107,10 +1107,10 @@ async def test_compaction_call_timeout_raises_even_when_provider_returns_after_c
     model = _SwallowingCancelSummaryModel(model_id="summary-model", provider="fake")
 
     with (
-        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
+        patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
         pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
     ):
-        await _generate_compaction_summary(
+        await generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1131,7 +1131,7 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
             raise TimeoutError(msg)
 
     with pytest.raises(TimeoutError, match="provider timeout"):
-        await _generate_compaction_summary(
+        await generate_compaction_summary(
             model=_ProviderTimeoutModel(id="summary-model", provider="fake"),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1167,7 +1167,7 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
 
     with (
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(side_effect=fake_summary),
         ),
         patch(
@@ -1235,7 +1235,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
         return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
 
     with patch(
-        "mindroom.history.compaction._generate_compaction_summary",
+        "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(side_effect=fake_summary),
     ):
         rewrite_result = await _rewrite_working_session_for_compaction(
@@ -1288,7 +1288,7 @@ async def test_compaction_summary_cancels_model_task_when_outer_call_is_cancelle
 
     model = _BlockingSummaryModel(model_id="summary-model", provider="fake")
     summary_task = asyncio.create_task(
-        _generate_compaction_summary(
+        generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1330,7 +1330,7 @@ async def test_compaction_summary_outer_cancellation_returns_without_waiting_for
 
     model = _SlowCancelCleanupSummaryModel(model_id="summary-model", provider="fake")
     summary_task = asyncio.create_task(
-        _generate_compaction_summary(
+        generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1371,7 +1371,7 @@ async def test_compaction_summary_outer_cancellation_wins_over_provider_cleanup_
 
     model = _CleanupErrorSummaryModel(model_id="summary-model", provider="fake")
     summary_task = asyncio.create_task(
-        _generate_compaction_summary(
+        generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1416,11 +1416,11 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
     model = _DetachedTimeoutCleanupSummaryModel(model_id="summary-model", provider="fake")
 
     with (
-        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
-        patch("mindroom.history.compaction._COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS", 0.01),
+        patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
+        patch("mindroom.history.summary_call._COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS", 0.01),
         pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
     ):
-        await _generate_compaction_summary(
+        await generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1469,7 +1469,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
             "mindroom.model_loading.get_model_instance",
             return_value=_SlowSummaryModel(id="summary-model", provider="fake"),
         ),
-        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
+        patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
     ):
         prepared = await prepare_history_for_run_for_test(
             agent=_agent(db=storage),
@@ -1577,7 +1577,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
     ):
@@ -1698,7 +1698,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
     ):
@@ -1799,7 +1799,7 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
         patch(
@@ -1931,7 +1931,7 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
     ):
@@ -2045,7 +2045,7 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
     ):
@@ -2101,7 +2101,7 @@ async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path) -> 
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
     ):
@@ -2183,7 +2183,7 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
                 return_value=SessionSummary(
                     summary="thread summary",
@@ -2334,7 +2334,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=summary_mock,
         ),
     ):
@@ -2458,7 +2458,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=summary_mock,
         ),
     ):
@@ -2596,7 +2596,7 @@ async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=summary_mock,
         ),
     ):
@@ -2734,7 +2734,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=summary_mock,
         ),
     ):
@@ -2816,7 +2816,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=summary_mock,
         ),
     ):
@@ -3000,7 +3000,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(side_effect=RuntimeError("summary failed")),
         ),
     ):
@@ -3715,7 +3715,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
     )
 
     with patch(
-        "mindroom.history.compaction._generate_compaction_summary",
+        "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(return_value=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))),
     ):
         rewrite_result = await _rewrite_working_session_for_compaction(
@@ -3772,7 +3772,7 @@ async def test_rewrite_working_session_for_compaction_ignores_runs_without_stabl
     working_session = _session("session-1", runs=[unremovable_run])
 
     with patch(
-        "mindroom.history.compaction._generate_compaction_summary",
+        "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(return_value=SessionSummary(summary="summary", updated_at=datetime.now(UTC))),
     ) as mock_generate:
         rewrite_result = await _rewrite_working_session_for_compaction(
@@ -3867,7 +3867,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
     )
 
     with patch(
-        "mindroom.history.compaction._generate_compaction_summary",
+        "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(return_value=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))),
     ):
         _state, outcome = await compact_scope_history(
@@ -3964,7 +3964,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         progress_events.append(event)
 
     with patch(
-        "mindroom.history.compaction._generate_compaction_summary",
+        "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
     ):
         rewrite_result = await _rewrite_working_session_for_compaction(
@@ -5719,7 +5719,7 @@ async def test_prepare_history_for_run_forced_compaction_uses_summary_replay_whe
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
                 return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
             ),
@@ -5922,11 +5922,12 @@ def test_compaction_progress_preserves_newer_seen_event_ids(tmp_path: Path) -> N
     update_scope_seen_event_ids(latest_session, scope, ["newer-event"])
     storage.upsert_session(latest_session)
 
-    _persist_compaction_progress(
+    record_compaction_chunk(
         storage=storage,
         persisted_session=persisted_session,
         working_session=working_session,
-        compacted_run_ids=set(),
+        scope=scope,
+        compacted_run_ids=(),
     )
 
     persisted = get_agent_session(storage, "session-1")
@@ -5993,7 +5994,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
                 return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
             ),

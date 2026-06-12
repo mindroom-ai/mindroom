@@ -442,7 +442,7 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
                 return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
             ),
@@ -635,7 +635,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=summary_mock,
         ),
     ):
@@ -686,7 +686,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
                 return_value=SessionSummary(summary="single run summary", updated_at=datetime.now(UTC)),
             ),
@@ -759,7 +759,7 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
-            "mindroom.history.compaction._generate_compaction_summary",
+            "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
                 return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
             ),

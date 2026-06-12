@@ -7,14 +7,11 @@ from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from functools import partial
 from html import escape
 from typing import TYPE_CHECKING, TypeGuard, cast
 from uuid import uuid4
 
 from agno.agent._tools import determine_tools_for_model
-from agno.db.base import SessionType
-from agno.models.message import Message
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -28,15 +25,19 @@ from agno.tools.function import Function
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
-from mindroom.cancellation import request_task_cancel
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, prompt_roles_for_history_storage
 from mindroom.history.storage import (
-    metadata_with_merged_seen_event_ids,
+    adopt_session_fields,
+    compacted_run_ids_with,
+    latest_persisted_session,
     read_scope_state,
+    record_compaction_chunk,
+    remove_runs_by_id,
     seen_event_ids_for_runs,
     update_scope_seen_event_ids,
     write_scope_state,
 )
+from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     CompactionOutcome,
@@ -47,7 +48,6 @@ from mindroom.history.types import (
 )
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
-from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.models.base import Model
-    from agno.models.response import ModelResponse
+    from agno.models.message import Message
     from agno.team import Team
 
     from mindroom.config.main import Config
@@ -71,67 +71,7 @@ _EXCERPT_METADATA_OMIT_KEYS = frozenset(
         "tools_schema",
     },
 )
-_COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 type _ToolDefinition = dict[str, object]
-
-
-class _CompactionProviderTimeoutError(Exception):
-    """Internal wrapper so provider TimeoutError does not look like our wait_for timeout."""
-
-    def __init__(self, original: TimeoutError) -> None:
-        super().__init__(str(original))
-        self.original = original
-
-
-def _consume_detached_compaction_request_result(
-    response_task: asyncio.Task[ModelResponse],
-    *,
-    log_message: str,
-) -> None:
-    """Consume a detached request result so late failures do not surface unhandled."""
-    try:
-        response_task.result()
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        logger.warning(log_message, exc_info=True)
-
-
-def _warn_if_detached_compaction_request_still_running(
-    response_task: asyncio.Task[ModelResponse],
-    *,
-    reason: str,
-) -> None:
-    """Log when a detached provider request ignored cancellation past the grace window."""
-    if response_task.done():
-        return
-    logger.warning(
-        "Compaction request still running after cancellation grace period",
-        reason=reason,
-        timeout_seconds=_COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS,
-    )
-
-
-def _detach_cancelled_compaction_request(
-    response_task: asyncio.Task[ModelResponse],
-    *,
-    reason: str,
-) -> None:
-    """Detach one cancelled provider request without blocking the caller or leaking cleanup tasks."""
-    response_task.add_done_callback(
-        partial(
-            _consume_detached_compaction_request_result,
-            log_message="Detached compaction request raised after caller moved on",
-        ),
-    )
-    asyncio.get_running_loop().call_later(
-        _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS,
-        partial(
-            _warn_if_detached_compaction_request_still_running,
-            response_task,
-            reason=reason,
-        ),
-    )
 
 
 @dataclass(frozen=True)
@@ -179,20 +119,14 @@ def _persist_cleared_force_state_if_needed(
     cleared_state = replace(state, force_compact_before_next_run=False)
     if cleared_state == state:
         return cleared_state
-    session_type = SessionType.TEAM if isinstance(session, TeamSession) else SessionType.AGENT
-    latest_session = storage.get_session(session_id=session.session_id, session_type=session_type)
-    target_session = latest_session if isinstance(latest_session, type(session)) else session
+    target_session = latest_persisted_session(storage, session)
     latest_state = read_scope_state(target_session, scope)
     if latest_state != state:
-        session.metadata = target_session.metadata
-        session.runs = target_session.runs
-        session.summary = target_session.summary
+        adopt_session_fields(session, target_session)
         return latest_state
     write_scope_state(target_session, scope, cleared_state)
     storage.upsert_session(target_session)
-    session.metadata = target_session.metadata
-    session.runs = target_session.runs
-    session.summary = target_session.summary
+    adopt_session_fields(session, target_session)
     return cleared_state
 
 
@@ -342,15 +276,17 @@ async def compact_scope_history(
         last_compacted_at=compacted_at,
         last_summary_model=_model_identifier(summary_model),
         last_compacted_run_count=rewrite_result.compacted_run_count,
+        compacted_run_ids=compacted_run_ids_with(state, rewrite_result.compacted_run_ids),
         force_compact_before_next_run=False,
     )
     write_scope_state(session, scope, new_state)
     write_scope_state(working_session, scope, new_state)
-    _persist_compaction_progress(
+    record_compaction_chunk(
         storage=storage,
         persisted_session=session,
         working_session=working_session,
-        compacted_run_ids=set(rewrite_result.compacted_run_ids),
+        scope=scope,
+        compacted_run_ids=rewrite_result.compacted_run_ids,
         sync_remaining_runs=True,
     )
     logger.info(
@@ -423,7 +359,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     total_compacted_run_count = 0
-    all_compacted_run_ids: set[str] = set()
+    all_compacted_run_ids: list[str] = []
+    all_compacted_run_id_set: set[str] = set()
     compacted_messages: list[Message] = []
     pending_selected_run_ids: set[str] | None = None
 
@@ -504,23 +441,27 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
         if before_persist_callback is not None:
             await before_persist_callback(included_runs)
         final_summary_text = generated_summary.summary
-        compacted_run_ids = {run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id}
+        compacted_run_ids = tuple(run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id)
         compacted_seen_event_ids = sorted(seen_event_ids_for_runs(included_runs))
         working_session.summary = SessionSummary(summary=generated_summary.summary, updated_at=datetime.now(UTC))
         if compacted_seen_event_ids:
             update_scope_seen_event_ids(working_session, scope, compacted_seen_event_ids)
-        working_session.runs = _remove_runs_by_id(working_session.runs or [], compacted_run_ids)
+        working_session.runs = remove_runs_by_id(working_session.runs or [], compacted_run_ids)
         total_compacted_run_count += len(included_runs)
-        all_compacted_run_ids.update(compacted_run_ids)
+        for run_id in compacted_run_ids:
+            if run_id not in all_compacted_run_id_set:
+                all_compacted_run_id_set.add(run_id)
+                all_compacted_run_ids.append(run_id)
         if collect_compaction_hook_messages:
             compacted_messages.extend(_messages_for_runs(included_runs, history_settings))
         if pending_selected_run_ids is not None:
             pending_selected_run_ids.difference_update(compacted_run_ids)
 
-        _persist_compaction_progress(
+        record_compaction_chunk(
             storage=storage,
             persisted_session=persisted_session,
             working_session=working_session,
+            scope=scope,
             compacted_run_ids=compacted_run_ids,
         )
 
@@ -614,51 +555,6 @@ async def _emit_lifecycle_progress_after_persist(
             threshold_tokens=threshold_tokens,
         ),
     )
-
-
-def _persist_compaction_progress(
-    *,
-    storage: BaseDb,
-    persisted_session: AgentSession | TeamSession,
-    working_session: AgentSession | TeamSession,
-    compacted_run_ids: set[str],
-    sync_remaining_runs: bool = False,
-) -> None:
-    """Save one successful compaction chunk before attempting the next chunk."""
-    session_type = SessionType.TEAM if isinstance(persisted_session, TeamSession) else SessionType.AGENT
-    latest_session = storage.get_session(session_id=persisted_session.session_id, session_type=session_type)
-    target_session = latest_session if isinstance(latest_session, type(persisted_session)) else persisted_session
-    target_session.summary = working_session.summary
-    target_session.metadata = metadata_with_merged_seen_event_ids(
-        deep_merge_metadata(target_session.metadata, working_session.metadata),
-        target_session.metadata,
-        working_session.metadata,
-    )
-    target_session.runs = _remove_runs_by_id(target_session.runs or [], compacted_run_ids)
-    if sync_remaining_runs:
-        target_session.runs = _sync_remaining_runs_from_working(
-            target_session.runs or [],
-            working_session.runs or [],
-        )
-    storage.upsert_session(target_session)
-    persisted_session.summary = target_session.summary
-    persisted_session.runs = target_session.runs
-    persisted_session.metadata = target_session.metadata
-
-
-def _sync_remaining_runs_from_working(
-    target_runs: list[RunOutput | TeamRunOutput],
-    working_runs: list[RunOutput | TeamRunOutput],
-) -> list[RunOutput | TeamRunOutput]:
-    working_by_id = {run.run_id: run for run in working_runs if isinstance(run.run_id, str) and run.run_id}
-    synced_runs: list[RunOutput | TeamRunOutput] = []
-    for run in target_runs:
-        run_id = run.run_id
-        if isinstance(run_id, str) and run_id in working_by_id:
-            synced_runs.append(deepcopy(working_by_id[run_id]))
-        else:
-            synced_runs.append(run)
-    return synced_runs
 
 
 def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:
@@ -989,12 +885,14 @@ async def _generate_compaction_summary_with_retry(
     summary_prompt: str,
     timing_scope: str | None = None,
 ) -> _GeneratedSummaryChunk:
-    """Generate one summary chunk, retrying once with a smaller input when safe."""
+    """Generate one summary chunk, shrinking the input per the retry policy when safe."""
+    del timing_scope
     summary_input = initial_summary_input
     included_runs = initial_included_runs
     budget = summary_input_budget
-    last_error: Exception | None = None
-    for attempt in (1, 2):
+    retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
+    attempt = 1
+    while True:
         estimated_input_tokens = estimate_text_tokens(summary_input)
         started = asyncio.get_running_loop().time()
         logger.info(
@@ -1009,12 +907,10 @@ async def _generate_compaction_summary_with_retry(
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
         )
         try:
-            summary = await _generate_compaction_summary(
+            summary = await generate_compaction_summary(
                 model=model,
                 summary_input=summary_input,
                 summary_prompt=summary_prompt,
-                timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
-                timing_scope=timing_scope,
             )
         except Exception as exc:
             duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
@@ -1031,9 +927,8 @@ async def _generate_compaction_summary_with_retry(
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
-            last_error = exc
-            retry_budget = max(1_000, budget // 2)
-            if attempt == 1 and retry_budget < budget and _should_retry_smaller_summary_chunk(exc):
+            retry_budget = retry_policy.retry_budget(attempt=attempt, budget=budget, error=exc)
+            if retry_budget is not None:
                 rebuilt_input, rebuilt_runs = _build_summary_input(
                     previous_summary=previous_summary,
                     compacted_runs=compactable_runs,
@@ -1044,6 +939,7 @@ async def _generate_compaction_summary_with_retry(
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
                     budget = retry_budget
+                    attempt += 1
                     continue
             raise
         duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
@@ -1060,103 +956,6 @@ async def _generate_compaction_summary_with_retry(
             duration_ms=duration_ms,
         )
         return _GeneratedSummaryChunk(summary=summary, included_runs=included_runs)
-    assert last_error is not None
-    raise last_error
-
-
-def _should_retry_smaller_summary_chunk(error: Exception) -> bool:
-    """Return whether a smaller compaction chunk may resolve the provider failure."""
-    if isinstance(error, TimeoutError):
-        return True
-    message = str(error).lower()
-    retry_fragments = (
-        "timed out",
-        "context length",
-        "context_length_exceeded",
-        "too many tokens",
-        "max tokens",
-        "too large",
-        "too long",
-        "input size",
-        "input too large",
-        "maximum length",
-        "max length",
-        "request too large",
-        "reduce the length",
-    )
-    return any(fragment in message for fragment in retry_fragments)
-
-
-@timed("system_prompt_assembly.history_prepare.compaction.summary_model_request")
-async def _generate_compaction_summary(
-    *,
-    model: Model,
-    summary_input: str,
-    summary_prompt: str,
-    timeout_seconds: float | None = None,
-    timing_scope: str | None = None,
-) -> SessionSummary:
-    del timing_scope
-    resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-
-    async def _request_summary() -> ModelResponse:
-        try:
-            return await model.aresponse(
-                messages=[
-                    Message(role="system", content=summary_prompt),
-                    Message(role="user", content=summary_input),
-                ],
-            )
-        except TimeoutError as exc:
-            raise _CompactionProviderTimeoutError(exc) from exc
-
-    response_task = asyncio.create_task(
-        _request_summary(),
-        name="compaction_summary_request",
-    )
-    try:
-        done, _pending = await asyncio.wait(
-            {response_task},
-            timeout=resolved_timeout,
-        )
-    except asyncio.CancelledError:
-        request_task_cancel(response_task)
-        _detach_cancelled_compaction_request(
-            response_task,
-            reason="outer_cancellation",
-        )
-        raise
-
-    if response_task not in done:
-        request_task_cancel(response_task)
-        _detach_cancelled_compaction_request(
-            response_task,
-            reason="timeout",
-        )
-        msg = f"compaction summary timed out after {resolved_timeout}s"
-        raise RuntimeError(msg)
-
-    try:
-        response = response_task.result()
-    except _CompactionProviderTimeoutError as exc:
-        raise exc.original from exc
-    raw_text = response.content if isinstance(response.content, str) else ""
-    normalized_text = _normalize_compaction_summary_text(raw_text)
-    if not normalized_text:
-        msg = "summary generation returned no result"
-        raise RuntimeError(msg)
-    return SessionSummary(summary=normalized_text, updated_at=datetime.now(UTC))
-
-
-def _normalize_compaction_summary_text(raw_text: str) -> str:
-    normalized = raw_text.strip()
-    if not normalized:
-        return ""
-    if normalized.startswith("```") and normalized.endswith("```"):
-        first_newline = normalized.find("\n")
-        if first_newline != -1:
-            normalized = normalized[first_newline + 1 : -3].strip()
-    return normalized
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.summary_input_build")
@@ -1641,36 +1440,6 @@ def _estimated_message_chars(message: Message) -> int:
     content_chars = len(_render_message_content(message))
     tool_call_chars = len(stable_serialize(message.tool_calls)) if message.tool_calls else 0
     return content_chars + tool_call_chars + _estimate_message_media_chars(message)
-
-
-def _remove_runs_by_id(
-    runs: Sequence[RunOutput | TeamRunOutput],
-    compacted_run_ids: set[str],
-) -> list[RunOutput | TeamRunOutput]:
-    if not compacted_run_ids:
-        return list(runs)
-
-    remove_ids = set(compacted_run_ids)
-    changed = True
-    while changed:
-        changed = False
-        for run in runs:
-            parent_run_id = run.parent_run_id
-            run_id = run.run_id
-            if not isinstance(parent_run_id, str) or not isinstance(run_id, str):
-                continue
-            if parent_run_id in remove_ids and run_id not in remove_ids:
-                remove_ids.add(run_id)
-                changed = True
-
-    return [
-        run
-        for run in runs
-        if not (
-            (isinstance(run.run_id, str) and run.run_id in remove_ids)
-            or (isinstance(run.parent_run_id, str) and run.parent_run_id in remove_ids)
-        )
-    ]
 
 
 def _estimate_message_media_chars(message: Message) -> int:

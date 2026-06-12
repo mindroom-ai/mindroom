@@ -1,12 +1,39 @@
-"""History-state persistence."""
+"""Single owner of durable compaction state.
+
+This module is the only code allowed to read or write the three durable
+compaction-state locations inside a stored Agno session:
+
+- per-scope control/audit state under ``MINDROOM_COMPACTION_METADATA_KEY``
+  (last compaction audit fields, force flag, and compacted-run tombstones)
+- per-scope consumed Matrix event ids under ``MINDROOM_MATRIX_HISTORY_METADATA_KEY``
+- the pending force-compaction scope keys list inside Agno ``session_state``
+
+It enforces the durable-state half of the compaction invariants
+(see ``tests/test_compaction_invariants.py``):
+
+1. Compacted runs never reappear.
+   Every compacted run id is recorded as a tombstone in scope state
+   (capped to the newest ``_COMPACTED_RUN_ID_RETENTION_LIMIT`` ids), and
+   ``prune_reintroduced_runs`` removes resurrected runs — including their
+   descendants — before each run uses persisted history.
+
+2. Chunk progress survives interruption.
+   ``record_compaction_chunk`` persists one chunk's partial summary, tombstones,
+   and run removals in a single session upsert against the freshest stored row,
+   so a crash between chunks neither loses the partial summary nor resurrects
+   removed runs on restart.
+"""
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from agno.db.base import SessionType
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
+from agno.session.team import TeamSession
 
 from mindroom.constants import (
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
@@ -15,16 +42,18 @@ from mindroom.constants import (
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
 from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.metadata_merge import deep_merge_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from agno.db.base import BaseDb
     from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
 
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
 _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
+_COMPACTED_RUN_ID_RETENTION_LIMIT = 1_024
 
 
 def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -> HistoryScopeState:
@@ -227,7 +256,7 @@ def update_scope_seen_event_ids(
     return True
 
 
-def metadata_with_merged_seen_event_ids(
+def _metadata_with_merged_seen_event_ids(
     merged_metadata: dict[str, Any] | None,
     *metadata_sources: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -247,11 +276,15 @@ def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
     compacted_at = raw_state.get("last_compacted_at")
     summary_model = raw_state.get("last_summary_model")
     compacted_run_count = raw_state.get("last_compacted_run_count")
+    compacted_run_ids = raw_state.get("compacted_run_ids")
     force_flag = raw_state.get("force_compact_before_next_run")
     return HistoryScopeState(
         last_compacted_at=compacted_at if isinstance(compacted_at, str) else None,
         last_summary_model=summary_model if isinstance(summary_model, str) else None,
         last_compacted_run_count=compacted_run_count if isinstance(compacted_run_count, int) else None,
+        compacted_run_ids=(
+            _normalize_compacted_run_ids(compacted_run_ids) if isinstance(compacted_run_ids, list) else ()
+        ),
         force_compact_before_next_run=bool(force_flag),
     )
 
@@ -266,6 +299,8 @@ def _state_to_metadata(state: HistoryScopeState) -> dict[str, object]:
         payload["last_summary_model"] = state.last_summary_model
     if state.last_compacted_run_count is not None:
         payload["last_compacted_run_count"] = state.last_compacted_run_count
+    if state.compacted_run_ids:
+        payload["compacted_run_ids"] = list(_normalize_compacted_run_ids(state.compacted_run_ids))
     return payload
 
 
@@ -274,8 +309,164 @@ def _state_is_empty(state: HistoryScopeState) -> bool:
         state.last_compacted_at is None
         and state.last_summary_model is None
         and state.last_compacted_run_count is None
+        and not state.compacted_run_ids
         and not state.force_compact_before_next_run
     )
+
+
+def _normalize_compacted_run_ids(run_ids: Iterable[object]) -> tuple[str, ...]:
+    """Deduplicate tombstones preserving order and keep only the newest ids."""
+    compacted_run_ids: list[str] = []
+    seen_run_ids: set[str] = set()
+    for run_id in run_ids:
+        if not isinstance(run_id, str) or not run_id or run_id in seen_run_ids:
+            continue
+        seen_run_ids.add(run_id)
+        compacted_run_ids.append(run_id)
+    return tuple(compacted_run_ids[-_COMPACTED_RUN_ID_RETENTION_LIMIT:])
+
+
+def compacted_run_ids_with(state: HistoryScopeState, run_ids: Iterable[str]) -> tuple[str, ...]:
+    """Return the state tombstone list extended with newly compacted run ids."""
+    return _normalize_compacted_run_ids([*state.compacted_run_ids, *run_ids])
+
+
+def remove_runs_by_id(
+    runs: Iterable[RunOutput | TeamRunOutput],
+    compacted_run_ids: Iterable[str],
+) -> list[RunOutput | TeamRunOutput]:
+    """Return runs with the compacted run ids, and all their descendants, removed."""
+    remove_ids = {run_id for run_id in compacted_run_ids if run_id}
+    if not remove_ids:
+        return list(runs)
+
+    run_list = list(runs)
+    children_by_parent: dict[str, list[str]] = {}
+    for run in run_list:
+        parent_run_id = run.parent_run_id
+        run_id = run.run_id
+        if isinstance(parent_run_id, str) and parent_run_id and isinstance(run_id, str) and run_id:
+            children_by_parent.setdefault(parent_run_id, []).append(run_id)
+
+    stack = list(remove_ids)
+    while stack:
+        run_id = stack.pop()
+        for child_run_id in children_by_parent.get(run_id, []):
+            if child_run_id not in remove_ids:
+                remove_ids.add(child_run_id)
+                stack.append(child_run_id)
+
+    return [
+        run
+        for run in run_list
+        if not (
+            (isinstance(run.run_id, str) and run.run_id in remove_ids)
+            or (isinstance(run.parent_run_id, str) and run.parent_run_id in remove_ids)
+        )
+    ]
+
+
+def prune_reintroduced_runs(
+    session: AgentSession | TeamSession,
+    state: HistoryScopeState,
+) -> bool:
+    """Remove runs that a stale session write resurrected after compaction (invariant 1)."""
+    if not state.compacted_run_ids:
+        return False
+    runs = session.runs or []
+    pruned_runs = remove_runs_by_id(runs, state.compacted_run_ids)
+    if len(pruned_runs) == len(runs):
+        return False
+    session.runs = pruned_runs
+    return True
+
+
+def latest_persisted_session(
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+) -> AgentSession | TeamSession:
+    """Return the freshest stored row for one session, or the given session when unavailable."""
+    session_type = SessionType.TEAM if isinstance(session, TeamSession) else SessionType.AGENT
+    latest_session = storage.get_session(session_id=session.session_id, session_type=session_type)
+    return latest_session if isinstance(latest_session, type(session)) else session
+
+
+def adopt_session_fields(
+    session: AgentSession | TeamSession,
+    source: AgentSession | TeamSession,
+) -> None:
+    """Sync one in-memory session's durable fields from another loaded row."""
+    session.metadata = source.metadata
+    session.runs = source.runs
+    session.summary = source.summary
+
+
+def record_compaction_chunk(
+    *,
+    storage: BaseDb,
+    persisted_session: AgentSession | TeamSession,
+    working_session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    compacted_run_ids: Iterable[str],
+    sync_remaining_runs: bool = False,
+) -> None:
+    """Durably persist one compaction chunk before the next chunk is attempted (invariant 2).
+
+    One upsert against the freshest stored row carries the partial summary, the
+    merged scope metadata, the compacted-run tombstones, and the run removals,
+    so an interruption between chunks can neither lose progress nor resurrect
+    already-compacted runs.
+    """
+    chunk_run_ids = [run_id for run_id in compacted_run_ids if run_id]
+    working_state = read_scope_state(working_session, scope)
+    write_scope_state(
+        working_session,
+        scope,
+        replace(working_state, compacted_run_ids=compacted_run_ids_with(working_state, chunk_run_ids)),
+    )
+
+    target_session = latest_persisted_session(storage, persisted_session)
+    preexisting_tombstones = read_scope_state(target_session, scope).compacted_run_ids
+    target_session.summary = working_session.summary
+    target_session.metadata = _metadata_with_merged_seen_event_ids(
+        deep_merge_metadata(target_session.metadata, working_session.metadata),
+        target_session.metadata,
+        working_session.metadata,
+    )
+    target_state = read_scope_state(target_session, scope)
+    write_scope_state(
+        target_session,
+        scope,
+        replace(
+            target_state,
+            compacted_run_ids=_normalize_compacted_run_ids(
+                [*preexisting_tombstones, *target_state.compacted_run_ids, *chunk_run_ids],
+            ),
+        ),
+    )
+    target_session.runs = remove_runs_by_id(target_session.runs or [], chunk_run_ids)
+    if sync_remaining_runs:
+        target_session.runs = _sync_remaining_runs_from_working(
+            target_session.runs or [],
+            working_session.runs or [],
+        )
+    storage.upsert_session(target_session)
+    adopt_session_fields(persisted_session, target_session)
+
+
+def _sync_remaining_runs_from_working(
+    target_runs: list[RunOutput | TeamRunOutput],
+    working_runs: list[RunOutput | TeamRunOutput],
+) -> list[RunOutput | TeamRunOutput]:
+    working_by_id = {run.run_id: run for run in working_runs if isinstance(run.run_id, str) and run.run_id}
+    synced_runs: list[RunOutput | TeamRunOutput] = []
+    for run in target_runs:
+        run_id = run.run_id
+        if isinstance(run_id, str) and run_id in working_by_id:
+            synced_runs.append(deepcopy(working_by_id[run_id]))
+        else:
+            synced_runs.append(run)
+    return synced_runs
 
 
 def _read_preserved_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:

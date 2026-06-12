@@ -817,16 +817,24 @@ depends_on = ["mindroom.attachment_media"]
 [[modules]]
 path = "mindroom.history.compaction"
 depends_on = [
-    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.history.storage",
+    "mindroom.history.summary_call",
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.logging_config",
-    "mindroom.metadata_merge",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.history.summary_call"
+depends_on = [
+    "mindroom.cancellation",
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.timing",
 ]
 
 [[modules]]
@@ -842,6 +850,7 @@ path = "mindroom.history.storage"
 depends_on = [
     "mindroom.constants",
     "mindroom.history.types",
+    "mindroom.metadata_merge",
 ]
 
 [[modules]]
@@ -2556,6 +2565,20 @@ expose = [
     "resolve_memory_backend",
 ]
 from = ["mindroom.memory._backend"]
+
+# Public seam for compaction summary calls: one model-configuration path, one
+# replaceable request builder (future warm-prefix builder, PR #861), and the
+# explicit budget-shrink retry policy. Tested in tests/test_compaction_invariants.py.
+[[interfaces]]
+expose = [
+    "DEFAULT_SUMMARY_RETRY_POLICY",
+    "SUMMARY_MAX_OUTPUT_TOKENS",
+    "SummaryRetryPolicy",
+    "build_summary_request_messages",
+    "configure_summary_model",
+    "generate_compaction_summary",
+]
+from = ["mindroom.history.summary_call"]
 
 [[interfaces]]
 expose = [
