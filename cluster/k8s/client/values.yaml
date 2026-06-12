@@ -1,0 +1,123 @@
+# Standalone MindRoom web client chart.
+# It serves the published MindRoom client image through unprivileged nginx.
+# Matrix, ingress, and TLS come from your own cluster.
+
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/mindroom-ai/mindroom-cinny
+  tag: latest
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+deploymentAnnotations: {}
+podAnnotations: {}
+podLabels: {}
+# Leave empty for the chart default.
+# Set this when adopting an existing Deployment whose selector is immutable.
+selectorLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+# The client image runs nginx as the unprivileged nginx user.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 101
+  runAsGroup: 101
+  fsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+  annotations: {}
+
+# URL path prefix the client is served under, for example /mindroom.
+# Use / when the client owns the origin root.
+# The client always loads /runtime-config.js from the origin root, so route the
+# full origin host to this Service even when basePath is not /.
+basePath: /
+
+matrix:
+  # Base URL of the Matrix homeserver the login flow connects to.
+  homeserverUrl: https://matrix.example.com
+  # Optional Matrix server name shown in the login form instead of the URL.
+  # The server name must publish /.well-known/matrix/client pointing at homeserverUrl.
+  # When set, this replaces homeserverUrl as the configured homeserver entry.
+  defaultServerName: ""
+  # Allow logging in to homeservers outside the configured entry.
+  allowCustomHomeservers: false
+
+serviceWorker:
+  # Register the client service worker, scoped to basePath.
+  enabled: true
+
+# Serve a cleanup service worker at the origin-root /sw.js.
+# A Matrix client that previously controlled the origin root can leave a
+# root-scoped service worker that keeps serving the old app for every path on
+# the origin, including basePath. Browsers replace a service worker by fetching
+# its script URL, so the deterministic fix is to serve a worker at the old URL
+# whose only job is to purge caches, release its clients, and unregister itself.
+# Enable this when moving such an origin to a basePath deployment.
+# Requires a basePath other than /.
+rootServiceWorkerCleanup:
+  enabled: false
+
+# Client config.json.
+config:
+  create: true
+  existingConfigMap: ""
+  key: config.json
+  # Leave empty to render the chart default client config from the matrix values.
+  # Set this when you want full control over config.json.
+  data: ""
+
+# Chart-managed nginx server configuration.
+nginx:
+  # Container port nginx listens on. Ports below 1024 require extra privileges.
+  port: 8080
+  create: true
+  existingConfigMap: ""
+  key: default.conf
+  # Key in the nginx ConfigMap holding the root cleanup service worker script.
+  # An existing ConfigMap must provide this key when rootServiceWorkerCleanup is enabled.
+  cleanupWorkerKey: root-cleanup-sw.js
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+probes:
+  readiness:
+    enabled: true
+    custom: {}
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  liveness:
+    enabled: true
+    custom: {}
+    initialDelaySeconds: 20
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 6
