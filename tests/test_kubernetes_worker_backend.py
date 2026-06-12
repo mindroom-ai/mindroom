@@ -2195,7 +2195,7 @@ def test_kubernetes_backend_reconcile_revalidates_live_state_before_recreating(t
     backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
     backend.cleanup_idle_workers(now=80.0)
-    stale_deployment = apps_api.deployments[handle.worker_id]
+    stale_deployment = deepcopy(apps_api.deployments[handle.worker_id])
 
     updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
     _wire_fake_apis(updated_backend, apps_api, core_api)
