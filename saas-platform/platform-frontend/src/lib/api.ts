@@ -21,9 +21,7 @@ export type GdprConsent = SuccessJson<'/my/gdpr/consent', 'post'>
 export type Instances = SuccessJson<'/my/instances', 'get'>
 export type Instance = Instances['instances'][number]
 export type Provision = SuccessJson<'/my/instances/provision', 'post'>
-export type InstanceAction = SuccessJson<'/my/instances/{instance_id}/start', 'post'>
 export type PricingConfig = SuccessJson<'/pricing/config', 'get'>
-export type UrlResponse = SuccessJson<'/stripe/checkout', 'post'>
 
 export async function apiCall(
   endpoint: string,
@@ -121,15 +119,21 @@ export async function provisionInstance(): Promise<Provision> {
   return request('/my/instances/provision', 'Failed to provision instance', { method: 'POST' })
 }
 
-export async function startInstance(instanceId: string | number): Promise<InstanceAction> {
+export async function startInstance(
+  instanceId: string | number
+): Promise<SuccessJson<'/my/instances/{instance_id}/start', 'post'>> {
   return request(`/my/instances/${String(instanceId)}/start`, 'Failed to start instance', { method: 'POST' })
 }
 
-export async function stopInstance(instanceId: string | number): Promise<InstanceAction> {
+export async function stopInstance(
+  instanceId: string | number
+): Promise<SuccessJson<'/my/instances/{instance_id}/stop', 'post'>> {
   return request(`/my/instances/${String(instanceId)}/stop`, 'Failed to stop instance', { method: 'POST' })
 }
 
-export async function restartInstance(instanceId: string | number): Promise<InstanceAction> {
+export async function restartInstance(
+  instanceId: string | number
+): Promise<SuccessJson<'/my/instances/{instance_id}/restart', 'post'>> {
   return request(`/my/instances/${String(instanceId)}/restart`, 'Failed to restart instance', { method: 'POST' })
 }
 
@@ -139,7 +143,10 @@ export async function getPricingConfig(): Promise<PricingConfig> {
 }
 
 // Stripe Integration
-export async function createCheckoutSession(tier: string, billingCycle: 'monthly' | 'yearly' = 'monthly'): Promise<UrlResponse> {
+export async function createCheckoutSession(
+  tier: string,
+  billingCycle: 'monthly' | 'yearly' = 'monthly'
+): Promise<SuccessJson<'/stripe/checkout', 'post'>> {
   const body: RequestJson<'/stripe/checkout', 'post'> = { tier, billing_cycle: billingCycle }
   return request('/stripe/checkout', 'Failed to create checkout session', {
     method: 'POST',
@@ -147,7 +154,7 @@ export async function createCheckoutSession(tier: string, billingCycle: 'monthly
   })
 }
 
-export async function createPortalSession(): Promise<UrlResponse> {
+export async function createPortalSession(): Promise<SuccessJson<'/stripe/portal', 'post'>> {
   return request('/stripe/portal', 'Failed to create portal session', { method: 'POST' })
 }
 

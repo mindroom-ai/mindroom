@@ -282,6 +282,8 @@ async def jwks(request: Request) -> dict[str, Any]:
     return {"keys": [_public_jwk()]}
 
 
+# response_model=None: the slowapi wrapper keeps FastAPI from resolving the postponed
+# RedirectResponse annotation, which crashes OpenAPI schema generation otherwise.
 @router.get("/matrix-oidc/authorize", response_model=None)
 @limiter.limit("60/minute")
 async def authorize(

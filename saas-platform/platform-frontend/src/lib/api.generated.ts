@@ -1542,16 +1542,15 @@ export interface components {
         /**
          * PublicPlan
          * @description One plan as exposed by /pricing/config (prices formatted for display).
+         *
+         *     Fields the route always emits are required so the generated frontend types are non-optional.
          */
         PublicPlan: {
             /** Description */
             description: string;
             /** Features */
             features: string[];
-            /**
-             * Included Ai Budget Usd
-             * @default 0
-             */
+            /** Included Ai Budget Usd */
             included_ai_budget_usd: number;
             limits: components["schemas"]["PlanLimits"];
             /** Name */
@@ -1560,19 +1559,12 @@ export interface components {
             price_monthly: string;
             /** Price Yearly */
             price_yearly: string;
-            /**
-             * Recommended
-             * @default false
-             */
+            /** Recommended */
             recommended: boolean;
-            /**
-             * Requires Customer Provider Keys
-             * @default false
-             */
+            /** Requires Customer Provider Keys */
             requires_customer_provider_keys: boolean;
             /**
              * Resource Profile
-             * @default small
              * @enum {string}
              */
             resource_profile: "small" | "pro";

@@ -219,7 +219,10 @@ class StripePriceResponse(BaseModel):
 
 
 class PublicPlan(BaseModel):
-    """One plan as exposed by /pricing/config (prices formatted for display)."""
+    """One plan as exposed by /pricing/config (prices formatted for display).
+
+    Fields the route always emits are required so the generated frontend types are non-optional.
+    """
 
     name: str
     price_monthly: str
@@ -227,10 +230,10 @@ class PublicPlan(BaseModel):
     description: str
     features: list[str]
     limits: PlanLimits
-    recommended: bool = False
-    included_ai_budget_usd: int = 0
-    requires_customer_provider_keys: bool = False
-    resource_profile: Literal["small", "pro"] = "small"
+    recommended: bool
+    included_ai_budget_usd: int
+    requires_customer_provider_keys: bool
+    resource_profile: Literal["small", "pro"]
     stripe_price_id_monthly: str | None = None
     stripe_price_id_yearly: str | None = None
 

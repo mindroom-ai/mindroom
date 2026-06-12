@@ -1293,7 +1293,7 @@
         "type": "object"
       },
       "PublicPlan": {
-        "description": "One plan as exposed by /pricing/config (prices formatted for display).",
+        "description": "One plan as exposed by /pricing/config (prices formatted for display).\n\nFields the route always emits are required so the generated frontend types are non-optional.",
         "properties": {
           "description": {
             "title": "Description",
@@ -1307,7 +1307,6 @@
             "type": "array"
           },
           "included_ai_budget_usd": {
-            "default": 0,
             "title": "Included Ai Budget Usd",
             "type": "integer"
           },
@@ -1327,17 +1326,14 @@
             "type": "string"
           },
           "recommended": {
-            "default": false,
             "title": "Recommended",
             "type": "boolean"
           },
           "requires_customer_provider_keys": {
-            "default": false,
             "title": "Requires Customer Provider Keys",
             "type": "boolean"
           },
           "resource_profile": {
-            "default": "small",
             "enum": [
               "small",
               "pro"
@@ -1374,7 +1370,11 @@
           "price_yearly",
           "description",
           "features",
-          "limits"
+          "limits",
+          "recommended",
+          "included_ai_budget_usd",
+          "requires_customer_provider_keys",
+          "resource_profile"
         ],
         "title": "PublicPlan",
         "type": "object"
