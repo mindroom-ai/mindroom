@@ -211,8 +211,11 @@ def _copy_workspace_template(
             destination_path.parent.mkdir(parents=True, exist_ok=True)
             # Publish atomically so concurrent readers never see partial files.
             temp_path = destination_path.with_name(f".{destination_path.name}.tmp")
-            shutil.copy2(source_path, temp_path)
-            temp_path.replace(destination_path)
+            try:
+                shutil.copy2(source_path, temp_path)
+                temp_path.replace(destination_path)
+            finally:
+                temp_path.unlink(missing_ok=True)
 
 
 def ensure_workspace_template(
