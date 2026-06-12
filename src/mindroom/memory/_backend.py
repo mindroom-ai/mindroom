@@ -23,11 +23,12 @@ if TYPE_CHECKING:
     from ._shared import MemoryResult
 
 
-class MemoryBackend(Protocol):
-    """One storage backend behind the public memory facade.
+class ResolvedMemoryBackend(Protocol):
+    """One resolved storage backend behind the public memory facade.
 
     Adapters implement every operation the facade dispatches, so call sites
-    resolve a backend once and never branch on backend type again.
+    resolve a backend once and never branch on backend type again. Distinct
+    from the ``MemoryBackend`` config literal, which names the authored choice.
     """
 
     context_label: ClassVar[str]
@@ -133,7 +134,7 @@ def resolve_memory_backend(
     caller_context: str | list[str],
     config: Config,
     runtime_paths: RuntimePaths,
-) -> MemoryBackend | None:
+) -> ResolvedMemoryBackend | None:
     """Resolve the effective backend for one caller scope; None disables memory.
 
     A team context (list of member names) resolves to the file backend only

@@ -21,14 +21,14 @@ from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.memory._backend import MemoryBackend
+    from mindroom.memory._backend import ResolvedMemoryBackend
 
 
 @dataclass
 class BackendEnv:
     """One adapter under test plus the config and storage it operates on."""
 
-    backend: MemoryBackend
+    backend: ResolvedMemoryBackend
     config: Config
     storage_path: Path
 
@@ -53,7 +53,7 @@ def _contract_config(tmp_path: Path, memory_backend: str) -> Config:
 def backend_env(request: pytest.FixtureRequest, tmp_path: Path) -> BackendEnv:
     config = _contract_config(tmp_path, request.param)
     runtime_paths = runtime_paths_for(config)
-    backend: MemoryBackend
+    backend: ResolvedMemoryBackend
     if request.param == "file":
         backend = FileMemoryBackend(runtime_paths=runtime_paths)
     else:
@@ -167,7 +167,7 @@ def test_resolve_memory_backend_maps_scopes_to_adapters(tmp_path: Path) -> None:
     assert isinstance(resolve_memory_backend("beta", config, runtime_paths), Mem0MemoryBackend)
     assert isinstance(resolve_memory_backend(["alpha", "alpha"], config, runtime_paths), FileMemoryBackend)
     # Mixed teams currently resolve to mem0; PR #798's partitioned-team fix
-    # slots in here as a new MemoryBackend implementation.
+    # slots in here as a new ResolvedMemoryBackend implementation.
     assert isinstance(resolve_memory_backend(["alpha", "beta"], config, runtime_paths), Mem0MemoryBackend)
 
     config.agents["alpha"].memory_backend = "none"
