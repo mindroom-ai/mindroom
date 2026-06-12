@@ -223,11 +223,14 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
     def _turn(request: ResponseRequest) -> int:
         return 1 if request.response_envelope.source_event_id == "$event1" else 2
 
+    refresh_calls = 0
+
     async def fake_fetch(room_id: str, thread_id: str, *, caller_label: str) -> ThreadHistoryResult:
+        nonlocal refresh_calls
         assert (room_id, thread_id, caller_label) == ("!room:localhost", "$thread", "dispatch_post_lock_refresh")
-        history = refreshed[len([event for event in events if event.startswith("refresh:")])]
-        events.append(f"refresh:{len(prepare_history_by_turn) + 1}")
-        return history
+        refresh_calls += 1
+        events.append(f"refresh:{refresh_calls}")
+        return refreshed[refresh_calls - 1]
 
     async def spy_prepare(request: ResponseRequest) -> ResponseRequest:
         turn = _turn(request)
@@ -622,8 +625,7 @@ def _queued_envelope(source_event_id: str) -> MessageEnvelope:
     )
 
 
-@pytest.mark.asyncio
-async def test_reserve_waiting_human_message_requires_active_turn() -> None:
+def test_reserve_waiting_human_message_requires_active_turn() -> None:
     """No queued-human notice is reserved when the conversation is idle."""
     coordinator = ResponseLifecycleCoordinator()
     envelope = _queued_envelope("$first")
@@ -663,17 +665,17 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
         response_envelope=second_envelope,
     )
     assert reservation is not None
-    signal = coordinator._thread_queued_signals[("!room:localhost", "$thread")]
-    assert signal.pending_human_messages == 1
+    queued_signal = coordinator._thread_queued_signals[("!room:localhost", "$thread")]
+    assert queued_signal.pending_human_messages == 1
     # A duplicate reservation for the same queued event must not double-register.
     assert (
         coordinator.reserve_waiting_human_message(target=second_envelope.target, response_envelope=second_envelope)
         is None
     )
-    assert signal.pending_human_messages == 1
+    assert queued_signal.pending_human_messages == 1
 
     async def second_turn(_target: MessageTarget) -> str:
-        pending_during_second_turn.append(signal.pending_human_messages)
+        pending_during_second_turn.append(queued_signal.pending_human_messages)
         return "second"
 
     second = asyncio.create_task(
@@ -688,14 +690,14 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
     for _ in range(10):
         await asyncio.sleep(0)
     # While the queued turn waits for the lock the notice stays pending for the in-flight turn.
-    assert signal.pending_human_messages == 1
+    assert queued_signal.pending_human_messages == 1
 
     gate.set()
     assert await asyncio.wait_for(first, timeout=2) == "first"
     assert await asyncio.wait_for(second, timeout=2) == "second"
     # The reservation is consumed exactly when the queued request becomes the active turn.
     assert pending_during_second_turn == [0]
-    assert signal.pending_human_messages == 0
+    assert queued_signal.pending_human_messages == 0
     assert not coordinator.has_active_response_for_target(first_envelope.target)
 
 
@@ -742,14 +744,14 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
     queued_two = run_queued()
     for _ in range(10):
         await asyncio.sleep(0)
-    signal = coordinator._thread_queued_signals[("!room:localhost", "$thread")]
-    assert signal.pending_human_messages == 1
+    queued_signal = coordinator._thread_queued_signals[("!room:localhost", "$thread")]
+    assert queued_signal.pending_human_messages == 1
 
     gate.set()
     assert await asyncio.wait_for(first, timeout=2) == "first"
     assert await asyncio.wait_for(queued_one, timeout=2) == "queued"
     assert await asyncio.wait_for(queued_two, timeout=2) == "queued"
-    assert signal.pending_human_messages == 0
+    assert queued_signal.pending_human_messages == 0
 
 
 # ---------------------------------------------------------------------------
