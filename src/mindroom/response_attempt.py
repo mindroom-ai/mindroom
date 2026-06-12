@@ -110,16 +110,23 @@ class ResponseAttemptRunner:
                 "Response attempt task did not finish after forwarded cancellation",
                 task_name=task.get_name(),
             )
-        # Consume the outcome: a task that errors while unwinding from the forced
-        # cancel would otherwise surface only via asyncio's GC-time handler.
+            task.add_done_callback(self._log_attempt_unwind_failure)
         for finished in done:
-            error = finished.exception() if not finished.cancelled() else None
-            if error is not None:
-                self.deps.logger.error(
-                    "Response attempt task failed while unwinding forwarded cancellation",
-                    task_name=finished.get_name(),
-                    error=str(error),
-                )
+            self._log_attempt_unwind_failure(finished)
+
+    def _log_attempt_unwind_failure(self, task: asyncio.Task[None]) -> None:
+        """Consume one finished attempt task's outcome, reporting unwind failures.
+
+        Without this, a task that errors while unwinding from the forced cancel
+        surfaces only via asyncio's GC-time unretrieved-exception handler.
+        """
+        error = task.exception() if not task.cancelled() else None
+        if error is not None:
+            self.deps.logger.error(
+                "Response attempt task failed while unwinding forwarded cancellation",
+                task_name=task.get_name(),
+                error=str(error),
+            )
 
     async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:
         """Run one response coroutine under visible message tracking."""
