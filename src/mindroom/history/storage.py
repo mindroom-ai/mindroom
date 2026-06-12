@@ -434,6 +434,11 @@ def record_compaction_chunk(
         working_session.metadata,
     )
     target_state = read_scope_state(target_session, scope)
+    # The three-way union is deliberate, not redundant: preexisting_tombstones was
+    # captured before the metadata merge so tombstones present only on the stored row
+    # survive, target_state carries the post-merge ids, and the explicit chunk_run_ids
+    # guard against the generic metadata merge dropping the compaction key entirely.
+    # _normalize_compacted_run_ids dedupes.
     write_scope_state(
         target_session,
         scope,
