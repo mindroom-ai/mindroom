@@ -1124,6 +1124,41 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured_kwargs["worker_grantable_credentials"] == runtime_config.get_worker_grantable_credentials()
 
 
+def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each background cleanup pass should also reconcile drifted worker pod templates."""
+
+    class _FakeWorkerManager:
+        backend_name = "kubernetes"
+
+        def cleanup_idle_workers(self) -> list[WorkerHandle]:
+            return []
+
+    worker_manager = _FakeWorkerManager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
+    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
+    monkeypatch.setattr(main, "get_primary_worker_manager", lambda *_args, **_kwargs: worker_manager)
+    reconciled_managers: list[object] = []
+
+    def _fake_reconcile(manager: object) -> list[WorkerHandle]:
+        reconciled_managers.append(manager)
+        return []
+
+    monkeypatch.setattr(main, "reconcile_drifted_worker_templates", _fake_reconcile)
+
+    runtime_paths = main._app_runtime_paths(main.app)
+    runtime_config = Config.validate_with_runtime({}, runtime_paths)
+    main._cleanup_workers_once(
+        runtime_paths,
+        runtime_config=runtime_config,
+        worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
+    )
+
+    assert reconciled_managers == [worker_manager]
+
+
 def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """The dashboard should expose backend-neutral worker metadata."""
 
