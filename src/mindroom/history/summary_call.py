@@ -12,16 +12,18 @@ It enforces the call-side half of the compaction invariants
    disabled, and one SDK timeout coordinated with the outer chunk budget
    (``MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS``) instead of two uncoordinated
    constants in two modules. Unknown providers pass through untouched and rely on
-   the outer chunk timeout alone.
+   the outer chunk timeout alone. Warm-prefix requests (``reuses_reply_prefix``)
+   keep cache flags and thinking exactly as the reply path configured them, so
+   the provider prompt cache built by the reply request stays valid.
 
 4. Budget shrinks deterministically on provider failure.
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
    (timeouts and the named context-length fragments), the shrink schedule
    (halving), and the give-up floor — no inline string matching at call sites.
 
-``build_summary_request_messages`` is the single replaceable request builder; a
-future cache-friendly builder that reuses the active provider prefix (PR #861)
-plugs in behind it without another cross-cutting diff.
+The request has exactly two shapes: the standalone two-message request from
+``build_summary_request_messages``, or a pre-assembled ``SummaryProviderRequest``
+built by ``mindroom.history.warm_prefix`` that reproduces the reply-path prefix.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from mindroom.timing import timed
 if TYPE_CHECKING:
     from agno.models.base import Model
     from agno.models.response import ModelResponse
+    from agno.tools.function import Function
 
 logger = get_logger(__name__)
 
@@ -100,13 +103,39 @@ class SummaryRetryPolicy:
 DEFAULT_SUMMARY_RETRY_POLICY = SummaryRetryPolicy()
 
 
-def configure_summary_model(model: Model, *, timeout_seconds: float | None = None) -> Model:
+@dataclass(frozen=True)
+class SummaryProviderRequest:
+    """Pre-assembled provider request for one warm-prefix summary call.
+
+    ``reuses_reply_prefix`` marks requests whose messages reproduce the active
+    reply-path request prefix; configuration that would invalidate the provider
+    prompt cache (cache flags, thinking) is preserved for those calls.
+    """
+
+    messages: tuple[Message, ...]
+    tools: tuple[dict[str, object], ...] = ()
+    tool_choice: str | dict[str, object] | None = None
+    reuses_reply_prefix: bool = True
+
+
+def configure_summary_model(
+    model: Model,
+    *,
+    timeout_seconds: float | None = None,
+    reuses_reply_prefix: bool = False,
+) -> Model:
     """Apply all compaction-specific provider tuning to one loaded model (invariant 3).
 
     ``isinstance(model, Claude)`` covers the anthropic, vertexai_claude, and
     bedrock_claude providers because both forks subclass the Anthropic model.
     Mutating the instance is safe: ``get_model_instance`` builds a fresh model per
     call and compaction loads its own instance per run.
+
+    When ``reuses_reply_prefix`` is true the request reproduces the reply-path
+    prefix, so cache flags stay untouched (the cache_control breakpoints must
+    match the reply request) and ``thinking`` stays as configured (toggling
+    thinking invalidates message-level cache entries). Retry and timeout tuning
+    applies to every summary call.
     """
     if not isinstance(model, Claude):
         logger.debug(
@@ -116,12 +145,17 @@ def configure_summary_model(model: Model, *, timeout_seconds: float | None = Non
         )
         return model
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    model.cache_system_prompt = False
-    model.extended_cache_time = False
-    model.thinking = None
-    model.max_tokens = (
-        min(model.max_tokens, SUMMARY_MAX_OUTPUT_TOKENS) if model.max_tokens else SUMMARY_MAX_OUTPUT_TOKENS
-    )
+    if not reuses_reply_prefix:
+        model.cache_system_prompt = False
+        model.extended_cache_time = False
+        model.thinking = None
+    if model.thinking is None:
+        # The output cap is a sampling parameter, not prefix content, so it never
+        # invalidates the prompt cache; with thinking enabled, max_tokens must stay
+        # above the configured thinking budget, so the reply-path value is kept.
+        model.max_tokens = (
+            min(model.max_tokens, SUMMARY_MAX_OUTPUT_TOKENS) if model.max_tokens else SUMMARY_MAX_OUTPUT_TOKENS
+        )
     model.timeout = min(model.timeout, resolved_timeout) if model.timeout else resolved_timeout
     client_params = dict(model.client_params or {})
     client_params["max_retries"] = 0
@@ -204,14 +238,33 @@ async def generate_compaction_summary(
     summary_prompt: str,
     timeout_seconds: float | None = None,
     timing_scope: str | None = None,
+    provider_request: SummaryProviderRequest | None = None,
 ) -> SessionSummary:
-    """Issue one compaction summary call with tuned provider config and one timeout."""
+    """Issue one compaction summary call with tuned provider config and one timeout.
+
+    Without ``provider_request`` the call sends the standalone two-message request
+    from ``build_summary_request_messages``. With one, the pre-assembled
+    warm-prefix request is sent verbatim (messages, tool schemas, tool_choice).
+    """
     del timing_scope
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    configure_summary_model(model, timeout_seconds=resolved_timeout)
+    configure_summary_model(
+        model,
+        timeout_seconds=resolved_timeout,
+        reuses_reply_prefix=provider_request.reuses_reply_prefix if provider_request is not None else False,
+    )
 
     async def _request_summary() -> ModelResponse:
         try:
+            if provider_request is not None:
+                request_tools: list[Function | dict] | None = (
+                    [dict(tool) for tool in provider_request.tools] if provider_request.tools else None
+                )
+                return await model.aresponse(
+                    messages=list(provider_request.messages),
+                    tools=request_tools,
+                    tool_choice=provider_request.tool_choice,
+                )
             return await model.aresponse(
                 messages=build_summary_request_messages(
                     summary_prompt=summary_prompt,

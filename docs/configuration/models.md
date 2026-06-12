@@ -199,6 +199,7 @@ Manual `compact_context` records a durable request that runs before the next rep
 Manual `compact_context` remains available when a compaction model and context window are configured.
 It still uses the active runtime window for the final replay-fit step, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`.
 If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
+When `compaction.model` is unset (or names the active model), agent summary calls reproduce the reply request prefix so providers can serve most of the summary input from their prompt cache; an explicit different `compaction.model` sends a standalone summary request and should not expect to reuse the active reply prompt cache.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
 Otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
 The budget uses a chars/4 approximation and reserves headroom for the current prompt and output.
