@@ -89,6 +89,14 @@ class TestParseChatCompletionBody:
         assert isinstance(response, JSONResponse)
         assert response.status_code == 400
 
+    def test_valid_json_non_object_bodies(self) -> None:
+        """Valid JSON that is not an object (null, list, scalar) returns a 400 error."""
+        for body in (b"null", b"[]", b'"hello"', b"42"):
+            response = parse_chat_completion_body(body)
+            assert isinstance(response, JSONResponse)
+            assert response.status_code == 400
+            assert _error_body(response)["message"] == "Invalid request body"
+
     def test_missing_model(self) -> None:
         """A payload without a model returns a 400 error."""
         response = parse_chat_completion_body(json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode())

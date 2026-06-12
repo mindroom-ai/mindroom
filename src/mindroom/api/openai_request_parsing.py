@@ -9,7 +9,6 @@ team a requested model name maps to.
 from __future__ import annotations
 
 import hashlib
-import json
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
@@ -73,10 +72,15 @@ class ChatCompletionRequest(BaseModel):
 
 
 def parse_chat_completion_body(body: bytes) -> ChatCompletionRequest | JSONResponse:
-    """Parse one chat completion request body, or return an OpenAI-style error."""
+    """Parse one chat completion request body, or return an OpenAI-style error.
+
+    Validates the raw bytes directly so invalid JSON and valid-but-non-object
+    JSON bodies (``null``, ``[]``, scalars) both surface as ValidationError
+    and map to the same 400 response.
+    """
     try:
-        return ChatCompletionRequest(**json.loads(body))
-    except (json.JSONDecodeError, ValidationError):
+        return ChatCompletionRequest.model_validate_json(body)
+    except ValidationError:
         return error_response(400, "Invalid request body")
 
 
