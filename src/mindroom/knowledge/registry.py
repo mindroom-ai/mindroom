@@ -13,7 +13,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, ParamSpec, Protocol, TypeVar, cast
 
-import mindroom.knowledge.manager as manager_module
+from agno.knowledge.knowledge import Knowledge
+from agno.vectordb.chroma import ChromaDb
+
+from mindroom.embedding_factory import create_configured_embedder
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import (
     load_index_metadata_payload,
@@ -21,13 +24,17 @@ from mindroom.knowledge.index_metadata import (
     parse_index_metadata_fields,
     write_index_metadata_payload,
 )
+from mindroom.knowledge.indexing_config import (
+    IndexingSettings,
+    chroma_collection_exists,
+    indexing_settings_key,
+    storage_key_for_base,
+)
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from agno.knowledge.knowledge import Knowledge
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -48,7 +55,7 @@ class PublishedIndexKey:
     base_id: str
     storage_root: str
     knowledge_path: str
-    indexing_settings: manager_module.IndexingSettings
+    indexing_settings: IndexingSettings
 
 
 @dataclass(frozen=True)
@@ -72,7 +79,7 @@ class KnowledgeSourceRoot:
 class PublishedIndexState:
     """Persisted state for the published knowledge index."""
 
-    settings: manager_module.IndexingSettings
+    settings: IndexingSettings
     status: Literal["resetting", "indexing", "complete", "failed"]
     collection: str | None = None
     last_published_at: str | None = None
@@ -153,7 +160,7 @@ def _published_index_key_from_binding(
         base_id=base_id,
         storage_root=str(storage_root),
         knowledge_path=str(knowledge_path),
-        indexing_settings=manager_module._indexing_settings_key(
+        indexing_settings=indexing_settings_key(
             config,
             storage_root,
             base_id,
@@ -242,9 +249,7 @@ def resolve_refresh_target(
 def _published_index_storage_path(key: PublishedIndexKey) -> Path:
     """Return the storage directory for one resolved knowledge base."""
     knowledge_path = Path(key.knowledge_path)
-    return (
-        Path(key.storage_root) / "knowledge_db" / manager_module._base_storage_key(key.base_id, knowledge_path)
-    ).resolve()
+    return (Path(key.storage_root) / "knowledge_db" / storage_key_for_base(key.base_id, knowledge_path)).resolve()
 
 
 def published_index_metadata_path(key: PublishedIndexKey) -> Path:
@@ -275,7 +280,7 @@ def load_published_index_state(metadata_path: Path) -> PublishedIndexState | Non
         indexed_count,
         source_signature,
     ) = fields
-    indexing_settings = manager_module.IndexingSettings.from_metadata(settings)
+    indexing_settings = IndexingSettings.from_metadata(settings)
     if indexing_settings is None:
         return None
 
@@ -442,11 +447,11 @@ def _build_published_index_vector_db(
 ) -> _PublishedIndexVectorDb:
     return cast(
         "_PublishedIndexVectorDb",
-        manager_module.ChromaDb(
+        ChromaDb(
             collection=_state_collection_name(state),
             path=str(_published_index_storage_path(key)),
             persistent_client=True,
-            embedder=manager_module.create_configured_embedder(config, runtime_paths),
+            embedder=create_configured_embedder(config, runtime_paths),
         ),
     )
 
@@ -458,7 +463,7 @@ def _build_published_index_knowledge(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> Knowledge:
-    return manager_module.Knowledge(
+    return Knowledge(
         vector_db=_build_published_index_vector_db(key, state, config=config, runtime_paths=runtime_paths),
     )
 
@@ -468,7 +473,7 @@ def published_index_collection_exists_for_state(key: PublishedIndexKey, state: P
     if state.status != "complete" or state.collection is None:
         return False
     try:
-        return manager_module.chroma_collection_exists(_published_index_storage_path(key), state.collection)
+        return chroma_collection_exists(_published_index_storage_path(key), state.collection)
     except Exception:
         logger.warning(
             "Published knowledge collection existence check failed",
@@ -480,32 +485,32 @@ def published_index_collection_exists_for_state(key: PublishedIndexKey, state: P
 
 
 def _indexing_settings_query_compatible(
-    published_settings: manager_module.IndexingSettings,
-    current_settings: manager_module.IndexingSettings,
+    published_settings: IndexingSettings,
+    current_settings: IndexingSettings,
 ) -> bool:
     """Return whether current queries can use a collection from published settings."""
     return published_settings.query_compatibility_key() == current_settings.query_compatibility_key()
 
 
 def _indexing_settings_corpus_compatible(
-    published_settings: manager_module.IndexingSettings,
-    current_settings: manager_module.IndexingSettings,
+    published_settings: IndexingSettings,
+    current_settings: IndexingSettings,
 ) -> bool:
     """Return whether published content is safe for the current corpus config."""
     return published_settings.corpus_compatibility_key() == current_settings.corpus_compatibility_key()
 
 
 def indexing_settings_metadata_equal(
-    published_settings: manager_module.IndexingSettings,
-    current_settings: manager_module.IndexingSettings,
+    published_settings: IndexingSettings,
+    current_settings: IndexingSettings,
 ) -> bool:
     """Return whether persisted metadata exactly matches current indexing settings."""
     return published_settings == current_settings
 
 
 def published_index_settings_compatible(
-    published_settings: manager_module.IndexingSettings,
-    current_settings: manager_module.IndexingSettings,
+    published_settings: IndexingSettings,
+    current_settings: IndexingSettings,
 ) -> bool:
     """Return whether a published index can be queried under the current config."""
     return _indexing_settings_query_compatible(

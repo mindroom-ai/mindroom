@@ -2383,11 +2383,19 @@ visibility = [
 [[modules]]
 path = "mindroom.knowledge.registry"
 depends_on = [
+    "mindroom.embedding_factory",
     "mindroom.knowledge.availability",
     "mindroom.knowledge.index_metadata",
-    "mindroom.knowledge.manager",
+    "mindroom.knowledge.indexing_config",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.knowledge.indexing_config"
+depends_on = [
+    "mindroom.embeddings",
+    "mindroom.knowledge.redaction",
 ]
 
 [[modules]]
@@ -2397,6 +2405,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.embedding_factory",
     "mindroom.knowledge.index_metadata",
+    "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
     "mindroom.path_globs",
 ]

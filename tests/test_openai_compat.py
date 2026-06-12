@@ -51,7 +51,7 @@ from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import CompactionDecision, HistoryScope, ResolvedReplayPlan
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import IndexingSettings
+from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage

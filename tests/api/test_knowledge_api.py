@@ -268,6 +268,10 @@ def test_status_and_list_use_persisted_indexed_count_without_refresh(tmp_path: P
             "mindroom.knowledge.manager.create_configured_embedder",
             side_effect=AssertionError("embedder should not load"),
         ),
+        patch(
+            "mindroom.knowledge.registry.create_configured_embedder",
+            side_effect=AssertionError("embedder should not load"),
+        ),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
     ):
         status_response = client.get("/api/knowledge/bases/research/status")
@@ -306,8 +310,14 @@ def test_status_reports_persisted_count_without_loading_collection(tmp_path: Pat
 
     with (
         patch("mindroom.knowledge.manager.ChromaDb", _BrokenVectorDb),
+        patch("mindroom.knowledge.registry.ChromaDb", _BrokenVectorDb),
+        patch("mindroom.knowledge.indexing_config.ChromaDb", _BrokenVectorDb),
         patch(
             "mindroom.knowledge.manager.create_configured_embedder",
+            side_effect=AssertionError("embedder should not load"),
+        ),
+        patch(
+            "mindroom.knowledge.registry.create_configured_embedder",
             side_effect=AssertionError("embedder should not load"),
         ),
     ):
