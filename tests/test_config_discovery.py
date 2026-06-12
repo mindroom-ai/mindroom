@@ -41,7 +41,7 @@ _RUNTIME_ENV_ALLOWLIST = {
     "src/mindroom/workers/backends/local.py",
 }
 _EXECUTION_IDENTITY_ENV_ALLOWLIST = {
-    "src/mindroom/api/credentials.py",
+    "src/mindroom/api/dashboard_credential_scope.py",
     "src/mindroom/api/main.py",
     "src/mindroom/api/openai_compat.py",
     "src/mindroom/bot.py",

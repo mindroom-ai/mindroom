@@ -21,10 +21,9 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom.api.auth import verify_user
-from mindroom.api.credentials import (
+from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
+from mindroom.api.credentials_target import (
     RequestCredentialsTarget,
-    consume_pending_oauth_request,
-    issue_pending_oauth_state,
     load_credentials_for_target,
     resolve_request_credentials_target,
 )
