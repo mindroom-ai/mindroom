@@ -11,10 +11,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import mindroom.ai as ai_module
+import mindroom.memory._file_backend as file_backend_module
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.history import PreparedHistoryState
 from mindroom.memory import MemoryPromptParts
-from tests.conftest import test_runtime_paths
+from mindroom.memory._file_backend import FileMemoryBackend
+from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -75,3 +79,42 @@ async def test_prepare_agent_and_prompt_builds_agent_off_event_loop(
     gate.set()
     prepared_run = await prepare_task
     assert prepared_run.agent is built_agent
+
+
+@pytest.mark.asyncio
+async def test_file_memory_keyword_search_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow keyword memory scan (read + score every memory file) must not stall the loop."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
+    )
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}),
+        runtime_paths,
+    )
+    config.memory.backend = "file"
+
+    gate = threading.Event()
+    scan_started = threading.Event()
+
+    def gated_scan(*_args: object, **_kwargs: object) -> list:
+        scan_started.set()
+        gate.wait()
+        return []
+
+    monkeypatch.setattr(file_backend_module, "_search_agent_file_scope_memories", gated_scan)
+    backend = FileMemoryBackend(runtime_paths)
+    search_task = asyncio.get_running_loop().create_task(
+        backend.search("query", "general", tmp_path, config, limit=5),
+    )
+    await asyncio.to_thread(scan_started.wait, 5.0)
+
+    # The scan thread is parked on the gate; the loop must stay live.
+    await _assert_loop_heartbeats_while_pending(search_task)
+
+    gate.set()
+    assert await search_task == []

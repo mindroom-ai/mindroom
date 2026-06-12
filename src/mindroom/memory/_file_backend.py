@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -665,6 +666,53 @@ def _search_team_file_scope_memories(
     )
 
 
+def _merge_team_scope_results(
+    results: list[MemoryResult],
+    *,
+    query: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    limit: int,
+    execution_identity: ToolExecutionIdentity | None,
+    timing_scope: str | None,
+) -> list[MemoryResult]:
+    """Merge keyword team-scope matches into one ranked result list (filesystem-bound)."""
+    existing_memories = {result.get("memory", "") for result in results}
+    for team_id in get_team_ids_for_agent(agent_name, config):
+        for target_storage_path in storage_paths_for_scope_user_id(
+            team_id,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        ):
+            team_resolution = resolve_file_memory_resolution(
+                target_storage_path,
+                config,
+                runtime_paths,
+                original_storage_path=storage_path,
+                execution_identity=execution_identity,
+            )
+            for memory in _search_team_file_scope_memories(
+                team_id,
+                query,
+                team_resolution,
+                config,
+                limit,
+                timing_scope,
+            ):
+                memory_text = memory.get("memory", "")
+                if memory_text in existing_memories:
+                    continue
+                existing_memories.add(memory_text)
+                _tag_keyword_mode(memory)
+                results.append(memory)
+    results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+    return results[:limit]
+
+
 @dataclass(frozen=True)
 class FileMemoryBackend:
     """File-backed adapter implementing the shared memory backend surface."""
@@ -684,7 +732,8 @@ class FileMemoryBackend:
     ) -> None:
         """Append one file-backed memory for an agent scope."""
         del metadata  # File memory entries persist plain text only.
-        resolution = resolve_file_memory_resolution(
+        resolution = await asyncio.to_thread(
+            resolve_file_memory_resolution,
             storage_path,
             config,
             self.runtime_paths,
@@ -692,7 +741,7 @@ class FileMemoryBackend:
             execution_identity=execution_identity,
         )
         scope_user_id = agent_scope_user_id(agent_name)
-        _append_scope_memory_entry(scope_user_id, content, resolution, config)
+        await asyncio.to_thread(_append_scope_memory_entry, scope_user_id, content, resolution, config)
         _schedule_agent_semantic_refresh(
             agent_name,
             scope_user_id,
@@ -715,8 +764,14 @@ class FileMemoryBackend:
         execution_identity: ToolExecutionIdentity | None = None,
         timing_scope: str | None = None,
     ) -> list[MemoryResult]:
-        """Search file-backed memories visible to an agent."""
-        agent_resolution = resolve_file_memory_resolution(
+        """Search file-backed memories visible to an agent.
+
+        Keyword scans read and score every memory file in the scope, so all
+        file-reading paths run in worker threads (#1260); only the semantic
+        index query stays natively async.
+        """
+        agent_resolution = await asyncio.to_thread(
+            resolve_file_memory_resolution,
             storage_path,
             config,
             self.runtime_paths,
@@ -757,48 +812,28 @@ class FileMemoryBackend:
                     "File-memory semantic index unavailable; falling back to keyword search",
                     agent=agent_name,
                 )
-                results = keyword_results()
+                results = await asyncio.to_thread(keyword_results)
             except Exception:
                 logger.exception(
                     "File-memory semantic search failed; falling back to keyword search",
                     agent=agent_name,
                 )
-                results = keyword_results()
+                results = await asyncio.to_thread(keyword_results)
         else:
-            results = keyword_results()
+            results = await asyncio.to_thread(keyword_results)
 
-        existing_memories = {result.get("memory", "") for result in results}
-        for team_id in get_team_ids_for_agent(agent_name, config):
-            for target_storage_path in storage_paths_for_scope_user_id(
-                team_id,
-                storage_path,
-                config,
-                self.runtime_paths,
-                execution_identity=execution_identity,
-            ):
-                team_resolution = resolve_file_memory_resolution(
-                    target_storage_path,
-                    config,
-                    self.runtime_paths,
-                    original_storage_path=storage_path,
-                    execution_identity=execution_identity,
-                )
-                for memory in _search_team_file_scope_memories(
-                    team_id,
-                    query,
-                    team_resolution,
-                    config,
-                    limit,
-                    timing_scope,
-                ):
-                    memory_text = memory.get("memory", "")
-                    if memory_text in existing_memories:
-                        continue
-                    existing_memories.add(memory_text)
-                    _tag_keyword_mode(memory)
-                    results.append(memory)
-        results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
-        return results[:limit]
+        return await asyncio.to_thread(
+            _merge_team_scope_results,
+            results,
+            query=query,
+            agent_name=agent_name,
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=self.runtime_paths,
+            limit=limit,
+            execution_identity=execution_identity,
+            timing_scope=timing_scope,
+        )
 
     async def list_all(
         self,
@@ -811,7 +846,8 @@ class FileMemoryBackend:
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> list[MemoryResult]:
         """List file-backed memories stored for an agent."""
-        resolution = resolve_file_memory_resolution(
+        resolution = await asyncio.to_thread(
+            resolve_file_memory_resolution,
             storage_path,
             config,
             self.runtime_paths,
@@ -819,7 +855,12 @@ class FileMemoryBackend:
             preserve_resolved_storage_path=preserve_resolved_storage_path,
             execution_identity=execution_identity,
         )
-        results, _ = _load_scope_id_entries(agent_scope_user_id(agent_name), resolution, config)
+        results, _ = await asyncio.to_thread(
+            _load_scope_id_entries,
+            agent_scope_user_id(agent_name),
+            resolution,
+            config,
+        )
         return results[:limit]
 
     async def get(
@@ -832,7 +873,8 @@ class FileMemoryBackend:
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryResult | None:
         """Return one file-backed memory visible to the caller."""
-        return _find_file_anchor_memory_result(
+        return await asyncio.to_thread(
+            _find_file_anchor_memory_result,
             memory_id,
             caller_context,
             storage_path,
@@ -853,7 +895,8 @@ class FileMemoryBackend:
     ) -> None:
         """Update one file-backed memory across its replica targets."""
         if (
-            anchor_result := _find_file_anchor_memory_result(
+            anchor_result := await asyncio.to_thread(
+                _find_file_anchor_memory_result,
                 memory_id,
                 caller_context,
                 storage_path,
@@ -864,7 +907,8 @@ class FileMemoryBackend:
         ) is None:
             raise MemoryNotFoundError(memory_id)
 
-        scope_user_id, updated_targets, updated_resolutions = _mutate_file_memory_targets(
+        scope_user_id, updated_targets, updated_resolutions = await asyncio.to_thread(
+            _mutate_file_memory_targets,
             memory_id=memory_id,
             content=content,
             storage_path=storage_path,
@@ -902,7 +946,8 @@ class FileMemoryBackend:
     ) -> None:
         """Delete one file-backed memory across its replica targets."""
         if (
-            anchor_result := _find_file_anchor_memory_result(
+            anchor_result := await asyncio.to_thread(
+                _find_file_anchor_memory_result,
                 memory_id,
                 caller_context,
                 storage_path,
@@ -913,7 +958,8 @@ class FileMemoryBackend:
         ) is None:
             raise MemoryNotFoundError(memory_id)
 
-        scope_user_id, deleted_targets, deleted_resolutions = _mutate_file_memory_targets(
+        scope_user_id, deleted_targets, deleted_resolutions = await asyncio.to_thread(
+            _mutate_file_memory_targets,
             memory_id=memory_id,
             content=None,
             storage_path=storage_path,
@@ -958,7 +1004,8 @@ class FileMemoryBackend:
         if not condensed_prompt:
             return
 
-        target_storage_paths = effective_storage_paths_for_context(
+        target_storage_paths = await asyncio.to_thread(
+            effective_storage_paths_for_context,
             agent_name,
             storage_path,
             config,
@@ -970,23 +1017,31 @@ class FileMemoryBackend:
         )
         team_memory_id = new_memory_id() if isinstance(agent_name, list) else None
 
-        for target_storage_path in target_storage_paths:
-            resolution = resolve_file_memory_resolution(
-                target_storage_path,
-                config,
-                self.runtime_paths,
-                agent_name=agent_name_from_scope_user_id(scope_user_id),
-                original_storage_path=storage_path,
-                execution_identity=execution_identity,
-            )
-            _append_scope_memory_entry(
-                scope_user_id,
-                condensed_prompt,
-                resolution,
-                config,
-                memory_id=team_memory_id,
-            )
-            if isinstance(agent_name, str):
+        def _persist_to_targets() -> list[FileMemoryResolution]:
+            resolutions: list[FileMemoryResolution] = []
+            for target_storage_path in target_storage_paths:
+                resolution = resolve_file_memory_resolution(
+                    target_storage_path,
+                    config,
+                    self.runtime_paths,
+                    agent_name=agent_name_from_scope_user_id(scope_user_id),
+                    original_storage_path=storage_path,
+                    execution_identity=execution_identity,
+                )
+                _append_scope_memory_entry(
+                    scope_user_id,
+                    condensed_prompt,
+                    resolution,
+                    config,
+                    memory_id=team_memory_id,
+                )
+                resolutions.append(resolution)
+            return resolutions
+
+        resolutions = await asyncio.to_thread(_persist_to_targets)
+        if isinstance(agent_name, str):
+            # Semantic refresh scheduling creates loop tasks, so it stays on the loop.
+            for resolution in resolutions:
                 _schedule_agent_semantic_refresh(
                     agent_name,
                     scope_user_id,
