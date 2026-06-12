@@ -325,7 +325,6 @@ def _build_harness(
     gate = CoalescingGate(
         dispatch_batch=_dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     ingress_validator = IngressValidator(
