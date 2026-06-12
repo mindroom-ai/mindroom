@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from watchfiles import Change, awatch
 
-from mindroom.knowledge.manager import include_semantic_knowledge_relative_path
+from mindroom.knowledge.file_listing import include_semantic_knowledge_relative_path
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
     KnowledgeSourceRoot,

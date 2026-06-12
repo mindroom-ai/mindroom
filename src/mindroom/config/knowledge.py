@@ -91,7 +91,14 @@ class KnowledgeBaseConfig(BaseModel):
     )
     include_extensions: list[str] | None = Field(
         default=None,
-        description="Optional file extensions to include for indexing, for example ['.md', '.py']",
+        description="Optional file extensions to index instead of the default text-like set, for example ['.md', '.py']",
+    )
+    extra_extensions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional file extensions to index in addition to the default text-like set, "
+            "for example ['.pdf', '.docx']; the matching reader package must be installed"
+        ),
     )
     exclude_extensions: list[str] = Field(
         default_factory=list,
@@ -116,7 +123,7 @@ class KnowledgeBaseConfig(BaseModel):
         """Validate include and exclude patterns stay inside the knowledge root."""
         return _validate_relative_patterns(value, field_name=f"knowledge_bases.{info.field_name}")
 
-    @field_validator("include_extensions", "exclude_extensions")
+    @field_validator("include_extensions", "extra_extensions", "exclude_extensions")
     @classmethod
     def normalize_extensions(cls, value: list[str] | None) -> list[str] | None:
         """Normalize configured extensions to lowercase dotted suffixes."""

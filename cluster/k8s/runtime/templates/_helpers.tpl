@@ -187,6 +187,10 @@ app.kubernetes.io/component: runtime
 {{- end -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.networkPolicyName" -}}
+{{- default (include "mindroom-runtime.fullname" .) .Values.networkPolicy.name -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.workerNetworkPolicyName" -}}
 {{- default (printf "%s-workers" (include "mindroom-runtime.fullname" .)) .Values.workers.kubernetes.networkPolicy.name -}}
 {{- end -}}

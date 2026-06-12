@@ -11679,11 +11679,37 @@ knowledge_bases:
 | `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent chunks (must be `< chunk_size`) |
+| `include_patterns` | list | `[]` | Root-anchored glob patterns to include before extension filtering |
+| `exclude_patterns` | list | `[]` | Root-anchored glob patterns to exclude after include filtering |
+| `include_extensions` | list | `null` | Exact set of file extensions to index instead of the default text-like set (semantic mode only) |
+| `extra_extensions` | list | `[]` | File extensions to index in addition to the default text-like set (semantic mode only) |
+| `exclude_extensions` | list | `[]` | File extensions to exclude after include filtering (semantic mode only) |
 | `git` | object | `null` | Optional Git repository sync settings |
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
 `chunk_size` and `chunk_overlap` only affect semantic mode.
 If chunking is too large, semantic indexing retries will fail with embedder 500 errors.
+
+### File Type Filtering
+
+In semantic mode, MindRoom indexes a default set of text-like extensions covering Markdown, plain text, source code, and structured text formats such as `.json`, `.yaml`, and `.csv`.
+
+```yaml
+knowledge_bases:
+  reports:
+    path: ./knowledge_docs/reports
+    extra_extensions: [".pdf", ".docx"]  # Default text-like set plus PDF and Word
+    exclude_extensions: [".csv"]         # Drop CSV files from the default set
+```
+
+- `extra_extensions` adds extensions on top of the default set.
+- `include_extensions` replaces the default set entirely, and `extra_extensions` still adds on top of it.
+- `exclude_extensions` removes extensions last and wins over both.
+
+The allowed set is always explicit configuration and never changes based on the configured embedder or the installed packages.
+Non-text formats such as `.pdf`, `.docx`, or `.pptx` require their reader package (for example `pypdf`, `python-docx`, or `python-pptx`) in the MindRoom environment.
+When a reader package is missing, the refresh indexes every other file, logs a warning naming the file and the missing package, and records a partial-index error instead of publishing an index without the opted-in content.
+Extension filtering does not apply in `files` mode, which exposes every managed file.
 
 ### Private Agent Knowledge
 

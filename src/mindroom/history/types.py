@@ -94,11 +94,17 @@ class ResolvedHistorySettings:
 
 @dataclass(frozen=True)
 class HistoryScopeState:
-    """Persisted compaction control/audit state stored in session metadata."""
+    """Persisted compaction control/audit state stored in session metadata.
+
+    ``compacted_run_ids`` are tombstones for runs already folded into the durable
+    summary; they let the state owner prune runs that a stale session write
+    reintroduced after compaction progress was persisted.
+    """
 
     last_compacted_at: str | None = None
     last_summary_model: str | None = None
     last_compacted_run_count: int | None = None
+    compacted_run_ids: tuple[str, ...] = ()
     force_compact_before_next_run: bool = False
 
 

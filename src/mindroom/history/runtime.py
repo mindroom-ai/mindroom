@@ -11,7 +11,6 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
-from agno.db.base import SessionType
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
@@ -39,8 +38,11 @@ from mindroom.history.policy import (
     resolve_history_execution_plan,
 )
 from mindroom.history.storage import (
+    adopt_session_fields,
     clear_force_compaction_state,
     consume_pending_force_compaction_scope,
+    latest_persisted_session,
+    prune_reintroduced_runs,
     read_scope_state,
     set_force_compaction_state,
     write_scope_state,
@@ -150,16 +152,6 @@ def note_prepared_history_timing(
     )
 
 
-def _sync_loaded_session(
-    *,
-    session: AgentSession | TeamSession,
-    target_session: AgentSession | TeamSession,
-) -> None:
-    session.metadata = target_session.metadata
-    session.runs = target_session.runs
-    session.summary = target_session.summary
-
-
 def _clear_forced_compaction_after_failure(
     *,
     storage: BaseDb,
@@ -170,17 +162,15 @@ def _clear_forced_compaction_after_failure(
     """Clear a consumed manual force marker after a compaction failure."""
     if session is None or not state.force_compact_before_next_run:
         return
-    session_type = SessionType.TEAM if isinstance(session, TeamSession) else SessionType.AGENT
-    latest_session = storage.get_session(session_id=session.session_id, session_type=session_type)
-    target_session = latest_session if isinstance(latest_session, type(session)) else session
+    target_session = latest_persisted_session(storage, session)
     latest_state = read_scope_state(target_session, scope)
     cleared_state = replace(latest_state, force_compact_before_next_run=False)
     if cleared_state == latest_state:
-        _sync_loaded_session(session=session, target_session=target_session)
+        adopt_session_fields(session, target_session)
         return
     write_scope_state(target_session, scope, cleared_state)
     storage.upsert_session(target_session)
-    _sync_loaded_session(session=session, target_session=target_session)
+    adopt_session_fields(session, target_session)
 
 
 @dataclass(frozen=True)
@@ -1411,6 +1401,8 @@ def _prepare_scope_state_for_run(
     execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
     state = read_scope_state(session, scope)
+    if prune_reintroduced_runs(session, state):
+        storage.upsert_session(session)
     if consume_pending_force_compaction_scope(session, scope):
         state = set_force_compaction_state(session, scope, state, force=True)
         storage.upsert_session(session)
