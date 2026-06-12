@@ -539,7 +539,7 @@ class KubernetesWorkerBackend:
             if not worker_lock.acquire(blocking=False):
                 continue
             try:
-                refreshed = self._reconcile_worker_deployment(deployment, handle=handle, now=timestamp)
+                refreshed = self._reconcile_worker_deployment(deployment, handle=handle)
             finally:
                 worker_lock.release()
             if refreshed is not None:
@@ -551,7 +551,6 @@ class KubernetesWorkerBackend:
         deployment: resources.KubernetesDeployment,
         *,
         handle: WorkerHandle,
-        now: float,
     ) -> WorkerHandle | None:
         annotations = dict(deployment.metadata.annotations or {})
         private_agent_names = resources.parse_private_agent_names_annotation(annotations)
@@ -585,10 +584,9 @@ class KubernetesWorkerBackend:
         except WorkerBackendError:
             logger.warning("Skipping pod-template reconciliation for worker %r", handle.worker_key, exc_info=True)
             return None
-        refreshed = self._resources.read_deployment(handle.worker_id)
-        if refreshed is None:
-            return None
-        return self._handle_from_deployment(refreshed, now=now)
+        # The recreate keeps the lifecycle annotations and zero replicas, so the
+        # handle projected before the apply still describes the reconciled worker.
+        return handle
 
     def record_failure(
         self,
