@@ -1007,7 +1007,17 @@ class KnowledgeManager:
             _SOURCE_SIZE_KEY: source_size,
             _SOURCE_DIGEST_KEY: source_digest,
         }
-        reader = self._build_reader(resolved_path)
+        try:
+            reader = self._build_reader(resolved_path)
+        except ImportError as exc:
+            logger.warning(
+                "Skipping knowledge file because its reader dependency is not installed",
+                base_id=self.base_id,
+                path=relative_path,
+                extension=resolved_path.suffix.lower(),
+                error=str(exc),
+            )
+            return False
         target_knowledge = knowledge or self._knowledge
 
         try:

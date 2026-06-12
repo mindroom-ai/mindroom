@@ -168,14 +168,15 @@ def include_semantic_knowledge_relative_path(config: Config, base_id: str, relat
         return False
 
     base_config = config.get_knowledge_base_config(base_id)
-    include_extensions = set(base_config.include_extensions) if base_config.include_extensions is not None else None
-    exclude_extensions = set(base_config.exclude_extensions)
-    allowed_extensions = include_extensions if include_extensions is not None else _TEXT_LIKE_EXTENSIONS
+    allowed_extensions = (
+        set(base_config.include_extensions) if base_config.include_extensions is not None else _TEXT_LIKE_EXTENSIONS
+    )
+    allowed_extensions = allowed_extensions | set(base_config.extra_extensions)
 
     suffix = Path(relative_path).suffix.lower()
     if suffix not in allowed_extensions:
         return False
-    return suffix not in exclude_extensions
+    return suffix not in base_config.exclude_extensions
 
 
 def include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
