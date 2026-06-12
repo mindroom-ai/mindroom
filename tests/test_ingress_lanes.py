@@ -88,7 +88,6 @@ def _gate(
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch or record,
         debounce_seconds=lambda: debounce_seconds,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
         wait_until_dispatch_allowed=wait_until_dispatch_allowed,
         room_scope_is_single_conversation=(

@@ -26,13 +26,10 @@ from .coalescing_cleanup import (
 from .coalescing_policy import (
     QueueKind,
     is_coalescing_exempt_source_kind,
-    pending_events_require_solo_batch,
-    pending_has_only_text,
-    pending_has_room_scope_source,
+    pending_event_is_text,
     queue_kind,
     source_or_event_allows_room_scope_batching,
 )
-from .dispatch_handoff import is_media_dispatch_event
 from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot
 from .logging_config import get_logger
@@ -54,8 +51,6 @@ __all__ = [
     "is_coalescing_exempt_source_kind",
 ]
 
-_UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
-_UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
 logger = get_logger(__name__)
 
@@ -68,7 +63,6 @@ class GatePhase(enum.Enum):
     """Lifecycle phases for one coalescing gate."""
 
     DEBOUNCE = "debounce"
-    GRACE = "grace"
     IN_FLIGHT = "in_flight"
 
 
@@ -146,7 +140,6 @@ class _GateEntry:
     wake_event: asyncio.Event = field(default_factory=asyncio.Event)
     wake_generation: int = 0
     deadline: float | None = None
-    grace_deadline: float | None = None
     drain_all_requested: bool = False
     drain_context: _DrainContext | None = None
 
@@ -168,22 +161,16 @@ class _DebounceWaitResult:
     quiet_deadline: float
 
 
-@dataclass(frozen=True)
-class _UploadGraceWaitResult:
-    """Boundary discovered during upload grace."""
-
-    candidate_count: int
-    quiet_deadline: float
-
-
 class CoalescingGate:
-    """Debounce/grace state machine for live inbound message batching.
+    """Debounce state machine for live inbound message batching.
 
     Ingress enters a per-(room, sender) lane in receipt order; lanes deliver
     only ready, conversation-assigned events to this gate. State machine per
     (room, thread, sender) key:
-    IDLE (absent) -> DEBOUNCE -> GRACE (optional, wait for images) ->
-    flush -> IN_FLIGHT, while all undispatched work remains in one FIFO queue.
+    IDLE (absent) -> DEBOUNCE -> flush -> IN_FLIGHT, while all undispatched
+    work remains in one FIFO queue. A batch ending in a text-like utterance is
+    complete and flushes immediately; a batch ending in media waits the
+    debounce window for more attachments or a trailing caption.
     """
 
     def __init__(
@@ -191,7 +178,6 @@ class CoalescingGate:
         *,
         dispatch_batch: Callable[[CoalescedBatch], Awaitable[None]],
         debounce_seconds: Callable[[], float],
-        upload_grace_seconds: Callable[[], float],
         is_shutting_down: Callable[[], bool],
         wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
         room_scope_is_single_conversation: Callable[[str], bool] | None = None,
@@ -199,7 +185,6 @@ class CoalescingGate:
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
-        self._upload_grace_seconds = upload_grace_seconds
         self._is_shutting_down = is_shutting_down
         self._wait_until_dispatch_allowed = wait_until_dispatch_allowed or _allow_dispatch
         self._room_scope_is_single_conversation = room_scope_is_single_conversation
@@ -365,13 +350,6 @@ class CoalescingGate:
             gate.claimed_admissions = []
 
     @staticmethod
-    def _requeue_claimed_admissions(gate: _GateEntry, admissions: list[_QueuedEvent]) -> None:
-        if not admissions:
-            return
-        gate.queue.extendleft(reversed(admissions))
-        CoalescingGate._clear_claimed_admissions(gate, admissions)
-
-    @staticmethod
     def _insert_queued_event(gate: _GateEntry, admission: _QueuedEvent) -> None:
         for index, queued in enumerate(gate.queue):
             if admission.receipt_time < queued.receipt_time:
@@ -398,18 +376,6 @@ class CoalescingGate:
         return count
 
     @staticmethod
-    def _extend_candidate_with_grace_media(gate: _GateEntry, candidate_count: int) -> int:
-        count = candidate_count
-        while count < len(gate.queue):
-            queued = gate.queue[count]
-            if CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL or not is_media_dispatch_event(
-                queued.pending_event.event,
-            ):
-                break
-            count += 1
-        return count
-
-    @staticmethod
     def _has_barrier_after_front_normal_run(
         gate: _GateEntry,
         *,
@@ -421,9 +387,10 @@ class CoalescingGate:
         )
         return normal_count < len(gate.queue)
 
-    @staticmethod
-    def _has_item_after_candidate(gate: _GateEntry, candidate_count: int) -> bool:
-        return candidate_count < len(gate.queue)
+    def _front_normal_run_ends_with_text(self, gate: _GateEntry, *, coalesce_normal_events: bool) -> bool:
+        """Return whether the claimable front run is terminated by a text-like utterance."""
+        count = self._front_normal_run_length(gate, coalesce_normal_events=coalesce_normal_events)
+        return count > 0 and pending_event_is_text(gate.queue[count - 1].pending_event)
 
     @staticmethod
     def _front_normal_run_latest_receipt_time(
@@ -445,11 +412,13 @@ class CoalescingGate:
             latest_receipt_time = queued.receipt_time
         return latest_receipt_time
 
-    def _enqueue_path(self, kind: QueueKind) -> str:
+    def _enqueue_path(self, kind: QueueKind, pending_event: PendingEvent) -> str:
         if kind is QueueKind.BYPASS:
             return "bypass"
         if self._debounce_seconds() <= 0:
             return "zero_debounce"
+        if pending_event_is_text(pending_event):
+            return "text_immediate"
         return "debounce_schedule"
 
     def _log_enqueue(
@@ -495,8 +464,6 @@ class CoalescingGate:
         self,
         key: CoalescingKey,
         pending_events: list[PendingEvent],
-        *,
-        bypass_grace: bool,
     ) -> _FlushDiagnostics:
         batch = build_coalesced_batch(key, pending_events)
         pending_count = len(pending_events)
@@ -511,7 +478,6 @@ class CoalescingGate:
                 "requester_user_id": key.requester_user_id,
                 "pending_count": pending_count,
                 "oldest_pending_age_ms": self._oldest_pending_events_age_ms(pending_events),
-                "bypass_grace": bypass_grace,
                 "source_event_ids": self._source_event_ids(pending_events),
                 "timing_scope": timing_scope,
             },
@@ -625,7 +591,7 @@ class CoalescingGate:
         self._insert_queued_event(gate, admission)
         self._schedule_drain(key, gate)
         kind = self._queued_kind(admission)
-        path = self._enqueue_path(kind)
+        path = self._enqueue_path(kind, ready_result.pending_event)
         self._record_enqueue(
             key,
             gate,
@@ -642,13 +608,6 @@ class CoalescingGate:
             result=_MutableDrainResult(),
         )
         return await _CoalescingDrainCoordinator(self, drain_context).run()
-
-    def _upload_grace_hard_cap_seconds(self) -> float:
-        grace_seconds = max(self._upload_grace_seconds(), 0.0)
-        return max(
-            grace_seconds,
-            min(grace_seconds * _UPLOAD_GRACE_HARD_CAP_MULTIPLIER, _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS),
-        )
 
     async def _wait_for_deadline(self, gate: _GateEntry, deadline: float) -> bool:
         """Return True when ingress woke the drain before the deadline."""
@@ -673,14 +632,23 @@ class CoalescingGate:
         *,
         coalesce_normal_events: Callable[[], bool],
     ) -> _DebounceWaitResult:
-        """Wait for the normal debounce window, returning early when a barrier appears."""
+        """Wait for the media debounce window, returning early when the batch completes.
+
+        A front run ending in text is a complete utterance and skips the wait;
+        a run ending in media keeps waiting for more attachments or a trailing
+        caption until the window goes quiet or a barrier appears.
+        """
         gate.phase = GatePhase.DEBOUNCE
-        gate.grace_deadline = None
         if not gate.queue:
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
         debounce_seconds = max(self._debounce_seconds(), 0.0)
-        if debounce_seconds <= 0 or self._is_shutting_down() or gate.drain_all_requested:
+        if (
+            debounce_seconds <= 0
+            or self._is_shutting_down()
+            or gate.drain_all_requested
+            or self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce_normal_events())
+        ):
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
         quiet_deadline = (
@@ -702,6 +670,9 @@ class CoalescingGate:
             deadline = gate.deadline or time.monotonic()
             if not await self._wait_for_deadline(gate, deadline):
                 return _DebounceWaitResult(quiet_deadline=quiet_deadline)
+            if self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce_normal_events()):
+                gate.deadline = time.monotonic()
+                return _DebounceWaitResult(quiet_deadline=gate.deadline)
             if (
                 self._is_shutting_down()
                 or gate.drain_all_requested
@@ -720,57 +691,6 @@ class CoalescingGate:
                 + debounce_seconds
             )
             gate.deadline = quiet_deadline
-
-    async def _wait_for_upload_grace(
-        self,
-        gate: _GateEntry,
-        candidate_count: int,
-        *,
-        timing_scope: str,
-    ) -> _UploadGraceWaitResult:
-        """Wait for late media without removing the candidate batch from the queue."""
-        grace_seconds = max(self._upload_grace_seconds(), 0.0)
-        if grace_seconds <= 0 or self._is_shutting_down() or gate.drain_all_requested:
-            return _UploadGraceWaitResult(candidate_count=candidate_count, quiet_deadline=time.monotonic())
-        gate.phase = GatePhase.GRACE
-        gate.grace_deadline = time.monotonic() + self._upload_grace_hard_cap_seconds()
-        gate.deadline = time.monotonic() + min(grace_seconds, self._upload_grace_hard_cap_seconds())
-        candidate_count = self._extend_candidate_with_grace_media(gate, candidate_count)
-        if self._has_item_after_candidate(gate, candidate_count):
-            return _UploadGraceWaitResult(
-                candidate_count=candidate_count,
-                quiet_deadline=gate.deadline,
-            )
-        grace_start = time.monotonic()
-        emit_elapsed_timing(
-            "coalescing_gate.flush",
-            grace_start,
-            outcome="scheduled_grace",
-            pending_count=candidate_count,
-            oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
-            timing_scope=timing_scope,
-        )
-        while True:
-            deadline = gate.deadline or time.monotonic()
-            woke = await self._wait_for_deadline(gate, deadline)
-            candidate_count = self._extend_candidate_with_grace_media(gate, candidate_count)
-            if (
-                self._is_shutting_down()
-                or gate.drain_all_requested
-                or self._has_item_after_candidate(gate, candidate_count)
-                or not woke
-            ):
-                return _UploadGraceWaitResult(
-                    candidate_count=candidate_count,
-                    quiet_deadline=deadline,
-                )
-            remaining_seconds = max((gate.grace_deadline or time.monotonic()) - time.monotonic(), 0.0)
-            if remaining_seconds <= 0:
-                return _UploadGraceWaitResult(
-                    candidate_count=candidate_count,
-                    quiet_deadline=deadline,
-                )
-            gate.deadline = time.monotonic() + min(grace_seconds, remaining_seconds)
 
     @staticmethod
     def _front_admissions_allow_room_scope_coalescing(gate: _GateEntry) -> bool:
@@ -796,10 +716,6 @@ class CoalescingGate:
             return True
         return self._front_admissions_allow_room_scope_coalescing(gate)
 
-    @staticmethod
-    def _should_wait_for_upload_grace(candidate_events: list[PendingEvent]) -> bool:
-        return pending_has_only_text(candidate_events) and not pending_has_room_scope_source(candidate_events)
-
     def _log_dispatch_failure(
         self,
         key: CoalescingKey,
@@ -822,14 +738,11 @@ class CoalescingGate:
         key: CoalescingKey,
         gate: _GateEntry,
         pending_events: list[PendingEvent],
-        *,
-        bypass_grace: bool,
     ) -> str:
         """Dispatch a claimed batch."""
         flush_start = time.monotonic()
         gate.phase = GatePhase.IN_FLIGHT
         gate.deadline = None
-        gate.grace_deadline = None
         pending_count = len(pending_events)
         timing_scope = event_timing_scope(pending_events[-1].event.event_id)
         log_context: dict[str, object] = {
@@ -838,13 +751,12 @@ class CoalescingGate:
             "requester_user_id": key.requester_user_id,
             "pending_count": pending_count,
             "oldest_pending_age_ms": self._oldest_pending_events_age_ms(pending_events),
-            "bypass_grace": bypass_grace,
             "source_event_ids": self._source_event_ids(pending_events),
             "timing_scope": timing_scope,
         }
         dispatched = False
         try:
-            diagnostics = self._flush_diagnostics(key, pending_events, bypass_grace=bypass_grace)
+            diagnostics = self._flush_diagnostics(key, pending_events)
             pending_count = diagnostics.pending_count
             timing_scope = diagnostics.timing_scope
             log_context = diagnostics.log_context
@@ -856,7 +768,6 @@ class CoalescingGate:
                 "coalescing_gate.flush.dispatch_batch",
                 dispatch_batch_start,
                 pending_count=pending_count,
-                bypass_grace=bypass_grace,
                 timing_scope=timing_scope,
             )
             return "dispatched"
@@ -867,7 +778,6 @@ class CoalescingGate:
                 flush_start,
                 outcome=outcome,
                 pending_count=pending_count,
-                bypass_grace=bypass_grace,
                 timing_scope=timing_scope,
             )
             self._log_flush_finished(
@@ -876,7 +786,6 @@ class CoalescingGate:
                 outcome=outcome,
             )
             gate.phase = GatePhase.DEBOUNCE
-            gate.grace_deadline = None
             gate.deadline = None
 
     async def _dispatch_claimed_events(
@@ -884,11 +793,9 @@ class CoalescingGate:
         key: CoalescingKey,
         gate: _GateEntry,
         segment_owner: ClaimedSegmentOwner,
-        *,
-        bypass_grace: bool,
     ) -> None:
         try:
-            await self._dispatch_events(key, gate, segment_owner.pending_events, bypass_grace=bypass_grace)
+            await self._dispatch_events(key, gate, segment_owner.pending_events)
         except asyncio.CancelledError:
             segment_owner.close_metadata_once()
             if (drain_context := self._current_drain_context(gate)) is not None:
@@ -900,78 +807,18 @@ class CoalescingGate:
                 drain_context.result.dispatch_failure_count += 1
             self._log_dispatch_failure(key, gate, error)
 
-    async def _dispatch_after_upload_grace(
-        self,
-        key: CoalescingKey,
-        gate: _GateEntry,
-        grace_result: _UploadGraceWaitResult,
-    ) -> None:
-        """Restart a claim after upload grace, including same-window unresolved ingress."""
-        if not gate.queue:
-            return
-
-        if not is_active_follow_up_coalescing_key(key):
-            window_slots = self._lanes.undelivered_in_window(
-                key.room_id,
-                key.requester_user_id,
-                before_or_at_receipt_time=grace_result.quiet_deadline,
-            )
-            if window_slots:
-                await self._wait_for_lane_slots(gate, window_slots)
-                return
-
-        claimable_count = self._front_normal_run_length(
-            gate,
-            coalesce_normal_events=self._should_coalesce_normal_events(key, gate),
-        )
-        candidate_count = min(grace_result.candidate_count, claimable_count)
-        if candidate_count <= 0:
-            return
-
-        next_admissions = self._claim_front_events(gate, candidate_count)
-        await self._dispatch_claim(
-            key,
-            gate,
-            next_admissions,
-            bypass_grace=True,
-            allow_upload_grace=False,
-        )
-
     async def _dispatch_claim(
         self,
         key: CoalescingKey,
         gate: _GateEntry,
         admissions: list[_QueuedEvent],
-        *,
-        bypass_grace: bool,
-        allow_upload_grace: bool,
     ) -> None:
         """Dispatch one claimed admission set with one cleanup owner."""
         pending_events = [admission.pending_event for admission in admissions]
         segment_owner: ClaimedSegmentOwner | None = None
         try:
-            if (
-                allow_upload_grace
-                and pending_events
-                and not pending_events_require_solo_batch(pending_events)
-                and self._should_wait_for_upload_grace(pending_events)
-            ):
-                timing_scope = event_timing_scope(pending_events[-1].event.event_id)
-                self._requeue_claimed_admissions(gate, admissions)
-                grace_result = await self._wait_for_upload_grace(
-                    gate,
-                    len(admissions),
-                    timing_scope=timing_scope,
-                )
-                await self._dispatch_after_upload_grace(key, gate, grace_result)
-                return
             segment_owner = ClaimedSegmentOwner(pending_events=pending_events)
-            await self._dispatch_claimed_events(
-                key,
-                gate,
-                segment_owner,
-                bypass_grace=bypass_grace,
-            )
+            await self._dispatch_claimed_events(key, gate, segment_owner)
         except BaseException:
             if segment_owner is not None:
                 closed_before = segment_owner.metadata_closed
@@ -991,13 +838,7 @@ class CoalescingGate:
         if front_kind is not QueueKind.BYPASS:
             return False
         claimed_admissions = self._claim_front_events(gate, 1)
-        await self._dispatch_claim(
-            key,
-            gate,
-            claimed_admissions,
-            bypass_grace=True,
-            allow_upload_grace=False,
-        )
+        await self._dispatch_claim(key, gate, claimed_admissions)
         return True
 
     async def _dispatch_normal_after_debounce(
@@ -1016,7 +857,6 @@ class CoalescingGate:
                 await self._wait_for_lane_slots(gate, window_slots)
                 return
 
-        bypass_grace = self._is_shutting_down() or gate.drain_all_requested
         candidate_count = self._front_normal_run_length(
             gate,
             coalesce_normal_events=self._should_coalesce_normal_events(key, gate),
@@ -1026,13 +866,7 @@ class CoalescingGate:
             return
 
         claimed_admissions = self._claim_front_events(gate, candidate_count)
-        await self._dispatch_claim(
-            key,
-            gate,
-            claimed_admissions,
-            bypass_grace=bypass_grace,
-            allow_upload_grace=not bypass_grace and self._upload_grace_seconds() > 0,
-        )
+        await self._dispatch_claim(key, gate, claimed_admissions)
         if not gate.queue:
             gate.drain_all_requested = False
 
@@ -1052,13 +886,7 @@ class CoalescingGate:
             return False
 
         claimed_admissions = self._claim_front_events(gate, candidate_count)
-        await self._dispatch_claim(
-            key,
-            gate,
-            claimed_admissions,
-            bypass_grace=True,
-            allow_upload_grace=False,
-        )
+        await self._dispatch_claim(key, gate, claimed_admissions)
         return True
 
     async def _drain_gate_iteration(self, key: CoalescingKey, gate: _GateEntry) -> None:
@@ -1158,7 +986,6 @@ class _CoalescingDrainCoordinator:
         gate.drain_context = self.context
         gate.drain_all_requested = True
         gate.deadline = time.monotonic()
-        gate.grace_deadline = None
 
     def _cancel_non_in_flight_drain_tasks(self) -> list[asyncio.Task[None]]:
         if not self.gate._is_bounded_drain(self.context):

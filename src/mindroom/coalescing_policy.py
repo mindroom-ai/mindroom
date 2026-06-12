@@ -12,7 +12,6 @@ from .dispatch_source import (
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
     VOICE_SOURCE_KIND,
-    is_voice_event,
     source_kind_bypasses_coalescing,
 )
 
@@ -51,30 +50,19 @@ def is_coalescing_exempt_source_kind(
     return source_kind_bypasses_coalescing(_effective_source_kind(event, fallback_source_kind))
 
 
-def pending_has_only_text(pending_events: list[PendingEvent]) -> bool:
-    """Return whether every pending event is text-like."""
-    return bool(pending_events) and all(
-        isinstance(pending_event.event, nio.RoomMessageText | PreparedTextEvent) for pending_event in pending_events
-    )
+def pending_event_is_text(pending_event: PendingEvent) -> bool:
+    """Return whether one pending event is a complete text-like utterance.
 
-
-def pending_has_room_scope_source(pending_events: list[PendingEvent]) -> bool:
-    """Return whether any pending event enables room-scope batching."""
-    return any(_pending_event_allows_room_scope_batching(pending_event) for pending_event in pending_events)
+    Text (typed messages, voice transcripts, edits) terminates an utterance burst:
+    clients upload attachments first and send the caption text last, so a batch
+    ending in text is complete and a batch ending in media may still grow.
+    """
+    return isinstance(pending_event.event, nio.RoomMessageText | PreparedTextEvent)
 
 
 def _pending_event_requires_solo_batch(pending_event: PendingEvent) -> bool:
     """Return whether a pending event must dispatch without neighbors."""
     return any(item.requires_solo_batch for item in pending_event.dispatch_metadata)
-
-
-def pending_events_require_solo_batch(pending_events: list[PendingEvent]) -> bool:
-    """Return whether any pending event in a group requires solo dispatch."""
-    return any(_pending_event_requires_solo_batch(pending_event) for pending_event in pending_events)
-
-
-def _pending_event_allows_room_scope_batching(pending_event: PendingEvent) -> bool:
-    return pending_event.source_kind in _ROOM_SCOPE_BATCHING_SOURCE_KINDS or is_voice_event(pending_event.event)
 
 
 def source_or_event_allows_room_scope_batching(

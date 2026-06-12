@@ -63,14 +63,12 @@ class CoalescingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     debounce_ms: int = Field(
-        default=300,
+        default=1000,
         ge=0,
-        description="Sliding debounce window in milliseconds for live message coalescing",
-    )
-    upload_grace_ms: int = Field(
-        default=500,
-        ge=0,
-        description="Upload grace window in milliseconds for late media joining a text-first live batch",
+        description=(
+            "Sliding window in milliseconds that a media-tailed live batch waits for more "
+            "attachments or a trailing caption; batches ending in text dispatch immediately"
+        ),
     )
 
 

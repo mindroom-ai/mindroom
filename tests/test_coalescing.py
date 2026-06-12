@@ -12,7 +12,6 @@ import pytest
 
 from mindroom.coalescing import (
     CoalescingGate,
-    GatePhase,
     IngressAdmissionClosedError,
     ReadyPendingEvent,
     is_coalescing_exempt_source_kind,
@@ -172,7 +171,6 @@ async def test_enter_lane_stamps_local_monotonic_receipt_time(monkeypatch: pytes
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.3,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -195,7 +193,6 @@ async def test_submit_rejects_released_lane_slot() -> None:
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
@@ -217,8 +214,8 @@ async def test_submit_rejects_released_lane_slot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lane_receipt_time_bounds_debounce_claim_window() -> None:
-    """Late lane delivery must keep receipt order without widening the receive-time window."""
+async def test_late_lane_delivery_combines_queued_text_backlog_in_receipt_order() -> None:
+    """Text queued behind late lane delivery dispatches as one combined turn in receipt order."""
     batches: list[CoalescedBatch] = []
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
@@ -227,7 +224,6 @@ async def test_lane_receipt_time_bounds_debounce_claim_window() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.3,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -253,7 +249,7 @@ async def test_lane_receipt_time_bounds_debounce_claim_window() -> None:
     )
 
     await _wait_for(
-        lambda: [batch.source_event_ids for batch in batches] == [["$first:localhost"], ["$second:localhost"]],
+        lambda: [batch.source_event_ids for batch in batches] == [["$first:localhost", "$second:localhost"]],
     )
     await gate.drain_all()
 
@@ -329,7 +325,6 @@ async def test_room_level_messages_do_not_coalesce() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 1.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
@@ -347,8 +342,8 @@ async def test_room_level_messages_do_not_coalesce() -> None:
 
 
 @pytest.mark.asyncio
-async def test_room_level_messages_do_not_coalesce_during_upload_grace() -> None:
-    """Room-level text roots must stay separate even when upload grace is enabled."""
+async def test_room_level_text_dispatches_before_late_media() -> None:
+    """A room-level text root dispatches immediately; late media becomes its own turn."""
     batches: list[CoalescedBatch] = []
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
@@ -356,52 +351,23 @@ async def test_room_level_messages_do_not_coalesce_during_upload_grace() -> None
 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.05,
-        is_shutting_down=lambda: False,
-    )
-    key = CoalescingKey("!room:localhost", None, "@user:localhost")
-
-    await _admit_ready(gate, key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
-    await _admit_ready(gate, key, _pending(_text_event("$second:localhost", "second", 1_000_600)))
-
-    await gate.drain_all()
-
-    assert [batch.source_event_ids for batch in batches] == [
-        ["$first:localhost"],
-        ["$second:localhost"],
-    ]
-    assert all("quick succession" not in batch.prompt for batch in batches)
-
-
-@pytest.mark.asyncio
-async def test_room_level_text_waits_for_late_media_upload_grace() -> None:
-    """One room-level text root may still collect a late media upload."""
-    batches: list[CoalescedBatch] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch)
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.05,
+        debounce_seconds=lambda: 1.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "describe this", 1_000_000)))
-    await asyncio.sleep(0.01)
+    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$text:localhost"]])
+
     await _admit_ready(gate, key, _pending(_image_event("$image:localhost", 1_000_600)))
+    await gate.drain_all()
 
-    await _wait_for(lambda: len(batches) >= 1)
-
-    assert [batch.source_event_ids for batch in batches] == [["$text:localhost", "$image:localhost"]]
+    assert [batch.source_event_ids for batch in batches] == [["$text:localhost"], ["$image:localhost"]]
 
 
 @pytest.mark.asyncio
-async def test_upload_grace_waits_for_same_window_unready_media_lane_slot() -> None:
-    """Upload grace must not flush text before an in-window unready media slot delivers."""
+async def test_text_dispatch_waits_for_same_window_unready_media_lane_slot() -> None:
+    """An immediate text flush must not run before an in-window unready media slot delivers."""
     batches: list[CoalescedBatch] = []
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
@@ -409,17 +375,14 @@ async def test_upload_grace_waits_for_same_window_unready_media_lane_slot() -> N
 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.05,
+        debounce_seconds=lambda: 1.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
 
     await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "describe this", 1_000_000)))
-    gate_entry = gate._gates[key]
-    await _wait_for(lambda: gate_entry.phase is GatePhase.GRACE)
     slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
-    await asyncio.sleep(0.08)
+    await asyncio.sleep(0.05)
 
     assert batches == []
 
@@ -446,7 +409,6 @@ async def test_bypass_barrier_does_not_wait_for_later_undelivered_lane_slot() ->
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 60.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -466,8 +428,8 @@ async def test_bypass_barrier_does_not_wait_for_later_undelivered_lane_slot() ->
 
 
 @pytest.mark.asyncio
-async def test_voice_class_text_does_not_wait_for_upload_grace() -> None:
-    """Voice transcripts are text-shaped but should not wait for image upload grace."""
+async def test_voice_transcript_dispatches_without_debounce_wait() -> None:
+    """Voice transcripts are complete utterances and skip the media debounce wait."""
     batches: list[CoalescedBatch] = []
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
@@ -475,8 +437,7 @@ async def test_voice_class_text_does_not_wait_for_upload_grace() -> None:
 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.5,
+        debounce_seconds=lambda: 60.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
@@ -507,7 +468,6 @@ async def test_thread_messages_inside_debounce_window_still_coalesce() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 1.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -522,8 +482,8 @@ async def test_thread_messages_inside_debounce_window_still_coalesce() -> None:
 
 
 @pytest.mark.asyncio
-async def test_threaded_debounce_uses_trailing_quiet_time() -> None:
-    """A later threaded message inside the debounce window should extend the quiet deadline."""
+async def test_threaded_media_debounce_uses_trailing_quiet_time() -> None:
+    """A later media upload inside the debounce window should extend the quiet deadline."""
     batches: list[CoalescedBatch] = []
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
@@ -532,14 +492,13 @@ async def test_threaded_debounce_uses_trailing_quiet_time() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.05,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
 
-    await _admit_ready(gate, key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
+    await _admit_ready(gate, key, _image_pending("$first:localhost", 1_000_000))
     await asyncio.sleep(0.01)
-    await _admit_ready(gate, key, _pending(_text_event("$second:localhost", "second", 1_000_040)))
+    await _admit_ready(gate, key, _image_pending("$second:localhost", 1_000_040))
     await asyncio.sleep(0.02)
 
     assert batches == []
@@ -547,6 +506,59 @@ async def test_threaded_debounce_uses_trailing_quiet_time() -> None:
     await _wait_for(
         lambda: [batch.source_event_ids for batch in batches] == [["$first:localhost", "$second:localhost"]],
     )
+
+
+@pytest.mark.asyncio
+async def test_lone_text_dispatches_without_debounce_wait() -> None:
+    """A lone text message is a complete utterance and never waits for the debounce window."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "instant", 1_000_000)))
+
+    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$text:localhost"]])
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_trailing_caption_closes_media_batch_immediately() -> None:
+    """A trailing text caption completes a media batch and flushes before the window expires."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+
+    await _admit_ready(gate, key, _image_pending("$one:localhost", 1_000_000))
+    await _admit_ready(gate, key, _image_pending("$two:localhost", 1_000_100))
+    await asyncio.sleep(0.05)
+
+    assert batches == []
+
+    await _admit_ready(gate, key, _pending(_text_event("$caption:localhost", "caption", 1_000_200)))
+
+    await _wait_for(
+        lambda: (
+            [batch.source_event_ids for batch in batches]
+            == [["$one:localhost", "$two:localhost", "$caption:localhost"]]
+        ),
+    )
+    await gate.drain_all()
 
 
 @pytest.mark.asyncio
@@ -566,7 +578,6 @@ async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> No
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.01,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
         wait_until_dispatch_allowed=wait_until_dispatch_allowed,
     )
@@ -628,7 +639,6 @@ async def test_different_thread_normal_gate_does_not_wait_behind_older_active_ba
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
         wait_until_dispatch_allowed=wait_until_dispatch_allowed,
     )
@@ -665,8 +675,8 @@ async def test_different_thread_normal_gate_does_not_wait_behind_older_active_ba
 
 
 @pytest.mark.asyncio
-async def test_unready_lane_slot_wait_keeps_debounce_gaps() -> None:
-    """Events received behind an unready lane slot still dispatch per receive-time gaps."""
+async def test_unready_lane_slot_backlog_combines_into_one_turn() -> None:
+    """Text queued behind an unready lane slot dispatches as one combined turn on release."""
     batches: list[CoalescedBatch] = []
     release_first = asyncio.Event()
 
@@ -676,7 +686,6 @@ async def test_unready_lane_slot_wait_keeps_debounce_gaps() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.02,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -713,18 +722,16 @@ async def test_unready_lane_slot_wait_keeps_debounce_gaps() -> None:
     assert batches == []
 
     release_first.set()
-    await _wait_for(lambda: len(batches) >= 3)
+    await _wait_for(lambda: len(batches) >= 1)
 
     assert [batch.source_event_ids for batch in batches] == [
-        ["$first:localhost"],
-        ["$second:localhost"],
-        ["$third:localhost"],
+        ["$first:localhost", "$second:localhost", "$third:localhost"],
     ]
 
 
 @pytest.mark.asyncio
-async def test_voice_readiness_delay_does_not_extend_receive_time_debounce() -> None:
-    """A slow STT result must not let later text join an expired voice debounce window."""
+async def test_voice_readiness_delay_combines_backlog_in_receipt_order() -> None:
+    """A slow STT result holds later text in the lane window, then both flush as one turn."""
     batches: list[CoalescedBatch] = []
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
@@ -733,7 +740,6 @@ async def test_voice_readiness_delay_does_not_extend_receive_time_debounce() -> 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.03,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -756,7 +762,7 @@ async def test_voice_readiness_delay_does_not_extend_receive_time_debounce() -> 
 
     voice_ready.set()
     await _wait_for(
-        lambda: [batch.source_event_ids for batch in batches] == [["$voice:localhost"], ["$typed:localhost"]],
+        lambda: [batch.source_event_ids for batch in batches] == [["$voice:localhost", "$typed:localhost"]],
     )
 
 
@@ -777,7 +783,6 @@ async def test_failed_lane_ready_task_does_not_block_later_lane_work() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -809,7 +814,6 @@ async def test_bounded_shutdown_marks_internal_drain_failure_incomplete() -> Non
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 60.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -819,11 +823,7 @@ async def test_bounded_shutdown_marks_internal_drain_failure_incomplete() -> Non
         _key: CoalescingKey,
         _gate: object,
         _admissions: object,
-        *,
-        bypass_grace: bool,
-        allow_upload_grace: bool,
     ) -> None:
-        del bypass_grace, allow_upload_grace
         msg = "internal drain failed"
         raise RuntimeError(msg)
 
@@ -848,7 +848,6 @@ async def test_bounded_shutdown_times_out_stuck_in_flight_dispatch() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -889,7 +888,6 @@ async def test_bounded_drain_does_not_wait_forever_on_external_dispatch_gate() -
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
         wait_until_dispatch_allowed=wait_until_dispatch_allowed,
     )
@@ -933,7 +931,6 @@ async def test_bounded_shutdown_closes_metadata_for_abandoned_ready_work() -> No
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 60.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -945,11 +942,7 @@ async def test_bounded_shutdown_closes_metadata_for_abandoned_ready_work() -> No
         _key: CoalescingKey,
         _gate: object,
         _admissions: object,
-        *,
-        bypass_grace: bool,
-        allow_upload_grace: bool,
     ) -> None:
-        del bypass_grace, allow_upload_grace
         msg = "internal drain failed"
         raise RuntimeError(msg)
 
@@ -975,7 +968,6 @@ async def test_drain_all_waits_for_lane_slot_to_admit() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -1001,41 +993,6 @@ async def test_drain_all_waits_for_lane_slot_to_admit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_debounce_waits_for_later_same_sender_lane_slot_inside_window() -> None:
-    """Debounce should wait for unready same-sender ingress inside the quiet window."""
-    batches: list[CoalescedBatch] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch)
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.03,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
-
-    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "typed first", 1_000_000)))
-    await asyncio.sleep(0.005)
-    slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
-    await asyncio.sleep(0.05)
-
-    assert batches == []
-
-    gate.submit_lane_slot(
-        slot,
-        key=key,
-        source_event_id="$voice:localhost",
-        source_kind=VOICE_SOURCE_KIND,
-        ready_result=ReadyPendingEvent(pending_event=_voice_pending("$voice:localhost", "voice second", 1_000_005)),
-    )
-    await gate.drain_all()
-
-    assert [batch.source_event_ids for batch in batches] == [["$text:localhost", "$voice:localhost"]]
-
-
-@pytest.mark.asyncio
 async def test_debounce_does_not_wait_for_later_lane_slot_outside_window() -> None:
     """A slot entered after the quiet window should not delay the already-ready prompt."""
     batches: list[CoalescedBatch] = []
@@ -1046,7 +1003,6 @@ async def test_debounce_does_not_wait_for_later_lane_slot_outside_window() -> No
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.01,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -1082,7 +1038,6 @@ async def test_ready_text_waits_behind_unready_older_voice_lane_slot() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -1132,7 +1087,6 @@ async def test_different_canonical_threads_do_not_serialize_after_admission() ->
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     first_key = CoalescingKey("!room:localhost", "$thread-a:localhost", "@user:localhost")
@@ -1163,7 +1117,6 @@ async def test_none_resolving_lane_slot_settles_without_residue() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -1204,7 +1157,6 @@ async def test_partial_ready_failure_dispatches_ready_events_and_clears_claim() 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.02,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -1236,33 +1188,6 @@ async def test_partial_ready_failure_dispatches_ready_events_and_clears_claim() 
 
 
 @pytest.mark.asyncio
-async def test_upload_grace_requeue_removes_admissions_from_claimed_state() -> None:
-    """Upload grace should requeue claimed text before awaiting the grace timer."""
-    batches: list[CoalescedBatch] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch)
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.2,
-        is_shutting_down=lambda: False,
-    )
-    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
-
-    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "text", 1_000_000)))
-    gate_entry = gate._gates[key]
-
-    await _wait_for(lambda: gate_entry.phase is GatePhase.GRACE)
-    assert gate_entry.claimed_admissions == []
-    assert [queued.source_event_id for queued in gate_entry.queue] == ["$text:localhost"]
-
-    await gate.drain_all()
-    assert [batch.source_event_ids for batch in batches] == [["$text:localhost"]]
-
-
-@pytest.mark.asyncio
 async def test_same_window_lane_slot_resolving_to_different_thread_waits_then_splits() -> None:
     """An in-window unready same-sender slot holds debounce, then dispatches under its resolved key."""
     batches: list[tuple[CoalescingKey, list[str]]] = []
@@ -1273,13 +1198,12 @@ async def test_same_window_lane_slot_resolving_to_different_thread_waits_then_sp
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.03,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     first_key = CoalescingKey("!room:localhost", "$thread-a:localhost", "@user:localhost")
     second_key = CoalescingKey("!room:localhost", "$thread-b:localhost", "@user:localhost")
 
-    await _admit_ready(gate, first_key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
+    await _admit_ready(gate, first_key, _image_pending("$first:localhost", 1_000_000))
     await asyncio.sleep(0.005)
     slot = gate.enter_lane(room_id=first_key.room_id, sender_id=first_key.requester_user_id)
     await asyncio.sleep(0.05)
@@ -1317,7 +1241,6 @@ async def test_batch_order_follows_lane_receipt_order_not_readiness_order() -> N
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.5,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -1357,7 +1280,6 @@ async def test_messages_in_different_rooms_do_not_coalesce() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 1.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     first_key = CoalescingKey("!room-a:localhost", "$thread:localhost", "@user:localhost")
@@ -1382,7 +1304,6 @@ async def test_messages_in_different_threads_do_not_coalesce() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 1.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     first_key = CoalescingKey("!room:localhost", "$thread-a:localhost", "@user:localhost")
@@ -1407,7 +1328,6 @@ async def test_drain_all_flushes_pending_debounced_work_and_idles_gate() -> None
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 60.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")

@@ -318,7 +318,6 @@ def _install_test_coalescing_gate(bot: AgentBot, *, debounce_seconds: float = 0.
     gate = CoalescingGate(
         dispatch_batch=bot._dispatch_coalesced_batch,
         debounce_seconds=lambda: debounce_seconds,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     bot._coalescing_gate = gate

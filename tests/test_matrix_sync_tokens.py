@@ -611,7 +611,6 @@ async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 60.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
 
@@ -664,7 +663,6 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 60.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: shutting_down,
     )
 
@@ -723,7 +721,6 @@ async def test_shutdown_drain_cancels_stuck_ready_task_without_cancelling_dispat
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -754,7 +751,6 @@ async def test_shutdown_drain_counts_self_cancelled_ready_task_as_incomplete() -
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -785,7 +781,6 @@ async def test_shutdown_drain_releases_stuck_pre_admission_lane_slot() -> None:
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
     slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
@@ -837,7 +832,6 @@ async def test_shutdown_ready_timeout_closes_ready_result_returned_during_cancel
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -875,7 +869,6 @@ async def test_shutdown_timeout_reaches_already_running_ready_wait() -> None:
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -912,7 +905,6 @@ async def test_ready_task_self_cancellation_finishes_no_ready() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -939,7 +931,6 @@ async def test_enter_lane_during_active_bounded_shutdown_returns_released_counte
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: shutting_down,
     )
     old_slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
@@ -979,7 +970,6 @@ async def test_shutdown_timeout_reaches_already_running_same_window_lane_slot_wa
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.01,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: shutting_down,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -1028,7 +1018,6 @@ async def test_shutdown_in_flight_dispatch_failure_marks_drain_incomplete() -> N
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
@@ -1068,7 +1057,6 @@ async def test_shutdown_in_flight_dispatch_cancellation_marks_drain_incomplete()
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")

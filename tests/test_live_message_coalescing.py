@@ -105,7 +105,6 @@ def _make_config(
     tmp_path: Path,
     *,
     debounce_ms: int = 10,
-    upload_grace_ms: int = 0,
 ) -> Config:
     """Build a config with configurable live coalescing timings."""
     return bind_runtime_paths(
@@ -116,7 +115,6 @@ def _make_config(
             defaults=DefaultsConfig(
                 coalescing={
                     "debounce_ms": debounce_ms,
-                    "upload_grace_ms": upload_grace_ms,
                 },
             ),
             authorization=AuthorizationConfig(default_room_access=True),
@@ -129,11 +127,10 @@ def _make_bot(
     tmp_path: Path,
     *,
     debounce_ms: int = 10,
-    upload_grace_ms: int = 0,
     agent_name: str = "test_agent",
 ) -> AgentBot:
     """Create a bot instance wired to a temporary runtime root."""
-    config = _make_config(tmp_path, debounce_ms=debounce_ms, upload_grace_ms=upload_grace_ms)
+    config = _make_config(tmp_path, debounce_ms=debounce_ms)
     agent_user = AgentMatrixUser(
         agent_name=agent_name,
         password=TEST_PASSWORD,
@@ -327,6 +324,7 @@ def _image_event(
     sender: str = "@user:localhost",
     server_timestamp: int = 1000,
     thread_id: str | None = None,
+    source_kind: str | None = None,
 ) -> nio.RoomMessageImage:
     """Build a synthetic inbound image event for coalescing tests."""
     content: dict[str, object] = {
@@ -338,6 +336,8 @@ def _image_event(
     }
     if thread_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    if source_kind is not None:
+        content[SOURCE_KIND_KEY] = source_kind
     return cast(
         "nio.RoomMessageImage",
         nio.RoomMessageImage.from_dict(
@@ -603,12 +603,12 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_room_root_text_and_image_coalesce_into_single_dispatch(tmp_path: Path) -> None:
-    """Root text and root media share the room coalescing scope before dispatch chooses a response root."""
-    bot = _make_bot(tmp_path, debounce_ms=200, upload_grace_ms=0)
+async def test_room_root_image_and_caption_coalesce_into_single_dispatch(tmp_path: Path) -> None:
+    """Root media and the trailing caption share the room coalescing scope into one dispatch."""
+    bot = _make_bot(tmp_path, debounce_ms=200)
     room = _make_room()
-    text_event = _text_event(event_id="$text", body="describe this", server_timestamp=1000)
-    image_event = _image_event(event_id="$img", server_timestamp=1001)
+    image_event = _image_event(event_id="$img", server_timestamp=1000)
+    text_event = _text_event(event_id="$text", body="describe this", server_timestamp=1001)
     calls: list[tuple[str, list[str], int]] = []
 
     async def record_dispatch(
@@ -623,28 +623,29 @@ async def test_room_root_text_and_image_coalesce_into_single_dispatch(tmp_path: 
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller.handle_text_event(room, text_event)
-        await asyncio.sleep(0.005)
         await bot._turn_controller.handle_media_event(room, image_event)
+        await asyncio.sleep(0.005)
+        await bot._turn_controller.handle_text_event(room, text_event)
         await _wait_for(lambda: len(calls) == 1)
 
     assert calls == [
         (
             "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\ndescribe this\n[Attached image]",
-            ["$text", "$img"],
+            "Treat them as one turn and respond once:\n\n[Attached image]\ndescribe this",
+            ["$img", "$text"],
             1,
         ),
     ]
 
 
 @pytest.mark.asyncio
-async def test_text_first_image_during_debounce_dispatches_without_upload_grace_delay(tmp_path: Path) -> None:
-    """Do not add upload-grace delay once media already joined during debounce."""
-    bot = _make_bot(tmp_path, debounce_ms=200, upload_grace_ms=10_000)
+async def test_images_then_caption_coalesce_into_single_dispatch(tmp_path: Path) -> None:
+    """Uploads arrive first and the trailing caption closes the batch into one dispatch."""
+    bot = _make_bot(tmp_path, debounce_ms=60_000)
     room = _make_room()
-    text_event = _text_event(event_id="$m1", body="describe this", server_timestamp=1000, thread_id="$thread")
-    image_event = _image_event(event_id="$img1", server_timestamp=1001, thread_id="$thread")
+    first_image = _image_event(event_id="$img1", server_timestamp=1000, thread_id="$thread")
+    second_image = _image_event(event_id="$img2", server_timestamp=1001, thread_id="$thread")
+    caption = _text_event(event_id="$m1", body="summarize these", server_timestamp=1002, thread_id="$thread")
     calls: list[tuple[list[str], int]] = []
 
     async def record_dispatch(
@@ -659,111 +660,6 @@ async def test_text_first_image_during_debounce_dispatches_without_upload_grace_
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await _enqueue_for_dispatch(
-            bot,
-            text_event,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        await _enqueue_for_dispatch(
-            bot,
-            image_event,
-            room,
-            source_kind="image",
-            requester_user_id="@user:localhost",
-        )
-        await _wait_for(lambda: calls == [(["$m1", "$img1"], 1)], deadline_seconds=1.0)
-
-    assert _coalescing_gate_is_idle(bot._coalescing_gate)
-
-
-@pytest.mark.asyncio
-async def test_text_first_image_during_grace_dispatches_once(tmp_path: Path) -> None:
-    """Hold a thread text-only batch briefly so a late image joins the first dispatch."""
-    bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=40)
-    room = _make_room()
-    text_event = _text_event(event_id="$m1", body="describe this", server_timestamp=1000, thread_id="$thread")
-    image_event = _image_event(event_id="$img1", server_timestamp=1001, thread_id="$thread")
-    calls: list[tuple[str, list[str], int]] = []
-
-    async def record_dispatch(
-        _room: nio.MatrixRoom,
-        dispatched_event: nio.RoomMessageText,
-        _requester_user_id: str,
-        *,
-        media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
-        **_metadata: object,
-    ) -> None:
-        _ = handled_turn
-        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
-
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await _enqueue_for_dispatch(
-            bot,
-            text_event,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        # Wait for debounce to fire (10ms) so gate enters upload grace
-        await asyncio.sleep(0.02)
-        assert calls == []
-
-        await _enqueue_for_dispatch(
-            bot,
-            image_event,
-            room,
-            source_kind="image",
-            requester_user_id="@user:localhost",
-        )
-        await _wait_for(lambda: len(calls) == 1)
-
-    assert calls == [
-        (
-            "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\ndescribe this\n[Attached image]",
-            ["$m1", "$img1"],
-            1,
-        ),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_text_first_multiple_images_during_grace_dispatch_once(tmp_path: Path) -> None:
-    """Merge several thread uploads that arrive during upload grace into one batch."""
-    bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=40)
-    room = _make_room()
-    text_event = _text_event(event_id="$m1", body="summarize these", server_timestamp=1000, thread_id="$thread")
-    first_image = _image_event(event_id="$img1", server_timestamp=1001, thread_id="$thread")
-    second_image = _image_event(event_id="$img2", server_timestamp=1002, thread_id="$thread")
-    calls: list[tuple[list[str], int]] = []
-
-    async def record_dispatch(
-        _room: nio.MatrixRoom,
-        _dispatched_event: nio.RoomMessageText,
-        _requester_user_id: str,
-        *,
-        media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
-        **_metadata: object,
-    ) -> None:
-        _ = handled_turn
-        calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
-
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await _enqueue_for_dispatch(
-            bot,
-            text_event,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        # Wait for debounce to fire (10ms) so gate enters upload grace
-        await asyncio.sleep(0.02)
-        assert calls == []
-
         await _enqueue_for_dispatch(
             bot,
             first_image,
@@ -771,7 +667,6 @@ async def test_text_first_multiple_images_during_grace_dispatch_once(tmp_path: P
             source_kind="image",
             requester_user_id="@user:localhost",
         )
-        await asyncio.sleep(0.01)
         await _enqueue_for_dispatch(
             bot,
             second_image,
@@ -779,15 +674,26 @@ async def test_text_first_multiple_images_during_grace_dispatch_once(tmp_path: P
             source_kind="image",
             requester_user_id="@user:localhost",
         )
+        await asyncio.sleep(0.02)
+        assert calls == []
+
+        await _enqueue_for_dispatch(
+            bot,
+            caption,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await _wait_for(lambda: len(calls) == 1)
 
-    assert calls == [(["$m1", "$img1", "$img2"], 2)]
+    assert calls == [(["$img1", "$img2", "$m1"], 2)]
+    assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
 @pytest.mark.asyncio
-async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_turn(tmp_path: Path) -> None:
-    """Plain thread text should not join an upload-grace batch meant only for late media."""
-    bot = _make_bot(tmp_path, debounce_ms=40, upload_grace_ms=200)
+async def test_each_thread_text_dispatches_immediately_as_own_turn(tmp_path: Path) -> None:
+    """Thread text never waits for the debounce window; later text becomes its own turn."""
+    bot = _make_bot(tmp_path, debounce_ms=60_000)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first turn", server_timestamp=1000, thread_id="$thread")
     second = _text_event(event_id="$m2", body="second turn", server_timestamp=1001, thread_id="$thread")
@@ -813,9 +719,7 @@ async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_tur
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        # Wait for debounce to fire (40ms) so gate enters upload grace
-        await asyncio.sleep(0.06)
-        assert calls == []
+        await _wait_for(lambda: calls == [("first turn", ["$m1"])])
 
         await _enqueue_for_dispatch(
             bot,
@@ -824,10 +728,6 @@ async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_tur
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-
-        await _wait_for(lambda: len(calls) >= 1)
-        assert calls == [("first turn", ["$m1"])]
-
         await _wait_for(lambda: len(calls) == 2)
 
     assert calls == [
@@ -837,9 +737,9 @@ async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_tur
 
 
 @pytest.mark.asyncio
-async def test_image_after_grace_expires_dispatches_as_second_batch(tmp_path: Path) -> None:
-    """Uploads that arrive after grace expires should remain a later turn."""
-    bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=40)
+async def test_image_after_text_dispatch_is_a_second_batch(tmp_path: Path) -> None:
+    """An upload that arrives after its text already dispatched remains a later turn."""
+    bot = _make_bot(tmp_path, debounce_ms=10)
     room = _make_room()
     text_event = _text_event(event_id="$m1", body="first turn", server_timestamp=1000)
     image_event = _image_event(event_id="$img1", server_timestamp=1001)
@@ -1197,37 +1097,37 @@ async def test_command_executes_immediately_while_text_batch_debounces(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_command_during_upload_grace_executes_immediately(tmp_path: Path) -> None:
-    """A command never waits for upload grace, and the graced batch flushes on its own."""
-    bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=60_000)
+async def test_command_during_media_debounce_executes_immediately(tmp_path: Path) -> None:
+    """A command never waits behind a held media batch, which flushes on its own."""
+    bot = _make_bot(tmp_path, debounce_ms=60_000)
     room = _make_room()
-    text_event = _text_event(event_id="$m1", body="first", server_timestamp=1000)
+    image_event = _image_event(event_id="$img1", server_timestamp=1000)
     command_event = _text_event(event_id="$m2", body="!help", server_timestamp=1001)
-    calls: list[tuple[str, list[str]]] = []
+    calls: list[list[str]] = []
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: nio.RoomMessageText,
+        _dispatched_event: nio.RoomMessageText,
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
         **_metadata: object,
     ) -> None:
-        _ = media_events, handled_turn
-        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
+        _ = media_events
+        calls.append(_handled_turn_source_event_ids(handled_turn))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller.handle_text_event(room, text_event)
+        await bot._turn_controller.handle_media_event(room, image_event)
         await bot._turn_controller.handle_text_event(room, command_event)
 
-        assert calls == [("!help", ["$m2"])]
+        assert calls == [["$m2"]]
 
         await bot._coalescing_gate.drain_all()
 
     assert calls == [
-        ("!help", ["$m2"]),
-        ("first", ["$m1"]),
+        ["$m2"],
+        ["$img1"],
     ]
 
 
@@ -1680,7 +1580,6 @@ async def test_room_scope_text_then_voice_live_debounce_coalesces_receive_time()
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 5.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
@@ -1719,13 +1618,11 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.05,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await _admit_ready(gate, key, PendingEvent(event=text, room=room, source_kind="message"))
-    await asyncio.sleep(0.01)
     voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
     gate.submit_lane_slot(
         voice_slot,
@@ -1744,8 +1641,8 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
 
 
 @pytest.mark.asyncio
-async def test_late_same_thread_text_does_not_join_expired_debounce_while_waiting_on_voice_ready() -> None:
-    """Resolving voice readiness after debounce must not move the claim boundary forward."""
+async def test_voice_ready_release_combines_same_thread_backlog_in_receipt_order() -> None:
+    """Voice resolving late releases the whole same-thread backlog as one receipt-ordered turn."""
     room = _make_room()
     first = _text_event(event_id="$typed1", body="first", server_timestamp=1000, thread_id="$thread-a")
     second = _text_event(event_id="$typed2", body="second", server_timestamp=1002, thread_id="$thread-a")
@@ -1772,7 +1669,6 @@ async def test_late_same_thread_text_does_not_join_expired_debounce_while_waitin
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.02,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -1804,7 +1700,7 @@ async def test_late_same_thread_text_does_not_join_expired_debounce_while_waitin
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [["$typed1", "$voice"], ["$typed2"]], deadline_seconds=0.5)
+    await _wait_for(lambda: calls == [["$typed1", "$voice", "$typed2"]], deadline_seconds=0.5)
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -1860,7 +1756,6 @@ async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -1924,7 +1819,6 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -1979,7 +1873,6 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.05,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -2033,12 +1926,10 @@ async def test_text_before_voice_uses_stable_admission_key() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.05,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
     await _admit_ready(gate, resolved_key, PendingEvent(event=typed, room=room, source_kind="message"))
-    await asyncio.sleep(0.005)
     voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
     gate.submit_lane_slot(
         voice_slot,
@@ -2087,7 +1978,6 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -2140,12 +2030,10 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.03,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
     await _admit_ready(gate, root_key, PendingEvent(event=typed, room=room, source_kind="message"))
-    await asyncio.sleep(0.005)
     voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
     gate.submit_lane_slot(
         voice_slot,
@@ -2202,7 +2090,6 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.03,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -2243,7 +2130,6 @@ async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> Non
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 5.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -2297,7 +2183,6 @@ async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce()
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 5.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -2361,7 +2246,6 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -2418,7 +2302,6 @@ async def test_room_scope_voice_burst_coalesces_under_null_thread_key() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.05,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
@@ -2461,7 +2344,6 @@ async def test_deferred_room_scope_voice_burst_stays_one_turn_under_null_thread_
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -2613,7 +2495,6 @@ async def test_pending_dispatch_policy_preserves_active_followup_without_bypassi
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 60.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -2648,16 +2529,15 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
     """User-controlled source_kind content should not become trusted dispatch policy."""
     bot = _make_bot(tmp_path, debounce_ms=1000)
     room = _make_room()
-    event = _text_event(
+    event = _image_event(
         event_id=f"$spoof_{spoofed_source_kind}",
-        body="normal user message",
         source_kind=spoofed_source_kind,
     )
-    calls: list[nio.RoomMessageText | PreparedTextEvent] = []
+    calls: list[nio.RoomMessageImage | PreparedTextEvent] = []
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: nio.RoomMessageText | PreparedTextEvent,
+        dispatched_event: nio.RoomMessageImage | PreparedTextEvent,
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
@@ -2673,7 +2553,7 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
             bot,
             event,
             room,
-            source_kind="message",
+            source_kind="image",
             requester_user_id="@user:localhost",
         )
         await asyncio.sleep(0.01)
@@ -2682,9 +2562,10 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
         await bot.prepare_for_sync_shutdown()
 
     assert len(calls) == 1
-    assert isinstance(calls[0], nio.RoomMessageText)
-    assert not isinstance(calls[0], PreparedTextEvent)
-    assert calls[0].body == "normal user message"
+    dispatched = calls[0]
+    assert isinstance(dispatched, PreparedTextEvent)
+    assert dispatched.event_id == f"$spoof_{spoofed_source_kind}"
+    assert dispatched.source_kind_override == IMAGE_SOURCE_KIND
 
 
 @pytest.mark.asyncio
@@ -2702,7 +2583,6 @@ async def test_bypass_preserves_fifo_order_behind_existing_normal_work() -> None
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.02,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
@@ -2743,7 +2623,6 @@ async def test_room_mode_voice_queued_notice_is_solo_barrier_before_nearby_norma
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 5.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
@@ -2755,7 +2634,7 @@ async def test_room_mode_voice_queued_notice_is_solo_barrier_before_nearby_norma
     )
     await _admit_ready(gate, key, PendingEvent(event=normal, room=room, source_kind="message"))
 
-    await _wait_for(lambda: calls == [["$voice-room"]], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [["$voice-room"], ["$normal"]], deadline_seconds=0.2)
     reservation.cancel.assert_not_called()
 
     await gate.drain_all()
@@ -2917,47 +2796,46 @@ async def test_prepare_for_sync_shutdown_drains_pending_debounced_messages(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_prepare_for_sync_shutdown_drains_pending_upload_grace(tmp_path: Path) -> None:
-    """Flush a text-only batch immediately when shutdown interrupts upload grace."""
-    bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=200)
+async def test_prepare_for_sync_shutdown_drains_pending_media_debounce(tmp_path: Path) -> None:
+    """Flush a held media batch immediately when shutdown interrupts the debounce window."""
+    bot = _make_bot(tmp_path, debounce_ms=60_000)
     room = _make_room()
-    event = _text_event(event_id="$m1", body="hello", thread_id="$thread")
-    calls: list[tuple[str, list[str]]] = []
+    event = _image_event(event_id="$img1", server_timestamp=1000, thread_id="$thread")
+    calls: list[list[str]] = []
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: nio.RoomMessageText,
+        _dispatched_event: nio.RoomMessageText,
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
         **_metadata: object,
     ) -> None:
-        _ = media_events, handled_turn
-        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
+        _ = media_events
+        calls.append(_handled_turn_source_event_ids(handled_turn))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await _enqueue_for_dispatch(
             bot,
             event,
             room,
-            source_kind="message",
+            source_kind="image",
             requester_user_id="@user:localhost",
         )
-        # Wait for debounce to fire (10ms) so gate enters upload grace
         await asyncio.sleep(0.02)
         assert calls == []
 
         await bot.prepare_for_sync_shutdown()
 
-    assert calls == [("hello", ["$m1"])]
+    assert calls == [["$img1"]]
     assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
 @pytest.mark.asyncio
-async def test_shutdown_during_in_flight_dispatch_does_not_start_grace(tmp_path: Path) -> None:
-    """Shutdown during an in-flight dispatch should not trigger upload grace."""
-    bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=200)
+async def test_shutdown_during_in_flight_dispatch_flushes_remaining_without_wait(tmp_path: Path) -> None:
+    """Shutdown during an in-flight dispatch flushes the queued remainder immediately."""
+    bot = _make_bot(tmp_path, debounce_ms=10)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
     second = _text_event(event_id="$m2", body="second", server_timestamp=1001)
@@ -3077,7 +2955,7 @@ async def test_thread_followups_dispatch_while_first_turn_root_in_flight(tmp_pat
 @pytest.mark.asyncio
 async def test_active_approval_fallthrough_reserves_before_async_approval_lookup(tmp_path: Path) -> None:
     """An approval reply that falls through to normal text must keep receive order."""
-    bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=0)
+    bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     approval_lookup_started = asyncio.Event()
     release_approval_lookup = asyncio.Event()
@@ -3126,7 +3004,7 @@ async def test_active_approval_fallthrough_reserves_before_async_approval_lookup
 @pytest.mark.asyncio
 async def test_trusted_relay_approval_fallthrough_reserves_effective_requester(tmp_path: Path) -> None:
     """Approval fallthrough reservations must use original human requester for trusted relays."""
-    bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=0)
+    bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     approval_lookup_started = asyncio.Event()
     release_approval_lookup = asyncio.Event()
@@ -3187,7 +3065,6 @@ async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing(
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -3210,37 +3087,6 @@ async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing(
     assert len(immediate_flush_calls) == 1
     assert immediate_flush_calls[0].kwargs["pending_count"] == 1
     assert immediate_flush_calls[0].kwargs["flush_outcome"] == "scheduled_drain"
-
-
-@pytest.mark.asyncio
-async def test_zero_debounce_with_upload_grace_logs_scheduled_grace_outcome() -> None:
-    """Zero debounce should not claim an immediate flush when upload grace delays dispatch."""
-    room = _make_room()
-    gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.1,
-        is_shutting_down=lambda: False,
-    )
-
-    with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
-        await _admit_ready(
-            gate,
-            CoalescingKey("!room:localhost", None, "@user:localhost"),
-            PendingEvent(
-                event=_text_event(event_id="$m1", body="first"),
-                room=room,
-                source_kind="message",
-            ),
-        )
-
-    zero_debounce_calls = [
-        call
-        for call in mock_emit.call_args_list
-        if call.args and call.args[0] == "coalescing_gate.enqueue" and call.kwargs.get("path") == "zero_debounce"
-    ]
-    assert len(zero_debounce_calls) == 1
-    assert zero_debounce_calls[0].kwargs["flush_outcome"] == "scheduled_drain"
 
 
 @pytest.mark.asyncio
@@ -3492,7 +3338,7 @@ def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
 @pytest.mark.asyncio
 async def test_coalesced_room_plain_reply_target_uses_prompt_thread_not_reply_thread(tmp_path: Path) -> None:
     """Room-level handoff targets the prompt event, not a stale preserved plain reply."""
-    bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=0)
+    bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     typed_reply = _reply_event(
         event_id="$typed",
@@ -3730,7 +3576,6 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
     gate = CoalescingGate(
         dispatch_batch=failing_dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -3759,7 +3604,6 @@ async def test_coalescing_enqueue_logs_pending_count() -> None:
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 10.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -3789,7 +3633,6 @@ async def test_slow_coalescing_flush_warns_with_correlation_metadata() -> None:
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     with (
@@ -3831,7 +3674,6 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
     gate = CoalescingGate(
         dispatch_batch=failing_dispatch_batch,
         debounce_seconds=lambda: 0.01,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -3880,7 +3722,6 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -3932,7 +3773,6 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -3982,7 +3822,6 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -4036,7 +3875,6 @@ async def test_cancelled_drain_dispatches_buffered_ingress_without_waiting_for_a
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -4076,7 +3914,6 @@ async def test_coalescing_drain_logs_lifecycle_metadata() -> None:
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
@@ -4113,7 +3950,7 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
     bot.client = AsyncMock()
     bot._emit_agent_lifecycle_event = AsyncMock()
     room = _make_room()
-    event = _text_event(event_id="$m1", body="hello")
+    event = _image_event(event_id="$m1")
 
     with (
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
@@ -4124,7 +3961,7 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
             bot,
             event,
             room,
-            source_kind="message",
+            source_kind="image",
             requester_user_id="@user:localhost",
         )
         await _wait_for(lambda: not _coalescing_gate_is_idle(bot._coalescing_gate))
@@ -4133,63 +3970,6 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
 
     mock_dispatch.assert_awaited_once()
     assert _coalescing_gate_is_idle(bot._coalescing_gate)
-
-
-@pytest.mark.asyncio
-async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Path) -> None:
-    """Media arrivals may extend grace, but never past the gate hard cap."""
-    # Use generous grace (100ms) so images arrive well before the grace timer fires.
-    # Hard cap = max(0.1, min(0.4, 2.0)) = 0.4s.
-    bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=100)
-    room = _make_room()
-    text_event = _text_event(event_id="$m1", body="describe", server_timestamp=1000, thread_id="$thread")
-    image_events = [
-        _image_event(event_id="$img1", server_timestamp=1001, thread_id="$thread"),
-        _image_event(event_id="$img2", server_timestamp=1002, thread_id="$thread"),
-        _image_event(event_id="$img3", server_timestamp=1003, thread_id="$thread"),
-        _image_event(event_id="$img4", server_timestamp=1004, thread_id="$thread"),
-    ]
-    calls: list[list[str]] = []
-
-    async def record_dispatch(
-        _room: nio.MatrixRoom,
-        _dispatched_event: nio.RoomMessageText,
-        _requester_user_id: str,
-        *,
-        media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
-        **_metadata: object,
-    ) -> None:
-        _ = media_events, handled_turn
-        calls.append(_handled_turn_source_event_ids(handled_turn))
-
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        started_at = time.monotonic()
-        await _enqueue_for_dispatch(
-            bot,
-            text_event,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        # Wait for debounce to fire (10ms) so gate enters upload grace
-        await asyncio.sleep(0.02)
-        assert calls == []
-
-        for delay, image_event in zip((0.01, 0.01, 0.01, 0.01), image_events, strict=True):
-            await asyncio.sleep(delay)
-            await _enqueue_for_dispatch(
-                bot,
-                image_event,
-                room,
-                source_kind="image",
-                requester_user_id="@user:localhost",
-            )
-        await _wait_for(lambda: len(calls) == 1, deadline_seconds=0.5)
-
-    assert calls == [["$m1", "$img1", "$img2", "$img3", "$img4"]]
-    # Hard cap bounds total time: dispatch must complete well within 500ms.
-    assert time.monotonic() - started_at < 0.5
 
 
 @pytest.mark.asyncio
@@ -4247,7 +4027,7 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
     """A zero debounce window should dispatch each message without delay."""
-    bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=0)
+    bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     event = _text_event(event_id="$m1", body="immediate")
     calls: list[tuple[str, list[str]]] = []

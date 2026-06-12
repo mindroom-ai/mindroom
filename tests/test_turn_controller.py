@@ -168,7 +168,6 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
@@ -198,7 +197,6 @@ async def test_owner_release_settles_lane_slot_when_cancelled_during_ready_task_
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")

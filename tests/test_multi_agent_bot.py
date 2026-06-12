@@ -7725,7 +7725,6 @@ class TestAgentBot:
         bot._coalescing_gate = CoalescingGate(
             dispatch_batch=dispatch_batch,
             debounce_seconds=lambda: 0.01,
-            upload_grace_seconds=lambda: 0.0,
             is_shutting_down=lambda: False,
         )
         replace_turn_controller_deps(bot, coalescing_gate=bot._coalescing_gate)
@@ -7828,7 +7827,6 @@ class TestAgentBot:
         bot._coalescing_gate = CoalescingGate(
             dispatch_batch=dispatch_batch,
             debounce_seconds=lambda: 0.01,
-            upload_grace_seconds=lambda: 0.0,
             is_shutting_down=lambda: False,
         )
         replace_turn_controller_deps(bot, coalescing_gate=bot._coalescing_gate)
@@ -7917,7 +7915,6 @@ class TestAgentBot:
         bot._coalescing_gate = CoalescingGate(
             dispatch_batch=dispatch_batch,
             debounce_seconds=lambda: 0.01,
-            upload_grace_seconds=lambda: 0.0,
             is_shutting_down=lambda: False,
         )
         replace_turn_controller_deps(bot, coalescing_gate=bot._coalescing_gate)
