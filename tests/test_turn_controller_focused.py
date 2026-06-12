@@ -34,7 +34,7 @@ from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnN
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.response_runner import ResponseRequest
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
+    from mindroom.response_runner import ResponseRunner
     from mindroom.turn_policy import ResponseAction
     from mindroom.turn_policy import _ResponderAvailability as ResponderAvailability
 
@@ -145,6 +146,12 @@ class _SpyTurnPolicy:
     async def plan_turn(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         self.plan_turn_calls += 1
         return await self.inner.plan_turn(*args, **kwargs)
+
+
+async def _unused_hook_send_message(*_args: object, **_kwargs: object) -> str | None:
+    """Hook message sending must not happen in these tests (the hook registry is empty)."""
+    msg = "hook_send_message must not be called in focused turn-controller tests"
+    raise AssertionError(msg)
 
 
 class _UnusedEditRegenerator:
@@ -241,7 +248,7 @@ def _build_harness(
         runtime_paths=runtime_paths,
         agent_name=agent_name,
         hook_registry_state=HookRegistryState(HookRegistry.empty()),
-        hook_send_message=cast("Any", None),
+        hook_send_message=_unused_hook_send_message,
     )
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,
@@ -524,6 +531,9 @@ async def test_non_router_agent_consumes_command_without_responding(config: Conf
     assert harness.policy.plan_turn_calls == 0
     assert harness.runner.requests == []
     assert harness.gateway.sent == []
+    # The non-router agent does not claim the command turn; the router owns its
+    # terminal record, so this agent's ledger must stay untouched.
+    assert harness.turn_store.is_handled(event.event_id) is False
 
 
 @pytest.mark.asyncio
