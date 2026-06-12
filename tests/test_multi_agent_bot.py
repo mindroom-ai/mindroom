@@ -42,7 +42,7 @@ from mindroom.attachments import AttachmentRecord, _attachment_id_for_event, reg
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingGate, LaneSlot, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, active_follow_up_coalescing_key
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -7739,7 +7739,6 @@ class TestAgentBot:
                     event_source=voice_event.source,
                 ),
                 CoalescingKey(room.room_id, "$thread-root", "@user:localhost"),
-                False,
             ),
         )
         bot._turn_controller._ready_voice_event = AsyncMock(
@@ -12253,6 +12252,11 @@ class TestAgentBot:
             ) as mock_active_thread_ids,
             patch.object(
                 bot._response_runner,
+                "has_active_response_for_target",
+                return_value=True,
+            ),
+            patch.object(
+                bot._response_runner,
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
@@ -12266,7 +12270,7 @@ class TestAgentBot:
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
             await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
 
-        mock_active_thread_ids.assert_called_once_with(room.room_id)
+        mock_active_thread_ids.assert_called_with(room.room_id)
         mock_reserve_waiting_human_message.assert_called_once()
         signal_target = mock_reserve_waiting_human_message.call_args.kwargs["target"]
         assert signal_target.resolved_thread_id == target.resolved_thread_id
@@ -12277,12 +12281,12 @@ class TestAgentBot:
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == active_follow_up_coalescing_key(room.room_id, "$thread_root")
+        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.requester_user_id == "@user:localhost"
-        assert pending_event.event is prepared_event
+        assert pending_event.event is event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+        assert pending_event.dispatch_policy_source_kind is None
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
@@ -12400,6 +12404,11 @@ class TestAgentBot:
             ),
             patch.object(
                 bot._response_runner,
+                "has_active_response_for_target",
+                return_value=True,
+            ),
+            patch.object(
+                bot._response_runner,
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
@@ -12416,7 +12425,7 @@ class TestAgentBot:
             await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
             mock_admit.assert_awaited_once()
             key = mock_admit.await_args.args[0]
-            assert key == active_follow_up_coalescing_key(room.room_id, "$thread_root")
+            assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
             ready_event = mock_admit.await_args.kwargs["ready_result"]
 
         assert isinstance(ready_event, ReadyPendingEvent)
@@ -12431,7 +12440,7 @@ class TestAgentBot:
         assert pending_event.requester_user_id == "@user:localhost"
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == VOICE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+        assert pending_event.dispatch_policy_source_kind is None
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
@@ -12618,6 +12627,11 @@ class TestAgentBot:
             ),
             patch.object(
                 bot._response_runner,
+                "has_active_response_for_target",
+                return_value=True,
+            ),
+            patch.object(
+                bot._response_runner,
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
@@ -12641,12 +12655,12 @@ class TestAgentBot:
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == active_follow_up_coalescing_key(room.room_id, "$thread_root")
+        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.requester_user_id == "@user:localhost"
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+        assert pending_event.dispatch_policy_source_kind is None
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"

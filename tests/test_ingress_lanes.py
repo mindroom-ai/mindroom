@@ -10,12 +10,13 @@ import nio
 import pytest
 
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent, active_follow_up_coalescing_key
-from mindroom.dispatch_source import VOICE_SOURCE_KIND
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent
+from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from tests.test_live_message_coalescing import _make_bot, _make_room, _text_event, _wait_for
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.coalescing_batch import CoalescedBatch
@@ -60,22 +61,28 @@ def _gate(
     *,
     debounce_seconds: float = 0.02,
     room_scope_is_single_conversation: bool | None = None,
-    dispatch_allowed_now: bool | None = None,
+    dispatch_allowed_now: Callable[[CoalescingKey], bool] | bool | None = None,
+    wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
 ) -> tuple[CoalescingGate, list[CoalescedBatch]]:
     batches: list[CoalescedBatch] = []
 
     async def record(batch: CoalescedBatch) -> None:
         batches.append(batch)
 
+    if isinstance(dispatch_allowed_now, bool):
+        allowed = dispatch_allowed_now
+        dispatch_allowed_now = lambda _key: allowed  # noqa: E731
+
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch or record,
         debounce_seconds=lambda: debounce_seconds,
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
+        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
         room_scope_is_single_conversation=(
             None if room_scope_is_single_conversation is None else lambda _room_id: room_scope_is_single_conversation
         ),
-        dispatch_allowed_now=(None if dispatch_allowed_now is None else lambda _key: dispatch_allowed_now),
+        dispatch_allowed_now=dispatch_allowed_now,
     )
     return gate, batches
 
@@ -189,18 +196,30 @@ async def test_room_mode_text_burst_coalesces_into_one_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_straggler_active_follow_up_logs_missed_combined_turn() -> None:
-    """A follow-up arriving after its response went idle is logged as a missed merge."""
-    gate, batches = _gate(debounce_seconds=0.0, dispatch_allowed_now=True)
-    key = active_follow_up_coalescing_key("!room:localhost", "$thread")
+async def test_straggler_follow_up_logs_missed_combined_turn() -> None:
+    """A late-resolving follow-up that misses its busy window is logged as a missed merge."""
+    busy = {"value": True}
+    gate, batches = _gate(debounce_seconds=0.0, dispatch_allowed_now=lambda _key: not busy["value"])
+    key = CoalescingKey("!room:localhost", "$thread", "@user:localhost")
+    release_ready = asyncio.Event()
 
+    async def slow_ready() -> ReadyPendingEvent:
+        await release_ready.wait()
+        return _ready(_plain_event("$late", "late follow-up", 1_000_000))
+
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        slot,
+        key=key,
+        source_event_id="$late",
+        source_kind="message",
+        ready_task=asyncio.create_task(slow_ready()),
+    )
+
+    busy["value"] = False
     with patch("mindroom.coalescing.logger") as logger_mock:
-        await gate.admit(
-            key,
-            ready_result=_ready(_plain_event("$late", "late follow-up", 1_000_000)),
-            source_event_id="$late",
-            source_kind="message",
-        )
+        release_ready.set()
+        await _wait_for(lambda: slot.settled.is_set())
 
     logger_mock.info.assert_any_call(
         "follow_up_missed_combined_turn",
@@ -210,25 +229,112 @@ async def test_straggler_active_follow_up_logs_missed_combined_turn() -> None:
     )
     await gate.drain_all()
     assert [batch.source_event_ids for batch in batches] == [["$late"]]
+    assert batches[0].dispatch_policy_source_kind is None
 
 
 @pytest.mark.asyncio
-async def test_active_follow_up_with_running_response_does_not_log_missed_turn() -> None:
-    """Follow-ups queued behind a still-active response are not logged as missed."""
-    gate, batches = _gate(debounce_seconds=0.0, dispatch_allowed_now=False)
-    key = active_follow_up_coalescing_key("!room:localhost", "$thread")
+async def test_follow_up_delivered_while_still_busy_is_not_logged_as_missed() -> None:
+    """A follow-up that lands inside the busy window joins the queue without a missed-turn log."""
+    busy = {"value": True}
+    idle = asyncio.Event()
 
+    async def wait_until_idle(_key: CoalescingKey) -> None:
+        await idle.wait()
+
+    gate, batches = _gate(
+        debounce_seconds=0.0,
+        dispatch_allowed_now=lambda _key: not busy["value"],
+        wait_until_dispatch_allowed=wait_until_idle,
+    )
+    key = CoalescingKey("!room:localhost", "$thread", "@user:localhost")
+
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
     with patch("mindroom.coalescing.logger") as logger_mock:
-        await gate.admit(
-            key,
-            ready_result=_ready(_plain_event("$queued", "queued follow-up", 1_000_000)),
+        gate.submit_lane_slot(
+            slot,
+            key=key,
             source_event_id="$queued",
             source_kind="message",
+            ready_result=_ready(_plain_event("$queued", "queued follow-up", 1_000_000)),
         )
+        await _wait_for(lambda: slot.settled.is_set())
 
     assert not any(call.args[:1] == ("follow_up_missed_combined_turn",) for call in logger_mock.info.call_args_list)
+    assert batches == []
+
+    busy["value"] = False
+    idle.set()
+    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$queued"]])
+    assert batches[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     await gate.drain_all()
-    assert [batch.source_event_ids for batch in batches] == [["$queued"]]
+
+
+@pytest.mark.asyncio
+async def test_busy_conversation_queues_any_sender_into_one_combined_follow_up() -> None:
+    """Admissions during a running response queue and flush as one combined follow-up."""
+    busy = {"value": True}
+    idle = asyncio.Event()
+
+    async def wait_until_idle(_key: CoalescingKey) -> None:
+        await idle.wait()
+
+    gate, batches = _gate(
+        debounce_seconds=0.0,
+        dispatch_allowed_now=lambda _key: not busy["value"],
+        wait_until_dispatch_allowed=wait_until_idle,
+    )
+
+    await gate.admit(
+        CoalescingKey("!room:localhost", "$thread", "@alice:localhost"),
+        ready_result=_ready(_plain_event("$a", "from alice", 1_000_000)),
+        source_event_id="$a",
+        source_kind="message",
+    )
+    await gate.admit(
+        CoalescingKey("!room:localhost", "$thread", "@bob:localhost"),
+        ready_result=_ready(_plain_event("$b", "from bob", 1_000_100)),
+        source_event_id="$b",
+        source_kind="message",
+    )
+    await asyncio.sleep(0.01)
+    assert batches == []
+
+    busy["value"] = False
+    idle.set()
+    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$a", "$b"]])
+    assert batches[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_machine_fire_queues_while_conversation_busy() -> None:
+    """A scheduled fire arriving mid-response queues and becomes the follow-up turn."""
+    busy = {"value": True}
+    idle = asyncio.Event()
+
+    async def wait_until_idle(_key: CoalescingKey) -> None:
+        await idle.wait()
+
+    gate, batches = _gate(
+        debounce_seconds=0.0,
+        dispatch_allowed_now=lambda _key: not busy["value"],
+        wait_until_dispatch_allowed=wait_until_idle,
+    )
+
+    await gate.admit(
+        CoalescingKey("!room:localhost", "$thread", "@scheduler:localhost"),
+        ready_result=_ready(_plain_event("$fire2", "scheduled check-in", 1_000_000), source_kind="scheduled"),
+        source_event_id="$fire2",
+        source_kind="scheduled",
+    )
+    await asyncio.sleep(0.01)
+    assert batches == []
+
+    busy["value"] = False
+    idle.set()
+    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$fire2"]])
+    assert batches[0].dispatch_policy_source_kind is None
+    await gate.drain_all()
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,7 @@ from .coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
     PendingEvent,
+    active_follow_up_coalescing_key,
     build_coalesced_batch,
     is_active_follow_up_coalescing_key,
 )
@@ -32,6 +33,7 @@ from .coalescing_policy import (
     source_or_event_allows_room_scope_batching,
 )
 from .dispatch_handoff import is_media_dispatch_event
+from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot
 from .logging_config import get_logger
 from .timing import elapsed_ms_since, emit_elapsed_timing, event_timing_scope
@@ -246,11 +248,15 @@ class CoalescingGate:
             ready_result=ready_result,
             ready_task=ready_task,
             received_at=received_at,
+            busy_at_submit=self._conversation_is_busy(key),
         )
 
     def release_lane_slot(self, slot: LaneSlot) -> None:
         """Release one lane slot that will not be admitted."""
         self._lanes.release(slot)
+
+    def _conversation_is_busy(self, key: CoalescingKey) -> bool:
+        return self._dispatch_allowed_now is not None and not self._dispatch_allowed_now(key)
 
     async def _admit_from_lane(
         self,
@@ -258,6 +264,13 @@ class CoalescingGate:
         delivery: LaneDelivery,
         ready: ReadyPendingEvent,
     ) -> None:
+        if delivery.busy_at_submit and not self._conversation_is_busy(delivery.key):
+            logger.info(
+                "follow_up_missed_combined_turn",
+                room_id=delivery.key.room_id,
+                thread_id=delivery.key.thread_id,
+                source_event_id=delivery.source_event_id,
+            )
         await self.admit(
             delivery.key,
             ready_result=ready,
@@ -572,19 +585,17 @@ class CoalescingGate:
             timing_scope=event_timing_scope(pending_event.event.event_id),
         )
 
-    def _log_missed_combined_follow_up(self, key: CoalescingKey, source_event_id: str | None) -> None:
-        if not is_active_follow_up_coalescing_key(key):
-            return
-        if key in self._gates:
-            return
-        if self._dispatch_allowed_now is None or not self._dispatch_allowed_now(key):
-            return
-        logger.info(
-            "follow_up_missed_combined_turn",
-            room_id=key.room_id,
-            thread_id=key.thread_id,
-            source_event_id=source_event_id,
-        )
+    def _busy_conversation_key(self, key: CoalescingKey, ready_result: ReadyPendingEvent) -> CoalescingKey:
+        """Reroute one admission to its conversation's follow-up queue while a response runs."""
+        if is_active_follow_up_coalescing_key(key) or not self._conversation_is_busy(key):
+            return key
+        pending_event = ready_result.pending_event
+        if pending_event.dispatch_policy_source_kind is None and not is_coalescing_exempt_source_kind(
+            pending_event.event,
+            pending_event.source_kind,
+        ):
+            pending_event.dispatch_policy_source_kind = ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+        return active_follow_up_coalescing_key(key.room_id, key.thread_id)
 
     async def admit(
         self,
@@ -596,9 +607,13 @@ class CoalescingGate:
         source_event_id: str | None = None,
         source_kind: str = "pending",
     ) -> None:
-        """Admit one ready, conversation-assigned event under its coalescing key."""
+        """Admit one ready, conversation-assigned event under its coalescing key.
+
+        The busy-conversation check and the enqueue happen synchronously on the
+        event loop, so an admission can never race a response start or finish.
+        """
         enqueue_start = time.monotonic()
-        self._log_missed_combined_follow_up(key, source_event_id)
+        key = self._busy_conversation_key(key, ready_result)
         gate = self._get_or_create_gate(key)
         admission = _QueuedEvent(
             received_at=received_at if received_at is not None else time.time(),

@@ -2456,25 +2456,21 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
         try:
             with (
                 patch.object(
-                    bot._turn_controller.deps.response_runner,
-                    "reserve_waiting_human_message",
-                    return_value=reservation,
-                ),
-                patch.object(
                     bot._turn_controller,
                     "_enqueue_for_dispatch",
                     new=AsyncMock(side_effect=asyncio.CancelledError),
                 ),
                 pytest.raises(asyncio.CancelledError),
             ):
-                await bot._turn_controller._enqueue_active_thread_follow_up(
+                await bot._turn_controller._enqueue_prepared_text_for_dispatch(
                     room=room,
-                    event=event,
-                    target=target,
+                    prepared_event=event,
+                    dispatch_event=event,
                     envelope=envelope,
+                    coalescing_thread_id="$thread",
                     requester_user_id="@user:localhost",
                     reservation_owner=reservation_owner,
-                    coalescing_key=active_follow_up_coalescing_key(room.room_id, "$thread"),
+                    queued_notice_reservation=reservation,
                 )
         finally:
             await reservation_owner.release()

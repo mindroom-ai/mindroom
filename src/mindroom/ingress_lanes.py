@@ -36,6 +36,7 @@ class LaneDelivery:
     ready_result: ReadyPendingEvent | None
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None
     received_at: float
+    busy_at_submit: bool = False
 
 
 @dataclass
@@ -114,6 +115,7 @@ class IngressLanes:
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
         received_at: float | None = None,
+        busy_at_submit: bool = False,
     ) -> None:
         """Load one slot with its conversation key and ready payload."""
         if slot.released or slot.closed:
@@ -129,6 +131,7 @@ class IngressLanes:
             ready_result=ready_result,
             ready_task=ready_task,
             received_at=received_at if received_at is not None else time.time(),
+            busy_at_submit=busy_at_submit,
         )
         slot.loaded.set()
         self._ensure_worker((slot.room_id, slot.sender_id))

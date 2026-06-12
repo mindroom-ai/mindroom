@@ -19,7 +19,6 @@ from mindroom.coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
     PendingEvent,
-    active_follow_up_coalescing_key,
     build_coalesced_batch,
 )
 from mindroom.config.agent import AgentConfig
@@ -1244,33 +1243,12 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
     release_first_dispatch = asyncio.Event()
     calls: list[list[str]] = []
 
+    active_threads: set[str | None] = set()
+
     async def wait_for_thread_response_idle(room_id: str, thread_id: str | None) -> None:
         assert room_id == room.room_id
         assert thread_id == "$m1"
         await release_first_dispatch.wait()
-
-    async def enqueue_active_follow_up(event: nio.RoomMessageText) -> None:
-        target = MessageTarget.resolve(room.room_id, "$m1", event.event_id)
-        envelope = bot._conversation_resolver.build_ingress_envelope(
-            room_id=room.room_id,
-            event=event,
-            requester_user_id="@user:localhost",
-            target=target,
-            source_kind=MESSAGE_SOURCE_KIND,
-        )
-        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
-        try:
-            await bot._turn_controller._enqueue_active_thread_follow_up(
-                room=room,
-                event=event,
-                target=target,
-                envelope=envelope,
-                requester_user_id="@user:localhost",
-                reservation_owner=reservation_owner,
-                coalescing_key=active_follow_up_coalescing_key(room.room_id, "$m1"),
-            )
-        finally:
-            await reservation_owner.release()
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
@@ -1294,6 +1272,11 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
             "wait_for_thread_response_idle",
             new=AsyncMock(side_effect=wait_for_thread_response_idle),
         ),
+        patch.object(
+            bot._response_runner,
+            "active_thread_ids_for_room",
+            new=lambda _room_id: frozenset(active_threads),
+        ),
     ):
         await _enqueue_for_dispatch(
             bot,
@@ -1304,14 +1287,22 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         )
         await asyncio.sleep(0.03)
         await entered_first_dispatch.wait()
+        active_threads.add("$m1")
 
-        await enqueue_active_follow_up(second)
-        await asyncio.sleep(0.03)
-        await enqueue_active_follow_up(third)
-        await asyncio.sleep(0.03)
+        for followup in (second, third):
+            await _enqueue_for_dispatch(
+                bot,
+                followup,
+                room,
+                source_kind="message",
+                requester_user_id="@user:localhost",
+                coalescing_key=CoalescingKey(room.room_id, "$m1", "@user:localhost"),
+            )
+            await asyncio.sleep(0.03)
 
         assert calls == [["$m1"]]
 
+        active_threads.clear()
         release_first_dispatch.set()
         await _wait_for(lambda: calls == [["$m1"], ["$m2", "$m3"]])
 
@@ -1320,48 +1311,53 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
 
 @pytest.mark.asyncio
 async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: Path) -> None:
-    """Active-response follow-ups should queue by target while preserving the actual requester."""
+    """Active-response follow-ups should queue by conversation while preserving each requester."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     first = _text_event(event_id="$a", body="first", sender="@alice:localhost", thread_id="$thread")
     second = _text_event(event_id="$b", body="second", sender="@bob:localhost", thread_id="$thread")
-    admitted: list[tuple[CoalescingKey, PendingEvent]] = []
+    active_threads: set[str | None] = {"$thread"}
+    idle = asyncio.Event()
+    calls: list[CoalescedBatch] = []
 
-    async def record_admit(key: CoalescingKey, **kwargs: object) -> None:
-        ready_result = cast("ReadyPendingEvent", kwargs["ready_result"])
-        admitted.append((key, ready_result.pending_event))
+    async def record_dispatch(batch: CoalescedBatch) -> None:
+        calls.append(batch)
+
+    async def wait_for_thread_response_idle(_room_id: str, _thread_id: str | None) -> None:
+        await idle.wait()
 
     with (
-        patch.object(bot._coalescing_gate, "admit", new=AsyncMock(side_effect=record_admit)),
+        patch.object(bot._turn_controller, "handle_coalesced_batch", new=AsyncMock(side_effect=record_dispatch)),
+        patch.object(
+            bot._response_runner,
+            "wait_for_thread_response_idle",
+            new=AsyncMock(side_effect=wait_for_thread_response_idle),
+        ),
+        patch.object(
+            bot._response_runner,
+            "active_thread_ids_for_room",
+            new=lambda _room_id: frozenset(active_threads),
+        ),
         patch.object(bot._response_runner, "reserve_waiting_human_message", return_value=MagicMock()),
     ):
         for event, requester_user_id in ((first, "@alice:localhost"), (second, "@bob:localhost")):
-            target = MessageTarget.resolve(room.room_id, "$thread", event.event_id)
-            envelope = bot._conversation_resolver.build_ingress_envelope(
-                room_id=room.room_id,
-                event=event,
+            await _enqueue_for_dispatch(
+                bot,
+                event,
+                room,
+                source_kind="message",
                 requester_user_id=requester_user_id,
-                target=target,
-                source_kind=MESSAGE_SOURCE_KIND,
+                coalescing_key=CoalescingKey(room.room_id, "$thread", requester_user_id),
             )
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, requester_user_id)
-            try:
-                await bot._turn_controller._enqueue_active_thread_follow_up(
-                    room=room,
-                    event=event,
-                    target=target,
-                    envelope=envelope,
-                    requester_user_id=requester_user_id,
-                    reservation_owner=reservation_owner,
-                    coalescing_key=active_follow_up_coalescing_key(room.room_id, "$thread"),
-                )
-            finally:
-                await reservation_owner.release()
+        await asyncio.sleep(0.01)
+        assert calls == []
 
-        await _wait_for(lambda: len(admitted) == 2)
+        active_threads.clear()
+        idle.set()
+        await _wait_for(lambda: [list(batch.source_event_ids) for batch in calls] == [["$a", "$b"]])
 
-    assert len({key for key, _pending_event in admitted}) == 1
-    assert [pending_event.requester_user_id for _key, pending_event in admitted] == [
+    assert calls[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert [pending_event.requester_user_id for pending_event in calls[0].pending_events] == [
         "@alice:localhost",
         "@bob:localhost",
     ]
@@ -1631,28 +1627,18 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
                 (text_event, "@alice:localhost"),
                 (image_event, "@bob:localhost"),
             ):
-                event_target = MessageTarget.resolve(room.room_id, "$thread", event.event_id)
-                envelope = bot._conversation_resolver.build_ingress_envelope(
-                    room_id=room.room_id,
-                    event=event,
-                    requester_user_id=requester_user_id,
-                    target=event_target,
+                await _enqueue_for_dispatch(
+                    bot,
+                    event,
+                    room,
                     source_kind=IMAGE_SOURCE_KIND if event.event_id == "$img" else MESSAGE_SOURCE_KIND,
+                    requester_user_id=requester_user_id,
+                    coalescing_key=CoalescingKey(room.room_id, "$thread", requester_user_id),
                 )
-                reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, requester_user_id)
-                try:
-                    await bot._turn_controller._enqueue_active_thread_follow_up(
-                        room=room,
-                        event=event,
-                        target=event_target,
-                        envelope=envelope,
-                        requester_user_id=requester_user_id,
-                        reservation_owner=reservation_owner,
-                        coalescing_key=active_follow_up_coalescing_key(room.room_id, "$thread"),
-                    )
-                finally:
-                    await reservation_owner.release()
 
+            await _wait_for(
+                lambda: sum(len(entry.queue) for entry in bot._coalescing_gate._gates.values()) == 2,
+            )
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
             await bot._coalescing_gate.drain_all()
