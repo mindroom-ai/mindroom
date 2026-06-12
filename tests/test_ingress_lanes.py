@@ -744,3 +744,44 @@ async def test_machine_and_human_follow_ups_split_solo_batch() -> None:
     assert batches[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     assert batches[1].dispatch_policy_source_kind is None
     await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_lane_worker_settles_remaining_slots() -> None:
+    """An externally cancelled lane worker releases its residual slots for drains."""
+    gate, _batches = _gate(debounce_seconds=0.0)
+    blocked = asyncio.Event()
+
+    async def never_ready() -> ReadyPendingEvent:
+        await blocked.wait()
+        return _ready(_plain_event("$blocked", "blocked", 1_000_000))
+
+    first_slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    second_slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        first_slot,
+        key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+        source_event_id="$blocked",
+        source_kind="message",
+        ready_task=asyncio.create_task(never_ready()),
+    )
+
+    worker = gate.lanes._workers[("!room:localhost", "@user:localhost")]
+    worker.cancel()
+    await asyncio.gather(worker, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert first_slot.settled.is_set()
+    assert second_slot.settled.is_set()
+    assert second_slot.released
+    with pytest.raises(IngressAdmissionClosedError):
+        gate.submit_lane_slot(
+            second_slot,
+            key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+            source_event_id="$late",
+            source_kind="message",
+            ready_result=_ready(_plain_event("$late", "late", 1_000_100)),
+        )
+    blocked.set()
+    result = await gate.drain_all()
+    assert result.completed is True

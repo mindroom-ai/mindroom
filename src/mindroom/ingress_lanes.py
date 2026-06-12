@@ -196,47 +196,70 @@ class IngressLanes:
         lane = self._lanes.get(lane_key)
         if not lane:
             return
-        self._workers[lane_key] = asyncio.create_task(
+        worker = asyncio.create_task(
             self._run_lane(lane_key),
             name=f"ingress_lane:{lane_key[0]}:{lane_key[1]}",
         )
+        # Lane cleanup lives in a done callback, not the coroutine's finally:
+        # a worker cancelled before its first scheduling never enters its own
+        # function body, and unsettled slots would hang graceful drains.
+        worker.add_done_callback(lambda task, lane_key=lane_key: self._finish_worker(lane_key, task))
+        self._workers[lane_key] = worker
+
+    def _finish_worker(self, lane_key: _LaneKey, task: asyncio.Task[None]) -> None:
+        current = self._workers.get(lane_key)
+        if current is task:
+            self._workers.pop(lane_key, None)
+        elif current is not None:
+            # A replacement worker already owns this lane.
+            return
+        if task.cancelled() or task.exception() is not None:
+            self._settle_abandoned_lane(lane_key)
+            return
+        if not self._lanes.get(lane_key):
+            self._lanes.pop(lane_key, None)
+
+    def _settle_abandoned_lane(self, lane_key: _LaneKey) -> None:
+        """Release and settle every slot of a lane whose worker died abnormally."""
+        remaining = self._lanes.pop(lane_key, None)
+        for slot in remaining or ():
+            if slot.settled.is_set():
+                continue
+            # A late submit into an abandoned slot must raise instead of
+            # loading work that no worker will ever deliver.
+            slot.released = True
+            slot.loaded.set()
+            slot.settled.set()
 
     async def _run_lane(self, lane_key: _LaneKey) -> None:
         lane = self._lanes.get(lane_key)
         if lane is None:
             return
-        try:
-            while lane:
-                slot = lane[0]
-                # The finally must cover the whole slot lifecycle, including the
-                # loaded wait: a head slot that never settles poisons its sender's
-                # lane and hangs unbounded drains.
-                completed = False
-                try:
-                    await slot.loaded.wait()
-                    if not slot.released:
-                        await self._deliver_slot(slot)
-                    completed = True
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception(
-                        "ingress_lane_slot_failed",
-                        room_id=slot.room_id,
-                        sender_id=slot.sender_id,
-                    )
-                finally:
-                    if not completed:
-                        # A late submit into an abandoned slot must raise instead
-                        # of loading work that no worker will ever deliver.
-                        slot.released = True
-                    if lane and lane[0] is slot:
-                        lane.popleft()
-                    slot.settled.set()
-        finally:
-            self._workers.pop(lane_key, None)
-            if not self._lanes.get(lane_key):
-                self._lanes.pop(lane_key, None)
+        while lane:
+            slot = lane[0]
+            # The finally must cover the whole slot lifecycle, including the
+            # loaded wait: a head slot that never settles poisons its sender's
+            # lane and hangs unbounded drains.
+            completed = False
+            try:
+                await slot.loaded.wait()
+                if not slot.released:
+                    await self._deliver_slot(slot)
+                completed = True
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "ingress_lane_slot_failed",
+                    room_id=slot.room_id,
+                    sender_id=slot.sender_id,
+                )
+            finally:
+                if not completed:
+                    slot.released = True
+                if lane and lane[0] is slot:
+                    lane.popleft()
+                slot.settled.set()
 
     async def _deliver_slot(self, slot: LaneSlot) -> None:
         delivery = slot.delivery

@@ -379,6 +379,8 @@ class ResponseRunner:
         """Settle detached inbox responses: graceful drains await, bounded drains cancel.
 
         Returns False when a bounded drain had to cancel or abandon running work.
+        A bounded drain may take up to two cancel_after_seconds windows: one
+        waiting for completion and one letting cancelled tasks run cleanup.
         """
         tasks = [task for task in self._inbox_response_tasks if not task.done()]
         if not tasks:
