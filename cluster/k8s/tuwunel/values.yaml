@@ -44,6 +44,8 @@ tuwunel:
   # Public HTTPS base URL where clients reach this homeserver, for example https://matrix.example.com.
   # Leave empty to default to https://<serverName>.
   clientBaseUrl: ""
+  # Listener bind addresses inside the pod, for example ["::"] for IPv6-only clusters.
+  listenAddresses: ["0.0.0.0"]
   # Listener port inside the pod.
   port: 8008
   logLevel: info

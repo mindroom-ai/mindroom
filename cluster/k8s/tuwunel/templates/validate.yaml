@@ -6,6 +6,9 @@
 {{- if contains "://" .Values.tuwunel.serverName -}}
 {{- fail "tuwunel.serverName must be a bare domain such as example.com, not a URL" -}}
 {{- end -}}
+{{- if not .Values.tuwunel.listenAddresses -}}
+{{- fail "tuwunel.listenAddresses must contain at least one bind address" -}}
+{{- end -}}
 {{- if .Values.tuwunel.oidc.enabled -}}
 {{- if not .Values.tuwunel.oidc.brand -}}
 {{- fail "tuwunel.oidc.brand is required when tuwunel.oidc.enabled=true" -}}

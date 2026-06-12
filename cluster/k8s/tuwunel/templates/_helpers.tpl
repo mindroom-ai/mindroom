@@ -103,7 +103,7 @@ Secret-bearing options reference files mounted from existing Secrets, so no secr
 {{- define "mindroom-tuwunel.config" -}}
 [global]
 server_name = {{ .Values.tuwunel.serverName | quote }}
-address = ["0.0.0.0"]
+address = {{ toJson .Values.tuwunel.listenAddresses }}
 port = {{ .Values.tuwunel.port }}
 database_path = {{ .Values.storage.mountPath | quote }}
 log = {{ .Values.tuwunel.logLevel | quote }}
