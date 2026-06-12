@@ -54,6 +54,22 @@ public/              # Static assets
 
 Runs on port 3000 by default with hot module replacement.
 
+### Typed API client
+
+`src/lib/api.ts` is typed against the platform backend's OpenAPI schema.
+`openapi.json` is checked in and `src/lib/api.generated.ts` is generated from it with `openapi-typescript` (types only, no runtime code).
+
+After changing backend routes or response models, regenerate both files:
+
+```bash
+just saas-api-types
+# or manually:
+cd saas-platform/platform-backend && uv run python scripts/export_openapi.py
+cd saas-platform/platform-frontend && bun run generate:api-types
+```
+
+`bun run check:api-types` is the CI-runnable drift guard: it regenerates the types from the checked-in `openapi.json` and fails if `src/lib/api.generated.ts` is stale.
+
 ## Environment Variables
 
 Required for runtime:
