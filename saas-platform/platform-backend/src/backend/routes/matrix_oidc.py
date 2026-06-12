@@ -282,7 +282,7 @@ async def jwks(request: Request) -> dict[str, Any]:
     return {"keys": [_public_jwk()]}
 
 
-@router.get("/matrix-oidc/authorize")
+@router.get("/matrix-oidc/authorize", response_model=None)
 @limiter.limit("60/minute")
 async def authorize(
     request: Request,

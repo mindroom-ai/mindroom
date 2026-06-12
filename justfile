@@ -98,6 +98,11 @@ local-platform-compose-logs:
 # Development / CI helpers
 # ------------------------
 
+# Export SaaS backend OpenAPI schema and regenerate frontend API types
+saas-openapi:
+    cd saas-platform/platform-backend && uv run python scripts/export_openapi.py
+    cd saas-platform/platform-frontend && bun install && bun run generate:api
+
 ################################
 # Cluster: Terraform / Helm / DB
 ################################

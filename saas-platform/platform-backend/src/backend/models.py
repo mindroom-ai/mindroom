@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from backend.pricing import Discounts, PlanLimits, Product, Trial
+
 
 class InstanceOut(BaseModel):
     """Instance information output model."""
@@ -173,6 +175,9 @@ class AccountWithRelationsOut(BaseModel):
     stripe_customer_id: str | None = None  # Optional for free users
     created_at: str  # Required, should always exist
     updated_at: str  # Required, should always exist
+    deleted_at: str | None = None  # Set while a GDPR deletion is pending
+    consent_marketing: bool | None = None
+    consent_analytics: bool | None = None
     subscriptions: list[dict[str, Any]] | None = None  # Can be None from DB
     instances: list[dict[str, Any]] | None = None  # Can be None from DB
 
@@ -211,6 +216,105 @@ class StripePriceResponse(BaseModel):
     price_id: str
     plan: str
     billing_cycle: str
+
+
+class PublicPlan(BaseModel):
+    """One plan as exposed by /pricing/config (prices formatted for display)."""
+
+    name: str
+    price_monthly: str
+    price_yearly: str
+    description: str
+    features: list[str]
+    limits: PlanLimits
+    recommended: bool = False
+    included_ai_budget_usd: int = 0
+    requires_customer_provider_keys: bool = False
+    resource_profile: Literal["small", "pro"] = "small"
+    stripe_price_id_monthly: str | None = None
+    stripe_price_id_yearly: str | None = None
+
+
+class PricingConfigResponse(BaseModel):
+    """Public pricing configuration response model."""
+
+    product: Product
+    plans: dict[str, PublicPlan]
+    trial: Trial
+    discounts: Discounts
+
+
+# GDPR Models
+class GdprPersonalData(BaseModel):
+    """Personal data section of a GDPR export."""
+
+    email: str | None = None
+    full_name: str | None = None
+    company_name: str | None = None
+    created_at: str | None = None
+    status: str | None = None
+    tier: str | None = None
+
+
+class GdprThirdPartyProcessor(BaseModel):
+    """Third-party processor disclosure in a GDPR export."""
+
+    name: str
+    purpose: str
+    data_shared: str
+
+
+class GdprExportResponse(BaseModel):
+    """GDPR data export response model."""
+
+    export_date: str
+    account_id: str
+    personal_data: GdprPersonalData
+    subscriptions: list[dict[str, Any]]
+    instances: list[dict[str, Any]]
+    usage_metrics: list[dict[str, Any]]
+    activity_history: list[dict[str, Any]]
+    payments: list[dict[str, Any]]
+    data_processing_purposes: list[str]
+    data_retention_periods: dict[str, str]
+    third_party_processors: list[GdprThirdPartyProcessor]
+
+
+class GdprDeletionResponse(BaseModel):
+    """GDPR deletion request response model (confirmation prompt or scheduled deletion)."""
+
+    status: Literal["confirmation_required", "deletion_scheduled"]
+    message: str
+    warning: str | None = None
+    grace_period_days: int | None = None
+    deletion_date: str | None = None
+    cancellation: str | None = None
+    data_deleted: str | None = None
+    data_retained: str | None = None
+
+
+class GdprConsentState(BaseModel):
+    """Consent flags echoed back after an update."""
+
+    marketing: bool
+    analytics: bool
+    essential: bool
+
+
+class GdprConsentResponse(BaseModel):
+    """GDPR consent update response model."""
+
+    status: str
+    consent: GdprConsentState
+    updated_at: str
+
+
+class GdprCancelDeletionResponse(BaseModel):
+    """GDPR deletion cancellation response model."""
+
+    status: Literal["success", "not_pending"]
+    message: str
+    account_status: str | None = None
 
 
 # Admin Models
