@@ -135,7 +135,7 @@ class DispatchHandoff:
     source_event_prompts: Mapping[str, str] = field(default_factory=dict)
     media_events: tuple[MediaDispatchEvent, ...] = ()
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
-    response_start: ResponseStartSignal | None = None
+    response_start: ResponseStartSignal = field(default_factory=ResponseStartSignal)
 
 
 def event_content_dict(event: DispatchEvent) -> dict[str, object] | None:

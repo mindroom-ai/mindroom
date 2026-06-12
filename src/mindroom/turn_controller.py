@@ -1897,9 +1897,7 @@ class TurnController:
             ingress_metadata=handoff.ingress,
             payload_metadata=handoff.payload,
             trust_hydrated_internal_metadata=handoff.trust_hydrated_internal_metadata,
-            on_lifecycle_lock_acquired=(
-                None if handoff.response_start is None else handoff.response_start.mark_started
-            ),
+            on_lifecycle_lock_acquired=handoff.response_start.mark_started,
         )
 
     async def handle_text_event(
