@@ -67,8 +67,6 @@ def read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
         raise WorkerBackendError(msg)
     cleaned: dict[str, str] = {}
     for key, value in parsed.items():
-        if not isinstance(key, str):
-            continue
         if isinstance(value, str):
             cleaned[key] = value
         elif value is not None:

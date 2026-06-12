@@ -95,7 +95,7 @@ def test_read_json_mapping_env_returns_empty_for_missing_or_blank() -> None:
 
 
 def test_read_json_mapping_env_cleans_valid_objects() -> None:
-    """Valid JSON objects should keep strings, stringify scalars, and drop null and non-string keys."""
+    """Valid JSON objects should keep strings, stringify scalars, and drop null values."""
     raw = '{"KEEP": "value", "NUMBER": 7, "NULL": null, "1": "string-key-only"}'
     assert read_json_mapping_env({"EXTRA": raw}, "EXTRA") == {
         "KEEP": "value",
