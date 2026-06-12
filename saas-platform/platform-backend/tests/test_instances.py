@@ -550,7 +550,7 @@ class TestInstancesEndpoints:
         from backend.routes.instances import _background_sync_instance_status
 
         # Setup
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"status": "running"})
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"status": "running"}])
         mock_check_deployment.return_value = True
         mock_kubectl.return_value = (0, "0", "")  # 0 replicas = stopped
         mock_supabase.table().update().eq().execute.return_value = Mock()
@@ -571,7 +571,7 @@ class TestInstancesEndpoints:
         from backend.routes.instances import _background_sync_instance_status
 
         # Setup
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"status": "running"})
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"status": "running"}])
         mock_check_deployment.return_value = False
         mock_supabase.table().update().eq().execute.return_value = Mock()
 

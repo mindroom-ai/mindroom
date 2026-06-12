@@ -11,7 +11,7 @@ from backend.deps import ensure_supabase, limiter, verify_user
 from backend.entitlements import assert_instance_entitlement
 from backend.k8s import check_deployment_exists, instance_deployment_ref, run_kubectl
 from backend.models import ActionResult, InstancesResponse, ProvisionResponse
-from backend.services import provisioner_service
+from backend.services import instances_data, provisioner_service
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 router = APIRouter()
@@ -33,8 +33,8 @@ async def _background_sync_instance_status(instance_id: str) -> None:
         sb = ensure_supabase()
 
         # Get current status from DB
-        result = sb.table("instances").select("status").eq("instance_id", instance_id).single().execute()
-        current_status = result.data.get("status") if result.data else None
+        instance_row = instances_data.get_instance(sb, instance_id)
+        current_status = instance_row.get("status") if instance_row else None
 
         # Check if deployment exists
         k8s_start = time.perf_counter()
@@ -87,9 +87,9 @@ async def _background_sync_instance_status(instance_id: str) -> None:
 
         # Update database
         now = datetime.now(UTC).isoformat()
-        sb.table("instances").update({"status": actual_status, "kubernetes_synced_at": now, "updated_at": now}).eq(
-            "instance_id", instance_id
-        ).execute()
+        instances_data.update_instance(
+            sb, instance_id, {"status": actual_status, "kubernetes_synced_at": now, "updated_at": now}
+        )
 
         total_time = (time.perf_counter() - start) * 1000
         k8s_time = (time.perf_counter() - k8s_start) * 1000
@@ -115,10 +115,8 @@ async def list_user_instances(
     account_id = user["account_id"]
 
     db_start = time.perf_counter()
-    result = sb.table("instances").select("*").eq("account_id", account_id).execute()
+    instances = instances_data.get_instances_for_account(sb, account_id)
     db_time = (time.perf_counter() - db_start) * 1000
-
-    instances = result.data or []
 
     enhanced_instances: list[dict[str, Any]] = []
     for instance in instances:
@@ -247,19 +245,11 @@ async def _verify_instance_ownership_and_run(
     """Verify user owns instance and run the provisioner service action."""
     sb = ensure_supabase()
 
-    result = (
-        sb.table("instances")
-        .select("id,subscription_id")
-        .eq("instance_id", instance_id)
-        .eq("account_id", user["account_id"])
-        .limit(1)
-        .execute()
-    )
-    if not result.data:
+    instance = instances_data.get_owned_instance(sb, instance_id, user["account_id"])
+    if instance is None:
         raise HTTPException(status_code=404, detail="Instance not found or access denied")
 
     if require_active_subscription:
-        instance = result.data[0]
         sub_result = sb.table("subscriptions").select("*").eq("id", instance["subscription_id"]).limit(1).execute()
         if not sub_result.data:
             raise HTTPException(status_code=404, detail="Subscription not found")

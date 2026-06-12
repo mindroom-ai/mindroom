@@ -9,6 +9,7 @@ import logging
 from backend.deps import ensure_supabase
 from backend.entitlements import is_expired_trial, is_subscription_service_active
 from backend.k8s import run_kubectl, tenant_stop_deployment_refs
+from backend.services.instances_data import update_instance
 
 logger = logging.getLogger(__name__)
 RUNNING_INSTANCE_STATUSES = ["running", "provisioning", "restarting"]
@@ -136,9 +137,7 @@ async def cleanup_unentitled_instances() -> dict:
             instance_id = instance["instance_id"]
             error = await _stop_tenant_deployments(instance_id)
             if not error:
-                sb.table("instances").update({"status": "stopped", "updated_at": now_iso}).eq(
-                    "instance_id", instance_id
-                ).execute()
+                update_instance(sb, instance_id, {"status": "stopped", "updated_at": now_iso})
                 instances_stopped += 1
                 logger.info("Stopped instance %s because subscription %s is inactive", instance_id, subscription["id"])
             else:

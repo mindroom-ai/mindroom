@@ -22,7 +22,7 @@ from backend.models import (
     UpdateAccountStatusResponse,
 )
 from backend.pricing import PRICING_CONFIG_MODEL
-from backend.services import provisioner_service
+from backend.services import instances_data, provisioner_service
 from backend.utils.audit import create_audit_log
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -163,11 +163,10 @@ async def admin_provision_instance(
     sb = ensure_supabase()
 
     # Get instance details
-    result = sb.table("instances").select("*").eq("instance_id", str(instance_id)).execute()
-    if not result.data:
+    instance = instances_data.get_instance(sb, instance_id)
+    if instance is None:
         raise HTTPException(status_code=404, detail="Instance not found")
 
-    instance = result.data[0]
     if instance.get("status") not in ["deprovisioned", "error"]:
         raise HTTPException(status_code=400, detail="Instance must be deprovisioned or in error state to provision")
 
@@ -231,15 +230,13 @@ async def get_account_details(
         )
 
         # Get instances if exist
-        instances_result = (
-            sb.table("instances").select("*").eq("account_id", account_id).order("created_at", desc=True).execute()
-        )
+        instances = instances_data.get_instances_for_account(sb, account_id, newest_first=True)
 
         # Build response
         return {
             "account": account,
             "subscription": subscription_result.data[0] if subscription_result.data else None,
-            "instances": instances_result.data if instances_result.data else [],
+            "instances": instances,
         }
     except HTTPException:
         raise
@@ -336,12 +333,11 @@ async def get_dashboard_metrics(
                 {"date": date, "messages_sent": count} for date, count in sorted(by_date.items())
             ]
 
-        all_instances = sb.table("instances").select("status").execute()
+        all_instances = instances_data.list_instances(sb, columns="status")
         status_counts: dict[str, int] = {}
-        if all_instances.data:
-            for inst in all_instances.data:
-                status = inst.get("status", "unknown")
-                status_counts[status] = status_counts.get(status, 0) + 1
+        for inst in all_instances:
+            status = inst.get("status", "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
 
         audit_logs = (
             sb.table("audit_logs")
@@ -377,7 +373,7 @@ async def get_dashboard_metrics(
         return {
             "total_accounts": accounts.count or 0,
             "active_subscriptions": active_subs.count or 0,
-            "total_instances": len(all_instances.data) if all_instances.data else 0,
+            "total_instances": len(all_instances),
             "instances_by_status": instances_by_status,
             "subscription_revenue": float(mrr),
             "subscriptions_by_tier": subscriptions_by_tier,
@@ -560,8 +556,7 @@ async def admin_delete_account_complete(
     )
 
     # 1. First, get all instances for this account
-    instances_result = sb.table("instances").select("*").eq("account_id", account_id).execute()
-    instances = instances_result.data or []
+    instances = instances_data.get_instances_for_account(sb, account_id)
 
     # 2. Deprovision all instances
     for instance in instances:

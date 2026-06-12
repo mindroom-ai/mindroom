@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from backend.deps import ensure_supabase, verify_user
+from backend.services import instances_data
 
 router = APIRouter()
 
@@ -45,8 +46,7 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[
     subscriptions = subscription_result.data or []
 
     # Get instances
-    instance_result = sb.table("instances").select("*").eq("account_id", account_id).execute()
-    instances = instance_result.data or []
+    instances = instances_data.get_instances_for_account(sb, account_id)
 
     # Get usage metrics (last 90 days)
     usage_result = (

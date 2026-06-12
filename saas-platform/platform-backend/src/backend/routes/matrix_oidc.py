@@ -24,6 +24,7 @@ from backend.config import (
 )
 from backend.deps import _extract_bearer_token, ensure_supabase, limiter, verify_user
 from backend.entitlements import assert_instance_entitlement
+from backend.services import instances_data
 from cachetools import TTLCache
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
@@ -114,18 +115,10 @@ def _validate_redirect_uri(redirect_uri: str) -> str:
 
 
 def _load_owned_instance(instance_id: str, account_id: str) -> dict[str, Any]:
-    sb = ensure_supabase()
-    result = (
-        sb.table("instances")
-        .select("instance_id,subscription_id,account_id")
-        .eq("instance_id", instance_id)
-        .eq("account_id", account_id)
-        .limit(1)
-        .execute()
-    )
-    if not result.data:
+    instance = instances_data.get_owned_instance(ensure_supabase(), instance_id, account_id)
+    if instance is None:
         raise HTTPException(status_code=403, detail="Instance not found or access denied")
-    return result.data[0]
+    return instance
 
 
 def _assert_instance_subscription_allows_login(instance: dict[str, Any]) -> None:
