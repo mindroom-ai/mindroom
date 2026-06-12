@@ -6,24 +6,19 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from backend.config import PROVISIONER_API_KEY, logger
+from backend.config import logger
 from backend.deps import ensure_supabase, limiter, verify_user
 from backend.entitlements import assert_instance_entitlement
 from backend.k8s import check_deployment_exists, instance_deployment_ref, run_kubectl
 from backend.models import ActionResult, InstancesResponse, ProvisionResponse
-from backend.routes.provisioner import (
-    provision_instance,
-    restart_instance_provisioner,
-    start_instance_provisioner,
-    stop_instance_provisioner,
-)
+from backend.services import provisioner_service
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 router = APIRouter()
 
 # Track instances being synced to prevent duplicates
 _syncing_instances: set[str] = set()
-ProvisionerAction = Callable[[Request, int, str], Awaitable[dict[str, Any]]]
+InstanceAction = Callable[[int], Awaitable[dict[str, Any]]]
 
 
 async def _background_sync_instance_status(instance_id: str) -> None:
@@ -179,7 +174,9 @@ async def list_user_instances(
 @router.post("/my/instances/provision", response_model=ProvisionResponse)
 @limiter.limit("5/minute")  # Creating instances is expensive
 async def provision_user_instance(
-    request: Request, user: Annotated[dict, Depends(verify_user)], background_tasks: BackgroundTasks
+    request: Request,  # noqa: ARG001
+    user: Annotated[dict, Depends(verify_user)],
+    background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     """Provision an instance for the current user."""
     sb = ensure_supabase()
@@ -206,15 +203,14 @@ async def provision_user_instance(
             logger.info(
                 "Reprovisioning %s instance %s for user %s", existing.get("status"), existing["instance_id"], account_id
             )
-            return await provision_instance(
-                request=request,
+            return await provisioner_service.provision_instance(
+                sb,
                 data={
                     "subscription_id": subscription["id"],
                     "account_id": account_id,
                     "tier": subscription["tier"],
                     "instance_id": existing["instance_id"],  # Reuse the same instance ID
                 },
-                authorization=f"Bearer {PROVISIONER_API_KEY}",
                 background_tasks=background_tasks,
             )
 
@@ -233,24 +229,22 @@ async def provision_user_instance(
             "matrix_url": existing.get("matrix_server_url") or existing.get("matrix_url"),
         }
 
-    return await provision_instance(
-        request=request,
+    return await provisioner_service.provision_instance(
+        sb,
         data={"subscription_id": subscription["id"], "account_id": account_id, "tier": subscription["tier"]},
-        authorization=f"Bearer {PROVISIONER_API_KEY}",
         background_tasks=background_tasks,
     )
 
 
 # Helper function for user instance actions
-async def _verify_instance_ownership_and_proxy(
-    request: Request,
+async def _verify_instance_ownership_and_run(
     instance_id: int,
     user: dict,
-    provisioner_func: ProvisionerAction,
+    instance_action: InstanceAction,
     *,
     require_active_subscription: bool,
 ) -> dict[str, Any]:
-    """Verify user owns instance and proxy to provisioner."""
+    """Verify user owns instance and run the provisioner service action."""
     sb = ensure_supabase()
 
     result = (
@@ -271,37 +265,43 @@ async def _verify_instance_ownership_and_proxy(
             raise HTTPException(status_code=404, detail="Subscription not found")
         assert_instance_entitlement(sub_result.data[0], "run")
 
-    return await provisioner_func(request, instance_id, f"Bearer {PROVISIONER_API_KEY}")
+    return await instance_action(instance_id)
 
 
 @router.post("/my/instances/{instance_id}/start", response_model=ActionResult)
 @limiter.limit("10/minute")  # Control actions moderate rate
 async def start_user_instance(
-    request: Request, instance_id: int, user: Annotated[dict, Depends(verify_user)]
+    request: Request,  # noqa: ARG001
+    instance_id: int,
+    user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Start user's instance."""
-    return await _verify_instance_ownership_and_proxy(
-        request, instance_id, user, start_instance_provisioner, require_active_subscription=True
+    return await _verify_instance_ownership_and_run(
+        instance_id, user, provisioner_service.start_instance, require_active_subscription=True
     )
 
 
 @router.post("/my/instances/{instance_id}/stop", response_model=ActionResult)
 @limiter.limit("10/minute")  # Control actions moderate rate
 async def stop_user_instance(
-    request: Request, instance_id: int, user: Annotated[dict, Depends(verify_user)]
+    request: Request,  # noqa: ARG001
+    instance_id: int,
+    user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Stop user's instance."""
-    return await _verify_instance_ownership_and_proxy(
-        request, instance_id, user, stop_instance_provisioner, require_active_subscription=False
+    return await _verify_instance_ownership_and_run(
+        instance_id, user, provisioner_service.stop_instance, require_active_subscription=False
     )
 
 
 @router.post("/my/instances/{instance_id}/restart", response_model=ActionResult)
 @limiter.limit("10/minute")  # Control actions moderate rate
 async def restart_user_instance(
-    request: Request, instance_id: int, user: Annotated[dict, Depends(verify_user)]
+    request: Request,  # noqa: ARG001
+    instance_id: int,
+    user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Restart user's instance."""
-    return await _verify_instance_ownership_and_proxy(
-        request, instance_id, user, restart_instance_provisioner, require_active_subscription=True
+    return await _verify_instance_ownership_and_run(
+        instance_id, user, provisioner_service.restart_instance, require_active_subscription=True
     )
