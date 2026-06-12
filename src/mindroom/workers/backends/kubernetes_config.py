@@ -59,6 +59,7 @@ _READY_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["ready_timeout"
 _NAME_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["name_prefix"]
 _NODE_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["node_name"]
 _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["colocate_with_control_plane_node"]
+_RECONCILE_POD_TEMPLATES_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["reconcile_pod_templates"]
 _EXTRA_ENV_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"]
 _EXTRA_LABELS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_labels_json"]
 _EXTRA_ANNOTATIONS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_annotations_json"]
@@ -235,6 +236,7 @@ class KubernetesWorkerBackendConfig:
     resource_limits: dict[str, str]
     enable_service_links: bool
     auth_secret_name: str | None
+    reconcile_pod_templates: bool = True
     agent_vault: KubernetesAgentVaultConfig | None = None
 
     @classmethod
@@ -290,6 +292,7 @@ class KubernetesWorkerBackendConfig:
             resource_limits=resource_limits,
             enable_service_links=_read_bool_env(env, _ENABLE_SERVICE_LINKS_ENV, default=False),
             auth_secret_name=_read_env(env, _AUTH_SECRET_NAME_ENV) or None,
+            reconcile_pod_templates=_read_bool_env(env, _RECONCILE_POD_TEMPLATES_ENV, default=True),
             agent_vault=KubernetesAgentVaultConfig.from_env(env),
         )
 
@@ -335,6 +338,7 @@ def kubernetes_backend_config_signature(
         resource_limits_json,
         str(config.enable_service_links),
         config.auth_secret_name or "",
+        str(config.reconcile_pod_templates),
         config.agent_vault.signature() if config.agent_vault is not None else "",
         credentials_encryption_key_marker,
         auth_token or "",

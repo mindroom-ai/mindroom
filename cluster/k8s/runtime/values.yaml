@@ -293,6 +293,10 @@ workers:
     port: 8766
     readyTimeoutSeconds: 60
     idleTimeoutSeconds: 1800
+    # Recreate scaled-down worker Deployments whose pod template (image, env,
+    # resources) drifted from current config during each cleanup interval.
+    # Running workers are recreated on their next provisioning after scale-down.
+    reconcilePodTemplates: true
     namePrefix: mindroom-worker
     storageSubpathPrefix: workers
     enableServiceLinks: false

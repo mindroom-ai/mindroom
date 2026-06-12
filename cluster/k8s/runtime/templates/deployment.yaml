@@ -269,6 +269,8 @@ spec:
               value: {{ .Values.workers.kubernetes.idleTimeoutSeconds | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS
               value: {{ .Values.workers.kubernetes.readyTimeoutSeconds | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES
+              value: {{ .Values.workers.kubernetes.reconcilePodTemplates | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_NAME_PREFIX
               value: {{ .Values.workers.kubernetes.namePrefix | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS

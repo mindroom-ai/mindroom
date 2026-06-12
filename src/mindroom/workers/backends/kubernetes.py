@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -39,6 +40,8 @@ __all__ = [
 _COLD_START_GRACE_SECONDS = 1.5
 _WAITING_PROGRESS_INTERVAL_SECONDS = 5.0
 _PROGRESS_REPORTER_JOIN_TIMEOUT_SECONDS = 1.0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -517,6 +520,67 @@ class KubernetesWorkerBackend:
             deployment.metadata.annotations = annotations
             cleaned.append(self._handle_from_deployment(deployment, now=timestamp))
         return cleaned
+
+    def reconcile_drifted_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
+        """Recreate scaled-down worker Deployments whose pod template drifted from current config.
+
+        Running workers are left untouched; the ensure-time template-hash check
+        recreates them on their next provisioning after they scale down.
+        """
+        if not self.config.reconcile_pod_templates:
+            return []
+        timestamp = time.time() if now is None else now
+        reconciled: list[WorkerHandle] = []
+        for deployment in self._resources.list_deployments():
+            handle = self._handle_from_deployment(deployment, now=timestamp)
+            if handle.status != "idle" or int(deployment.spec.replicas or 0) != 0:
+                continue
+            worker_lock = self._worker_lock(handle.worker_key)
+            if not worker_lock.acquire(blocking=False):
+                continue
+            try:
+                refreshed = self._reconcile_worker_deployment(deployment, handle=handle, now=timestamp)
+            finally:
+                worker_lock.release()
+            if refreshed is not None:
+                reconciled.append(refreshed)
+        return reconciled
+
+    def _reconcile_worker_deployment(
+        self,
+        deployment: resources.KubernetesDeployment,
+        *,
+        handle: WorkerHandle,
+        now: float,
+    ) -> WorkerHandle | None:
+        annotations = dict(deployment.metadata.annotations or {})
+        private_agent_names = resources.parse_private_agent_names_annotation(annotations)
+        state_subpath = self._state_subpath(handle.worker_key)
+        try:
+            drifted = self._resources.deployment_template_drifted(
+                deployment,
+                worker_key=handle.worker_key,
+                worker_id=handle.worker_id,
+                state_subpath=state_subpath,
+                private_agent_names=private_agent_names,
+            )
+            if not drifted:
+                return None
+            self._resources.apply_deployment(
+                worker_key=handle.worker_key,
+                worker_id=handle.worker_id,
+                state_subpath=state_subpath,
+                annotations=annotations,
+                replicas=0,
+                private_agent_names=private_agent_names,
+            )
+        except WorkerBackendError:
+            logger.warning("Skipping pod-template reconciliation for worker %r", handle.worker_key, exc_info=True)
+            return None
+        refreshed = self._resources.read_deployment(handle.worker_id)
+        if refreshed is None:
+            return None
+        return self._handle_from_deployment(refreshed, now=now)
 
     def record_failure(
         self,
