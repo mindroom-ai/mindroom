@@ -101,7 +101,7 @@ class TestParseChatCompletionBody:
 
     def test_undecodable_body(self) -> None:
         """Bytes that cannot be decoded as detected encoding return 400."""
-        response = parse_chat_completion_body(b"\xff\xfe\xff{bad}")
+        response = parse_chat_completion_body(b"\xff\xff")
         assert isinstance(response, JSONResponse)
         assert response.status_code == 400
         assert _error_body(response)["message"] == "Invalid request body"
