@@ -208,7 +208,7 @@ class TestMemoryFacade:
 
     @pytest.mark.asyncio
     async def test_memory_instance_creation(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory) as mock_create:
             await add_agent_memory("Test content", "test_agent", storage_path, config)
             assert mock_create.call_args[0][0] == agent_state_root_path(storage_path, "test_agent")
 
@@ -217,7 +217,7 @@ class TestMemoryFacade:
 
     @pytest.mark.asyncio
     async def test_add_agent_memory(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             await add_agent_memory(
                 "Test memory content",
                 "test_agent",
@@ -243,7 +243,7 @@ class TestMemoryFacade:
         mock_memory.add.side_effect = Exception("Memory error")
 
         with (
-            patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory),
             pytest.raises(Exception, match="Memory error"),
         ):
             await add_agent_memory("Test content", "test_agent", storage_path, config)
@@ -255,7 +255,7 @@ class TestMemoryFacade:
         ]
         mock_memory.search.return_value = {"results": mock_results}
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             results = await search_agent_memories("calculation", "calculator", storage_path, config, limit=5)
 
             mock_memory.search.assert_called_once_with(
@@ -274,7 +274,7 @@ class TestMemoryFacade:
     ) -> None:
         mock_memory.search.return_value = {"results": [{"memory": "test"}]}
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             results = await search_agent_memories("query", "agent", storage_path, config)
             assert results == [{"memory": "test"}]
 
@@ -287,7 +287,7 @@ class TestMemoryFacade:
     ) -> None:
         mock_memory.search.return_value = [{"memory": "test"}]
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             results = await search_agent_memories("query", "agent", storage_path, config)
             assert results == []
 
@@ -300,7 +300,7 @@ class TestMemoryFacade:
     ) -> None:
         mock_memory.get.return_value = {"id": "mem-1", "memory": "Own memory", "user_id": "agent_test_agent"}
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             result = await get_agent_memory("mem-1", "test_agent", storage_path, config)
 
         assert result is not None
@@ -316,7 +316,7 @@ class TestMemoryFacade:
     ) -> None:
         mock_memory.get.return_value = {"id": "mem-1", "memory": "Other memory", "user_id": "agent_other_agent"}
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             result = await get_agent_memory("mem-1", "test_agent", storage_path, config)
 
         assert result is None
@@ -332,7 +332,7 @@ class TestMemoryFacade:
         config.teams = {"test_team": MockTeamConfig(agents=["helper", "test_agent"])}
         mock_memory.get.return_value = {"id": "mem-team", "memory": "Team memory", "user_id": "team_helper+test_agent"}
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             result = await get_agent_memory("mem-team", "test_agent", storage_path, config)
 
         assert result is not None
@@ -348,7 +348,7 @@ class TestMemoryFacade:
     ) -> None:
         mock_memory.get.return_value = {"id": "mem-member", "memory": "Member memory", "user_id": "agent_helper"}
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             result = await get_agent_memory("mem-member", ["helper", "test_agent"], storage_path, config)
 
         assert result is None
@@ -365,7 +365,7 @@ class TestMemoryFacade:
         config.memory.team_reads_member_memory = True
         mock_memory.get.return_value = {"id": "mem-member", "memory": "Member memory", "user_id": "agent_helper"}
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             result = await get_agent_memory("mem-member", ["helper", "test_agent"], storage_path, config)
 
         assert result is not None
@@ -382,7 +382,7 @@ class TestMemoryFacade:
         mock_memory.get.return_value = {"id": "mem-1", "memory": "Other memory", "user_id": "agent_other_agent"}
 
         with (
-            patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory),
             pytest.raises(ValueError, match="No memory found with id=mem-1"),
         ):
             await update_agent_memory("mem-1", "Updated content", "test_agent", storage_path, config)
@@ -399,7 +399,7 @@ class TestMemoryFacade:
         mock_memory.get.return_value = {"id": "mem-1", "memory": "Other memory", "user_id": "agent_other_agent"}
 
         with (
-            patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory),
             pytest.raises(ValueError, match="No memory found with id=mem-1"),
         ):
             await delete_agent_memory("mem-1", "test_agent", storage_path, config)
@@ -438,7 +438,7 @@ class TestMemoryFacade:
         agent_memories = [{"memory": "I previously calculated 2+2=4", "id": "1"}]
         mock_memory.search.return_value = {"results": agent_memories}
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             prompt_parts = await build_memory_prompt_parts(
                 "What is 3+3?",
                 "calculator",
@@ -461,7 +461,7 @@ class TestMemoryFacade:
     ) -> None:
         mock_memory.search.return_value = {"results": []}
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             prompt_parts = await build_memory_prompt_parts("Original prompt", "agent", storage_path, config)
 
         assert prompt_parts == MemoryPromptParts()
@@ -475,7 +475,7 @@ class TestMemoryFacade:
         config.memory.backend = "none"
 
         with patch(
-            "mindroom.memory.functions.create_memory_instance",
+            "mindroom.memory._backend.create_memory_instance",
             side_effect=AssertionError("disabled memory must not create Mem0"),
         ) as mock_create:
             prompt_parts = await build_memory_prompt_parts("Original prompt", "agent", storage_path, config)
@@ -485,7 +485,7 @@ class TestMemoryFacade:
 
     @pytest.mark.asyncio
     async def test_store_conversation_memory(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             await store_conversation_memory(
                 "What is 2+2?",
                 "calculator",
@@ -507,7 +507,7 @@ class TestMemoryFacade:
         storage_path: Path,
         config: Config,
     ) -> None:
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             await store_conversation_memory("", "agent", storage_path, "session123", config)
 
         mock_memory.add.assert_not_called()
@@ -521,7 +521,7 @@ class TestMemoryFacade:
         config.memory.backend = "none"
 
         with patch(
-            "mindroom.memory.functions.create_memory_instance",
+            "mindroom.memory._backend.create_memory_instance",
             side_effect=AssertionError("disabled memory must not create Mem0"),
         ) as mock_create:
             await store_conversation_memory("Remember this", "calculator", storage_path, "session123", config)
@@ -543,7 +543,7 @@ class TestMemoryFacade:
         storage_path: Path,
         config: Config,
     ) -> None:
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             await store_conversation_memory("What is 2+2?", "calculator", storage_path, "session123", config)
 
         assert mock_memory.add.call_count == 1
@@ -563,7 +563,7 @@ class TestMemoryFacade:
             make_visible_message(sender="@user:matrix.org", body="Yes please"),
         ]
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             await store_conversation_memory(
                 "What is 2+2?",
                 "calculator",
@@ -591,7 +591,7 @@ class TestMemoryFacade:
     ) -> None:
         team_agents = ["calculator", "data_analyst", "finance"]
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             await store_conversation_memory(
                 "Analyze our Q4 financial data",
                 team_agents,
@@ -618,7 +618,7 @@ class TestMemoryFacade:
         config.memory.backend = "file"
         config.agents["calculator"].memory_backend = "mem0"
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory) as mock_create:
             await store_conversation_memory("What is 2+2?", "calculator", storage_path, "session123", config)
 
         mock_create.assert_called_once_with(
@@ -639,7 +639,7 @@ class TestMemoryFacade:
         config.memory.file.path = str(storage_path / "memory-files")
         config.agents["calculator"].memory_backend = "mem0"
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory) as mock_create:
             await store_conversation_memory(
                 "Analyze our quarterly metrics",
                 ["calculator", "finance"],
@@ -673,7 +673,7 @@ class TestMemoryFacade:
         config.memory.backend = "none"
 
         with patch(
-            "mindroom.memory.functions.create_memory_instance",
+            "mindroom.memory._backend.create_memory_instance",
             side_effect=AssertionError("disabled memory must not create Mem0"),
         ) as mock_create:
             await add_agent_memory("Remember this", "general", storage_path, config)
@@ -709,7 +709,7 @@ class TestMemoryFacade:
 
         mock_memory.search = AsyncMock(side_effect=search_side_effect)
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             results = await search_agent_memories("test query", "calculator", storage_path, config, limit=5)
 
         assert len(results) == 2
@@ -728,7 +728,7 @@ class TestMemoryFacade:
         config.memory.file.path = str(storage_path / "memory-files")
         config.agents["general"].memory_backend = "file"
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory) as mock_create:
             await add_agent_memory("Remember this", "general", storage_path, config)
 
         mock_create.assert_not_called()
@@ -746,7 +746,7 @@ class TestMemoryFacade:
         config.memory.backend = "file"
         config.agents["general"].memory_backend = "mem0"
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory) as mock_create:
             await add_agent_memory("Remember this", "general", storage_path, config)
 
         mock_create.assert_called_once_with(
@@ -773,7 +773,7 @@ class TestMemoryFacade:
         calculator_memory_id = calculator_memories[0]["id"]
 
         with patch(
-            "mindroom.memory.functions.create_memory_instance",
+            "mindroom.memory._backend.create_memory_instance",
             side_effect=AssertionError("Mem0 should not be used for file-backed team context"),
         ):
             allowed = await get_agent_memory(

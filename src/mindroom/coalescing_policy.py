@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from .commands.parsing import command_parser
 from .dispatch_handoff import DispatchEvent, PreparedTextEvent, is_media_dispatch_event
 from .dispatch_source import (
     IMAGE_SOURCE_KIND,
@@ -25,7 +24,6 @@ class QueueKind(enum.Enum):
     """Dispatch behavior for one queued event."""
 
     NORMAL = "normal"
-    COMMAND = "command"
     BYPASS = "bypass"
 
 
@@ -53,21 +51,6 @@ def is_coalescing_exempt_source_kind(
     return source_kind_bypasses_coalescing(_effective_source_kind(event, fallback_source_kind))
 
 
-def _is_command_event(
-    event: DispatchEvent,
-    *,
-    fallback_source_kind: str | None = None,
-) -> bool:
-    """Return whether a dispatch event should bypass coalescing as a command."""
-    if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
-        return False
-    if fallback_source_kind == VOICE_SOURCE_KIND or is_voice_event(event):
-        return False
-    if _effective_source_kind(event, fallback_source_kind) in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND}:
-        return False
-    return command_parser.parse(event.body) is not None
-
-
 def pending_has_only_text(pending_events: list[PendingEvent]) -> bool:
     """Return whether every pending event is text-like."""
     return bool(pending_events) and all(
@@ -80,14 +63,14 @@ def pending_has_room_scope_source(pending_events: list[PendingEvent]) -> bool:
     return any(_pending_event_allows_room_scope_batching(pending_event) for pending_event in pending_events)
 
 
-def pending_event_requires_solo_batch(pending_event: PendingEvent) -> bool:
+def _pending_event_requires_solo_batch(pending_event: PendingEvent) -> bool:
     """Return whether a pending event must dispatch without neighbors."""
     return any(item.requires_solo_batch for item in pending_event.dispatch_metadata)
 
 
 def pending_events_require_solo_batch(pending_events: list[PendingEvent]) -> bool:
     """Return whether any pending event in a group requires solo dispatch."""
-    return any(pending_event_requires_solo_batch(pending_event) for pending_event in pending_events)
+    return any(_pending_event_requires_solo_batch(pending_event) for pending_event in pending_events)
 
 
 def _pending_event_allows_room_scope_batching(pending_event: PendingEvent) -> bool:
@@ -104,10 +87,8 @@ def source_or_event_allows_room_scope_batching(
 
 def queue_kind(pending_event: PendingEvent) -> QueueKind:
     """Return the dispatch behavior for one resolved pending event."""
-    if pending_event_requires_solo_batch(pending_event):
+    if _pending_event_requires_solo_batch(pending_event):
         return QueueKind.BYPASS
     if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
         return QueueKind.BYPASS
-    if _is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
-        return QueueKind.COMMAND
     return QueueKind.NORMAL

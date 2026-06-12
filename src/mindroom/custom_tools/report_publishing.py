@@ -13,7 +13,7 @@ from mindroom.custom_tools.dynamic_workflow_context import (
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
-from mindroom.dynamic_workflows.store import DynamicWorkflowError
+from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.report_publishing.store import (
     ARTIFACT_KIND_STATIC_SITE,
     PublishableReport,

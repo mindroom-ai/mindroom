@@ -137,7 +137,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Mock the methods needed for regeneration
     with (
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
-        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
     ):
         # Process the redelivered edit event
         await bot._on_message(room, edit_event)
@@ -220,7 +220,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     # Mock methods
     with (
         patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
-        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
     ):
         # Process the redelivered message
         await bot._on_message(room, message_event)

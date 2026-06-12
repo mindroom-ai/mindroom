@@ -1,5 +1,6 @@
 """Test configuration and fixtures for MindRoom tests."""
 
+import asyncio
 import os
 import re
 import shutil
@@ -31,6 +32,7 @@ from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history import prepare_history_for_run as prepare_history_for_run_for_test
 from mindroom.hooks import MessageEnvelope
+from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -237,9 +239,24 @@ def requires_linux(
 
 
 async def drain_coalescing(*bots: RuntimeBot) -> None:
-    """Run queued coalescing dispatch before asserting post-dispatch effects."""
+    """Drain gate batches and detached responses until both are quiescent.
+
+    A detached response settling during the runner drain can release its
+    lifecycle lock and flush a busy-conversation backlog into the gate, so a
+    single gate-then-runner pass is not a reliable barrier.
+    """
     for bot in bots:
-        await bot._coalescing_gate.drain_all()
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        while True:
+            # Concurrently: the gate drain may hold a busy conversation's
+            # backlog until its detached response goes idle, which only the
+            # runner drain settles.
+            await asyncio.gather(
+                bot._coalescing_gate.drain_all(),
+                runner.drain_inbox_responses(),
+            )
+            if not runner._inbox_response_tasks and not bot._coalescing_gate._gates:
+                break
 
 
 def _wait_for_postgres_container(database_url: str) -> None:
@@ -1003,6 +1020,15 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         rebuilt_changes["turn_store"] = bot._turn_store
     if "edit_regenerator" not in rebuilt_changes:
         rebuilt_changes["edit_regenerator"] = bot._edit_regenerator
+    if "ingress" not in rebuilt_changes:
+        rebuilt_changes["ingress"] = IngressValidator(
+            replace(
+                bot._ingress_validator.deps,
+                turn_store=rebuilt_changes["turn_store"],
+                turn_policy=rebuilt_changes["turn_policy"],
+            ),
+        )
+    bot._ingress_validator = rebuilt_changes["ingress"]
     rebuilt = TurnController(replace(controller.deps, **rebuilt_changes))
     bot._turn_controller = rebuilt
     edit_changes = {
@@ -1219,6 +1245,6 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
     else:
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         ):
             yield

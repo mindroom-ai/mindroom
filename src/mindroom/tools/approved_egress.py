@@ -1,4 +1,9 @@
-"""Approved worker egress tool."""
+"""Approved worker egress tool.
+
+Hostname validation, the static allowlist, and grant-subject resolution are
+owned by ``mindroom.egress.policy``; this module only drives the approval
+flow against the egress proxy's policy API.
+"""
 
 from __future__ import annotations
 
@@ -7,50 +12,35 @@ import ipaddress
 import json
 import os
 import unicodedata
-from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from urllib import error, parse, request
 
 from agno.tools import Toolkit
 
+from mindroom.egress.policy import (
+    canonical_hostname,
+    is_hostname_allowed,
+    load_static_allowlist,
+    resolve_grant_subject,
+    resolve_worker_egress_policy,
+)
 from mindroom.tool_system.metadata import SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
-from mindroom.tool_system.worker_routing import resolve_worker_key
 
 if TYPE_CHECKING:
     from http.client import HTTPMessage
     from typing import IO
 
+    from mindroom.egress.policy import EgressGrantSubject
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _DEFAULT_MAX_TTL_SECONDS = 6 * 60 * 60
 _DEFAULT_POLICY_API_URL = "http://mindroom-egress-proxy:8080"
-_DEFAULT_ALLOWLIST_PATH = "/etc/mindroom-egress/allowed-domains.txt"
 _MAX_ALLOWLIST_ENTRIES_IN_TOOL_DESCRIPTION = 80
 _MAX_REASON_CHARS = 500
-_MAX_DNS_NAME_LENGTH = 253
-_MAX_DNS_LABEL_LENGTH = 63
-_MIN_DNS_LABELS = 2
-_FORBIDDEN_HOSTNAMES = {
-    "localhost",
-    "metadata.google.internal",
-}
-_FORBIDDEN_HOST_SUFFIXES = (
-    ".localhost",
-    ".svc",
-    ".svc.cluster.local",
-    ".cluster.local",
-)
-
-
-@dataclass(frozen=True, slots=True)
-class _GrantSubject:
-    subject_type: str
-    subject: str
 
 
 def _env_int(name: str, default: int) -> int:
@@ -64,26 +54,8 @@ def _env_int(name: str, default: int) -> int:
         raise RuntimeError(msg) from exc
 
 
-def _static_allowlist_entries() -> list[str]:
-    inline = os.environ.get("MINDROOM_APPROVED_EGRESS_ALLOWLIST", "").strip()
-    text = inline.replace(",", "\n") if inline else ""
-    if not text:
-        allowlist_path = (
-            os.environ.get("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH")
-            or os.environ.get("MINDROOM_EGRESS_ALLOWLIST_PATH")
-            or _DEFAULT_ALLOWLIST_PATH
-        ).strip()
-        if allowlist_path:
-            try:
-                text = Path(allowlist_path).read_text(encoding="utf-8")
-            except OSError:
-                text = ""
-    entries = (line for raw in text.splitlines() if (line := raw.split("#", 1)[0].strip()))
-    return list(dict.fromkeys(entries))
-
-
 def _static_allowlist_description() -> str:
-    entries = _static_allowlist_entries()
+    entries = load_static_allowlist()
     if not entries:
         return (
             "Static egress allowlist: unavailable when this tool loaded. "
@@ -105,93 +77,6 @@ def _request_network_access_description() -> str:
         "Use this only when the worker needs a hostname that is not already allowed.\n\n"
         f"{_static_allowlist_description()}"
     )
-
-
-def _raw_hostname(value: str) -> str:
-    if not isinstance(value, str):
-        msg = "hostname must be a string"
-        raise TypeError(msg)
-    raw = value.strip().rstrip(".")
-    if not raw:
-        msg = "hostname must not be empty"
-        raise ValueError(msg)
-    if "://" in raw or any(part in raw for part in ("/", "?", "#", "@")):
-        msg = "hostname must not include a scheme, path, query, or credentials"
-        raise ValueError(msg)
-    if "*" in raw:
-        msg = "hostname wildcards are not supported"
-        raise ValueError(msg)
-    if ":" in raw:
-        msg = "hostname must not include a port"
-        raise ValueError(msg)
-    if len(raw) > _MAX_DNS_NAME_LENGTH:
-        msg = "hostname is too long"
-        raise ValueError(msg)
-    return raw
-
-
-def _reject_ip_literal(raw: str) -> None:
-    try:
-        ipaddress.ip_address(raw)
-    except ValueError:
-        return
-    msg = "IP literals are not valid egress hostnames"
-    raise ValueError(msg)
-
-
-def _idna_hostname(raw: str) -> str:
-    try:
-        return raw.encode("idna").decode("ascii").lower()
-    except UnicodeError as exc:
-        msg = "hostname is not valid IDNA"
-        raise ValueError(msg) from exc
-
-
-def _validate_dns_labels(normalized: str) -> None:
-    labels = normalized.split(".")
-    if len(labels) < _MIN_DNS_LABELS:
-        msg = "hostname must be a fully-qualified external DNS name"
-        raise ValueError(msg)
-    if len(normalized) > _MAX_DNS_NAME_LENGTH or any(not label for label in labels):
-        msg = "hostname is not a valid DNS name"
-        raise ValueError(msg)
-    for label in labels:
-        if len(label) > _MAX_DNS_LABEL_LENGTH or label.startswith("-") or label.endswith("-"):
-            msg = "hostname is not a valid DNS name"
-            raise ValueError(msg)
-        if not all(char.isalnum() or char == "-" for char in label):
-            msg = "hostname contains unsupported characters"
-            raise ValueError(msg)
-
-
-def _reject_internal_hostname(normalized: str) -> None:
-    if normalized in _FORBIDDEN_HOSTNAMES or normalized.endswith(_FORBIDDEN_HOST_SUFFIXES):
-        msg = "hostname points at an internal name"
-        raise ValueError(msg)
-
-
-def _canonical_hostname(value: str) -> str:
-    raw = _raw_hostname(value)
-    _reject_ip_literal(raw)
-    normalized = _idna_hostname(raw)
-    _validate_dns_labels(normalized)
-    _reject_internal_hostname(normalized)
-    return normalized
-
-
-def _static_allowlist_allows(host: str) -> bool:
-    """Return whether one canonical hostname matches the static allowlist."""
-    for entry in _static_allowlist_entries():
-        try:
-            if entry.startswith("."):
-                base = _canonical_hostname(entry[1:])
-                if host == base or host.endswith(f".{base}"):
-                    return True
-            elif host == _canonical_hostname(entry):
-                return True
-        except ValueError:
-            continue
-    return False
 
 
 def _is_plain_http_api_host_allowed(hostname: str) -> bool:
@@ -250,20 +135,15 @@ def _effective_ttl_seconds(requested_ttl_seconds: int) -> int:
     return max(1, min(requested_ttl_seconds, max_ttl))
 
 
-def _grant_subject(context: ToolRuntimeContext) -> _GrantSubject:
+def _grant_subject(context: ToolRuntimeContext) -> EgressGrantSubject:
     agent_name = context.agent_name
     scope = context.config.get_agent_execution_scope(agent_name)
-    if scope == "user_agent":
-        identity = build_execution_identity_from_runtime_context(context)
-        worker_key = resolve_worker_key("user_agent", identity, agent_name=agent_name)
-        if worker_key is None:
-            msg = "could not resolve the user-agent worker key for this request"
-            raise RuntimeError(msg)
-        return _GrantSubject(subject_type="worker_key", subject=worker_key)
-    if scope == "user":
-        msg = "approved egress is not supported for worker_scope=user"
-        raise RuntimeError(msg)
-    return _GrantSubject(subject_type="agent", subject=agent_name)
+    execution_identity = build_execution_identity_from_runtime_context(context) if scope == "user_agent" else None
+    return resolve_grant_subject(
+        agent_name=agent_name,
+        worker_scope=scope,
+        execution_identity=execution_identity,
+    )
 
 
 class _NoRedirectHandler(request.HTTPRedirectHandler):
@@ -361,8 +241,8 @@ class _ApprovedEgressTools(Toolkit):
         reason: str,
     ) -> str:
         """Request temporary worker egress to one exact external hostname."""
-        host = _canonical_hostname(hostname)
-        if _static_allowlist_allows(host):
+        host = canonical_hostname(hostname)
+        if is_hostname_allowed(host, resolve_worker_egress_policy()):
             return f"{host} is already allowed by the static egress allowlist. No temporary grant was created."
         normalized_reason = _normalize_reason(reason)
         requested_ttl_seconds = ttl_minutes * 60

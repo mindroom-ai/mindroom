@@ -86,6 +86,7 @@ from .delivery_gateway import (
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, InboundTurnNormalizerDeps
+from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
@@ -380,6 +381,8 @@ class AgentBot:
             upload_grace_seconds=lambda: self.config.defaults.coalescing.upload_grace_ms / 1000,
             is_shutting_down=lambda: self._sync_shutting_down,
             wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
+            room_scope_is_single_conversation=self._room_scope_is_single_conversation,
+            dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
@@ -511,6 +514,15 @@ class AgentBot:
                 matrix_id=runtime_matrix_id,
             ),
         )
+        self._ingress_validator = IngressValidator(
+            IngressValidatorDeps(
+                runtime=self._runtime_view,
+                runtime_paths=self.runtime_paths,
+                matrix_id=runtime_matrix_id,
+                turn_store=self._turn_store,
+                turn_policy=self._turn_policy,
+            ),
+        )
         self._turn_controller = TurnController(
             TurnControllerDeps(
                 runtime=self._runtime_view,
@@ -529,6 +541,7 @@ class AgentBot:
                 turn_store=self._turn_store,
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
+                ingress=self._ingress_validator,
                 restart_retry=self._restart_retry_queue,
             ),
         )
@@ -538,6 +551,21 @@ class AgentBot:
         if not is_active_follow_up_coalescing_key(key):
             return
         await self._response_runner.wait_for_thread_response_idle(key.room_id, key.thread_id)
+
+    def _coalesced_dispatch_allowed_now(self, key: CoalescingKey) -> bool:
+        """Return whether one coalescing key's target has no active response right now."""
+        return key.thread_id not in self._response_runner.active_thread_ids_for_room(key.room_id)
+
+    def _room_scope_is_single_conversation(self, room_id: str) -> bool:
+        """Return whether this agent treats the whole room as one conversation."""
+        return (
+            self.config.get_entity_thread_mode(
+                self.agent_name,
+                self.runtime_paths,
+                room_id=room_id,
+            )
+            == "room"
+        )
 
     def _rebuild_runtime_components_after_login_if_identity_changed(self, matrix_id_before_login: MatrixID) -> None:
         """Refresh startup collaborators when Matrix login authenticates as a different user."""
@@ -1492,11 +1520,13 @@ class AgentBot:
             await self._cancel_deferred_overdue_task_drain()
         background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
         drain_result = await self._coalescing_gate.drain_all(ready_timeout_seconds=5.0)
+        responses_drained = await self._response_runner.drain_inbox_responses(cancel_after_seconds=5.0)
         post_drain_background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
         callback_failure_count = self._runtime_view.callback_failure_count
         if (
             background_tasks_completed
             and drain_result.completed
+            and responses_drained
             and post_drain_background_tasks_completed
             and callback_failure_count == 0
             and self._sync_trust_state is SyncTrustState.CERTIFIED
@@ -1505,6 +1535,7 @@ class AgentBot:
         elif (
             not background_tasks_completed
             or not drain_result.completed
+            or not responses_drained
             or not post_drain_background_tasks_completed
             or callback_failure_count
         ):
@@ -1566,7 +1597,7 @@ class AgentBot:
         early_reservation_owner = None
         approval_reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
         if approval_reply_to_event_id is not None and is_process_active_approval_card(approval_reply_to_event_id):
-            requester_user_id = self._turn_controller._requester_user_id(
+            requester_user_id = self._ingress_validator.requester_user_id(
                 sender=event.sender,
                 source=event.source,
             )
@@ -1713,7 +1744,7 @@ class AgentBot:
             self.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
             return
 
-        requester_user_id = self._turn_controller._requester_user_id(
+        requester_user_id = self._ingress_validator.requester_user_id(
             sender=event.sender,
             source=event.source,
         )

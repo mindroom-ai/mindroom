@@ -2,43 +2,77 @@
 
 Exposes MindRoom agents as an OpenAI-compatible API so any chat frontend
 (LibreChat, Open WebUI, LobeChat, etc.) can use them as selectable "models".
+
+Route handlers orchestrate: parse (``openai_request_parsing``) ->
+resolve identity -> core execution seam (``ai.py`` / ``teams.py``) ->
+protocol formatting (``openai_streaming_protocol``).
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
-import re
 import time
+import weakref
 from contextlib import ExitStack
-from dataclasses import dataclass, field
-from html import escape
-from typing import TYPE_CHECKING, Annotated, Literal, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Annotated, cast
 from uuid import uuid4
 
-from agno.run.agent import (
-    RunCompletedEvent,
-    RunContentEvent,
-    RunErrorEvent,
-    RunOutput,
-    ToolCallCompletedEvent,
-    ToolCallStartedEvent,
-)
+from agno.run.agent import RunCompletedEvent, RunContentEvent, RunErrorEvent, RunOutput
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
-from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
-from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from mindroom.agent_run_context import prepend_knowledge_availability_notice
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
+from mindroom.api.openai_request_parsing import (
+    AUTO_MODEL_NAME,
+    RESERVED_MODEL_NAMES,
+    TEAM_MODEL_PREFIX,
+    openai_compatible_agent_names,
+    parse_chat_completion_body,
+    validate_chat_request,
+)
+from mindroom.api.openai_request_parsing import (
+    ChatMessage as _ChatMessage,
+)
+from mindroom.api.openai_request_parsing import (
+    convert_messages as _convert_messages,
+)
+from mindroom.api.openai_request_parsing import (
+    derive_session_id as _derive_session_id,
+)
+from mindroom.api.openai_request_parsing import (
+    openai_incompatible_agents as _openai_incompatible_agents,
+)
+from mindroom.api.openai_streaming_protocol import (
+    SSE_DONE,
+    CompletionStreamState,
+    extract_agent_stream_failure,
+    extract_stream_text,
+    finalize_pending_tools,
+    format_stream_tool_event,
+    new_completion_id,
+    sse_chunk,
+)
+from mindroom.api.openai_streaming_protocol import (
+    OpenAIJSONResponse as _OpenAIJSONResponse,
+)
+from mindroom.api.openai_streaming_protocol import (
+    OpenAIStreamingResponse as _OpenAIStreamingResponse,
+)
+from mindroom.api.openai_streaming_protocol import (
+    error_response as _error_response,
+)
+from mindroom.api.openai_streaming_protocol import (
+    is_error_response as _is_error_response,
+)
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.execution_preparation import render_prepared_team_messages_text
 from mindroom.history import ScopeSessionContext, close_team_runtime_state_dbs, open_bound_scope_session_context
@@ -49,7 +83,6 @@ from mindroom.llm_request_logging import (
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.routing import suggest_responder
 from mindroom.teams import (
     TeamMode,
@@ -60,18 +93,12 @@ from mindroom.teams import (
     materialize_exact_team_members,
     prepare_materialized_team_execution,
 )
-from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    WorkerScope,
     build_tool_execution_identity,
     stream_with_tool_execution_identity,
     tool_execution_identity,
 )
-
-_AUTO_MODEL_NAME = "auto"
-_TEAM_MODEL_PREFIX = "team/"
-_RESERVED_MODEL_NAMES = {_AUTO_MODEL_NAME}
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
@@ -79,108 +106,29 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.knowledge.knowledge import Knowledge
-    from agno.models.response import ToolExecution
     from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
     from agno.team import Team
-    from starlette.types import Receive, Scope, Send
 
+    from mindroom.api.openai_request_parsing import ChatCompletionRequest
+    from mindroom.api.openai_streaming_protocol import ToolStreamState
     from mindroom.config.main import Config
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
-_OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES: frozenset[WorkerScope | None] = frozenset({None, "shared"})
-_OPENAI_COMPLETION_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
-
-
-@dataclass(slots=True)
-class _ToolStreamState:
-    """Track per-stream IDs so tool started/completed updates can be reconciled client-side."""
-
-    next_tool_id: int = 1
-    tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
-
-
-async def _run_openai_response_backgrounds(
-    *,
-    completed: bool,
-    response_error: BaseException | None,
-    completion_background: BackgroundTask | None,
-    always_background: BackgroundTask | None,
-) -> None:
-    """Run completion-scoped and always-run OpenAI response backgrounds."""
-    finalizer_error: BaseException | None = None
-    if always_background is not None:
-        try:
-            await always_background()
-        except BaseException as error:
-            finalizer_error = error
-
-    background_error: BaseException | None = None
-    if completed and completion_background is not None:
-        try:
-            await completion_background()
-        except BaseException as error:
-            background_error = error
-
-    if response_error is not None:
-        raise response_error
-    if background_error is not None:
-        raise background_error
-    if finalizer_error is not None:
-        raise finalizer_error
-
-
-class _OpenAIJSONResponse(JSONResponse):
-    """JSON response with separate completion-scoped and always-run finalizers."""
-
-    always_background: BackgroundTask | None = None
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        completion_background = self.background
-        self.background = None
-        completed = False
-        response_error: BaseException | None = None
-        try:
-            await super().__call__(scope, receive, send)
-        except BaseException as error:
-            response_error = error
-        else:
-            completed = True
-        await _run_openai_response_backgrounds(
-            completed=completed,
-            response_error=response_error,
-            completion_background=completion_background,
-            always_background=self.always_background,
-        )
-
-
-class _OpenAIStreamingResponse(StreamingResponse):
-    """Streaming response with completion-aware compaction and always-run finalizers."""
-
-    always_background: BackgroundTask | None = None
-    completion_predicate: Callable[[], bool] | None = None
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        completion_background = self.background
-        self.background = None
-        completed = False
-        response_error: BaseException | None = None
-        try:
-            await super().__call__(scope, receive, send)
-        except BaseException as error:
-            response_error = error
-            completed = self.completion_predicate() if self.completion_predicate is not None else False
-        else:
-            completed = self.completion_predicate() if self.completion_predicate is not None else True
-        await _run_openai_response_backgrounds(
-            completed=completed,
-            response_error=response_error,
-            completion_background=completion_background,
-            always_background=self.always_background,
-        )
+# Per-session completion locks keep same-session /v1 completions from
+# interleaving Agno session writes and post-response history compaction.
+# The mapping holds weak references: every in-flight request keeps a strong
+# reference to its lock (locally and via the attached response finalizer),
+# so an entry lives exactly as long as some request for that session is
+# still running and the cache is bounded by in-flight concurrency.
+_OPENAI_COMPLETION_LOCKS: weakref.WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 
 def _openai_completion_lock(
@@ -189,18 +137,12 @@ def _openai_completion_lock(
     agent_name: str,
     session_id: str,
 ) -> asyncio.Lock:
+    """Return the shared lock serializing completions for one agent session."""
     key = (str(runtime_paths.storage_root), agent_name, session_id)
     lock = _OPENAI_COMPLETION_LOCKS.get(key)
-    if lock is not None:
-        return lock
-    if len(_OPENAI_COMPLETION_LOCKS) >= 100:
-        for candidate_key, candidate_lock in list(_OPENAI_COMPLETION_LOCKS.items()):
-            if len(_OPENAI_COMPLETION_LOCKS) < 100:
-                break
-            if not candidate_lock.locked():
-                _OPENAI_COMPLETION_LOCKS.pop(candidate_key, None)
-    lock = asyncio.Lock()
-    _OPENAI_COMPLETION_LOCKS[key] = lock
+    if lock is None:
+        lock = asyncio.Lock()
+        _OPENAI_COMPLETION_LOCKS[key] = lock
     return lock
 
 
@@ -269,153 +211,9 @@ def _load_config(
     return config, committed_runtime_paths
 
 
-def _openai_compatible_agent_names(config: Config) -> list[str]:
-    delegation_closures: dict[str, frozenset[str]] = {}
-    return [
-        agent_name
-        for agent_name in config.agents
-        if agent_name != ROUTER_AGENT_NAME
-        and not _openai_incompatible_agent_closure(agent_name, config, delegation_closures=delegation_closures)
-    ]
-
-
-def _openai_incompatible_agents(agent_names: list[str], config: Config) -> list[str]:
-    delegation_closures: dict[str, frozenset[str]] = {}
-    return [
-        agent_name
-        for agent_name in agent_names
-        if agent_name in config.agents
-        and _openai_incompatible_agent_closure(agent_name, config, delegation_closures=delegation_closures)
-    ]
-
-
-def _openai_incompatible_agent_closure(
-    agent_name: str,
-    config: Config,
-    *,
-    delegation_closures: dict[str, frozenset[str]],
-) -> frozenset[str]:
-    """Return the unsupported agents reachable from one /v1 agent request."""
-    return frozenset(
-        target_name
-        for target_name in config.get_agent_delegation_closure(
-            agent_name,
-            closures=delegation_closures,
-        )
-        if target_name in config.agents
-        and config.get_agent_execution_scope(target_name) not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
-    )
-
-
-def _unsupported_worker_scope_error(agent_names: list[str], config: Config) -> JSONResponse:
-    invalid_agents = ", ".join(agent_names)
-    delegation_closures: dict[str, frozenset[str]] = {}
-    invalid_scope_agents = {
-        target_name
-        for agent_name in agent_names
-        for target_name in _openai_incompatible_agent_closure(
-            agent_name,
-            config,
-            delegation_closures=delegation_closures,
-        )
-    }
-    invalid_execution_scopes = {
-        config.get_agent_execution_scope(agent_name)
-        for agent_name in invalid_scope_agents
-        if agent_name in config.agents
-    }
-    has_private_agents = any(
-        config.get_agent(agent_name).private is not None
-        for agent_name in invalid_scope_agents
-        if agent_name in config.agents
-    )
-    message = (
-        "OpenAI-compatible chat completions currently support only shared agents that are "
-        "unscoped or configured with worker_scope=shared, including all delegation targets."
-    )
-    if invalid_execution_scopes & {"user", "user_agent"}:
-        message += " Shared agents with worker_scope=user and worker_scope=user_agent are not yet supported on /v1."
-    if has_private_agents:
-        message += " Requester-private agents configured with private.per are not yet supported on /v1."
-    if invalid_scope_agents and set(agent_names) != invalid_scope_agents:
-        message += f" Delegation reaches unsupported agents: {', '.join(sorted(invalid_scope_agents))}."
-
-    return _error_response(
-        400,
-        f"{message} Unsupported agents: {invalid_agents}",
-        param="model",
-        code="unsupported_worker_scope",
-    )
-
-
-def _validate_team_model_request(team_name: str, config: Config) -> JSONResponse | None:
-    if not config.teams or team_name not in config.teams:
-        return _error_response(
-            404,
-            f"Team '{team_name}' not found",
-            param="model",
-            code="model_not_found",
-        )
-    invalid_agents = _openai_incompatible_agents(config.teams[team_name].agents, config)
-    if invalid_agents:
-        return _unsupported_worker_scope_error(invalid_agents, config)
-    return None
-
-
-def _validate_agent_model_request(agent_name: str, config: Config) -> JSONResponse | None:
-    if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME or agent_name in _RESERVED_MODEL_NAMES:
-        return _error_response(
-            404,
-            f"Model '{agent_name}' not found",
-            param="model",
-            code="model_not_found",
-        )
-    invalid_agents = _openai_incompatible_agents([agent_name], config)
-    if invalid_agents:
-        return _unsupported_worker_scope_error(invalid_agents, config)
-    return None
-
-
 # ---------------------------------------------------------------------------
-# Pydantic models
+# Response models
 # ---------------------------------------------------------------------------
-
-
-class _ChatMessage(BaseModel):
-    """A single message in the chat conversation."""
-
-    role: Literal["system", "developer", "user", "assistant", "tool"]
-    content: str | list[dict] | None = None
-
-
-class _ChatCompletionRequest(BaseModel):
-    """OpenAI-compatible chat completion request."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    model: str
-    messages: list[_ChatMessage]
-    stream: bool = False
-    user: str | None = None
-    # Accepted but ignored — agent's model config controls these:
-    temperature: float | None = None
-    max_tokens: int | None = None
-    max_completion_tokens: int | None = None
-    stop: str | list[str] | None = None
-    n: int | None = None
-    top_p: float | None = None
-    frequency_penalty: float | None = None
-    presence_penalty: float | None = None
-    seed: int | None = None
-    response_format: dict | None = None
-    tools: list | None = None
-    tool_choice: str | dict | None = None
-    stream_options: dict | None = None
-    logprobs: bool | None = None
-    logit_bias: dict | None = None
-
-
-# --- Non-streaming response models ---
 
 
 class _ChatCompletionChoice(BaseModel):
@@ -446,31 +244,6 @@ class _ChatCompletionResponse(BaseModel):
     system_fingerprint: str | None = None
 
 
-# --- Streaming response models ---
-
-
-class _ChatCompletionChunkChoice(BaseModel):
-    """A single choice in a streaming chunk."""
-
-    index: int = 0
-    delta: dict
-    finish_reason: str | None = None
-
-
-class _ChatCompletionChunk(BaseModel):
-    """A single SSE chunk in a streaming response."""
-
-    id: str
-    object: str = "chat.completion.chunk"
-    created: int
-    model: str
-    choices: list[_ChatCompletionChunkChoice]
-    system_fingerprint: str | None = None
-
-
-# --- Model listing ---
-
-
 class _ModelObject(BaseModel):
     """A model (agent) entry for the /v1/models response."""
 
@@ -489,41 +262,9 @@ class _ModelListResponse(BaseModel):
     data: list[_ModelObject]
 
 
-# --- Error response ---
-
-
-class _OpenAIError(BaseModel):
-    """OpenAI-compatible error detail."""
-
-    message: str
-    type: str
-    param: str | None = None
-    code: str | None = None
-
-
-class _OpenAIErrorResponse(BaseModel):
-    """OpenAI-compatible error wrapper."""
-
-    error: _OpenAIError
-
-
 # ---------------------------------------------------------------------------
-# Helpers
+# Request helpers
 # ---------------------------------------------------------------------------
-
-
-def _error_response(
-    status_code: int,
-    message: str,
-    error_type: str = "invalid_request_error",
-    param: str | None = None,
-    code: str | None = None,
-) -> JSONResponse:
-    """Return an OpenAI-style error response."""
-    body = _OpenAIErrorResponse(
-        error=_OpenAIError(message=message, type=error_type, param=param, code=code),
-    )
-    return _OpenAIJSONResponse(status_code=status_code, content=body.model_dump())
 
 
 def _authenticate_request(
@@ -562,200 +303,22 @@ def _authenticate_request(
     return None
 
 
-def _is_error_response(text: str) -> bool:
-    """Detect error strings returned by ai_response() / stream_agent_response().
-
-    Checks for:
-    - Emoji-prefixed errors from get_user_friendly_error_message()
-    - [agent_name] bracket prefix followed by error emoji
-    - Raw provider error strings (e.g. "Error code: 404 - ...")
-    - Raw provider JSON error payloads
-    """
-    error_prefixes = ("❌", "⏱️", "⏰", "⚠️")
-    stripped = text.lstrip()
-    if not stripped:
-        return False
-
-    # Check for [agent_name] prefix followed by error emoji
-    if stripped.startswith("["):
-        bracket_end = stripped.find("]")
-        if bracket_end != -1:
-            after_bracket = stripped[bracket_end + 1 :].lstrip()
-            return any(after_bracket.startswith(p) for p in error_prefixes)
-
-    if any(stripped.startswith(p) for p in error_prefixes):
-        return True
-
-    # Raw provider errors (agno may surface these as response content)
-    return _looks_like_raw_provider_error(stripped)
-
-
-_RAW_PROVIDER_ERROR_PREFIX_RE = re.compile(
-    r"^(?:[\w.]+(?:error|exception):\s*)?error\s*code:\s*",
-    re.IGNORECASE,
-)
-_RAW_PROVIDER_JSON_PREFIXES = (
-    '{"error":',
-    "{'error':",
-    '{"type":"error"',
-    '{"type": "error"',
-    "{'type': 'error'",
-)
-
-
-def _looks_like_raw_provider_error(text: str) -> bool:
-    """Detect raw provider error payloads surfaced as text."""
-    lowered = text.casefold()
-    if _RAW_PROVIDER_ERROR_PREFIX_RE.search(text):
-        return True
-    # Some providers return error payloads directly as serialized JSON-ish text.
-    return lowered.startswith(_RAW_PROVIDER_JSON_PREFIXES)
-
-
-def _extract_content_text(content: str | list[dict] | None) -> str:
-    """Extract text from a message content field.
-
-    Handles string content and multimodal content lists.
-    """
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    # Multimodal: concatenate text parts (coerce to str for robustness)
-    return " ".join(str(p["text"]) for p in content if isinstance(p, dict) and p.get("type") == "text" and "text" in p)
-
-
-def _find_last_user_message(
-    conversation: list[ResolvedVisibleMessage],
-) -> tuple[str, list[ResolvedVisibleMessage] | None] | None:
-    """Find the last user message and split into (prompt, thread_history).
-
-    Returns None if no user message exists.
-    """
-    for i in range(len(conversation) - 1, -1, -1):
-        if conversation[i].sender == "user":
-            prompt = conversation[i].body
-            history = conversation[:i] if i > 0 else None
-            return prompt, history
-    return None
-
-
-def _convert_messages(
-    messages: list[_ChatMessage],
-) -> tuple[str, list[ResolvedVisibleMessage] | None]:
-    """Convert OpenAI messages to MindRoom's (prompt, thread_history) format.
-
-    Returns:
-        Tuple of (prompt, thread_history).
-
-    """
-    system_parts: list[str] = []
-    conversation: list[ResolvedVisibleMessage] = []
-    synthetic_index = 0
-
-    for msg in messages:
-        if msg.role in ("system", "developer"):
-            text = _extract_content_text(msg.content)
-            if text:
-                system_parts.append(text)
-        elif msg.role == "tool":
-            continue
-        elif msg.role in ("user", "assistant"):
-            text = _extract_content_text(msg.content)
-            if text:
-                synthetic_index += 1
-                conversation.append(
-                    ResolvedVisibleMessage.synthetic(
-                        sender=msg.role,
-                        body=text,
-                        event_id=f"$openai-{synthetic_index}",
-                        timestamp=synthetic_index,
-                    ),
-                )
-
-    system_prompt = "\n\n".join(system_parts) if system_parts else ""
-
-    if not conversation:
-        return system_prompt, None
-
-    result = _find_last_user_message(conversation)
-    if result is None:
-        return system_prompt, None
-
-    prompt, thread_history = result
-
-    if system_prompt:
-        prompt = f"{system_prompt}\n\n{prompt}"
-
-    return prompt, thread_history
-
-
-def _derive_session_id(
-    model: str,
-    request: Request,
-) -> str:
-    """Derive a session ID from request headers or content.
-
-    Priority cascade:
-    1. X-Session-Id header (namespaced with API key to prevent cross-key collision)
-    2. X-LibreChat-Conversation-Id header + model
-    3. Random UUID fallback (collision-safe default when no conversation ID is provided)
-    """
-    # Namespace prefix from API key to prevent session hijack across keys
-    auth = request.headers.get("authorization", "")
-    key_namespace = hashlib.sha256(auth.encode()).hexdigest()[:8] if auth else "noauth"
-
-    # 1. Explicit session ID (namespaced to prevent cross-key collision)
-    session_id = request.headers.get("x-session-id")
-    if session_id:
-        return f"{key_namespace}:{session_id}"
-
-    # 2. LibreChat conversation ID
-    libre_id = request.headers.get("x-librechat-conversation-id")
-    if libre_id:
-        return f"{key_namespace}:{libre_id}:{model}"
-
-    # 3. Collision-safe fallback for clients that do not provide a conversation ID.
-    # This avoids unintended session sharing across unrelated chats.
-    return f"{key_namespace}:ephemeral:{uuid4().hex}"
-
-
-def _validate_chat_request(
-    req: _ChatCompletionRequest,
-    config: Config,
-) -> JSONResponse | None:
-    """Validate a chat completion request. Returns error response or None if valid."""
-    if not req.messages:
-        return _error_response(400, "Messages array is required and must not be empty")
-
-    agent_name = req.model
-
-    if agent_name.startswith(_TEAM_MODEL_PREFIX):
-        return _validate_team_model_request(agent_name.removeprefix(_TEAM_MODEL_PREFIX), config)
-
-    if agent_name == _AUTO_MODEL_NAME:
-        return None  # auto-routing handled in chat_completions
-
-    return _validate_agent_model_request(agent_name, config)
-
-
 def _parse_chat_request(
     request: Request,
     body: bytes,
     *,
     runtime_paths: RuntimePaths | None = None,
-) -> tuple[_ChatCompletionRequest, Config, RuntimePaths, str, list[ResolvedVisibleMessage] | None] | JSONResponse:
+) -> tuple[ChatCompletionRequest, Config, RuntimePaths, str, list[ResolvedVisibleMessage] | None] | JSONResponse:
     """Parse and validate a chat completion request body.
 
     Returns (request, config, runtime_paths, prompt, thread_history) on success, or a JSONResponse error.
     """
-    try:
-        req = _ChatCompletionRequest(**json.loads(body))
-    except (json.JSONDecodeError, ValidationError):
-        return _error_response(400, "Invalid request body")
+    req = parse_chat_completion_body(body)
+    if isinstance(req, JSONResponse):
+        return req
 
     config, runtime_paths = _load_config(request, runtime_paths=runtime_paths)
-    validation_error = _validate_chat_request(req, config)
+    validation_error = validate_chat_request(req, config)
     if validation_error:
         return validation_error
 
@@ -777,7 +340,7 @@ async def _resolve_auto_route(
     Returns the resolved agent name, or a JSONResponse error if routing fails
     and no agents are available.
     """
-    available = _openai_compatible_agent_names(config)
+    available = openai_compatible_agent_names(config)
     if not available:
         return _error_response(
             500,
@@ -823,23 +386,19 @@ async def list_models(
     except OSError:
         created = 0
 
-    compatible_agents = set(_openai_compatible_agent_names(config))
+    compatible_agents = set(openai_compatible_agent_names(config))
     models: list[_ModelObject] = []
     if compatible_agents:
         models.append(
             _ModelObject(
-                id=_AUTO_MODEL_NAME,
+                id=AUTO_MODEL_NAME,
                 name="Auto",
                 description="Automatically routes to the best agent for your message",
                 created=created,
             ),
         )
     for agent_name, agent_config in config.agents.items():
-        if (
-            agent_name == ROUTER_AGENT_NAME
-            or agent_name in _RESERVED_MODEL_NAMES
-            or agent_name not in compatible_agents
-        ):
+        if agent_name == ROUTER_AGENT_NAME or agent_name in RESERVED_MODEL_NAMES or agent_name not in compatible_agents:
             continue
         models.append(
             _ModelObject(
@@ -856,7 +415,7 @@ async def list_models(
             continue
         models.append(
             _ModelObject(
-                id=f"{_TEAM_MODEL_PREFIX}{team_name}",
+                id=f"{TEAM_MODEL_PREFIX}{team_name}",
                 name=team_config.display_name,
                 description=team_config.role or None,
                 created=created,
@@ -886,7 +445,7 @@ async def chat_completions(  # noqa: C901, PLR0912
 
     # Resolve auto-routing if model is "auto"
     agent_name = req.model
-    if agent_name == _AUTO_MODEL_NAME:
+    if agent_name == AUTO_MODEL_NAME:
         result = await _resolve_auto_route(
             prompt,
             config,
@@ -925,8 +484,8 @@ async def chat_completions(  # noqa: C901, PLR0912
 
     try:
         # Team execution path
-        if agent_name.startswith(_TEAM_MODEL_PREFIX):
-            team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
+        if agent_name.startswith(TEAM_MODEL_PREFIX):
+            team_name = agent_name.removeprefix(TEAM_MODEL_PREFIX)
             if req.stream:
                 response: JSONResponse | StreamingResponse = await _stream_team_completion(
                     team_name,
@@ -1047,9 +606,8 @@ async def _non_stream_completion(
         return _error_response(500, "Agent execution failed", error_type="server_error")
 
     logger.info("Chat completion sent", model=agent_name, stream=False, session_id=session_id)
-    completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     response = _ChatCompletionResponse(
-        id=completion_id,
+        id=new_completion_id(),
         created=int(time.time()),
         model=agent_name,
         choices=[
@@ -1064,143 +622,6 @@ async def _non_stream_completion(
 # ---------------------------------------------------------------------------
 # Streaming completion
 # ---------------------------------------------------------------------------
-
-
-def _chunk_json(
-    completion_id: str,
-    created: int,
-    model: str,
-    delta: dict,
-    finish_reason: str | None = None,
-) -> str:
-    """Build a JSON string for a single SSE chunk."""
-    chunk = _ChatCompletionChunk(
-        id=completion_id,
-        created=created,
-        model=model,
-        choices=[
-            _ChatCompletionChunkChoice(delta=delta, finish_reason=finish_reason),
-        ],
-    )
-    return chunk.model_dump_json()
-
-
-def _extract_tool_call_id(tool: ToolExecution) -> str:
-    """Extract the required tool call identifier for streaming tool events."""
-    tool_call_id = str(tool.tool_call_id).strip()
-    if not tool_call_id:
-        msg = "Streaming tool events require a non-empty tool_call_id"
-        raise ValueError(msg)
-    return tool_call_id
-
-
-def _allocate_next_tool_id(tool_state: _ToolStreamState) -> str:
-    tool_id = str(tool_state.next_tool_id)
-    tool_state.next_tool_id += 1
-    return tool_id
-
-
-def _resolve_started_tool_id(tool: ToolExecution, tool_state: _ToolStreamState) -> str:
-    tool_call_id = _extract_tool_call_id(tool)
-
-    existing_tool_id = tool_state.tool_ids_by_call_id.get(tool_call_id)
-    if existing_tool_id is not None:
-        return existing_tool_id
-
-    tool_id = _allocate_next_tool_id(tool_state)
-    tool_state.tool_ids_by_call_id[tool_call_id] = tool_id
-    return tool_id
-
-
-def _resolve_completed_tool_id(tool: ToolExecution, tool_state: _ToolStreamState) -> str:
-    tool_call_id = _extract_tool_call_id(tool)
-
-    existing_tool_id = tool_state.tool_ids_by_call_id.pop(tool_call_id, None)
-    if existing_tool_id is not None:
-        return existing_tool_id
-
-    return _allocate_next_tool_id(tool_state)
-
-
-def _inject_tool_metadata(tool_message: str, *, tool_id: str, state: Literal["start", "done"]) -> str:
-    return f'<tool id="{tool_id}" state="{state}">{tool_message}</tool>'
-
-
-def _escape_tool_payload_text(text: str) -> str:
-    return escape(text, quote=True)
-
-
-def _format_openai_tool_call_display(tool_name: str, args_preview: str | None) -> str:
-    safe_tool_name = _escape_tool_payload_text(tool_name)
-    if not args_preview:
-        return f"{safe_tool_name}()"
-    return f"{safe_tool_name}({_escape_tool_payload_text(args_preview)})"
-
-
-def _format_openai_stream_tool_message(
-    tool: ToolExecution,
-    *,
-    completed: bool,
-) -> str:
-    if completed:
-        _, trace = format_tool_completed_event(tool)
-    else:
-        _, trace = format_tool_started_event(tool)
-    if trace is None:
-        return ""
-
-    call_display = _format_openai_tool_call_display(trace.tool_name, trace.args_preview)
-    if not completed:
-        return call_display
-
-    if trace.result_preview is None:
-        return f"{call_display}\n"
-    return f"{call_display}\n{_escape_tool_payload_text(trace.result_preview)}"
-
-
-def _format_stream_tool_event(
-    event: RunOutputEvent | TeamRunOutputEvent,
-    tool_state: _ToolStreamState,
-) -> str | None:
-    """Format tool events as inline text for the SSE stream with stable IDs."""
-    if isinstance(event, (ToolCallStartedEvent, TeamToolCallStartedEvent)):
-        tool = event.tool
-        if tool is None:
-            return None
-        tool_msg = _format_openai_stream_tool_message(tool, completed=False)
-        tool_id = _resolve_started_tool_id(tool, tool_state)
-        state: Literal["start", "done"] = "start"
-    elif isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
-        tool = event.tool
-        if tool is None:
-            return None
-        tool_msg = _format_openai_stream_tool_message(tool, completed=True)
-        tool_id = _resolve_completed_tool_id(tool, tool_state)
-        state = "done"
-    else:
-        return None
-
-    if not tool_msg:
-        return None
-    return _inject_tool_metadata(tool_msg, tool_id=tool_id, state=state)
-
-
-def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> str | None:
-    """Extract text content from a stream event."""
-    if isinstance(event, RunContentEvent) and event.content:
-        return str(event.content)
-    if isinstance(event, str):
-        return event
-    return _format_stream_tool_event(event, tool_state)
-
-
-def _extract_agent_stream_failure(event: AIStreamChunk) -> str | None:
-    """Return terminal agent-stream failure text when the chunk represents one."""
-    if isinstance(event, RunErrorEvent):
-        return str(event.content or "Agent execution failed.")
-    if isinstance(event, str) and _is_error_response(event):
-        return event
-    return None
 
 
 async def _stream_completion(  # noqa: C901, PLR0915
@@ -1245,7 +666,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
         await stream.aclose()
         return _error_response(500, "Agent returned empty response", error_type="server_error")
 
-    first_error = _extract_agent_stream_failure(first_event)
+    first_error = extract_agent_stream_failure(first_event)
     if first_error is not None:
         logger.warning(
             "Stream returned error",
@@ -1256,29 +677,27 @@ async def _stream_completion(  # noqa: C901, PLR0915
         await stream.aclose()
         return _error_response(500, "Agent execution failed", error_type="server_error")
 
-    completion_id = f"chatcmpl-{uuid4().hex[:12]}"
-    created = int(time.time())
+    state = CompletionStreamState.begin(agent_name)
     stream_completed = False
     stream_failed = False
 
     async def event_generator() -> AsyncIterator[str]:
         nonlocal stream_completed, stream_failed
-        tool_state = _ToolStreamState()
         saw_text_delta = False
         completed_body: str | None = None
         try:
             # 1. Initial role announcement
-            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
+            yield sse_chunk(state, {"role": "assistant"})
 
             # 2. Yield the peeked first event
             if isinstance(first_event, RunCompletedEvent):
                 completed_body = str(first_event.content) if first_event.content is not None else None
             else:
-                text = _extract_stream_text(first_event, tool_state)
+                text = extract_stream_text(first_event, state.tool_state)
                 if text:
                     if isinstance(first_event, (RunContentEvent, str)):
                         saw_text_delta = True
-                    yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
+                    yield sse_chunk(state, {"content": text})
 
             # 3. Stream remaining content
             # Error strings after the first event are sent as content chunks
@@ -1287,7 +706,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
                 if isinstance(event, RunCompletedEvent):
                     completed_body = str(event.content) if event.content is not None else completed_body
                     continue
-                failure_text = _extract_agent_stream_failure(event)
+                failure_text = extract_agent_stream_failure(event)
                 if failure_text is not None:
                     stream_failed = True
                     logger.warning(
@@ -1296,23 +715,23 @@ async def _stream_completion(  # noqa: C901, PLR0915
                         session_id=session_id,
                         error=failure_text,
                     )
-                    yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': failure_text})}\n\n"
+                    yield sse_chunk(state, {"content": failure_text})
                     break
-                text = _extract_stream_text(event, tool_state)
+                text = extract_stream_text(event, state.tool_state)
                 if text:
                     if isinstance(event, (RunContentEvent, str)):
                         saw_text_delta = True
-                    yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
+                    yield sse_chunk(state, {"content": text})
 
             if completed_body and not saw_text_delta and not stream_failed:
-                yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': completed_body})}\n\n"
+                yield sse_chunk(state, {"content": completed_body})
 
             # 4. Final chunk with finish_reason
             logger.info("Chat completion sent", model=agent_name, stream=True)
-            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={}, finish_reason='stop')}\n\n"
+            yield sse_chunk(state, {}, finish_reason="stop")
 
             # 5. Stream terminator
-            yield "data: [DONE]\n\n"
+            yield SSE_DONE
             stream_completed = not stream_failed
         finally:
             await stream.aclose()
@@ -1537,9 +956,8 @@ async def _non_stream_team_completion(
                 return _error_response(500, "Team execution failed", error_type="server_error")
 
             logger.info("Team completion sent", team=team_name, stream=False)
-            completion_id = f"chatcmpl-{uuid4().hex[:12]}"
             result = _ChatCompletionResponse(
-                id=completion_id,
+                id=new_completion_id(),
                 created=int(time.time()),
                 model=model_id,
                 choices=[
@@ -1686,8 +1104,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
             await _cleanup()
             return _error_response(500, "Team execution failed", error_type="server_error")
 
-        completion_id = f"chatcmpl-{uuid4().hex[:12]}"
-        created = int(time.time())
+        state = CompletionStreamState.begin(model_id)
         stream_completed = False
         stream_failed = False
 
@@ -1701,14 +1118,12 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                 async for chunk in _team_stream_event_generator(
                     stream=stream,
                     first_event=first_event,
-                    completion_id=completion_id,
-                    created=created,
-                    model_id=model_id,
+                    state=state,
                     team_name=team_name,
                     mark_stream_failed=mark_stream_failed,
                 ):
                     yield chunk
-                    if chunk == "data: [DONE]\n\n" and not stream_failed:
+                    if chunk == SSE_DONE and not stream_failed:
                         stream_completed = True
             finally:
                 await _cleanup()
@@ -1746,7 +1161,7 @@ def _extract_team_stream_failure(
 
 def _classify_team_event(
     event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput,
-    tool_state: _ToolStreamState,
+    tool_state: ToolStreamState,
 ) -> str | None:
     """Classify a team stream event and return formatted content, or ``None`` to skip.
 
@@ -1762,7 +1177,7 @@ def _classify_team_event(
         return formatted_output or None
 
     # Tool events — emit for progress feedback
-    tool_text = _format_stream_tool_event(event, tool_state)
+    tool_text = format_stream_tool_event(event, tool_state)
     if tool_text is not None:
         return tool_text
 
@@ -1774,24 +1189,11 @@ def _classify_team_event(
     return None
 
 
-def _finalize_pending_tools(tool_state: _ToolStreamState) -> str | None:
-    """Build done tags for tool calls that started but never completed."""
-    if not tool_state.tool_ids_by_call_id:
-        return None
-    parts = [
-        f'<tool id="{tool_id}" state="done">(interrupted)</tool>' for tool_id in tool_state.tool_ids_by_call_id.values()
-    ]
-    tool_state.tool_ids_by_call_id.clear()
-    return "".join(parts)
-
-
 async def _team_stream_event_generator(
     *,
     stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput],
     first_event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput,
-    completion_id: str,
-    created: int,
-    model_id: str,
+    state: CompletionStreamState,
     team_name: str,
     mark_stream_failed: Callable[[], None],
 ) -> AsyncIterator[str]:
@@ -1802,16 +1204,16 @@ async def _team_stream_event_generator(
     Emits all tool events (agent-level and team-level) for progress feedback.
 
     The caller (``_stream_team_completion``) validates the first event via
-    ``_team_stream_preflight_error`` before entering this generator, so
+    ``_extract_team_stream_failure`` before entering this generator, so
     ``first_event`` is guaranteed to be non-error.
     """
-    tool_state = _ToolStreamState()
+    tool_state = state.tool_state
 
     def _chunk(content: str) -> str:
-        return f"data: {_chunk_json(completion_id, created, model_id, delta={'content': content})}\n\n"
+        return sse_chunk(state, {"content": content})
 
     # 1. Role announcement
-    yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
+    yield sse_chunk(state, {"role": "assistant"})
 
     # 2. First event (guaranteed non-error by preflight)
     text = _classify_team_event(first_event, tool_state)
@@ -1824,7 +1226,7 @@ async def _team_stream_event_generator(
             if _extract_team_stream_failure(event) is not None:
                 logger.warning("Team stream emitted terminal failure", team=team_name)
                 mark_stream_failed()
-                pending = _finalize_pending_tools(tool_state)
+                pending = finalize_pending_tools(tool_state)
                 if pending:
                     yield _chunk(pending)
                 yield _chunk("Team execution failed.")
@@ -1836,17 +1238,17 @@ async def _team_stream_event_generator(
     except Exception:
         logger.exception("Team stream failed during iteration", team=team_name)
         mark_stream_failed()
-        pending = _finalize_pending_tools(tool_state)
+        pending = finalize_pending_tools(tool_state)
         if pending:
             yield _chunk(pending)
         yield _chunk("Team execution failed.")
 
     # 4. Finalize any tool calls that started but never completed
-    pending = _finalize_pending_tools(tool_state)
+    pending = finalize_pending_tools(tool_state)
     if pending:
         yield _chunk(pending)
 
     # 5. Finish
     logger.info("Team completion sent", team=team_name, stream=True)
-    yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
-    yield "data: [DONE]\n\n"
+    yield sse_chunk(state, {}, finish_reason="stop")
+    yield SSE_DONE

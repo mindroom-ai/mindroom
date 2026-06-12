@@ -9,7 +9,7 @@ import pytest
 
 import mindroom.constants as constants_mod
 import mindroom.credentials as credentials_module
-from mindroom.api.credentials import RequestCredentialsTarget
+from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.credentials import (
     CredentialsManager,

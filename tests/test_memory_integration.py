@@ -160,7 +160,7 @@ class TestMemoryIntegration:
 
         with (
             patch("mindroom.ai.create_agent", side_effect=Exception("Model error")),
-            patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory),
         ):
             response = await ai_response(
                 agent_name="general",
@@ -183,7 +183,7 @@ class TestMemoryIntegration:
         mock_memory.search.return_value = {"results": []}
 
         with (
-            patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory),
             patch("mindroom.ai_runtime.cached_agent_run", AsyncMock(return_value=MagicMock(content="First response"))),
             patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
             patch("mindroom.ai.create_agent", return_value=MagicMock()),

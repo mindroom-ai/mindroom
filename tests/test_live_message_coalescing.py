@@ -19,7 +19,6 @@ from mindroom.coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
     PendingEvent,
-    active_follow_up_coalescing_key,
     build_coalesced_batch,
 )
 from mindroom.config.agent import AgentConfig
@@ -1163,12 +1162,12 @@ async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(
 
 
 @pytest.mark.asyncio
-async def test_command_mid_batch_flushes_pending_then_processes_command(tmp_path: Path) -> None:
-    """Flush pending messages before dispatching a command event."""
-    bot = _make_bot(tmp_path)
+async def test_command_executes_immediately_while_text_batch_debounces(tmp_path: Path) -> None:
+    """A command is a control input: it dispatches before batching and never waits on debounce."""
+    bot = _make_bot(tmp_path, debounce_ms=60_000)
     room = _make_room()
-    first = _text_event(event_id="$m1", body="tell me more", server_timestamp=1000, thread_id="$thread")
-    command = _text_event(event_id="$m2", body="!help", server_timestamp=1001, thread_id="$thread")
+    first = _text_event(event_id="$m1", body="tell me more", server_timestamp=1000)
+    command = _text_event(event_id="$m2", body="!help", server_timestamp=1001)
     calls: list[tuple[str, list[str]]] = []
 
     async def record_dispatch(
@@ -1184,36 +1183,26 @@ async def test_command_mid_batch_flushes_pending_then_processes_command(tmp_path
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await _enqueue_for_dispatch(
-            bot,
-            first,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        await _enqueue_for_dispatch(
-            bot,
-            command,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        await _wait_for(lambda: len(calls) == 2)
+        await bot._turn_controller.handle_text_event(room, first)
+        await bot._turn_controller.handle_text_event(room, command)
+
+        assert calls == [("!help", ["$m2"])]
+
+        await bot._coalescing_gate.drain_all()
 
     assert calls == [
+        ("!help", ["$m2"]),
         ("tell me more", ["$m1"]),
-        ("!help", ["$m2"]),
     ]
 
 
 @pytest.mark.asyncio
-async def test_command_flush_does_not_leave_stale_timer_for_next_message(tmp_path: Path) -> None:
-    """Drop stale debounce timers after a command-triggered flush."""
-    bot = _make_bot(tmp_path, debounce_ms=40)
+async def test_command_during_upload_grace_executes_immediately(tmp_path: Path) -> None:
+    """A command never waits for upload grace, and the graced batch flushes on its own."""
+    bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=60_000)
     room = _make_room()
-    first = _text_event(event_id="$m1", body="first", server_timestamp=1000, thread_id="$thread")
-    command = _text_event(event_id="$m2", body="!help", server_timestamp=1001, thread_id="$thread")
-    second = _text_event(event_id="$m3", body="second", server_timestamp=1002, thread_id="$thread")
+    text_event = _text_event(event_id="$m1", body="first", server_timestamp=1000)
+    command_event = _text_event(event_id="$m2", body="!help", server_timestamp=1001)
     calls: list[tuple[str, list[str]]] = []
 
     async def record_dispatch(
@@ -1229,118 +1218,17 @@ async def test_command_flush_does_not_leave_stale_timer_for_next_message(tmp_pat
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await _enqueue_for_dispatch(
-            bot,
-            first,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        await asyncio.sleep(0.01)
-        await _enqueue_for_dispatch(
-            bot,
-            command,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        await asyncio.sleep(0.005)
-        await _enqueue_for_dispatch(
-            bot,
-            second,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        await _wait_for(lambda: len(calls) >= 2)
+        await bot._turn_controller.handle_text_event(room, text_event)
+        await bot._turn_controller.handle_text_event(room, command_event)
 
-        assert calls[:2] == [
-            ("first", ["$m1"]),
-            ("!help", ["$m2"]),
-        ]
+        assert calls == [("!help", ["$m2"])]
 
-        await _wait_for(lambda: len(calls) == 3)
+        await bot._coalescing_gate.drain_all()
 
     assert calls == [
-        ("first", ["$m1"]),
         ("!help", ["$m2"]),
-        ("second", ["$m3"]),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_command_during_upload_grace_flushes_immediately(tmp_path: Path) -> None:
-    """Commands should bypass upload grace rather than waiting for its timer."""
-    bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=200)
-    room = _make_room()
-    text_event = _text_event(event_id="$m1", body="first", server_timestamp=1000, thread_id="$thread")
-    command_event = _text_event(event_id="$m2", body="!help", server_timestamp=1001, thread_id="$thread")
-    calls: list[tuple[str, list[str]]] = []
-
-    async def record_dispatch(
-        _room: nio.MatrixRoom,
-        dispatched_event: nio.RoomMessageText,
-        _requester_user_id: str,
-        *,
-        media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
-        **_metadata: object,
-    ) -> None:
-        _ = media_events, handled_turn
-        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
-
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await _enqueue_for_dispatch(
-            bot,
-            text_event,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        # Wait for debounce to fire (10ms) so gate enters upload grace
-        await asyncio.sleep(0.02)
-        assert calls == []
-
-        await _enqueue_for_dispatch(
-            bot,
-            command_event,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        await _wait_for(lambda: len(calls) == 2)
-
-    assert calls == [
         ("first", ["$m1"]),
-        ("!help", ["$m2"]),
     ]
-
-
-@pytest.mark.asyncio
-async def test_already_queued_command_barrier_flushes_normal_without_debounce() -> None:
-    """A queued command barrier should flush older normal work without waiting for debounce."""
-    room = _make_room()
-    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
-    command = _text_event(event_id="$cmd", body="!help", server_timestamp=1001)
-    calls: list[list[str]] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 5.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    key = CoalescingKey("!room:localhost", None, "@user:localhost")
-
-    await _admit_ready(gate, key, PendingEvent(event=first, room=room, source_kind="message"))
-    await _admit_ready(gate, key, PendingEvent(event=command, room=room, source_kind="message"))
-
-    await _wait_for(lambda: calls == [["$m1"], ["$cmd"]], deadline_seconds=0.2)
-
-    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -1355,33 +1243,12 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
     release_first_dispatch = asyncio.Event()
     calls: list[list[str]] = []
 
+    active_threads: set[str | None] = set()
+
     async def wait_for_thread_response_idle(room_id: str, thread_id: str | None) -> None:
         assert room_id == room.room_id
         assert thread_id == "$m1"
         await release_first_dispatch.wait()
-
-    async def enqueue_active_follow_up(event: nio.RoomMessageText) -> None:
-        target = MessageTarget.resolve(room.room_id, "$m1", event.event_id)
-        envelope = bot._conversation_resolver.build_ingress_envelope(
-            room_id=room.room_id,
-            event=event,
-            requester_user_id="@user:localhost",
-            target=target,
-            source_kind=MESSAGE_SOURCE_KIND,
-        )
-        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
-        try:
-            await bot._turn_controller._enqueue_active_thread_follow_up(
-                room=room,
-                event=event,
-                target=target,
-                envelope=envelope,
-                requester_user_id="@user:localhost",
-                reservation_owner=reservation_owner,
-                coalescing_key=active_follow_up_coalescing_key(room.room_id, "$m1"),
-            )
-        finally:
-            await reservation_owner.release()
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
@@ -1405,6 +1272,11 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
             "wait_for_thread_response_idle",
             new=AsyncMock(side_effect=wait_for_thread_response_idle),
         ),
+        patch.object(
+            bot._response_runner,
+            "active_thread_ids_for_room",
+            new=lambda _room_id: frozenset(active_threads),
+        ),
     ):
         await _enqueue_for_dispatch(
             bot,
@@ -1415,14 +1287,22 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         )
         await asyncio.sleep(0.03)
         await entered_first_dispatch.wait()
+        active_threads.add("$m1")
 
-        await enqueue_active_follow_up(second)
-        await asyncio.sleep(0.03)
-        await enqueue_active_follow_up(third)
-        await asyncio.sleep(0.03)
+        for followup in (second, third):
+            await _enqueue_for_dispatch(
+                bot,
+                followup,
+                room,
+                source_kind="message",
+                requester_user_id="@user:localhost",
+                coalescing_key=CoalescingKey(room.room_id, "$m1", "@user:localhost"),
+            )
+            await asyncio.sleep(0.03)
 
         assert calls == [["$m1"]]
 
+        active_threads.clear()
         release_first_dispatch.set()
         await _wait_for(lambda: calls == [["$m1"], ["$m2", "$m3"]])
 
@@ -1431,47 +1311,53 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
 
 @pytest.mark.asyncio
 async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: Path) -> None:
-    """Active-response follow-ups should queue by target while preserving the actual requester."""
+    """Active-response follow-ups should queue by conversation while preserving each requester."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     first = _text_event(event_id="$a", body="first", sender="@alice:localhost", thread_id="$thread")
     second = _text_event(event_id="$b", body="second", sender="@bob:localhost", thread_id="$thread")
-    admitted: list[tuple[CoalescingKey, PendingEvent]] = []
+    active_threads: set[str | None] = {"$thread"}
+    idle = asyncio.Event()
+    calls: list[CoalescedBatch] = []
 
-    async def record_admit(key: CoalescingKey, **kwargs: object) -> None:
-        ready_result = cast("ReadyPendingEvent", kwargs["ready_result"])
-        admitted.append((key, ready_result.pending_event))
-        bot._coalescing_gate.release_order_reservation(kwargs["order_reservation"])
+    async def record_dispatch(batch: CoalescedBatch) -> None:
+        calls.append(batch)
+
+    async def wait_for_thread_response_idle(_room_id: str, _thread_id: str | None) -> None:
+        await idle.wait()
 
     with (
-        patch.object(bot._coalescing_gate, "admit", new=AsyncMock(side_effect=record_admit)),
+        patch.object(bot._turn_controller, "handle_coalesced_batch", new=AsyncMock(side_effect=record_dispatch)),
+        patch.object(
+            bot._response_runner,
+            "wait_for_thread_response_idle",
+            new=AsyncMock(side_effect=wait_for_thread_response_idle),
+        ),
+        patch.object(
+            bot._response_runner,
+            "active_thread_ids_for_room",
+            new=lambda _room_id: frozenset(active_threads),
+        ),
         patch.object(bot._response_runner, "reserve_waiting_human_message", return_value=MagicMock()),
     ):
         for event, requester_user_id in ((first, "@alice:localhost"), (second, "@bob:localhost")):
-            target = MessageTarget.resolve(room.room_id, "$thread", event.event_id)
-            envelope = bot._conversation_resolver.build_ingress_envelope(
-                room_id=room.room_id,
-                event=event,
+            await _enqueue_for_dispatch(
+                bot,
+                event,
+                room,
+                source_kind="message",
                 requester_user_id=requester_user_id,
-                target=target,
-                source_kind=MESSAGE_SOURCE_KIND,
+                coalescing_key=CoalescingKey(room.room_id, "$thread", requester_user_id),
             )
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, requester_user_id)
-            try:
-                await bot._turn_controller._enqueue_active_thread_follow_up(
-                    room=room,
-                    event=event,
-                    target=target,
-                    envelope=envelope,
-                    requester_user_id=requester_user_id,
-                    reservation_owner=reservation_owner,
-                    coalescing_key=active_follow_up_coalescing_key(room.room_id, "$thread"),
-                )
-            finally:
-                await reservation_owner.release()
+        await asyncio.sleep(0.01)
+        assert calls == []
 
-    assert len({key for key, _pending_event in admitted}) == 1
-    assert [pending_event.requester_user_id for _key, pending_event in admitted] == [
+        active_threads.clear()
+        idle.set()
+        await _wait_for(lambda: [list(batch.source_event_ids) for batch in calls] == [["$a", "$b"]])
+
+    assert calls[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert [pending_event.requester_user_id for pending_event in calls[0].pending_events] == [
         "@alice:localhost",
         "@bob:localhost",
     ]
@@ -1479,7 +1365,7 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(tmp_path: Path) -> None:
-    """A slow older lookup received during an active turn must stay in the same active backlog."""
+    """A slow older lookup must stay before a later same-sender follow-up in the backlog."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     second = _text_event(
@@ -1492,7 +1378,7 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
     third = _text_event(
         event_id="$m3",
         body="third",
-        sender="@bob:localhost",
+        sender="@alice:localhost",
         server_timestamp=1002,
         thread_id="$thread",
     )
@@ -1566,8 +1452,8 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
 
 
 @pytest.mark.asyncio
-async def test_later_slow_thread_lookup_active_follow_up_joins_open_backlog(tmp_path: Path) -> None:
-    """A later lookup received during an active turn must not miss the active backlog freeze."""
+async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_path: Path) -> None:
+    """A follow-up still resolving when the backlog flushes lands as its own turn, never lost."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     first = _text_event(
@@ -1633,12 +1519,11 @@ async def test_later_slow_thread_lookup_active_follow_up_joins_open_backlog(tmp_
 
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
-            await asyncio.sleep(0.05)
-            assert calls == []
+            await _wait_for(lambda: calls == [["$m1"]])
 
             release_second_lookup.set()
             await asyncio.wait_for(second_task, timeout=0.5)
-            await _wait_for(lambda: calls == [["$m1", "$m2"]])
+            await _wait_for(lambda: calls == [["$m1"], ["$m2"]])
     finally:
         release_second_lookup.set()
         queued_signal.finish_response_turn()
@@ -1650,7 +1535,7 @@ async def test_later_slow_thread_lookup_active_follow_up_joins_open_backlog(tmp_
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
 
-    assert calls == [["$m1", "$m2"]]
+    assert calls == [["$m1"], ["$m2"]]
 
 
 @pytest.mark.asyncio
@@ -1742,28 +1627,18 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
                 (text_event, "@alice:localhost"),
                 (image_event, "@bob:localhost"),
             ):
-                event_target = MessageTarget.resolve(room.room_id, "$thread", event.event_id)
-                envelope = bot._conversation_resolver.build_ingress_envelope(
-                    room_id=room.room_id,
-                    event=event,
-                    requester_user_id=requester_user_id,
-                    target=event_target,
+                await _enqueue_for_dispatch(
+                    bot,
+                    event,
+                    room,
                     source_kind=IMAGE_SOURCE_KIND if event.event_id == "$img" else MESSAGE_SOURCE_KIND,
+                    requester_user_id=requester_user_id,
+                    coalescing_key=CoalescingKey(room.room_id, "$thread", requester_user_id),
                 )
-                reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, requester_user_id)
-                try:
-                    await bot._turn_controller._enqueue_active_thread_follow_up(
-                        room=room,
-                        event=event,
-                        target=event_target,
-                        envelope=envelope,
-                        requester_user_id=requester_user_id,
-                        reservation_owner=reservation_owner,
-                        coalescing_key=active_follow_up_coalescing_key(room.room_id, "$thread"),
-                    )
-                finally:
-                    await reservation_owner.release()
 
+            await _wait_for(
+                lambda: sum(len(entry.queue) for entry in bot._coalescing_gate._gates.values()) == 2,
+            )
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
             await bot._coalescing_gate.drain_all()
@@ -1784,87 +1659,6 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
         '<msg event_id="$img" from="@bob:localhost"><![CDATA[[Attached image]]]></msg>\n'
         "</queued_messages>"
     )
-
-
-@pytest.mark.asyncio
-async def test_in_flight_command_barrier_flushes_buffered_normal_without_debounce() -> None:
-    """A command queued during active dispatch should wake and flush older buffered work promptly."""
-    room = _make_room()
-    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
-    before_command = _text_event(event_id="$m2", body="before command", server_timestamp=1001)
-    command = _text_event(event_id="$cmd", body="!help", server_timestamp=1002)
-    entered_first_dispatch = asyncio.Event()
-    release_first_dispatch = asyncio.Event()
-    debounce_seconds = 0.0
-    calls: list[list[str]] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        source_event_ids = list(batch.source_event_ids)
-        calls.append(source_event_ids)
-        if source_event_ids == ["$m1"]:
-            entered_first_dispatch.set()
-            await release_first_dispatch.wait()
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: debounce_seconds,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    key = CoalescingKey("!room:localhost", None, "@user:localhost")
-
-    await _admit_ready(gate, key, PendingEvent(event=first, room=room, source_kind="message"))
-    await entered_first_dispatch.wait()
-    debounce_seconds = 5.0
-    await _admit_ready(gate, key, PendingEvent(event=before_command, room=room, source_kind="message"))
-    await _admit_ready(gate, key, PendingEvent(event=command, room=room, source_kind="message"))
-    await asyncio.sleep(0.05)
-
-    assert calls == [["$m1"]]
-
-    release_first_dispatch.set()
-    await _wait_for(lambda: calls == [["$m1"], ["$m2"], ["$cmd"]], deadline_seconds=0.2)
-
-    assert _coalescing_gate_is_idle(gate)
-
-
-@pytest.mark.asyncio
-async def test_command_during_active_dispatch_preserves_fifo_order() -> None:
-    """A command should not pull later in-flight-buffered messages ahead of itself."""
-    room = _make_room()
-    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
-    before_command = _text_event(event_id="$m2", body="before command", server_timestamp=1001)
-    command = _text_event(event_id="$cmd", body="!help", server_timestamp=1002)
-    after_command = _text_event(event_id="$m3", body="after command", server_timestamp=1003)
-    entered_first_dispatch = asyncio.Event()
-    release_first_dispatch = asyncio.Event()
-    calls: list[list[str]] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        source_event_ids = list(batch.source_event_ids)
-        calls.append(source_event_ids)
-        if source_event_ids == ["$m1"]:
-            entered_first_dispatch.set()
-            await release_first_dispatch.wait()
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    key = CoalescingKey("!room:localhost", None, "@user:localhost")
-
-    await _admit_ready(gate, key, PendingEvent(event=first, room=room, source_kind="message"))
-    await entered_first_dispatch.wait()
-    await _admit_ready(gate, key, PendingEvent(event=before_command, room=room, source_kind="message"))
-    await _admit_ready(gate, key, PendingEvent(event=command, room=room, source_kind="message"))
-    await _admit_ready(gate, key, PendingEvent(event=after_command, room=room, source_kind="message"))
-
-    release_first_dispatch.set()
-    await _wait_for(lambda: calls == [["$m1"], ["$m2"], ["$cmd"], ["$m3"]])
-
-    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -1932,11 +1726,13 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
 
     await _admit_ready(gate, key, PendingEvent(event=text, room=room, source_kind="message"))
     await asyncio.sleep(0.01)
-    await gate.admit(
-        key,
-        ready_task=asyncio.create_task(ready_voice()),
-        received_at=1.001,
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=key,
+        source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.07)
 
@@ -1980,75 +1776,71 @@ async def test_late_same_thread_text_does_not_join_expired_debounce_while_waitin
         is_shutting_down=lambda: False,
     )
 
-    await _admit_ready(gate, text_key, PendingEvent(event=first, room=room, source_kind="message"))
+    start = time.monotonic() - 1.0
     await gate.admit(
         text_key,
-        ready_task=asyncio.create_task(ready_voice()),
+        ready_result=ReadyPendingEvent(pending_event=PendingEvent(event=first, room=room, source_kind="message")),
+        receipt_time=start,
+        source_event_id="$typed1",
+        source_kind="message",
+    )
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost", receipt_time=start + 0.005)
+    gate.submit_lane_slot(
+        voice_slot,
+        key=text_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
-    await _wait_for(lambda: bool(gate._gates[text_key].claimed_admissions))
-    await _admit_ready(gate, text_key, PendingEvent(event=second, room=room, source_kind="message"))
+    await gate.admit(
+        text_key,
+        ready_result=ReadyPendingEvent(pending_event=PendingEvent(event=second, room=room, source_kind="message")),
+        receipt_time=start + 0.5,
+        source_event_id="$typed2",
+        source_kind="message",
+    )
+    await asyncio.sleep(0.05)
 
     assert calls == []
 
     release_voice.set()
-    await gate.drain_all()
-    assert calls == [["$typed1", "$voice"], ["$typed2"]]
+    await _wait_for(lambda: calls == [["$typed1", "$voice"], ["$typed2"]], deadline_seconds=0.5)
     assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
-async def test_front_command_does_not_wait_for_later_unresolved_voice() -> None:
-    """A front command is a barrier and must not wait on later voice resolution."""
+async def test_command_executes_immediately_despite_unresolved_ingress(tmp_path: Path) -> None:
+    """A command never waits behind unresolved late-ready ingress from the same sender."""
+    bot = _make_bot(tmp_path)
     room = _make_room()
-    key = CoalescingKey(room.room_id, "$thread", "@user:localhost")
-    command = _text_event(event_id="$cmd", body="!help", server_timestamp=1000, thread_id="$thread")
-    voice = _text_event(
-        event_id="$voice",
-        body="voice transcript",
-        server_timestamp=1001,
-        thread_id="$thread",
-        source_kind=VOICE_SOURCE_KIND,
-    )
-    release_voice = asyncio.Event()
-    calls: list[list[str]] = []
+    command_event = _text_event(event_id="$cmd", body="!help", server_timestamp=1001)
+    calls: list[tuple[str, list[str]]] = []
 
-    async def ready_voice() -> ReadyPendingEvent:
-        await release_voice.wait()
-        return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
-        )
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        _ = media_events, handled_turn
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
+    reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+    try:
+        with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+            await bot._turn_controller.handle_text_event(room, command_event)
 
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-
-    await _admit_ready(gate, key, PendingEvent(event=command, room=room, source_kind="message"))
-    await gate.admit(
-        key,
-        ready_task=asyncio.create_task(ready_voice()),
-        source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
-    )
-
-    await _wait_for(lambda: calls == [["$cmd"]], deadline_seconds=1.0)
-
-    release_voice.set()
-    await gate.drain_all()
-    assert calls == [["$cmd"], ["$voice"]]
-    assert _coalescing_gate_is_idle(gate)
+        assert calls == [("!help", ["$cmd"])]
+    finally:
+        await reservation_owner.release()
 
 
 @pytest.mark.asyncio
 async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
-    """A cancelled drain should not lose admissions already claimed from the queue."""
+    """A cancelled drain should not lose queued or still-resolving admissions."""
     room = _make_room()
     key = CoalescingKey(room.room_id, "$thread", "@user:localhost")
     first = _text_event(event_id="$first", body="first")
@@ -2073,14 +1865,22 @@ async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
     )
 
     await _admit_ready(gate, key, PendingEvent(event=first, room=room, source_kind="message"))
-    await gate.admit(key, ready_task=asyncio.create_task(ready_second()))
+    second_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        second_slot,
+        key=key,
+        source_event_id="$second",
+        source_kind="message",
+        ready_task=asyncio.create_task(ready_second()),
+    )
     [gate_entry] = gate._gates.values()
-    await _wait_for(lambda: bool(gate_entry.claimed_admissions), deadline_seconds=0.2)
+    drain_task = gate_entry.drain_task
+    assert drain_task is not None
+    await asyncio.sleep(0.02)
 
-    assert gate_entry.drain_task is not None
-    gate_entry.drain_task.cancel()
+    drain_task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await gate_entry.drain_task
+        await drain_task
 
     release_second.set()
     await gate.drain_all()
@@ -2128,10 +1928,13 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
         is_shutting_down=lambda: False,
     )
 
-    await gate.admit(
-        resolved_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=resolved_key,
+        source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.wait_for(entered_voice_dispatch.wait(), timeout=0.2)
     await _admit_ready(gate, resolved_key, PendingEvent(event=followup, room=room, source_kind="message"))
@@ -2180,11 +1983,13 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
         is_shutting_down=lambda: False,
     )
 
-    await gate.admit(
-        resolved_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=resolved_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.005)
     await _admit_ready(gate, resolved_key, PendingEvent(event=typed, room=room, source_kind="message"))
@@ -2234,75 +2039,19 @@ async def test_text_before_voice_uses_stable_admission_key() -> None:
 
     await _admit_ready(gate, resolved_key, PendingEvent(event=typed, room=room, source_kind="message"))
     await asyncio.sleep(0.005)
-    await gate.admit(
-        resolved_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=resolved_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.06)
     assert calls == []
 
     release_voice.set()
     await _wait_for(lambda: calls == [(resolved_key, ["$typed", "$voice"])], deadline_seconds=0.2)
-    assert _coalescing_gate_is_idle(gate)
-
-
-@pytest.mark.asyncio
-async def test_same_thread_followup_after_voice_claim_stays_on_admitted_gate() -> None:
-    """A follow-up queued while voice is claimed should stay on the stable admission key."""
-    room = _make_room()
-    admitted_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
-    voice = _text_event(
-        event_id="$voice",
-        body="voice transcript",
-        server_timestamp=1000,
-        thread_id="$thread-root",
-        source_kind=VOICE_SOURCE_KIND,
-    )
-    typed = _text_event(
-        event_id="$typed",
-        body="typed follow-up",
-        server_timestamp=1001,
-        thread_id="$thread-root",
-    )
-    release_voice = asyncio.Event()
-    calls: list[tuple[CoalescingKey, list[str]]] = []
-
-    async def ready_voice() -> ReadyPendingEvent:
-        await release_voice.wait()
-        return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
-        )
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append((batch.coalescing_key, list(batch.source_event_ids)))
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-
-    await gate.admit(
-        admitted_key,
-        ready_task=asyncio.create_task(ready_voice()),
-        source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
-    )
-    await asyncio.sleep(0.02)
-    await _admit_ready(gate, admitted_key, PendingEvent(event=typed, room=room, source_kind="message"))
-    await asyncio.sleep(0.02)
-    assert calls == []
-
-    release_voice.set()
-    await gate.drain_all()
-
-    assert calls == [
-        (admitted_key, ["$voice"]),
-        (admitted_key, ["$typed"]),
-    ]
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2342,11 +2091,13 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
         is_shutting_down=lambda: False,
     )
 
-    await gate.admit(
-        root_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=root_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
     await _admit_ready(gate, root_key, PendingEvent(event=typed, room=room, source_kind="message"))
     await asyncio.sleep(0.02)
@@ -2395,11 +2146,13 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
 
     await _admit_ready(gate, root_key, PendingEvent(event=typed, room=room, source_kind="message"))
     await asyncio.sleep(0.005)
-    await gate.admit(
-        root_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=root_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
 
     await asyncio.sleep(0.06)
@@ -2412,10 +2165,10 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
 
 @pytest.mark.asyncio
 async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None:
-    """A later voice in a different resolved thread must not hold earlier text."""
+    """A later voice from another sender's thread must not hold earlier text."""
     room = _make_room()
     text_key = CoalescingKey(room.room_id, "$thread-a-root", "@user:localhost")
-    voice_root_key = CoalescingKey(room.room_id, "$thread-b-root", "@user:localhost")
+    voice_root_key = CoalescingKey(room.room_id, "$thread-b-root", "@voice-sender:localhost")
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
@@ -2425,6 +2178,7 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
+        sender="@voice-sender:localhost",
         server_timestamp=1001,
         source_kind=VOICE_SOURCE_KIND,
     )
@@ -2434,7 +2188,12 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
     async def ready_voice() -> ReadyPendingEvent:
         await release_voice.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+            pending_event=PendingEvent(
+                event=voice,
+                room=room,
+                source_kind=VOICE_SOURCE_KIND,
+                requester_user_id="@voice-sender:localhost",
+            ),
         )
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
@@ -2449,11 +2208,13 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
 
     await _admit_ready(gate, text_key, PendingEvent(event=typed, room=room, source_kind="message"))
     await asyncio.sleep(0.005)
-    await gate.admit(
-        voice_root_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@voice-sender:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=voice_root_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.06)
     assert calls == [["$typed"]]
@@ -2487,68 +2248,19 @@ async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> Non
     )
 
     await _admit_ready(gate, key, PendingEvent(event=first, room=room, source_kind="message"))
-    await gate.admit(
-        key,
-        ready_task=asyncio.create_task(failed_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(failed_voice()),
     )
     await _admit_ready(gate, key, PendingEvent(event=second, room=room, source_kind="message"))
 
     await gate.drain_all()
 
     assert calls == [["$first"], ["$second"]]
-    assert _coalescing_gate_is_idle(gate)
-
-
-@pytest.mark.asyncio
-async def test_command_after_pending_voice_waits_for_same_resolved_thread() -> None:
-    """Commands stay solo but must not jump ahead of earlier voice in the same thread."""
-    room = _make_room()
-    root_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
-    voice = _text_event(
-        event_id="$voice",
-        body="voice transcript",
-        server_timestamp=1000,
-        source_kind=VOICE_SOURCE_KIND,
-    )
-    command = _text_event(
-        event_id="$cmd",
-        body="!help",
-        server_timestamp=1001,
-        thread_id="$thread-root",
-    )
-    release_voice = asyncio.Event()
-    calls: list[list[str]] = []
-
-    async def ready_voice() -> ReadyPendingEvent:
-        await release_voice.wait()
-        return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
-        )
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-
-    await gate.admit(
-        root_key,
-        ready_task=asyncio.create_task(ready_voice()),
-        source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
-    )
-    await _admit_ready(gate, root_key, PendingEvent(event=command, room=room, source_kind="message"))
-    await asyncio.sleep(0.02)
-    assert calls == []
-
-    release_voice.set()
-    await _wait_for(lambda: calls == [["$voice"], ["$cmd"]], deadline_seconds=0.2)
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2589,17 +2301,21 @@ async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce()
         is_shutting_down=lambda: False,
     )
 
-    await gate.admit(
-        first_key,
-        ready_task=asyncio.create_task(ready_voice(first_voice)),
+    first_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    second_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        first_slot,
+        key=first_key,
         source_event_id="$voice1",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice(first_voice)),
     )
-    await gate.admit(
-        second_key,
-        ready_task=asyncio.create_task(ready_voice(second_voice)),
+    gate.submit_lane_slot(
+        second_slot,
+        key=second_key,
         source_event_id="$voice2",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice(second_voice)),
     )
 
     await gate.drain_all()
@@ -2613,10 +2329,10 @@ async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce()
 
 @pytest.mark.asyncio
 async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> None:
-    """A pending voice admission in one thread must not steal another thread's turn."""
+    """A pending voice admission must not steal another sender's thread turn."""
     room = _make_room()
     voice_key = CoalescingKey(room.room_id, "$thread-a-child", "@user:localhost")
-    unrelated_thread_key = CoalescingKey(room.room_id, "$thread-b-root", "@user:localhost")
+    unrelated_thread_key = CoalescingKey(room.room_id, "$thread-b-root", "@other:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -2626,6 +2342,7 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
+        sender="@other:localhost",
         server_timestamp=1001,
         thread_id="$thread-b-root",
     )
@@ -2648,13 +2365,19 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
         is_shutting_down=lambda: False,
     )
 
-    await gate.admit(
-        voice_key,
-        ready_task=asyncio.create_task(ready_voice()),
+    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        voice_slot,
+        key=voice_key,
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice()),
     )
-    await _admit_ready(gate, unrelated_thread_key, PendingEvent(event=typed, room=room, source_kind="message"))
+    await _admit_ready(
+        gate,
+        unrelated_thread_key,
+        PendingEvent(event=typed, room=room, source_kind="message", requester_user_id="@other:localhost"),
+    )
     await _wait_for(lambda: calls == [(unrelated_thread_key, ["$typed"])])
 
     release_voice.set()
@@ -2742,17 +2465,21 @@ async def test_deferred_room_scope_voice_burst_stays_one_turn_under_null_thread_
         is_shutting_down=lambda: False,
     )
 
-    await gate.admit(
-        key,
-        ready_task=asyncio.create_task(ready_voice(first_voice)),
+    first_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    second_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        first_slot,
+        key=key,
         source_event_id="$voice1",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice(first_voice)),
     )
-    await gate.admit(
-        key,
-        ready_task=asyncio.create_task(ready_voice(second_voice)),
+    gate.submit_lane_slot(
+        second_slot,
+        key=key,
         source_event_id="$voice2",
         source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready_voice(second_voice)),
     )
     await gate.drain_all()
 
@@ -2811,14 +2538,13 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
             timeout=0.05,
         )
 
-        canonical_key = CoalescingKey("!room:localhost", "$m1", "@user:localhost")
-        assert [queued.pending_event.event.event_id for queued in bot._coalescing_gate._gates[canonical_key].queue] == [
-            "$m2",
-        ]
+        await _wait_for(lambda: calls == [["$m1"], ["$m2"]])
+        assert not release_first_dispatch.is_set()
 
         release_first_dispatch.set()
-        await _wait_for(lambda: calls == [["$m1"], ["$m2"]])
+        await bot._coalescing_gate.drain_all()
 
+    assert calls == [["$m1"], ["$m2"]]
     assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
@@ -3287,8 +3013,8 @@ async def test_shutdown_during_in_flight_dispatch_does_not_start_grace(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_thread_followups_wait_behind_first_turn_root_in_flight(tmp_path: Path) -> None:
-    """Threaded follow-ups should not overtake their room-root parent while it dispatches."""
+async def test_thread_followups_dispatch_while_first_turn_root_in_flight(tmp_path: Path) -> None:
+    """Thread replies dispatch as their own turn without waiting on the root's in-flight dispatch."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first")
@@ -3336,12 +3062,13 @@ async def test_thread_followups_wait_behind_first_turn_root_in_flight(tmp_path: 
                 requester_user_id="@user:localhost",
             )
 
-        await asyncio.sleep(0.01)
-        assert calls == [["$m1"]]
+        await _wait_for(lambda: ["$m2", "$m3"] in calls)
+        assert not release_first_dispatch.is_set()
+        assert calls == [["$m1"], ["$m2", "$m3"]]
 
         release_first_dispatch.set()
         await first_task
-        await _wait_for(lambda: calls == [["$m1"], ["$m2", "$m3"]])
+        await bot._coalescing_gate.drain_all()
 
     assert calls == [["$m1"], ["$m2", "$m3"]]
     assert _coalescing_gate_is_idle(bot._coalescing_gate)
@@ -4400,7 +4127,7 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        assert not _coalescing_gate_is_idle(bot._coalescing_gate)
+        await _wait_for(lambda: not _coalescing_gate_is_idle(bot._coalescing_gate))
 
         await bot.cleanup()
 
@@ -4553,8 +4280,8 @@ async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> None:
-    """Each command should dispatch as its own solo batch even when sent rapidly."""
-    bot = _make_bot(tmp_path)
+    """Each command dispatches as its own solo control input even when sent rapidly."""
+    bot = _make_bot(tmp_path, debounce_ms=60_000)
     room = _make_room()
     first_cmd = _text_event(event_id="$c1", body="!help", server_timestamp=1000)
     second_cmd = _text_event(event_id="$c2", body="!schedule list", server_timestamp=1001)
@@ -4573,21 +4300,8 @@ async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> 
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await _enqueue_for_dispatch(
-            bot,
-            first_cmd,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        await _enqueue_for_dispatch(
-            bot,
-            second_cmd,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        await _wait_for(lambda: len(calls) == 2)
+        await bot._turn_controller.handle_text_event(room, first_cmd)
+        await bot._turn_controller.handle_text_event(room, second_cmd)
 
     assert calls == [
         ("!help", ["$c1"]),

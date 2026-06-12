@@ -354,6 +354,48 @@ class ResponseRunner:
         init=False,
     )
     _in_flight_response_count: int = field(default=0, init=False)
+    _inbox_response_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
+
+    def track_inbox_response(self, response: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+        """Own one detached inbox response until it completes or a drain settles it."""
+        task = asyncio.create_task(response, name=name)
+        self._inbox_response_tasks.add(task)
+        task.add_done_callback(self._finish_inbox_response_task)
+        return task
+
+    def _finish_inbox_response_task(self, task: asyncio.Task[None]) -> None:
+        self._inbox_response_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            self.deps.logger.error(
+                "inbox_response_task_failed",
+                task_name=task.get_name(),
+                exception_type=error.__class__.__name__,
+                error=str(error),
+            )
+
+    async def drain_inbox_responses(self, *, cancel_after_seconds: float | None = None) -> bool:
+        """Settle detached inbox responses: graceful drains await, bounded drains cancel.
+
+        Returns False when a bounded drain had to cancel or abandon running work.
+        A bounded drain may take up to two cancel_after_seconds windows: one
+        waiting for completion and one letting cancelled tasks run cleanup.
+        """
+        tasks = [task for task in self._inbox_response_tasks if not task.done()]
+        if not tasks:
+            return True
+        if cancel_after_seconds is None:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            return True
+        _done, pending = await asyncio.wait(tasks, timeout=cancel_after_seconds)
+        if not pending:
+            return True
+        for task in pending:
+            task.cancel()
+        await asyncio.wait(pending, timeout=cancel_after_seconds)
+        return False
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for response coordination."""

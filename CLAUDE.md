@@ -59,9 +59,11 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 Matrix sync callback
   -> bot.py (AgentBot/TeamBot runtime shell)
   -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
+       -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
-       -> coalescing.py                                          (debounced batching per room/thread)
-       -> text_ingress_dispatch.py + turn_policy.py              (commands; ignore / route / respond decision)
+       -> ingress_lanes.py                                       (per-(room, sender) receipt-order FIFO; STT readiness waits here)
+       -> coalescing.py                                          (debounced batching per conversation)
+       -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py                            (lifecycle lock, Agno agent/team run)
        -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
        -> turn_store.py / handled_turns.py                       (durable dedup so restarts don't double-reply)
@@ -78,16 +80,18 @@ Matrix sync callback
 | `team_exact_members.py` | Runtime resolution for exact team member materialization |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle, sync callbacks, and room behavior |
 | `turn_controller.py` | TurnController - owns one inbound turn from ingress to recorded outcome |
+| `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
 | `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
-| `coalescing.py` | Live message coalescing gate (debounced batching per room/thread) |
+| `ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
+| `coalescing.py` | Live message coalescing gate (debounced batching per conversation) |
 | `coalescing_batch.py` | Coalesced dispatch batch construction |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
-| `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation) |
+| `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
 | `response_attempt.py` | Runs one visible response attempt with placeholder and stop tracking |
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
@@ -107,6 +111,7 @@ Matrix sync callback
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `scheduling.py` | Cron and natural-language task scheduling |
+| `scheduling_executor.py` | Fire one scheduled task: hook emission, message build, Matrix delivery, failure notices |
 | `tools/` | 100+ tool integrations |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |

@@ -35,6 +35,7 @@ from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import write_index_metadata_payload
+from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.manager import (
     KnowledgeManager,
     git_checkout_present,
@@ -191,6 +192,10 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _Knowledge)
     monkeypatch.setattr("mindroom.knowledge.manager.create_configured_embedder", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("mindroom.knowledge.indexing_config.ChromaDb", _VectorDb)
+    monkeypatch.setattr("mindroom.knowledge.registry.ChromaDb", _VectorDb)
+    monkeypatch.setattr("mindroom.knowledge.registry.Knowledge", _Knowledge)
+    monkeypatch.setattr("mindroom.knowledge.registry.create_configured_embedder", lambda *_args, **_kwargs: object())
     knowledge_registry._published_indexes.clear()
     knowledge_utils._refresh_scheduled_at.clear()
     knowledge_refresh_runner._refresh_locks.clear()
@@ -220,8 +225,8 @@ def _create_idle_refresh_lock(key: knowledge_registry.KnowledgeSourceRoot) -> No
     knowledge_refresh_runner._release_refresh_lock_for_key(key, entry)
 
 
-def _test_indexing_settings(base_id: str = "docs") -> knowledge_manager_module.IndexingSettings:
-    return knowledge_manager_module.IndexingSettings(
+def _test_indexing_settings(base_id: str = "docs") -> IndexingSettings:
+    return IndexingSettings(
         base_id=base_id,
         storage_root="storage",
         knowledge_path=f"knowledge/{base_id}",
@@ -2310,9 +2315,7 @@ def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
     assert key.indexing_settings.chunk_size == "5000"
     assert key.indexing_settings.chunk_overlap == "0"
     assert key.indexing_settings.repo_identity == credential_free_url_identity("https://example.com/org/repo.git")
-    assert knowledge_manager_module.IndexingSettings.from_metadata(key.indexing_settings.to_metadata()) == (
-        key.indexing_settings
-    )
+    assert IndexingSettings.from_metadata(key.indexing_settings.to_metadata()) == key.indexing_settings
     changed_repo_identity = replace(key.indexing_settings, repo_identity="https://example.com/other/repo.git")
     assert not knowledge_registry.published_index_settings_compatible(key.indexing_settings, changed_repo_identity)
 

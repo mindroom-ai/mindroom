@@ -825,7 +825,7 @@ class TestRoutingRegression:
             content_with_metadata: dict[str, object] = {ORIGINAL_SENDER_KEY: original_sender, **content}
             if source_kind is not None:
                 content_with_metadata[SOURCE_KIND_KEY] = source_kind
-            return router_bot._turn_controller._requester_user_id(
+            return router_bot._ingress_validator.requester_user_id(
                 sender=router_sender,
                 source={"content": content_with_metadata},
             )

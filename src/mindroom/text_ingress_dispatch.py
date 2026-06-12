@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -161,7 +162,7 @@ async def _prepare_text_dispatch(
     hydrated_payload_metadata = payload_metadata_from_source(
         event.source,
         trust_internal_metadata=(
-            controller._should_trust_internal_payload_metadata(event)
+            controller.deps.ingress.should_trust_internal_payload_metadata(event)
             if trust_hydrated_internal_metadata is None
             else trust_hydrated_internal_metadata
         ),
@@ -174,7 +175,7 @@ async def _prepare_text_dispatch(
             hydrated_payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata
             if trust_hydrated_internal_metadata is not None
-            else controller._should_trust_internal_payload_metadata(event),
+            else controller.deps.ingress.should_trust_internal_payload_metadata(event),
         )
     )
     attach_dispatch_pipeline_timing(event.source, dispatch_timing)
@@ -240,7 +241,7 @@ def _parsed_command_for_event(
         return None
     if is_audio_message_event(event) or is_voice_event(
         event,
-        sender_is_trusted=controller._sender_is_trusted_for_ingress_metadata,
+        sender_is_trusted=controller.deps.ingress.sender_is_trusted_for_ingress_metadata,
     ):
         return None
     return command_parser.parse(event.body)
@@ -366,18 +367,39 @@ async def _apply_turn_plan(
         media_events=tuple(media_events or ()),
     )
 
-    await controller._execute_response_action(
-        room,
-        prepared.event,
-        prepared.dispatch,
-        plan.response_action,
-        payload_inputs,
-        processing_log="Processing",
-        dispatch_started_at=prepared.dispatch_started_at,
-        handled_turn=handled_turn,
-        matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
-        queued_notice_reservation=queued_notice_reservation,
+    # The inbox handoff is complete once the runner takes the conversation's
+    # response lock; the response itself keeps running on a runner-owned task.
+    response_started = asyncio.Event()
+    response_task = controller.deps.response_runner.track_inbox_response(
+        controller._execute_response_action(
+            room,
+            prepared.event,
+            prepared.dispatch,
+            plan.response_action,
+            payload_inputs,
+            processing_log="Processing",
+            dispatch_started_at=prepared.dispatch_started_at,
+            handled_turn=handled_turn,
+            matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
+            queued_notice_reservation=queued_notice_reservation,
+            on_lifecycle_lock_acquired=response_started.set,
+        ),
+        name=f"inbox_response:{prepared.event.event_id}",
     )
+    started_wait = asyncio.ensure_future(response_started.wait())
+    try:
+        await asyncio.wait({started_wait, response_task}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        started_wait.cancel()
+    if response_task.done() and not response_task.cancelled() and not response_started.is_set():
+        # Surface pre-lock failures to the caller's containment; post-lock
+        # failures (including a fast failure racing the FIRST_COMPLETED wait)
+        # belong to the runner-owned task. Pre-lock CANCELLATION is
+        # deliberately NOT surfaced: this coroutine was not itself cancelled,
+        # and re-raising CancelledError here would corrupt the gate drain's
+        # own cancellation state. The queued-notice reservation still cancels
+        # in dispatch_text_message's finally, which is the cleanup contract.
+        response_task.result()
 
 
 async def _execute_route_plan(

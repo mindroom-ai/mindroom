@@ -1,4 +1,4 @@
-"""Prompt-ingress reservation ownership."""
+"""Prompt-ingress lane slot ownership."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.coalescing import (
     CoalescingGate,
-    IngressOrderReservation,
+    LaneSlot,
     ReadyPendingEvent,
     close_ready_task_result_metadata,
 )
@@ -19,11 +19,10 @@ if TYPE_CHECKING:
 
 @dataclass
 class PromptIngressReservationOwner:
-    """Own one prompt ingress reservation until it is admitted or released."""
+    """Own one prompt ingress lane slot until it is admitted or released."""
 
     gate: CoalescingGate
-    reservation: IngressOrderReservation
-    active_response_thread_ids_at_receipt: frozenset[str | None] = frozenset()
+    slot: LaneSlot
     admitted: bool = False
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
 
@@ -44,18 +43,18 @@ class PromptIngressReservationOwner:
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
     ) -> None:
-        """Transfer this reservation and any ready metadata to the coalescing gate."""
+        """Transfer this lane slot and any ready metadata to the coalescing gate."""
         if ready_task is not None:
             self.ready_task = ready_task
         metadata_transferred = False
         try:
-            await self.gate.admit(
-                key,
+            self.gate.submit_lane_slot(
+                self.slot,
+                key=key,
                 ready_result=ready_result,
                 ready_task=ready_task,
                 source_event_id=source_event_id,
                 source_kind=source_kind,
-                order_reservation=self.reservation,
             )
             metadata_transferred = True
         except BaseException:
@@ -65,10 +64,6 @@ class PromptIngressReservationOwner:
             raise
         self.admitted = True
         self.ready_task = None
-
-    def retarget(self, requester_user_id: str) -> None:
-        """Move this reservation to a different coalescing owner before admission."""
-        self.gate.retarget_order_reservation(self.reservation, requester_user_id=requester_user_id)
 
     async def cancel_ready_task(self) -> None:
         """Cancel or collect the owned ready task once."""
@@ -89,10 +84,10 @@ class PromptIngressReservationOwner:
         close_ready_task_result_metadata(result[0])
 
     async def release(self) -> None:
-        """Release this reservation if admission did not transfer ownership."""
+        """Release this lane slot if admission did not transfer ownership."""
         if self.admitted:
             return
         try:
             await self.cancel_ready_task()
         finally:
-            self.gate.release_order_reservation(self.reservation)
+            self.gate.release_lane_slot(self.slot)
