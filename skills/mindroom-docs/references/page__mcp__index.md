@@ -96,6 +96,7 @@ Use the OAuth `auth` block for remote MCP servers that need a different bearer t
 | Option | Type | Default | Notes |
 |--------|------|---------|-------|
 | `enabled` | bool | `true` | Set to `false` to disable one server without removing its config |
+| `description` | string | `null` | What the server provides; appended to the OAuth bridge tool descriptions shown to the model |
 | `required` | bool | `false` | Block dependent agent startup while this server is unavailable instead of degrading |
 | `transport` | string | *required* | One of `stdio`, `sse`, or `streamable-http` |
 | `command` | string | `null` | Required for `stdio` |
@@ -173,6 +174,7 @@ mcp_servers:
     transport: streamable-http
     url: https://mcp.example.com/mcp
     tool_prefix: example
+    description: Example workspace search, documents, and calendar for the signed-in user.
     auth:
       type: oauth
       provider_id: mcp_example
@@ -207,6 +209,8 @@ OAuth-backed MCP servers always expose a stable bridge surface:
 
 The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a requester-specific tool catalog.
 When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
+Until the requester connects, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
+Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
 After the user connects, `list_tools` returns the remote catalog and `call_tool` sends `Authorization: Bearer <requester access token>` to the MCP server.
 After MindRoom has a cached requester-specific catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that requester in addition to the bridge functions.
 

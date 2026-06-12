@@ -60,6 +60,15 @@ def test_mcp_server_config_normalizes_tool_filters() -> None:
     assert config.exclude_tools == ["pong"]
 
 
+def test_mcp_server_config_normalizes_description() -> None:
+    """Trim the server description and collapse blank values to None."""
+    config = MCPServerConfig(transport="stdio", command="npx", description="  Demo workspace tools.  ")
+    assert config.description == "Demo workspace tools."
+
+    blank = MCPServerConfig(transport="stdio", command="npx", description="   ")
+    assert blank.description is None
+
+
 def test_mcp_server_config_accepts_oauth_auth_for_remote_servers() -> None:
     """Parse OAuth settings for requester-scoped remote MCP servers."""
     config = MCPServerConfig(

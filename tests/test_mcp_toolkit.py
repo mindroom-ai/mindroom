@@ -146,10 +146,11 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
 
 
-def _oauth_server_config() -> MCPServerConfig:
+def _oauth_server_config(description: str | None = None) -> MCPServerConfig:
     return MCPServerConfig(
         transport="streamable-http",
         url="https://mcp.example.test/mcp",
+        description=description,
         auth={
             "type": "oauth",
             "discovery": "manual",
@@ -218,6 +219,41 @@ async def test_oauth_mcp_toolkit_returns_structured_oauth_required_payload(tmp_p
         "provider": "mcp_demo",
         "connect_url": "http://localhost:8765/api/oauth/mcp_demo/authorize?connect_token=opaque",
     }
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_toolkit_bridge_descriptions_include_server_description(tmp_path: Path) -> None:
+    """Configured server descriptions must reach the model before the requester signs in."""
+    description = "Company workspace gateway: email, calendar, documents, and issue tracking."
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=_OAuthRequiredManager(),
+        catalog=None,
+        server_config=_oauth_server_config(description),
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=_worker_target(),
+    )
+
+    for function_name in ("demo_connection_status", "demo_list_tools", "demo_call_tool"):
+        assert toolkit.async_functions[function_name].description.endswith(f" {description}")
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_toolkit_bridge_descriptions_without_server_description(tmp_path: Path) -> None:
+    """Bridge descriptions keep their original shape when no description is configured."""
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=_OAuthRequiredManager(),
+        catalog=None,
+        server_config=_oauth_server_config(),
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=_worker_target(),
+    )
+
+    status_description = toolkit.async_functions["demo_connection_status"].description
+    assert status_description == "Check whether MCP server 'demo' is connected for the current requester."
 
 
 @pytest.mark.asyncio
