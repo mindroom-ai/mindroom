@@ -178,6 +178,39 @@ def _load_scope_id_entries(
     return results, id_to_file
 
 
+def _load_scope_unstructured_entries(
+    scope_user_id: str,
+    resolution: FileMemoryResolution,
+    config: Config,
+    existing_memory_text: set[str],
+) -> list[MemoryResult]:
+    scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
+    if not scope_path.exists():
+        return []
+
+    results: list[MemoryResult] = []
+    seen_memory_text = set(existing_memory_text)
+    for file_path in _scope_markdown_files(scope_path):
+        relative_path = file_path.relative_to(scope_path).as_posix()
+        for line_no, raw_line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), 1):
+            snippet = raw_line.strip()
+            if not snippet or snippet.startswith("#") or FILE_MEMORY_ENTRY_PATTERN.match(snippet):
+                continue
+            normalized_snippet = snippet.lower()
+            if normalized_snippet in seen_memory_text:
+                continue
+            seen_memory_text.add(normalized_snippet)
+            results.append(
+                {
+                    "id": f"file:{relative_path}:{line_no}",
+                    "memory": snippet,
+                    "user_id": scope_user_id,
+                    "metadata": {"source_file": relative_path, "line": line_no},
+                },
+            )
+    return results
+
+
 @timed("system_prompt_assembly.memory_search.file.id_entries_load")
 def _load_scope_entries_for_search(
     scope_user_id: str,
@@ -429,6 +462,9 @@ def _replace_scope_memory_entry(
     resolution: FileMemoryResolution,
     config: Config,
 ) -> bool:
+    if FILE_MEMORY_PATH_ID_PATTERN.match(memory_id):
+        return _replace_scope_path_memory_entry(scope_user_id, memory_id, content, resolution, config)
+
     _entries, id_to_file = _load_scope_id_entries(scope_user_id, resolution, config)
     if (file_path := id_to_file.get(memory_id)) is None:
         return False
@@ -455,6 +491,42 @@ def _replace_scope_memory_entry(
         return False
 
     file_path.write_text(f"{'\n'.join(new_lines)}\n" if new_lines else "", encoding="utf-8")
+    return True
+
+
+def _replace_scope_path_memory_entry(
+    scope_user_id: str,
+    memory_id: str,
+    content: str | None,
+    resolution: FileMemoryResolution,
+    config: Config,
+) -> bool:
+    match = FILE_MEMORY_PATH_ID_PATTERN.match(memory_id)
+    if match is None:
+        return False
+
+    line_no = int(match.group("line"))
+    relative_path = match.group("path")
+    scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
+    target_path = _resolve_scope_markdown_path(scope_path, relative_path)
+    if target_path is None or not target_path.exists():
+        return False
+
+    lines = target_path.read_text(encoding="utf-8").splitlines()
+    if line_no <= 0 or line_no > len(lines):
+        return False
+
+    raw_line = lines[line_no - 1]
+    stripped = raw_line.strip()
+    if not stripped or stripped.startswith("#") or FILE_MEMORY_ENTRY_PATTERN.match(stripped):
+        return False
+
+    if content is None:
+        lines[line_no - 1] = ""
+    else:
+        prefix_len = len(raw_line) - len(raw_line.lstrip(" "))
+        lines[line_no - 1] = f"{raw_line[:prefix_len]}{' '.join(content.strip().split())}"
+    target_path.write_text(f"{'\n'.join(lines)}\n" if lines else "", encoding="utf-8")
     return True
 
 
@@ -861,7 +933,20 @@ class FileMemoryBackend:
             resolution,
             config,
         )
-        return results[:limit]
+        if len(results) >= limit:
+            return results[:limit]
+
+        existing_memory_text = {
+            memory_text.strip().lower() for entry in results if (memory_text := entry.get("memory"))
+        }
+        unstructured_results = await asyncio.to_thread(
+            _load_scope_unstructured_entries,
+            agent_scope_user_id(agent_name),
+            resolution,
+            config,
+            existing_memory_text,
+        )
+        return (results + unstructured_results)[:limit]
 
     async def get(
         self,

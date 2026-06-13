@@ -441,6 +441,31 @@ async def test_file_backend_add_and_list_memories(storage_path: Path, config: Co
 
 
 @pytest.mark.asyncio
+async def test_file_backend_lists_unstructured_daily_memory_lines(storage_path: Path, config: Config) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    daily_file = workspace / "memory" / "2026-06-13.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    daily_file.write_text(
+        "# Daily notes\n\nBas prefers repo-grounded answers.\n- [id=m_existing] Structured daily note.\n",
+        encoding="utf-8",
+    )
+
+    results = await list_all_agent_memories("general", storage_path, config)
+
+    assert [result["memory"] for result in results] == [
+        "Structured daily note.",
+        "Bas prefers repo-grounded answers.",
+    ]
+    assert [result["id"] for result in results] == [
+        "m_existing",
+        "file:memory/2026-06-13.md:3",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_file_backend_user_scoped_workers_share_agent_memory_across_requesters(
     storage_path: Path,
     config: Config,
@@ -1298,6 +1323,32 @@ async def test_file_backend_memory_crud_and_scope(storage_path: Path, config: Co
     assert await get_agent_memory(private_id, "other_agent", storage_path, config) is None
     with pytest.raises(ValueError, match=f"No memory found with id={private_id}"):
         await update_agent_memory(private_id, "Tampered", "other_agent", storage_path, config)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_can_update_and_delete_unstructured_file_memory_line(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    daily_file = workspace / "memory" / "2026-06-13.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    daily_file.write_text("Old raw note.\nKeep this line.\n", encoding="utf-8")
+
+    memory_id = "file:memory/2026-06-13.md:1"
+    await update_agent_memory(memory_id, "Updated raw note.", "general", storage_path, config)
+
+    assert daily_file.read_text(encoding="utf-8") == "Updated raw note.\nKeep this line.\n"
+    updated = await get_agent_memory(memory_id, "general", storage_path, config)
+    assert updated is not None
+    assert updated["memory"] == "Updated raw note."
+
+    await delete_agent_memory(memory_id, "general", storage_path, config)
+    assert daily_file.read_text(encoding="utf-8") == "\nKeep this line.\n"
+    assert await get_agent_memory(memory_id, "general", storage_path, config) is None
 
 
 @pytest.mark.asyncio
