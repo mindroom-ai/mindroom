@@ -19,6 +19,11 @@ function formatLimit(value: number | string | undefined): string {
   return value
 }
 
+function formatMonthlyPrice(price: string): string {
+  if (price === 'custom') return 'Custom'
+  return `${price}/month`
+}
+
 export default function BillingPage() {
   const { subscription, loading, refresh } = useSubscription()
   const [redirecting, setRedirecting] = useState(false)
@@ -77,7 +82,7 @@ export default function BillingPage() {
   const tierInfo = {
     name: currentPlan?.name || 'Free',
     price: currentPlan ?
-      `${currentPlan.price_monthly}/month` :
+      formatMonthlyPrice(currentPlan.price_monthly) :
       '$0/month',
   }
 
