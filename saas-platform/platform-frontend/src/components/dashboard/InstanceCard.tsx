@@ -57,7 +57,7 @@ export function InstanceCard({
     }
   }
 
-  const formatRelativeTime = (dateStr?: string) => {
+  const formatRelativeTime = (dateStr?: string | null) => {
     if (!dateStr) return '—'
     const date = new Date(dateStr)
     const diff = Date.now() - date.getTime()
@@ -346,7 +346,7 @@ export function InstanceCard({
         <div className="flex items-center justify-between">
           <span className="text-gray-600 dark:text-gray-400">Last Updated</span>
           <span className="text-sm text-gray-500 dark:text-gray-400">
-            {formatRelativeTime(instance.updated_at)} · {new Date(instance.updated_at).toLocaleString()}
+            {formatRelativeTime(instance.updated_at)} · {instance.updated_at ? new Date(instance.updated_at).toLocaleString() : '—'}
           </span>
         </div>
 

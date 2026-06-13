@@ -4,33 +4,8 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Check, ArrowLeft, Sparkles } from 'lucide-react'
 import { useSubscription } from '@/hooks/useSubscription'
-import { createCheckoutSession, getPricingConfig } from '@/lib/api'
+import { createCheckoutSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
-
-interface PricingPlan {
-  id: string
-  name: string
-  price_monthly: string
-  price_yearly: string
-  description: string
-  features: string[]
-  recommended?: boolean
-  included_ai_budget_usd?: number
-  requires_customer_provider_keys?: boolean
-  resource_profile?: 'small' | 'pro'
-  limits?: {
-    max_agents: number | string
-    max_messages_per_day: number | string
-    storage_gb: number | string
-  }
-}
-
-interface PricingConfig {
-  plans: Record<string, PricingPlan>
-  discounts?: {
-    annual_percentage: number
-  }
-}
 
 export default function UpgradePage() {
   const router = useRouter()
@@ -176,9 +151,9 @@ export default function UpgradePage() {
           const isCurrentPlan = plan.id === currentTier
           const isDowngrade = plans.findIndex(p => p.id === plan.id) < plans.findIndex(p => p.id === currentTier)
 
-          // Parse prices and calculate display values
-          const monthlyPrice = plan.price_monthly
-          const yearlyPrice = plan.price_yearly
+          // Parse prices and calculate display values ('custom' is the backend literal)
+          const monthlyPrice = plan.price_monthly === 'custom' ? 'Custom' : plan.price_monthly
+          const yearlyPrice = plan.price_yearly === 'custom' ? 'Custom' : plan.price_yearly
           const isCustom = monthlyPrice === 'Custom'
 
           // Calculate yearly monthly equivalent (with discount)

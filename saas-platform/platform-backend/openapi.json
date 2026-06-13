@@ -1,0 +1,4473 @@
+{
+  "components": {
+    "schemas": {
+      "AccountSetupResponse": {
+        "description": "Account setup response model.",
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "subscription": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SubscriptionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "message",
+          "account_id"
+        ],
+        "title": "AccountSetupResponse",
+        "type": "object"
+      },
+      "AccountWithRelationsOut": {
+        "description": "Account with subscriptions and instances.",
+        "properties": {
+          "company_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company Name"
+          },
+          "consent_analytics": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consent Analytics"
+          },
+          "consent_marketing": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consent Marketing"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "full_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Full Name"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "instances": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instances"
+          },
+          "is_admin": {
+            "title": "Is Admin",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "stripe_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stripe Customer Id"
+          },
+          "subscriptions": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subscriptions"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "is_admin",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AccountWithRelationsOut",
+        "type": "object"
+      },
+      "ActionResult": {
+        "description": "Result model for action operations.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "ActionResult",
+        "type": "object"
+      },
+      "AdminAccountDetailsResponse": {
+        "description": "Admin account details response.",
+        "properties": {
+          "account": {
+            "additionalProperties": true,
+            "title": "Account",
+            "type": "object"
+          },
+          "instances": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Instances",
+            "type": "array"
+          },
+          "subscription": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subscription"
+          }
+        },
+        "required": [
+          "account",
+          "subscription",
+          "instances"
+        ],
+        "title": "AdminAccountDetailsResponse",
+        "type": "object"
+      },
+      "AdminCreateResponse": {
+        "description": "Admin create response.",
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "AdminCreateResponse",
+        "type": "object"
+      },
+      "AdminDashboardMetricsResponse": {
+        "description": "Admin dashboard metrics response.",
+        "properties": {
+          "active_subscriptions": {
+            "title": "Active Subscriptions",
+            "type": "integer"
+          },
+          "instances_by_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Instances By Status",
+            "type": "object"
+          },
+          "recent_instances": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Recent Instances",
+            "type": "array"
+          },
+          "recent_signups": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Recent Signups",
+            "type": "array"
+          },
+          "subscription_revenue": {
+            "title": "Subscription Revenue",
+            "type": "number"
+          },
+          "subscriptions_by_tier": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Subscriptions By Tier",
+            "type": "object"
+          },
+          "total_accounts": {
+            "title": "Total Accounts",
+            "type": "integer"
+          },
+          "total_instances": {
+            "title": "Total Instances",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_accounts",
+          "active_subscriptions",
+          "total_instances",
+          "instances_by_status",
+          "subscription_revenue",
+          "subscriptions_by_tier",
+          "recent_signups",
+          "recent_instances"
+        ],
+        "title": "AdminDashboardMetricsResponse",
+        "type": "object"
+      },
+      "AdminDeleteResponse": {
+        "description": "Admin delete response.",
+        "properties": {
+          "data": {
+            "additionalProperties": true,
+            "title": "Data",
+            "type": "object"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "AdminDeleteResponse",
+        "type": "object"
+      },
+      "AdminGetOneResponse": {
+        "description": "Admin single item response.",
+        "properties": {
+          "data": {
+            "additionalProperties": true,
+            "title": "Data",
+            "type": "object"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "AdminGetOneResponse",
+        "type": "object"
+      },
+      "AdminListResponse": {
+        "description": "Admin list response for generic resources.",
+        "properties": {
+          "data": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "data",
+          "total"
+        ],
+        "title": "AdminListResponse",
+        "type": "object"
+      },
+      "AdminLogoutResponse": {
+        "description": "Admin logout response model.",
+        "properties": {
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success"
+        ],
+        "title": "AdminLogoutResponse",
+        "type": "object"
+      },
+      "AdminStatsOut": {
+        "description": "Admin statistics output model.",
+        "properties": {
+          "accounts": {
+            "title": "Accounts",
+            "type": "integer"
+          },
+          "active_subscriptions": {
+            "title": "Active Subscriptions",
+            "type": "integer"
+          },
+          "running_instances": {
+            "title": "Running Instances",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "accounts",
+          "active_subscriptions",
+          "running_instances"
+        ],
+        "title": "AdminStatsOut",
+        "type": "object"
+      },
+      "AdminStatusOut": {
+        "description": "Admin status response model.",
+        "properties": {
+          "is_admin": {
+            "title": "Is Admin",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "is_admin"
+        ],
+        "title": "AdminStatusOut",
+        "type": "object"
+      },
+      "AdminUpdateResponse": {
+        "description": "Admin update response.",
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "AdminUpdateResponse",
+        "type": "object"
+      },
+      "CancelSubscriptionRequest": {
+        "description": "Request model for canceling subscription.",
+        "properties": {
+          "cancel_at_period_end": {
+            "default": true,
+            "title": "Cancel At Period End",
+            "type": "boolean"
+          }
+        },
+        "title": "CancelSubscriptionRequest",
+        "type": "object"
+      },
+      "CheckoutRequest": {
+        "description": "Request model for creating Stripe checkout sessions.",
+        "properties": {
+          "billing_cycle": {
+            "default": "monthly",
+            "title": "Billing Cycle",
+            "type": "string"
+          },
+          "tier": {
+            "title": "Tier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tier"
+        ],
+        "title": "CheckoutRequest",
+        "type": "object"
+      },
+      "ConsentUpdate": {
+        "description": "Model for consent update requests.",
+        "properties": {
+          "analytics": {
+            "default": false,
+            "title": "Analytics",
+            "type": "boolean"
+          },
+          "marketing": {
+            "default": false,
+            "title": "Marketing",
+            "type": "boolean"
+          }
+        },
+        "title": "ConsentUpdate",
+        "type": "object"
+      },
+      "DeletionRequest": {
+        "description": "Model for account deletion requests.",
+        "properties": {
+          "confirmation": {
+            "default": false,
+            "title": "Confirmation",
+            "type": "boolean"
+          }
+        },
+        "title": "DeletionRequest",
+        "type": "object"
+      },
+      "Discounts": {
+        "description": "Discount configuration.",
+        "properties": {
+          "annual_percentage": {
+            "title": "Annual Percentage",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "annual_percentage"
+        ],
+        "title": "Discounts",
+        "type": "object"
+      },
+      "GdprCancelDeletionResponse": {
+        "description": "GDPR deletion cancellation response model.",
+        "properties": {
+          "account_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Status"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "success",
+              "not_pending"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "GdprCancelDeletionResponse",
+        "type": "object"
+      },
+      "GdprConsentResponse": {
+        "description": "GDPR consent update response model.",
+        "properties": {
+          "consent": {
+            "$ref": "#/components/schemas/GdprConsentState"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "consent",
+          "updated_at"
+        ],
+        "title": "GdprConsentResponse",
+        "type": "object"
+      },
+      "GdprConsentState": {
+        "description": "Consent flags echoed back after an update.",
+        "properties": {
+          "analytics": {
+            "title": "Analytics",
+            "type": "boolean"
+          },
+          "essential": {
+            "title": "Essential",
+            "type": "boolean"
+          },
+          "marketing": {
+            "title": "Marketing",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "marketing",
+          "analytics",
+          "essential"
+        ],
+        "title": "GdprConsentState",
+        "type": "object"
+      },
+      "GdprDeletionResponse": {
+        "description": "GDPR deletion request response model (confirmation prompt or scheduled deletion).",
+        "properties": {
+          "cancellation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancellation"
+          },
+          "data_deleted": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Deleted"
+          },
+          "data_retained": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Retained"
+          },
+          "deletion_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Date"
+          },
+          "grace_period_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grace Period Days"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "confirmation_required",
+              "deletion_scheduled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warning"
+          }
+        },
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "GdprDeletionResponse",
+        "type": "object"
+      },
+      "GdprExportResponse": {
+        "description": "GDPR data export response model.",
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "string"
+          },
+          "activity_history": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Activity History",
+            "type": "array"
+          },
+          "data_processing_purposes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Data Processing Purposes",
+            "type": "array"
+          },
+          "data_retention_periods": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Data Retention Periods",
+            "type": "object"
+          },
+          "export_date": {
+            "title": "Export Date",
+            "type": "string"
+          },
+          "instances": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Instances",
+            "type": "array"
+          },
+          "payments": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Payments",
+            "type": "array"
+          },
+          "personal_data": {
+            "$ref": "#/components/schemas/GdprPersonalData"
+          },
+          "subscriptions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Subscriptions",
+            "type": "array"
+          },
+          "third_party_processors": {
+            "items": {
+              "$ref": "#/components/schemas/GdprThirdPartyProcessor"
+            },
+            "title": "Third Party Processors",
+            "type": "array"
+          },
+          "usage_metrics": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Usage Metrics",
+            "type": "array"
+          }
+        },
+        "required": [
+          "export_date",
+          "account_id",
+          "personal_data",
+          "subscriptions",
+          "instances",
+          "usage_metrics",
+          "activity_history",
+          "payments",
+          "data_processing_purposes",
+          "data_retention_periods",
+          "third_party_processors"
+        ],
+        "title": "GdprExportResponse",
+        "type": "object"
+      },
+      "GdprPersonalData": {
+        "description": "Personal data section of a GDPR export.",
+        "properties": {
+          "company_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company Name"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "full_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Full Name"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "tier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tier"
+          }
+        },
+        "title": "GdprPersonalData",
+        "type": "object"
+      },
+      "GdprThirdPartyProcessor": {
+        "description": "Third-party processor disclosure in a GDPR export.",
+        "properties": {
+          "data_shared": {
+            "title": "Data Shared",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "purpose": {
+            "title": "Purpose",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "purpose",
+          "data_shared"
+        ],
+        "title": "GdprThirdPartyProcessor",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "description": "Health check response model.",
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "stripe": {
+            "title": "Stripe",
+            "type": "boolean"
+          },
+          "supabase": {
+            "title": "Supabase",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status",
+          "supabase",
+          "stripe"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "InstanceOut": {
+        "description": "Instance information output model.",
+        "properties": {
+          "backend_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend Url"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "frontend_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frontend Url"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "instance_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Instance Id"
+          },
+          "kubernetes_synced_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kubernetes Synced At"
+          },
+          "matrix_server_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matrix Server Url"
+          },
+          "status": {
+            "enum": [
+              "provisioning",
+              "running",
+              "stopped",
+              "failed",
+              "error",
+              "deprovisioned",
+              "restarting"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "status_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Hint"
+          },
+          "subdomain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subdomain"
+          },
+          "subscription_id": {
+            "title": "Subscription Id",
+            "type": "string"
+          },
+          "tier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tier"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "id",
+          "instance_id",
+          "subscription_id",
+          "status"
+        ],
+        "title": "InstanceOut",
+        "type": "object"
+      },
+      "InstancesResponse": {
+        "description": "Response model for listing multiple instances.",
+        "properties": {
+          "instances": {
+            "items": {
+              "$ref": "#/components/schemas/InstanceOut"
+            },
+            "title": "Instances",
+            "type": "array"
+          }
+        },
+        "required": [
+          "instances"
+        ],
+        "title": "InstancesResponse",
+        "type": "object"
+      },
+      "PlanLimits": {
+        "description": "Plan limits and capabilities.",
+        "properties": {
+          "analytics": {
+            "title": "Analytics",
+            "type": "string"
+          },
+          "custom_development": {
+            "title": "Custom Development",
+            "type": "boolean"
+          },
+          "dedicated_infrastructure": {
+            "title": "Dedicated Infrastructure",
+            "type": "boolean"
+          },
+          "integrations": {
+            "title": "Integrations",
+            "type": "string"
+          },
+          "max_agents": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "const": "unlimited",
+                "type": "string"
+              }
+            ],
+            "title": "Max Agents"
+          },
+          "max_messages_per_day": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "const": "unlimited",
+                "type": "string"
+              }
+            ],
+            "title": "Max Messages Per Day"
+          },
+          "on_premise": {
+            "title": "On Premise",
+            "type": "boolean"
+          },
+          "sla": {
+            "title": "Sla",
+            "type": "boolean"
+          },
+          "sso": {
+            "title": "Sso",
+            "type": "boolean"
+          },
+          "storage_gb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "const": "unlimited",
+                "type": "string"
+              }
+            ],
+            "title": "Storage Gb"
+          },
+          "support": {
+            "title": "Support",
+            "type": "string"
+          },
+          "training": {
+            "title": "Training",
+            "type": "boolean"
+          },
+          "workflows": {
+            "title": "Workflows",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "max_agents",
+          "max_messages_per_day",
+          "storage_gb",
+          "support",
+          "integrations",
+          "workflows",
+          "analytics",
+          "sla",
+          "training",
+          "sso",
+          "custom_development",
+          "on_premise",
+          "dedicated_infrastructure"
+        ],
+        "title": "PlanLimits",
+        "type": "object"
+      },
+      "PricingConfigResponse": {
+        "description": "Public pricing configuration response model.",
+        "properties": {
+          "discounts": {
+            "$ref": "#/components/schemas/Discounts"
+          },
+          "plans": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PublicPlan"
+            },
+            "title": "Plans",
+            "type": "object"
+          },
+          "product": {
+            "$ref": "#/components/schemas/Product"
+          },
+          "trial": {
+            "$ref": "#/components/schemas/Trial"
+          }
+        },
+        "required": [
+          "product",
+          "plans",
+          "trial",
+          "discounts"
+        ],
+        "title": "PricingConfigResponse",
+        "type": "object"
+      },
+      "Product": {
+        "description": "Product configuration.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/ProductMetadata"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "metadata"
+        ],
+        "title": "Product",
+        "type": "object"
+      },
+      "ProductMetadata": {
+        "description": "Product metadata.",
+        "properties": {
+          "platform": {
+            "title": "Platform",
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform"
+        ],
+        "title": "ProductMetadata",
+        "type": "object"
+      },
+      "ProvisionResponse": {
+        "description": "Response model for provisioning operations.",
+        "properties": {
+          "api_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Url"
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Customer Id"
+          },
+          "frontend_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frontend Url"
+          },
+          "matrix_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matrix Url"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message",
+          "customer_id"
+        ],
+        "title": "ProvisionResponse",
+        "type": "object"
+      },
+      "PublicPlan": {
+        "description": "One plan as exposed by /pricing/config (prices formatted for display).\n\nFields the route always emits are required so the generated frontend types are non-optional.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "features": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Features",
+            "type": "array"
+          },
+          "included_ai_budget_usd": {
+            "title": "Included Ai Budget Usd",
+            "type": "integer"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/PlanLimits"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "price_monthly": {
+            "title": "Price Monthly",
+            "type": "string"
+          },
+          "price_yearly": {
+            "title": "Price Yearly",
+            "type": "string"
+          },
+          "recommended": {
+            "title": "Recommended",
+            "type": "boolean"
+          },
+          "requires_customer_provider_keys": {
+            "title": "Requires Customer Provider Keys",
+            "type": "boolean"
+          },
+          "resource_profile": {
+            "enum": [
+              "small",
+              "pro"
+            ],
+            "title": "Resource Profile",
+            "type": "string"
+          },
+          "stripe_price_id_monthly": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stripe Price Id Monthly"
+          },
+          "stripe_price_id_yearly": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stripe Price Id Yearly"
+          }
+        },
+        "required": [
+          "name",
+          "price_monthly",
+          "price_yearly",
+          "description",
+          "features",
+          "limits",
+          "recommended",
+          "included_ai_budget_usd",
+          "requires_customer_provider_keys",
+          "resource_profile"
+        ],
+        "title": "PublicPlan",
+        "type": "object"
+      },
+      "StatusResponse": {
+        "description": "Generic status response model.",
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "StatusResponse",
+        "type": "object"
+      },
+      "StripePriceResponse": {
+        "description": "Stripe price ID response model.",
+        "properties": {
+          "billing_cycle": {
+            "title": "Billing Cycle",
+            "type": "string"
+          },
+          "plan": {
+            "title": "Plan",
+            "type": "string"
+          },
+          "price_id": {
+            "title": "Price Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "price_id",
+          "plan",
+          "billing_cycle"
+        ],
+        "title": "StripePriceResponse",
+        "type": "object"
+      },
+      "SubscriptionCancelResponse": {
+        "description": "Subscription cancellation response model.",
+        "properties": {
+          "cancel_at_period_end": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancel At Period End"
+          },
+          "cancelled_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancelled At"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "subscription_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subscription Id"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "SubscriptionCancelResponse",
+        "type": "object"
+      },
+      "SubscriptionOut": {
+        "description": "Subscription information output model.",
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "string"
+          },
+          "can_run_instances": {
+            "title": "Can Run Instances",
+            "type": "boolean"
+          },
+          "cancelled_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancelled At"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "current_period_end": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Period End"
+          },
+          "current_period_start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Period Start"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "max_agents": {
+            "title": "Max Agents",
+            "type": "integer"
+          },
+          "max_messages_per_day": {
+            "title": "Max Messages Per Day",
+            "type": "integer"
+          },
+          "max_storage_gb": {
+            "title": "Max Storage Gb",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "cancelled",
+              "past_due",
+              "trialing",
+              "paused",
+              "incomplete"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "stripe_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stripe Customer Id"
+          },
+          "stripe_subscription_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stripe Subscription Id"
+          },
+          "tier": {
+            "enum": [
+              "free",
+              "byok",
+              "hobby",
+              "pro",
+              "enterprise"
+            ],
+            "title": "Tier",
+            "type": "string"
+          },
+          "trial_days_remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trial Days Remaining"
+          },
+          "trial_ends_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trial Ends At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "id",
+          "account_id",
+          "tier",
+          "status",
+          "max_agents",
+          "max_messages_per_day",
+          "max_storage_gb",
+          "can_run_instances"
+        ],
+        "title": "SubscriptionOut",
+        "type": "object"
+      },
+      "SubscriptionReactivateResponse": {
+        "description": "Subscription reactivation response model.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "subscription_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subscription Id"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "SubscriptionReactivateResponse",
+        "type": "object"
+      },
+      "SyncResult": {
+        "description": "Sync operation result model.",
+        "properties": {
+          "errors": {
+            "title": "Errors",
+            "type": "integer"
+          },
+          "synced": {
+            "title": "Synced",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "updates": {
+            "items": {
+              "$ref": "#/components/schemas/SyncUpdateOut"
+            },
+            "title": "Updates",
+            "type": "array"
+          }
+        },
+        "required": [
+          "total",
+          "synced",
+          "errors",
+          "updates"
+        ],
+        "title": "SyncResult",
+        "type": "object"
+      },
+      "SyncUpdateOut": {
+        "description": "Sync update information model.",
+        "properties": {
+          "instance_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Instance Id"
+          },
+          "new_status": {
+            "title": "New Status",
+            "type": "string"
+          },
+          "old_status": {
+            "title": "Old Status",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instance_id",
+          "old_status",
+          "new_status",
+          "reason"
+        ],
+        "title": "SyncUpdateOut",
+        "type": "object"
+      },
+      "Trial": {
+        "description": "Trial configuration.",
+        "properties": {
+          "applicable_plans": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Applicable Plans",
+            "type": "array"
+          },
+          "days": {
+            "title": "Days",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled",
+          "days",
+          "applicable_plans"
+        ],
+        "title": "Trial",
+        "type": "object"
+      },
+      "UpdateAccountStatusRequest": {
+        "description": "Request model for updating account status.",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "UpdateAccountStatusRequest",
+        "type": "object"
+      },
+      "UpdateAccountStatusResponse": {
+        "description": "Update account status response model.",
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "string"
+          },
+          "new_status": {
+            "title": "New Status",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "account_id",
+          "new_status"
+        ],
+        "title": "UpdateAccountStatusResponse",
+        "type": "object"
+      },
+      "UrlResponse": {
+        "description": "Response model containing a URL.",
+        "properties": {
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "UrlResponse",
+        "type": "object"
+      },
+      "UsageAggregateOut": {
+        "description": "Aggregated usage statistics model.",
+        "properties": {
+          "totalAgents": {
+            "title": "Totalagents",
+            "type": "integer"
+          },
+          "totalMessages": {
+            "title": "Totalmessages",
+            "type": "integer"
+          },
+          "totalStorage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Totalstorage"
+          }
+        },
+        "required": [
+          "totalMessages",
+          "totalAgents",
+          "totalStorage"
+        ],
+        "title": "UsageAggregateOut",
+        "type": "object"
+      },
+      "UsageMetricOut": {
+        "description": "Usage metric output model.",
+        "properties": {
+          "agents_used": {
+            "title": "Agents Used",
+            "type": "integer"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "messages_sent": {
+            "title": "Messages Sent",
+            "type": "integer"
+          },
+          "metric_date": {
+            "title": "Metric Date",
+            "type": "string"
+          },
+          "storage_used_gb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Storage Used Gb"
+          },
+          "subscription_id": {
+            "title": "Subscription Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subscription_id",
+          "metric_date",
+          "messages_sent",
+          "agents_used",
+          "storage_used_gb"
+        ],
+        "title": "UsageMetricOut",
+        "type": "object"
+      },
+      "UsageResponse": {
+        "description": "Response model for usage metrics.",
+        "properties": {
+          "aggregated": {
+            "$ref": "#/components/schemas/UsageAggregateOut"
+          },
+          "usage": {
+            "items": {
+              "$ref": "#/components/schemas/UsageMetricOut"
+            },
+            "title": "Usage",
+            "type": "array"
+          }
+        },
+        "required": [
+          "usage",
+          "aggregated"
+        ],
+        "title": "UsageResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WebhookResponse": {
+        "description": "Webhook processing response model.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "received": {
+            "title": "Received",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "received"
+        ],
+        "title": "WebhookResponse",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "MindRoom Backend",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/.well-known/openid-configuration/matrix-oidc": {
+      "get": {
+        "description": "Return OIDC discovery metadata for Synapse.",
+        "operationId": "openid_configuration__well_known_openid_configuration_matrix_oidc_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Openid Configuration  Well Known Openid Configuration Matrix Oidc Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Openid Configuration"
+      }
+    },
+    "/admin/accounts/{account_id}": {
+      "get": {
+        "description": "Get detailed account information including subscription and instances.",
+        "operationId": "get_account_details_admin_accounts__account_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAccountDetailsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Account Details"
+      }
+    },
+    "/admin/accounts/{account_id}/complete": {
+      "delete": {
+        "description": "Completely delete an account with all associated resources.",
+        "operationId": "admin_delete_account_complete_admin_accounts__account_id__complete_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminDeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Delete Account Complete"
+      }
+    },
+    "/admin/accounts/{account_id}/status": {
+      "put": {
+        "description": "Update account status (active, suspended, etc).",
+        "operationId": "update_account_status_admin_accounts__account_id__status_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAccountStatusRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateAccountStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Account Status"
+      }
+    },
+    "/admin/auth/logout": {
+      "post": {
+        "description": "Admin logout placeholder.",
+        "operationId": "admin_logout_admin_auth_logout_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminLogoutResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Admin Logout"
+      }
+    },
+    "/admin/instances/{instance_id}/provision": {
+      "post": {
+        "description": "Provision a deprovisioned instance.",
+        "operationId": "admin_provision_instance_admin_instances__instance_id__provision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Provision Instance"
+      }
+    },
+    "/admin/instances/{instance_id}/restart": {
+      "post": {
+        "description": "Restart an instance.",
+        "operationId": "admin_restart_instance_admin_instances__instance_id__restart_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Restart Instance"
+      }
+    },
+    "/admin/instances/{instance_id}/start": {
+      "post": {
+        "description": "Start an instance.",
+        "operationId": "admin_start_instance_admin_instances__instance_id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Start Instance"
+      }
+    },
+    "/admin/instances/{instance_id}/stop": {
+      "post": {
+        "description": "Stop an instance.",
+        "operationId": "admin_stop_instance_admin_instances__instance_id__stop_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Stop Instance"
+      }
+    },
+    "/admin/instances/{instance_id}/uninstall": {
+      "delete": {
+        "description": "Uninstall an instance.",
+        "operationId": "admin_uninstall_instance_admin_instances__instance_id__uninstall_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Uninstall Instance"
+      }
+    },
+    "/admin/metrics/dashboard": {
+      "get": {
+        "description": "Get dashboard metrics for admin panel.",
+        "operationId": "get_dashboard_metrics_admin_metrics_dashboard_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminDashboardMetricsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Dashboard Metrics"
+      }
+    },
+    "/admin/stats": {
+      "get": {
+        "description": "Get platform statistics for admin dashboard.",
+        "operationId": "get_admin_stats_admin_stats_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminStatsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Admin Stats"
+      }
+    },
+    "/admin/sync-instances": {
+      "post": {
+        "description": "Sync instance states between database and Kubernetes.",
+        "operationId": "admin_sync_instances_admin_sync_instances_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Sync Instances"
+      }
+    },
+    "/admin/{resource}": {
+      "get": {
+        "description": "Generic list endpoint for React Admin.",
+        "operationId": "admin_get_list_admin__resource__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "title": "Resource",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "_sort",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": " Sort"
+            }
+          },
+          {
+            "in": "query",
+            "name": "_order",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": " Order"
+            }
+          },
+          {
+            "in": "query",
+            "name": "_start",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": " Start",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "_end",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "title": " End",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Get List"
+      },
+      "post": {
+        "description": "Create record for React Admin.",
+        "operationId": "admin_create_admin__resource__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "title": "Resource",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Data",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminCreateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Create"
+      }
+    },
+    "/admin/{resource}/{resource_id}": {
+      "delete": {
+        "description": "Delete record for React Admin (generic endpoint - use with caution for accounts).",
+        "operationId": "admin_delete_admin__resource___resource_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "title": "Resource",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "title": "Resource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminDeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Delete"
+      },
+      "get": {
+        "description": "Get single record for React Admin.",
+        "operationId": "admin_get_one_admin__resource___resource_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "title": "Resource",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "title": "Resource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminGetOneResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Get One"
+      },
+      "put": {
+        "description": "Update record for React Admin.",
+        "operationId": "admin_update_admin__resource___resource_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "title": "Resource",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "title": "Resource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Data",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUpdateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Update"
+      }
+    },
+    "/health": {
+      "get": {
+        "description": "Health check endpoint.",
+        "operationId": "health_check_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health Check"
+      }
+    },
+    "/matrix-oidc/.well-known/openid-configuration": {
+      "get": {
+        "description": "Return OIDC discovery metadata for Synapse.",
+        "operationId": "openid_configuration_matrix_oidc__well_known_openid_configuration_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Openid Configuration Matrix Oidc  Well Known Openid Configuration Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Openid Configuration"
+      }
+    },
+    "/matrix-oidc/authorize": {
+      "get": {
+        "description": "Issue an authorization code to Synapse after platform-cookie authentication.",
+        "operationId": "authorize_matrix_oidc_authorize_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "response_type",
+            "required": true,
+            "schema": {
+              "title": "Response Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "title": "Client Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "redirect_uri",
+            "required": true,
+            "schema": {
+              "title": "Redirect Uri",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": true,
+            "schema": {
+              "title": "Scope",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": true,
+            "schema": {
+              "title": "State",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "nonce",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Nonce"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Authorize"
+      }
+    },
+    "/matrix-oidc/jwks.json": {
+      "get": {
+        "description": "Return public signing keys for OIDC token verification.",
+        "operationId": "jwks_matrix_oidc_jwks_json_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Jwks Matrix Oidc Jwks Json Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Jwks"
+      }
+    },
+    "/matrix-oidc/token": {
+      "post": {
+        "description": "Exchange a Synapse authorization code for OIDC tokens.",
+        "operationId": "token_matrix_oidc_token_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Token Matrix Oidc Token Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Token"
+      }
+    },
+    "/matrix-oidc/userinfo": {
+      "get": {
+        "description": "Return user claims for Synapse's OIDC userinfo fetch.",
+        "operationId": "userinfo_matrix_oidc_userinfo_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Userinfo Matrix Oidc Userinfo Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Userinfo"
+      }
+    },
+    "/my/account": {
+      "get": {
+        "description": "Get current user's account with subscription and instances.",
+        "operationId": "get_current_account_my_account_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountWithRelationsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Current Account"
+      }
+    },
+    "/my/account/admin-status": {
+      "get": {
+        "description": "Check if current user is an admin.",
+        "operationId": "check_admin_status_my_account_admin_status_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Check Admin Status"
+      }
+    },
+    "/my/account/setup": {
+      "post": {
+        "description": "Setup free tier account for new user.",
+        "operationId": "setup_account_my_account_setup_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountSetupResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Setup Account"
+      }
+    },
+    "/my/gdpr/cancel-deletion": {
+      "post": {
+        "description": "Cancel a pending account deletion request.\nOnly works if account is still in soft-delete state.",
+        "operationId": "cancel_account_deletion_my_gdpr_cancel_deletion_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GdprCancelDeletionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Account Deletion"
+      }
+    },
+    "/my/gdpr/consent": {
+      "post": {
+        "description": "Update user consent preferences for GDPR compliance.",
+        "operationId": "update_consent_my_gdpr_consent_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsentUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GdprConsentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Consent"
+      }
+    },
+    "/my/gdpr/export-data": {
+      "get": {
+        "description": "Export all user data for GDPR compliance.\nReturns all personal data in machine-readable format.",
+        "operationId": "export_user_data_my_gdpr_export_data_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GdprExportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export User Data"
+      }
+    },
+    "/my/gdpr/request-deletion": {
+      "post": {
+        "description": "Request account and data deletion under GDPR Article 17.\nRequires explicit confirmation to prevent accidental deletion.",
+        "operationId": "request_account_deletion_my_gdpr_request_deletion_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeletionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GdprDeletionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Account Deletion"
+      }
+    },
+    "/my/instances": {
+      "get": {
+        "description": "List instances for current user with background status refresh.",
+        "operationId": "list_user_instances_my_instances_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstancesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List User Instances"
+      }
+    },
+    "/my/instances/provision": {
+      "post": {
+        "description": "Provision an instance for the current user.",
+        "operationId": "provision_user_instance_my_instances_provision_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Provision User Instance"
+      }
+    },
+    "/my/instances/{instance_id}/restart": {
+      "post": {
+        "description": "Restart user's instance.",
+        "operationId": "restart_user_instance_my_instances__instance_id__restart_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restart User Instance"
+      }
+    },
+    "/my/instances/{instance_id}/start": {
+      "post": {
+        "description": "Start user's instance.",
+        "operationId": "start_user_instance_my_instances__instance_id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start User Instance"
+      }
+    },
+    "/my/instances/{instance_id}/stop": {
+      "post": {
+        "description": "Stop user's instance.",
+        "operationId": "stop_user_instance_my_instances__instance_id__stop_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop User Instance"
+      }
+    },
+    "/my/sso-cookie": {
+      "delete": {
+        "description": "Clear the SSO cookie on logout.",
+        "operationId": "clear_sso_cookie_my_sso_cookie_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Clear Sso Cookie"
+      },
+      "post": {
+        "description": "Set an API-host SSO cookie with the current Supabase access token.\n\nTenant subdomains must not receive raw platform JWTs.",
+        "operationId": "set_sso_cookie_my_sso_cookie_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Sso Cookie"
+      }
+    },
+    "/my/subscription": {
+      "get": {
+        "description": "Get current user's subscription.",
+        "operationId": "get_user_subscription_my_subscription_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get User Subscription"
+      }
+    },
+    "/my/subscription/cancel": {
+      "post": {
+        "description": "Cancel subscription.",
+        "operationId": "cancel_subscription_my_subscription_cancel_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelSubscriptionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionCancelResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Subscription"
+      }
+    },
+    "/my/subscription/reactivate": {
+      "post": {
+        "description": "Reactivate a cancelled subscription (if still in billing period).",
+        "operationId": "reactivate_subscription_my_subscription_reactivate_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionReactivateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reactivate Subscription"
+      }
+    },
+    "/my/usage": {
+      "get": {
+        "description": "Get usage metrics for current user.",
+        "operationId": "get_user_usage_my_usage_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get User Usage"
+      }
+    },
+    "/pricing/config": {
+      "get": {
+        "description": "Get the current pricing configuration.\n\nThis returns the pricing plans, features, and limits.\nStripe price IDs are only included if they are configured.",
+        "operationId": "get_pricing_config_pricing_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PricingConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Pricing Config"
+      }
+    },
+    "/pricing/stripe-price/{plan}/{billing_cycle}": {
+      "get": {
+        "description": "Get the Stripe price ID for a specific plan and billing cycle.\n\nArgs:\n    plan: Plan key (e.g., 'byok', 'hobby', 'pro')\n    billing_cycle: Either 'monthly' or 'yearly'\n\nReturns:\n    Dict with price_id or error",
+        "operationId": "get_stripe_price_pricing_stripe_price__plan___billing_cycle__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan",
+            "required": true,
+            "schema": {
+              "title": "Plan",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "billing_cycle",
+            "required": true,
+            "schema": {
+              "title": "Billing Cycle",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StripePriceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Stripe Price"
+      }
+    },
+    "/stripe/checkout": {
+      "post": {
+        "description": "Create Stripe checkout session for subscription.",
+        "operationId": "create_checkout_session_stripe_checkout_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UrlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Checkout Session"
+      }
+    },
+    "/stripe/portal": {
+      "post": {
+        "description": "Create Stripe customer portal session for subscription management.",
+        "operationId": "create_portal_session_stripe_portal_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UrlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Portal Session"
+      }
+    },
+    "/system/instances/{instance_id}/restart": {
+      "post": {
+        "description": "Restart an instance (provisioner API compatible).",
+        "operationId": "restart_instance_provisioner_system_instances__instance_id__restart_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restart Instance Provisioner"
+      }
+    },
+    "/system/instances/{instance_id}/start": {
+      "post": {
+        "description": "Start an instance (provisioner API compatible).",
+        "operationId": "start_instance_provisioner_system_instances__instance_id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Instance Provisioner"
+      }
+    },
+    "/system/instances/{instance_id}/stop": {
+      "post": {
+        "description": "Stop an instance (provisioner API compatible).",
+        "operationId": "stop_instance_provisioner_system_instances__instance_id__stop_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Instance Provisioner"
+      }
+    },
+    "/system/instances/{instance_id}/uninstall": {
+      "delete": {
+        "description": "Completely uninstall/deprovision an instance.",
+        "operationId": "uninstall_instance_system_instances__instance_id__uninstall_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Uninstall Instance"
+      }
+    },
+    "/system/provision": {
+      "post": {
+        "description": "Provision a new instance (compatible with customer portal).",
+        "operationId": "provision_instance_system_provision_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Data",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Provision Instance"
+      }
+    },
+    "/system/sync-instances": {
+      "post": {
+        "description": "Sync instance states between database and Kubernetes cluster.",
+        "operationId": "sync_instances_system_sync_instances_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sync Instances"
+      }
+    },
+    "/webhooks/stripe": {
+      "post": {
+        "description": "Handle incoming Stripe webhook events.",
+        "operationId": "stripe_webhook_webhooks_stripe_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Stripe-Signature",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Stripe-Signature"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stripe Webhook"
+      }
+    }
+  }
+}
