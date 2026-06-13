@@ -188,13 +188,14 @@
 {{- if not (trim (default "" .Values.approvedEgress.parentProxy.host)) -}}
 {{- fail "approvedEgress.parentProxy.host is required when approvedEgress.parentProxy.enabled=true" -}}
 {{- end -}}
-{{- if not .Values.approvedEgress.parentProxy.port -}}
-{{- fail "approvedEgress.parentProxy.port is required when approvedEgress.parentProxy.enabled=true" -}}
+{{- $parentProxyPort := int .Values.approvedEgress.parentProxy.port -}}
+{{- if or (lt $parentProxyPort 1) (gt $parentProxyPort 65535) -}}
+{{- fail "approvedEgress.parentProxy.port must be between 1 and 65535 when approvedEgress.parentProxy.enabled=true" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
 {{- $agentVault := .Values.workers.kubernetes.agentVault -}}
-{{- $agentVaultProxyUrl := trimSuffix "/" (default "" $agentVault.proxyUrl) -}}
+{{- $agentVaultProxyUrl := lower (regexReplaceAll "/+$" (trim (default "" $agentVault.proxyUrl)) "") -}}
 {{- $agentVaultServiceName := include "mindroom-runtime.agentVaultServerName" . -}}
 {{- $agentVaultMitmPort := printf "%v" $agentVault.server.mitmPort -}}
 {{- $agentVaultServiceProxyUrls := list (printf "http://%s:%s" $agentVaultServiceName $agentVaultMitmPort) (printf "http://%s.%s:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) (printf "http://%s.%s.svc:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) (printf "http://%s.%s.svc.cluster.local:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) -}}

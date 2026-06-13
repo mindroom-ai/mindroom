@@ -1368,6 +1368,14 @@ def test_runtime_chart_approved_egress_can_chain_agent_vault_parent(tmp_path: Pa
         ],
         "ports": [{"protocol": "TCP", "port": 14321}],
     }
+    assert not any(
+        any(port.get("port") == 14322 for port in rule.get("ports", []))
+        and any(
+            to.get("podSelector", {}).get("matchLabels", {}).get("app.kubernetes.io/name") == "agent-vault"
+            for to in rule.get("to", [])
+        )
+        for rule in worker_policy["spec"]["egress"]
+    )
 
     conf = squid_config["data"]["squid.conf"]
     assert "include /etc/squid/squid.conf" in conf
@@ -1401,10 +1409,34 @@ def test_runtime_chart_rejects_agent_vault_default_proxy_url_with_approved_egres
     assert "approvedEgress with Agent Vault must be squid-first" in completed.stderr
 
 
+def test_runtime_chart_rejects_invalid_approved_egress_parent_proxy_port() -> None:
+    """Parent proxy ports must be valid TCP ports before rendering Squid config."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "workers.kubernetes.agentVault.enabled=true",
+        "workers.kubernetes.agentVault.cliImage=infisical/agent-vault:test",
+        "workers.kubernetes.agentVault.ownerEmail=owner@example.test",
+        "workers.kubernetes.agentVault.server.enabled=true",
+        "eventCache.postgres.auth.password=test-password",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=v0.1.0",
+        "approvedEgress.parentProxy.enabled=true",
+        "approvedEgress.parentProxy.port=70000",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "approvedEgress.parentProxy.port must be between 1 and 65535" in completed.stderr
+
+
 @pytest.mark.parametrize(
     "proxy_url",
     [
+        " http://agent-vault:14322 ",
         "http://agent-vault:14322/",
+        "HTTP://agent-vault:14322/",
         "http://agent-vault.default:14322",
         "http://agent-vault.default.svc:14322",
         "http://agent-vault.default.svc.cluster.local:14322",

@@ -43,7 +43,9 @@ When approved egress and Agent Vault are used together, the correct chain is:
 worker -> approved egress (Squid) -> Agent Vault MITM parent -> internet
 ```
 
-Squid must be first. Dynamic `request_network_access` grants are keyed to the worker that made the request, and the approved egress helper resolves that worker from the proxy client's source IP. If traffic goes `worker -> Agent Vault -> Squid`, Squid only sees the Agent Vault pod IP, so the grant lookup cannot match the worker and dynamic grants fail even though static allowlist entries can still work.
+Squid must be first.
+Dynamic `request_network_access` grants are keyed to the worker that made the request, and the approved egress helper resolves that worker from the proxy client's source IP.
+If traffic goes `worker -> Agent Vault -> Squid`, Squid only sees the Agent Vault pod IP, so the grant lookup cannot match the worker and dynamic grants fail even though static allowlist entries can still work.
 
 Use `approvedEgress.parentProxy` to make the chart render a layered Squid config and point Agent Vault tool traffic at approved egress first:
 
@@ -76,9 +78,14 @@ approvedEgress:
     port: 14322
 ```
 
-When `parentProxy.enabled` is true, workers use the approved egress Service for `MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL`. Squid enforces the allowlist and dynamic grants, then forwards requests that carry `Proxy-Authorization` to the Agent Vault parent with `login=PASSTHRU` so the vault still validates the worker's proxy-role token and injects credentials. Tokenless traffic remains direct from Squid after the policy check.
+When `parentProxy.enabled` is true, workers use the approved egress Service for `MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL`.
+Squid enforces the allowlist and dynamic grants, then forwards requests that carry `Proxy-Authorization` to the Agent Vault parent with `login=PASSTHRU` so the vault still validates the worker's proxy-role token and injects credentials.
+Tokenless traffic remains direct from Squid after the policy check.
 
-Do not leave Agent Vault tool traffic pointed directly at the chart-managed Agent Vault MITM Service when chart-managed approved egress is enabled. That path either bypasses Squid, or forces Squid behind the vault where worker identity is lost. The chart rejects direct URLs to the chart-managed Agent Vault proxy Service, including short and cluster-local DNS names, unless `approvedEgress.parentProxy` is enabled. Truly external/custom proxy URLs remain an explicit escape hatch.
+Do not leave Agent Vault tool traffic pointed directly at the chart-managed Agent Vault MITM Service when chart-managed approved egress is enabled.
+That path either bypasses Squid, or forces Squid behind the vault where worker identity is lost.
+The chart rejects direct URLs to the chart-managed Agent Vault proxy Service, including short and cluster-local DNS names, unless `approvedEgress.parentProxy` is enabled.
+Truly external/custom proxy URLs remain an explicit escape hatch.
 
 ## Custom Config
 
