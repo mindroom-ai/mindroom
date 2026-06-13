@@ -359,11 +359,14 @@ workers:
     # http://<token>:@<proxyUrl host> for python/shell egress. No separate
     # bridge pod or Service is created.
     #
-    # NOTE: if egressProxy/approvedEgress NetworkPolicies are also enabled, they
-    # restrict worker egress and do NOT open the Agent Vault api/proxy ports.
-    # You must allow the worker pods (and their init container) to reach the
-    # agent-vault api (apiUrl) and proxy (proxyUrl) ports, e.g. via
-    # egressProxy.networkPolicy.extraEgress, or the init container will time out.
+    # NOTE: if egressProxy/approvedEgress NetworkPolicies are also enabled,
+    # workers still need Agent Vault API egress (apiUrl) so the init container
+    # can mint the per-worker token. For a chart-managed vault server, the chart
+    # opens that API egress automatically. For externally managed vaults, add
+    # an explicit API-only egress rule. Do not open direct worker egress to the
+    # Agent Vault proxy port when approvedEgress owns dynamic grants; enable
+    # approvedEgress.parentProxy so Squid remains the first hop and forwards
+    # token-bearing traffic to the vault parent.
     agentVault:
       enabled: false
       # Agent Vault CLI image used by the init container to mint per-worker
@@ -541,6 +544,16 @@ approvedEgress:
   maxTtlSeconds: 21600
   sandboxProxyTimeoutSeconds: ""
   logLevel: info
+  # Optional parent proxy for token-bearing worker traffic. This is primarily
+  # for Agent Vault: workers proxy to approved egress first, so dynamic grants
+  # resolve from the real worker source IP, then Squid forwards requests with a
+  # Proxy-Authorization header to the Agent Vault MITM proxy for credential
+  # injection. Tokenless traffic egresses direct from Squid after the normal
+  # allowlist/grant check.
+  parentProxy:
+    enabled: false
+    host: agent-vault
+    port: 14322
   resources:
     requests:
       cpu: 100m

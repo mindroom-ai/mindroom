@@ -393,8 +393,14 @@ For HTTPS, Agent Vault terminates TLS at its proxy, so workers must trust the va
 Publish the CA (from `agent-vault ca fetch`) as a ConfigMap with key `ca.pem` and set `MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME` (chart: `workers.kubernetes.agentVault.workerCaConfigMapName`).
 Worker pods mount it at `/etc/agent-vault/ca.pem` and the runner exports `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`SSL_CERT_FILE` for python/shell egress.
 
-If you also enable the worker egress-proxy / approved-egress NetworkPolicies, they restrict worker egress and do not open the Agent Vault ports.
-Allow the worker pods and their init container to reach the Agent Vault api (`apiUrl`) and proxy (`proxyUrl`) ports — e.g. via `egressProxy.networkPolicy.extraEgress` — or the init container's health-check loop times out and the pod never starts.
+If you also enable the worker egress-proxy / approved-egress NetworkPolicies, keep Squid as the first hop for tool egress.
+Dynamic `request_network_access` grants are resolved by the approved egress helper from the proxy client's source IP; a vault-first chain (`worker -> Agent Vault -> Squid`) collapses every worker to the Agent Vault pod IP, so dynamic grants cannot match the worker.
+With the runtime chart's managed approved egress, set `approvedEgress.parentProxy.enabled: true` and leave Agent Vault tool traffic pointed at the approved egress Service; Squid forwards requests carrying the worker's `Proxy-Authorization` token to the Agent Vault MITM parent with `login=PASSTHRU`.
+
+Workers still need Agent Vault API access (`apiUrl`, usually port `14321`) so the init container can mint the per-worker proxy token.
+When the chart also manages the Agent Vault server, the worker NetworkPolicy includes that API egress automatically.
+For an externally managed Agent Vault server, add an egress rule for the API endpoint only.
+Do not add worker egress directly to the Agent Vault MITM proxy port (`proxyUrl`, usually `14322`) when approved egress owns dynamic grants; that bypasses the Squid-first policy path.
 
 For non-Kubernetes deployments, point worker egress at a shared proxy you run yourself by setting the worker proxy env directly (see the shared egress proxy option above).
 

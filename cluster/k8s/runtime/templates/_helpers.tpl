@@ -215,6 +215,27 @@ app.kubernetes.io/component: runtime
 {{- end -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.approvedEgressSquidConfigMapName" -}}
+{{- printf "%s-squid-config" (include "mindroom-runtime.approvedEgressName" .) -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressSquidConfigPath" -}}
+/etc/mindroom-egress-squid/squid.conf
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressSquidConfig" -}}
+include /etc/squid/squid.conf
+
+acl egress_has_token req_header Proxy-Authorization .
+dns_defnames on
+cache_peer {{ .Values.approvedEgress.parentProxy.host }} parent {{ .Values.approvedEgress.parentProxy.port }} 0 no-query no-digest login=PASSTHRU
+cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} allow egress_has_token
+cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} deny all
+nonhierarchical_direct off
+always_direct allow !egress_has_token
+never_direct allow egress_has_token
+{{- end -}}
+
 {{- define "mindroom-runtime.approvedEgressClaimName" -}}
 {{- if .Values.approvedEgress.persistence.existingClaim -}}
 {{- .Values.approvedEgress.persistence.existingClaim -}}
@@ -325,6 +346,14 @@ matchLabels:
 {{- $scheme = "http" -}}
 {{- end -}}
 {{- printf "%s://%s.%s.svc.cluster.local:%v" $scheme $serviceName $namespace $servicePort -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultProxyUrl" -}}
+{{- if and .Values.approvedEgress.enabled .Values.approvedEgress.parentProxy.enabled -}}
+{{- include "mindroom-runtime.egressProxyUrl" . -}}
+{{- else -}}
+{{- .Values.workers.kubernetes.agentVault.proxyUrl -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.workerExtraEnvJson" -}}

@@ -1290,6 +1290,117 @@ def test_runtime_chart_approved_egress_can_opt_out_of_runtime_config_overlay(tmp
     assert "MINDROOM_APPROVED_EGRESS_TOKEN" in runtime_env
 
 
+def test_runtime_chart_approved_egress_can_chain_agent_vault_parent(tmp_path: Path) -> None:
+    """Tokened Agent Vault traffic should chain through Squid while grants keep worker IPs."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "approvedEgress": {
+                    "enabled": True,
+                    "image": {"tag": "v0.1.0"},
+                    "parentProxy": {
+                        "enabled": True,
+                        "host": "agent-vault",
+                        "port": 14322,
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                    "kubernetes": {
+                        "agentVault": {
+                            "enabled": True,
+                            "cliImage": "infisical/agent-vault:test",
+                            "ownerEmail": "owner@example.test",
+                            "server": {"enabled": True},
+                        },
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    proxy_name = "mindroom-runtime-egress-proxy"
+    proxy_deployment = _resource(docs, "Deployment", proxy_name)
+    proxy_container = _container(proxy_deployment, "approved-egress-proxy")
+    proxy_pod_template = proxy_deployment["spec"]["template"]
+    runtime_container = _container(_resource(docs, "Deployment", "mindroom-runtime"), "mindroom")
+    worker_policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+    proxy_env = _env_by_name(proxy_container)
+    runtime_env = _env_by_name(runtime_container)
+    squid_config = _resource(docs, "ConfigMap", f"{proxy_name}-squid-config")
+
+    assert runtime_env["MINDROOM_KUBERNETES_AGENT_VAULT_API_URL"]["value"] == "http://agent-vault:14321"
+    assert runtime_env["MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL"]["value"] == (
+        "http://mindroom-runtime-egress-proxy.default.svc.cluster.local:3128"
+    )
+    assert "checksum/squid-config" in proxy_pod_template["metadata"]["annotations"]
+    assert proxy_env["MINDROOM_EGRESS_SQUID_CONFIG_PATH"]["value"] == "/etc/mindroom-egress-squid/squid.conf"
+    assert {
+        "name": "squid-config",
+        "mountPath": "/etc/mindroom-egress-squid/squid.conf",
+        "subPath": "squid.conf",
+        "readOnly": True,
+    } in proxy_container["volumeMounts"]
+    assert {
+        "name": "squid-config",
+        "configMap": {"name": f"{proxy_name}-squid-config"},
+    } in proxy_deployment["spec"]["template"]["spec"]["volumes"]
+    assert worker_policy["spec"]["egress"][2] == {
+        "to": [
+            {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "default"}},
+                "podSelector": {
+                    "matchLabels": {
+                        "app.kubernetes.io/name": "agent-vault",
+                        "app.kubernetes.io/instance": "mindroom-runtime",
+                        "app.kubernetes.io/component": "agent-vault",
+                    },
+                },
+            },
+        ],
+        "ports": [{"protocol": "TCP", "port": 14321}],
+    }
+
+    conf = squid_config["data"]["squid.conf"]
+    assert "include /etc/squid/squid.conf" in conf
+    assert "acl egress_has_token req_header Proxy-Authorization ." in conf
+    assert "dns_defnames on" in conf
+    assert "cache_peer agent-vault parent 14322 0 no-query no-digest login=PASSTHRU" in conf
+    assert "cache_peer_access agent-vault allow egress_has_token" in conf
+    assert "cache_peer_access agent-vault deny all" in conf
+    assert "nonhierarchical_direct off" in conf
+    assert "always_direct allow !egress_has_token" in conf
+    assert "never_direct allow egress_has_token" in conf
+    assert "name=agentvault" not in conf
+
+
+def test_runtime_chart_rejects_agent_vault_default_proxy_url_with_approved_egress() -> None:
+    """Agent Vault must not stay vault-first when approved egress owns dynamic grants."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "workers.kubernetes.agentVault.enabled=true",
+        "workers.kubernetes.agentVault.cliImage=infisical/agent-vault:test",
+        "workers.kubernetes.agentVault.ownerEmail=owner@example.test",
+        "eventCache.postgres.auth.password=test-password",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=v0.1.0",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "approvedEgress with Agent Vault must be squid-first" in completed.stderr
+
+
 def test_runtime_chart_approved_egress_uses_worker_namespace_for_pod_lookup_and_rbac() -> None:
     """The proxy runs in the release namespace but reads worker pods from the worker namespace."""
     docs = _render_chart(

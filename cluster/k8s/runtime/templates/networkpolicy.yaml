@@ -2,6 +2,7 @@
 {{- $egressPolicyEnabled := and (include "mindroom-runtime.egressProxyEnabled" .) .Values.egressProxy.networkPolicy.create -}}
 {{- $proxyNamespace := include "mindroom-runtime.egressProxyNamespace" . -}}
 {{- $proxyPort := include "mindroom-runtime.egressProxyServicePort" . -}}
+{{- $agentVault := .Values.workers.kubernetes.agentVault -}}
 {{- $dnsNamespaceSelector := .Values.egressProxy.networkPolicy.dns.namespaceSelector -}}
 {{- $dnsPodSelector := .Values.egressProxy.networkPolicy.dns.podSelector -}}
 {{- $hasDnsNamespaceSelector := kindIs "map" $dnsNamespaceSelector -}}
@@ -75,6 +76,18 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $proxyPort }}
+    {{- if and $agentVault.enabled $agentVault.server.enabled }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.agentVaultSelectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $agentVault.server.apiPort }}
+    {{- end }}
     {{- with .Values.egressProxy.networkPolicy.extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

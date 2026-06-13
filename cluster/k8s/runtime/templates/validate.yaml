@@ -184,8 +184,19 @@
 {{- if and .Values.approvedEgress.persistence.enabled (not .Values.approvedEgress.persistence.existingClaim) (not .Values.approvedEgress.persistence.size) -}}
 {{- fail "approvedEgress.persistence.size is required when chart-managed approved egress persistence is enabled" -}}
 {{- end -}}
+{{- if .Values.approvedEgress.parentProxy.enabled -}}
+{{- if not (trim (default "" .Values.approvedEgress.parentProxy.host)) -}}
+{{- fail "approvedEgress.parentProxy.host is required when approvedEgress.parentProxy.enabled=true" -}}
+{{- end -}}
+{{- if not .Values.approvedEgress.parentProxy.port -}}
+{{- fail "approvedEgress.parentProxy.port is required when approvedEgress.parentProxy.enabled=true" -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- $agentVault := .Values.workers.kubernetes.agentVault -}}
+{{- if and .Values.approvedEgress.enabled $agentVault.enabled (not .Values.approvedEgress.parentProxy.enabled) (eq (default "" $agentVault.proxyUrl) "http://agent-vault:14322") -}}
+{{- fail "approvedEgress with Agent Vault must be squid-first: enable approvedEgress.parentProxy so Squid sees worker source IPs for dynamic grants, or set workers.kubernetes.agentVault.proxyUrl to a non-default proxy URL explicitly" -}}
+{{- end -}}
 {{- if $agentVault.accessTool.enabled -}}
 {{- if not $agentVault.enabled -}}
 {{- fail "workers.kubernetes.agentVault.accessTool.enabled requires workers.kubernetes.agentVault.enabled=true" -}}

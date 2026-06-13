@@ -316,7 +316,7 @@ spec:
             - name: MINDROOM_KUBERNETES_AGENT_VAULT_API_URL
               value: {{ .apiUrl | quote }}
             - name: MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL
-              value: {{ .proxyUrl | quote }}
+              value: {{ include "mindroom-runtime.agentVaultProxyUrl" $ | quote }}
             - name: MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME
               value: {{ .bootstrapSecretName | quote }}
             {{- if .workerCaConfigMapName }}

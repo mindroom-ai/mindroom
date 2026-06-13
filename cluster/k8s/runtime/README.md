@@ -297,6 +297,37 @@ Set `approvedEgress.manageRuntimeConfig: false` to skip that flag when the autho
 The proxy pod reads `MINDROOM_APPROVED_EGRESS_TOKEN` from `approvedEgress.token.existingSecret` when set, otherwise it reuses `workers.sandbox.proxyToken`.
 Pin `approvedEgress.image.tag` or `approvedEgress.image.digest` before enabling the feature.
 
+When Agent Vault is also enabled, keep approved egress as the first network hop.
+The proxy resolves dynamic `request_network_access` grants from the worker pod's source IP; if worker traffic goes to Agent Vault first, every request reaches Squid from the vault pod IP and worker identity cannot be resolved.
+Enable `approvedEgress.parentProxy` to route only token-bearing Agent Vault tool traffic through the vault parent after the allowlist/grant check:
+
+```yaml
+workers:
+  backend: kubernetes
+  kubernetes:
+    agentVault:
+      enabled: true
+      cliImage: infisical/agent-vault:<pinned>
+      ownerEmail: owner@example.test
+      server:
+        enabled: true
+      # Leave proxyUrl at the default; parentProxy makes workers use approved
+      # egress first and Squid forwards Proxy-Authorization traffic to the vault.
+
+approvedEgress:
+  enabled: true
+  image:
+    tag: v0.1.0
+  parentProxy:
+    enabled: true
+    host: agent-vault
+    port: 14322
+```
+
+With this setup, workers mint Agent Vault tokens through the API port (`14321`), workers proxy tool egress to the approved egress Service, Squid enforces allowlists and dynamic grants using the real worker IP, and Squid forwards requests carrying `Proxy-Authorization` to Agent Vault (`login=PASSTHRU`) for credential injection.
+Tokenless traffic egresses directly from Squid after the normal policy check.
+The chart rejects the unsafe default combination of chart-managed approved egress plus Agent Vault without `approvedEgress.parentProxy`, because that would be vault-first and break dynamic grants.
+
 Use `egressProxy` when another chart or platform layer already manages the proxy:
 
 ```yaml
