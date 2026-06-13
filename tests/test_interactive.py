@@ -176,6 +176,89 @@ class TestInteractiveFunctions:
         assert response.interactive_metadata.question_text == "Which option?"
         assert response.interactive_metadata.option_labels == {"✅": "Approve", "1": "Approve"}
 
+    def test_parse_and_format_interactive_renders_question_in_place(self) -> None:
+        """The question should replace the block where it was written, not move to the end."""
+        response_text = """Lock the decision:
+
+```interactive
+{
+    "question": "Which option?",
+    "options": [
+        {"emoji": "✅", "label": "Approve", "value": "approve"}
+    ]
+}
+```
+
+Whichever you pick, tell the other tool."""
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.formatted_text == (
+            "Lock the decision:\n"
+            "\n"
+            "Which option?\n"
+            "\n"
+            "1. ✅ Approve\n"
+            "\n"
+            "React with an emoji or type the number to respond.\n"
+            "\n"
+            "Whichever you pick, tell the other tool."
+        )
+        assert response.option_map == {"✅": "approve", "1": "approve"}
+
+    def test_parse_and_format_interactive_renders_extra_blocks_as_plain_text(self) -> None:
+        """Only the first block gets reactions; later blocks render readably instead of as raw JSON."""
+        response_text = """First question:
+
+```interactive
+{
+    "question": "Which option?",
+    "options": [
+        {"emoji": "✅", "label": "Approve", "value": "approve"}
+    ]
+}
+```
+
+Second question:
+
+```interactive
+{
+    "question": "What next?",
+    "options": [
+        {"emoji": "🔎", "label": "Verify", "value": "verify"},
+        {"emoji": "✋", "label": "Hold", "value": "hold"}
+    ]
+}
+```"""
+
+        with patch.object(interactive.logger, "warning") as mock_warning:
+            response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.formatted_text == (
+            "First question:\n"
+            "\n"
+            "Which option?\n"
+            "\n"
+            "1. ✅ Approve\n"
+            "\n"
+            "React with an emoji or type the number to respond.\n"
+            "\n"
+            "Second question:\n"
+            "\n"
+            "What next?\n"
+            "\n"
+            "1. 🔎 Verify\n"
+            "2. ✋ Hold"
+        )
+        assert response.option_map == {"✅": "approve", "1": "approve"}
+        assert response.interactive_metadata is not None
+        assert response.interactive_metadata.question_text == "Which option?"
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.args == (
+            "Multiple interactive blocks in one response; only the first gets reaction buttons",
+        )
+        assert mock_warning.call_args.kwargs["block_count"] == 2
+
     def test_parse_and_format_interactive_defaults_null_question_text(self) -> None:
         """Explicit JSON null question text should use the default prompt."""
         response_text = """```interactive
