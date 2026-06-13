@@ -15985,7 +15985,7 @@ approvedEgress:
 
 When `parentProxy.enabled` is true, workers use the approved egress Service for `MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL`. Squid enforces the allowlist and dynamic grants, then forwards requests that carry `Proxy-Authorization` to the Agent Vault parent with `login=PASSTHRU` so the vault still validates the worker's proxy-role token and injects credentials. Tokenless traffic remains direct from Squid after the policy check.
 
-Do not leave Agent Vault tool traffic pointed directly at `http://agent-vault:14322` when chart-managed approved egress is enabled. That path either bypasses Squid, or forces Squid behind the vault where worker identity is lost. The chart rejects that default combination unless `approvedEgress.parentProxy` is enabled or `workers.kubernetes.agentVault.proxyUrl` is set to another explicit proxy URL.
+Do not leave Agent Vault tool traffic pointed directly at the chart-managed Agent Vault MITM Service when chart-managed approved egress is enabled. That path either bypasses Squid, or forces Squid behind the vault where worker identity is lost. The chart rejects direct URLs to the chart-managed Agent Vault proxy Service, including short and cluster-local DNS names, unless `approvedEgress.parentProxy` is enabled. Truly external/custom proxy URLs remain an explicit escape hatch.
 
 ## Custom Config
 

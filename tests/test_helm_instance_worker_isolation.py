@@ -1401,6 +1401,34 @@ def test_runtime_chart_rejects_agent_vault_default_proxy_url_with_approved_egres
     assert "approvedEgress with Agent Vault must be squid-first" in completed.stderr
 
 
+@pytest.mark.parametrize(
+    "proxy_url",
+    [
+        "http://agent-vault.default:14322",
+        "http://agent-vault.default.svc:14322",
+        "http://agent-vault.default.svc.cluster.local:14322",
+    ],
+)
+def test_runtime_chart_rejects_agent_vault_service_proxy_url_aliases_with_approved_egress(proxy_url: str) -> None:
+    """Agent Vault service aliases must not avoid the Squid-first validation."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "workers.kubernetes.agentVault.enabled=true",
+        "workers.kubernetes.agentVault.cliImage=infisical/agent-vault:test",
+        "workers.kubernetes.agentVault.ownerEmail=owner@example.test",
+        f"workers.kubernetes.agentVault.proxyUrl={proxy_url}",
+        "eventCache.postgres.auth.password=test-password",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=v0.1.0",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "approvedEgress with Agent Vault must be squid-first" in completed.stderr
+
+
 def test_runtime_chart_approved_egress_uses_worker_namespace_for_pod_lookup_and_rbac() -> None:
     """The proxy runs in the release namespace but reads worker pods from the worker namespace."""
     docs = _render_chart(

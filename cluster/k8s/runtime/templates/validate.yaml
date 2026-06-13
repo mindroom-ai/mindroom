@@ -194,8 +194,12 @@
 {{- end -}}
 {{- end -}}
 {{- $agentVault := .Values.workers.kubernetes.agentVault -}}
-{{- if and .Values.approvedEgress.enabled $agentVault.enabled (not .Values.approvedEgress.parentProxy.enabled) (eq (default "" $agentVault.proxyUrl) "http://agent-vault:14322") -}}
-{{- fail "approvedEgress with Agent Vault must be squid-first: enable approvedEgress.parentProxy so Squid sees worker source IPs for dynamic grants, or set workers.kubernetes.agentVault.proxyUrl to a non-default proxy URL explicitly" -}}
+{{- $agentVaultProxyUrl := default "" $agentVault.proxyUrl -}}
+{{- $agentVaultServiceName := include "mindroom-runtime.agentVaultServerName" . -}}
+{{- $agentVaultMitmPort := printf "%v" $agentVault.server.mitmPort -}}
+{{- $agentVaultServiceProxyUrls := list (printf "http://%s:%s" $agentVaultServiceName $agentVaultMitmPort) (printf "http://%s.%s:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) (printf "http://%s.%s.svc:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) (printf "http://%s.%s.svc.cluster.local:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) -}}
+{{- if and .Values.approvedEgress.enabled $agentVault.enabled (not .Values.approvedEgress.parentProxy.enabled) (has $agentVaultProxyUrl $agentVaultServiceProxyUrls) -}}
+{{- fail "approvedEgress with Agent Vault must be squid-first: enable approvedEgress.parentProxy so Squid sees worker source IPs for dynamic grants, or set workers.kubernetes.agentVault.proxyUrl to an external/custom proxy URL explicitly" -}}
 {{- end -}}
 {{- if $agentVault.accessTool.enabled -}}
 {{- if not $agentVault.enabled -}}
