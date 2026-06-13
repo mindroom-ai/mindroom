@@ -194,7 +194,7 @@
 {{- end -}}
 {{- end -}}
 {{- $agentVault := .Values.workers.kubernetes.agentVault -}}
-{{- $agentVaultProxyUrl := default "" $agentVault.proxyUrl -}}
+{{- $agentVaultProxyUrl := trimSuffix "/" (default "" $agentVault.proxyUrl) -}}
 {{- $agentVaultServiceName := include "mindroom-runtime.agentVaultServerName" . -}}
 {{- $agentVaultMitmPort := printf "%v" $agentVault.server.mitmPort -}}
 {{- $agentVaultServiceProxyUrls := list (printf "http://%s:%s" $agentVaultServiceName $agentVaultMitmPort) (printf "http://%s.%s:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) (printf "http://%s.%s.svc:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) (printf "http://%s.%s.svc.cluster.local:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) -}}

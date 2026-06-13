@@ -220,7 +220,7 @@ app.kubernetes.io/component: runtime
 {{- end -}}
 
 {{- define "mindroom-runtime.approvedEgressSquidConfigPath" -}}
-/etc/mindroom-egress-squid/squid.conf
+/etc/squid/mindroom-egress-chain.conf
 {{- end -}}
 
 {{- define "mindroom-runtime.approvedEgressSquidConfig" -}}

@@ -1342,10 +1342,10 @@ def test_runtime_chart_approved_egress_can_chain_agent_vault_parent(tmp_path: Pa
         "http://mindroom-runtime-egress-proxy.default.svc.cluster.local:3128"
     )
     assert "checksum/squid-config" in proxy_pod_template["metadata"]["annotations"]
-    assert proxy_env["MINDROOM_EGRESS_SQUID_CONFIG_PATH"]["value"] == "/etc/mindroom-egress-squid/squid.conf"
+    assert proxy_env["MINDROOM_EGRESS_SQUID_CONFIG_PATH"]["value"] == "/etc/squid/mindroom-egress-chain.conf"
     assert {
         "name": "squid-config",
-        "mountPath": "/etc/mindroom-egress-squid/squid.conf",
+        "mountPath": "/etc/squid/mindroom-egress-chain.conf",
         "subPath": "squid.conf",
         "readOnly": True,
     } in proxy_container["volumeMounts"]
@@ -1404,6 +1404,7 @@ def test_runtime_chart_rejects_agent_vault_default_proxy_url_with_approved_egres
 @pytest.mark.parametrize(
     "proxy_url",
     [
+        "http://agent-vault:14322/",
         "http://agent-vault.default:14322",
         "http://agent-vault.default.svc:14322",
         "http://agent-vault.default.svc.cluster.local:14322",
