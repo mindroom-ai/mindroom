@@ -510,39 +510,66 @@ class MCPServerManager:
         auth_headers: Mapping[str, str] | None = None,
     ) -> MCPServerCatalog:
         handle = build_transport_handle(state.server_id, state.config, self.runtime_paths, extra_headers=auth_headers)
-        exit_stack = AsyncExitStack()
+        ready: asyncio.Future[tuple[ClientSession, MCPServerCatalog]] = asyncio.get_running_loop().create_future()
+        close_event = asyncio.Event()
 
-        async def open_session_and_discover() -> tuple[ClientSession, MCPServerCatalog]:
-            read_stream, write_stream = await exit_stack.enter_async_context(handle.opener())
-            session = await exit_stack.enter_async_context(
-                ClientSession(
-                    read_stream,
-                    write_stream,
-                    read_timeout_seconds=timedelta(seconds=state.config.call_timeout_seconds),
-                    message_handler=self._build_message_handler(state),
-                ),
-            )
-            initialize_result = await session.initialize()
-            catalog = await self._discover_catalog(state.server_id, state.config, session, initialize_result)
-            return session, catalog
+        async def session_owner() -> None:
+            # MCP/AnyIO session contexts must exit in the same task that entered them.
+            exit_stack = AsyncExitStack()
+            try:
+                read_stream, write_stream = await exit_stack.enter_async_context(handle.opener())
+                session = await exit_stack.enter_async_context(
+                    ClientSession(
+                        read_stream,
+                        write_stream,
+                        read_timeout_seconds=timedelta(seconds=state.config.call_timeout_seconds),
+                        message_handler=self._build_message_handler(state),
+                    ),
+                )
+                initialize_result = await session.initialize()
+                catalog = await self._discover_catalog(state.server_id, state.config, session, initialize_result)
+                if not ready.done():
+                    ready.set_result((session, catalog))
+                await close_event.wait()
+            except asyncio.CancelledError:
+                if not ready.done():
+                    ready.cancel()
+                raise
+            except BaseException as exc:
+                if not ready.done():
+                    ready.set_exception(exc)
+                else:
+                    logger.warning(
+                        "MCP server session owner failed",
+                        server_id=state.server_id,
+                        transport=state.config.transport,
+                        error=self._runtime_exception_message(exc),
+                    )
+                raise
+            finally:
+                await exit_stack.aclose()
+
+        owner_task = asyncio.create_task(session_owner(), name=f"mcp_session:{state.server_id}")
 
         try:
             session, catalog = await asyncio.wait_for(
-                open_session_and_discover(),
+                asyncio.shield(ready),
                 timeout=state.config.startup_timeout_seconds,
             )
         except asyncio.CancelledError:
-            await exit_stack.aclose()
+            await self._cancel_session_owner_task(owner_task)
             raise
         except Exception as exc:
-            await exit_stack.aclose()
+            await self._cancel_session_owner_task(owner_task)
             if isinstance(exc, TimeoutError | asyncio.TimeoutError):
                 msg = f"MCP startup timed out after {state.config.startup_timeout_seconds} seconds"
                 raise MCPTimeoutError(state.server_id, msg) from exc
             raise self._wrap_runtime_exception(state.server_id, exc) from exc
 
-        state.exit_stack = exit_stack
+        state.exit_stack = None
         state.session = session
+        state.session_owner_task = owner_task
+        state.session_close_event = close_event
         logger.info(
             "MCP server connected",
             server_id=state.server_id,
@@ -716,7 +743,18 @@ class MCPServerManager:
 
     async def _disconnect_state(self, state: MCPServerState) -> None:
         close_error: BaseException | None = None
-        if state.exit_stack is not None:
+        owner_task = state.session_owner_task
+        close_event = state.session_close_event
+        state.session_owner_task = None
+        state.session_close_event = None
+        if owner_task is not None:
+            try:
+                if close_event is not None:
+                    close_event.set()
+                await owner_task
+            except BaseException as exc:
+                close_error = exc
+        elif state.exit_stack is not None:
             try:
                 await state.exit_stack.aclose()
             except BaseException as exc:
@@ -733,6 +771,11 @@ class MCPServerManager:
         state.connected = False
         if close_error is not None:
             raise close_error
+
+    @staticmethod
+    async def _cancel_session_owner_task(owner_task: asyncio.Task[None]) -> None:
+        owner_task.cancel()
+        await asyncio.gather(owner_task, return_exceptions=True)
 
     def _require_state(self, server_id: str) -> MCPServerState:
         state = self._states.get(server_id)
@@ -1102,9 +1145,19 @@ class MCPServerManager:
                 names.add(function_name)
         return names
 
+    @classmethod
+    def _runtime_exception_message(cls, exc: BaseException) -> str:
+        if isinstance(exc, BaseExceptionGroup):
+            nested_messages = [cls._runtime_exception_message(nested) for nested in exc.exceptions]
+            nested_text = "; ".join(message for message in nested_messages if message)
+            if nested_text:
+                return f"{exc.message}: {nested_text}"
+        return str(exc)
+
     def _wrap_runtime_exception(self, server_id: str, exc: Exception) -> MCPError:
         if isinstance(exc, MCPError):
             return exc
+        message = self._runtime_exception_message(exc)
         if isinstance(exc, TimeoutError | asyncio.TimeoutError):
-            return MCPTimeoutError(server_id, f"MCP operation timed out: {exc}")
-        return MCPConnectionError(server_id, f"MCP operation failed: {exc}")
+            return MCPTimeoutError(server_id, f"MCP operation timed out: {message}")
+        return MCPConnectionError(server_id, f"MCP operation failed: {message}")

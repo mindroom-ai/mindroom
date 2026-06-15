@@ -73,6 +73,8 @@ class _FakeClientSession:
     call_started_event: ClassVar[asyncio.Event | None] = None
     call_continue_event: ClassVar[asyncio.Event | None] = None
     transport_extra_headers: ClassVar[list[dict[str, str]]] = []
+    enforce_same_task_exit: ClassVar[bool] = False
+    close_exception: ClassVar[BaseException | None] = None
 
     def __init__(
         self,
@@ -86,14 +88,21 @@ class _FakeClientSession:
         self.message_handler = message_handler
         self.read_timeout_seconds = read_timeout_seconds
         self.closed = False
+        self.entered_task: asyncio.Task[object] | None = None
         _FakeClientSession.sessions.append(self)
 
     async def __aenter__(self) -> Self:
         """Return the fake session as an async context manager."""
+        self.entered_task = asyncio.current_task()
         return self
 
     async def __aexit__(self, *_args: object) -> None:
         """Mark the fake session as closed when the context exits."""
+        if _FakeClientSession.enforce_same_task_exit and asyncio.current_task() is not self.entered_task:
+            msg = "Attempted to exit cancel scope in a different task than it was entered in"
+            raise RuntimeError(msg)
+        if _FakeClientSession.close_exception is not None:
+            raise _FakeClientSession.close_exception
         self.closed = True
 
     async def initialize(self) -> mcp_types.InitializeResult:
@@ -164,6 +173,8 @@ def _reset_fake_session_state() -> Generator[None, None, None]:
     _FakeClientSession.call_started_event = None
     _FakeClientSession.call_continue_event = None
     _FakeClientSession.transport_extra_headers = []
+    _FakeClientSession.enforce_same_task_exit = False
+    _FakeClientSession.close_exception = None
     yield
     dynamic_toolkits_module._loaded_tools.clear()
 
@@ -549,6 +560,41 @@ async def test_mcp_manager_reconnects_after_call_failure(
     result = await manager.call_tool("demo", "echo", {"value": "ping"})
     assert result.content == "pong"
     assert len(_FakeClientSession.sessions) == 2
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_closes_session_context_in_owner_task_during_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """MCP session context managers must exit in the same task that entered them."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.enforce_same_task_exit = True
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [
+        BrokenPipeError("transport closed"),
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="pong")]),
+    ]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+
+    await asyncio.create_task(manager.sync_servers(config))
+    result = await manager.call_tool("demo", "echo", {"value": "ping"})
+
+    assert result.content == "pong"
+    assert _FakeClientSession.sessions[0].closed is True
+    assert len(_FakeClientSession.sessions) == 2
+
+
+def test_mcp_manager_wraps_exception_group_with_inner_message(tmp_path: Path) -> None:
+    """ExceptionGroup wrappers should expose the useful nested failure text."""
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    exc = ExceptionGroup("unhandled errors in a TaskGroup", [RuntimeError("transport handshake failed")])
+
+    wrapped = manager._wrap_runtime_exception("demo", exc)
+
+    assert "unhandled errors in a TaskGroup" in str(wrapped)
+    assert "transport handshake failed" in str(wrapped)
 
 
 @pytest.mark.asyncio
@@ -1655,7 +1701,7 @@ async def test_mcp_manager_disconnect_clears_state_even_when_close_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A close failure should not leave the state holding a poisoned exit stack."""
+    """A close failure should not leave the state holding a poisoned session owner."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     manager = MCPServerManager(_runtime_paths(tmp_path))
@@ -1663,16 +1709,13 @@ async def test_mcp_manager_disconnect_clears_state_even_when_close_fails(
     await manager.sync_servers(config)
     state = manager._states["demo"]
     close_failed_message = "close failed"
-
-    class _BrokenExitStack:
-        async def aclose(self) -> None:
-            raise RuntimeError(close_failed_message)
-
-    state.exit_stack = _BrokenExitStack()
+    _FakeClientSession.close_exception = RuntimeError(close_failed_message)
 
     with pytest.raises(RuntimeError, match=close_failed_message):
         await manager._disconnect_state(state)
 
+    assert state.session_owner_task is None
+    assert state.session_close_event is None
     assert state.exit_stack is None
     assert state.session is None
     assert state.connected is False

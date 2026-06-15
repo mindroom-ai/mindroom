@@ -95,6 +95,8 @@ class MCPServerState:
     catalog: MCPServerCatalog | None = None
     session: ClientSession | None = None
     exit_stack: AsyncExitStack | None = None
+    session_owner_task: asyncio.Task[None] | None = None
+    session_close_event: asyncio.Event | None = None
     semaphore: asyncio.Semaphore = field(init=False)
     connected: bool = False
     stale: bool = False
