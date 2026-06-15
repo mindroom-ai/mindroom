@@ -1452,6 +1452,36 @@ async def test_file_backend_rejects_path_ids_outside_memory_files(
 
 
 @pytest.mark.asyncio
+async def test_file_backend_rejects_unstructured_entrypoint_path_ids(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    memory_file = workspace / "MEMORY.md"
+    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    memory_file.write_text(
+        "# Memory\n\nCurated raw entrypoint line.\n- [id=m_existing] Structured entrypoint note.\n",
+        encoding="utf-8",
+    )
+    original_content = memory_file.read_text(encoding="utf-8")
+
+    structured = await get_agent_memory("m_existing", "general", storage_path, config)
+    assert structured is not None
+    assert structured["memory"] == "Structured entrypoint note."
+    assert await get_agent_memory("file:MEMORY.md:3", "general", storage_path, config) is None
+
+    with pytest.raises(ValueError, match=r"No memory found with id=file:MEMORY\.md:3"):
+        await update_agent_memory("file:MEMORY.md:3", "Changed.", "general", storage_path, config)
+    with pytest.raises(ValueError, match=r"No memory found with id=file:MEMORY\.md:3"):
+        await delete_agent_memory("file:MEMORY.md:3", "general", storage_path, config)
+
+    assert memory_file.read_text(encoding="utf-8") == original_content
+
+
+@pytest.mark.asyncio
 async def test_file_backend_store_conversation_memory_uses_agent_scope_only(
     storage_path: Path,
     config: Config,

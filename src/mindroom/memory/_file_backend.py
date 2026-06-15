@@ -449,7 +449,8 @@ def _load_scope_path_memory_line(
     if target_path is None or not target_path.exists():
         return None
 
-    eligible_paths = {path.resolve() for path in _scope_markdown_files(scope_path)}
+    entrypoint_path = _scope_entrypoint_path(scope_path)
+    eligible_paths = {path.resolve() for path in _scope_markdown_files(scope_path) if path != entrypoint_path}
     if target_path not in eligible_paths:
         return None
 
@@ -554,15 +555,14 @@ def _replace_scope_path_memory_entry(
         return False
 
     lines = list(path_memory_line.lines)
-    line_no = path_memory_line.line_no
-    if line_no <= 0 or line_no > len(lines):
-        return False
 
     if content is None or not content.strip():
-        lines[line_no - 1] = ""
+        lines[path_memory_line.line_no - 1] = ""
     else:
         prefix_len = len(path_memory_line.raw_line) - len(path_memory_line.raw_line.lstrip(" "))
-        lines[line_no - 1] = f"{path_memory_line.raw_line[:prefix_len]}{' '.join(content.strip().split())}"
+        lines[path_memory_line.line_no - 1] = (
+            f"{path_memory_line.raw_line[:prefix_len]}{' '.join(content.strip().split())}"
+        )
     path_memory_line.target_path.write_text(f"{'\n'.join(lines)}\n" if lines else "", encoding="utf-8")
     return True
 
