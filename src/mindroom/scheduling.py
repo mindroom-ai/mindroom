@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from mindroom import model_loading, scheduling_executor
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.hooks import build_hook_matrix_admin
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
@@ -448,6 +449,7 @@ async def drain_deferred_overdue_tasks(
 ) -> int:
     """Start queued overdue one-time tasks after Matrix sync is ready."""
     drained_count = 0
+    matrix_admin = build_hook_matrix_admin(client, runtime_paths)
 
     while _deferred_overdue_tasks:
         queued_task = _deferred_overdue_tasks.popleft()
@@ -462,6 +464,7 @@ async def drain_deferred_overdue_tasks(
                 runtime_paths,
                 event_cache,
                 conversation_cache,
+                matrix_admin=matrix_admin,
             ):
                 drained_count += 1
         except Exception:
@@ -1565,6 +1568,7 @@ async def restore_scheduled_tasks(  # noqa: C901
         return 0
 
     restored_count = 0
+    matrix_admin = build_hook_matrix_admin(client, runtime_paths)
     for task in _parse_task_records_from_state(room_id, response, include_non_pending=False):
         task_id = task.task_id
         workflow = task.workflow
@@ -1591,6 +1595,7 @@ async def restore_scheduled_tasks(  # noqa: C901
                             workflow=workflow,
                             status="failed",
                             created_at=task.created_at,
+                            matrix_admin=matrix_admin,
                         )
                     except Exception:
                         logger.exception("Failed to mark ancient task as failed", task_id=task_id)
@@ -1616,6 +1621,7 @@ async def restore_scheduled_tasks(  # noqa: C901
             runtime_paths,
             event_cache,
             conversation_cache,
+            matrix_admin=matrix_admin,
         ):
             restored_count += 1
 

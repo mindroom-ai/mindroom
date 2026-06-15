@@ -300,6 +300,23 @@ def test_cancel_schedule_success(test_client: TestClient) -> None:
     assert cancel_mock.await_args.kwargs["room_id"] == "test_room"
 
 
+def test_cancel_schedule_returns_error_when_backend_cancel_fails(test_client: TestClient) -> None:
+    """Cancel endpoint should not report success when Matrix state persistence fails."""
+    mock_client = _mock_matrix_client()
+    existing_task = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
+    cancel_mock = AsyncMock(return_value="❌ Failed to cancel task `abc12345`: Matrix rejected state write")
+    with (
+        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
+        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
+    ):
+        response = test_client.delete("/api/schedules/abc12345?room_id=test_room")
+
+    assert response.status_code == 400
+    assert "Failed to cancel task" in response.json()["detail"]
+
+
 def test_cancel_schedule_not_found(test_client: TestClient) -> None:
     """Cancel endpoint should return 404 when task does not exist."""
     mock_client = _mock_matrix_client()

@@ -212,12 +212,14 @@ async def cancel_schedule(
         if not existing:
             raise HTTPException(status_code=404, detail=f"Task `{task_id}` not found")
 
-        await cancel_scheduled_task(
+        result = await cancel_scheduled_task(
             client=client,
             room_id=resolved_room_id,
             task_id=task_id,
             cancel_in_memory=False,
         )
+        if result.startswith("❌"):
+            raise HTTPException(status_code=400, detail=result)
     finally:
         await client.close()
 

@@ -401,6 +401,7 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> 
 
     assert drained == 2
     assert [call.args[1] for call in mock_start.call_args_list] == ["task_overdue_1", "task_overdue_2"]
+    assert all(call.kwargs["matrix_admin"] is not None for call in mock_start.call_args_list)
     mock_sleep.assert_awaited_once_with(scheduling._DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS)
     assert len(scheduling._deferred_overdue_tasks) == 0
 
@@ -532,6 +533,7 @@ async def test_restore_scheduled_tasks_keeps_cron_restoration_unchanged() -> Non
 
     assert restored == 1
     mock_start.assert_called_once()
+    assert mock_start.call_args.kwargs["matrix_admin"] is not None
     assert len(scheduling._deferred_overdue_tasks) == 0
 
 
@@ -578,6 +580,7 @@ async def test_restore_scheduled_tasks_does_not_queue_when_nothing_is_overdue() 
 
     assert restored == 1
     mock_start.assert_called_once()
+    assert mock_start.call_args.kwargs["matrix_admin"] is not None
     assert len(scheduling._deferred_overdue_tasks) == 0
 
 
