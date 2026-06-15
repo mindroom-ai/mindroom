@@ -18,8 +18,15 @@ logger = get_logger(__name__)
 
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
 _ROOM_ADMIN_POWER_LEVEL = 100
-_THREAD_TAGS_POWER_LEVEL = 0
+_MINDROOM_STATE_EVENT_POWER_LEVEL = 0
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
+_DEFAULT_USER_POWER_LEVEL = 0
+_POWER_USER_POWER_LEVEL = 50
+_SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
+_MANAGED_STATE_EVENT_POWER_LEVELS = {
+    THREAD_TAGS_EVENT_TYPE: _MINDROOM_STATE_EVENT_POWER_LEVEL,
+    _SCHEDULED_TASK_EVENT_TYPE: _MINDROOM_STATE_EVENT_POWER_LEVEL,
+}
 
 
 async def invite_to_room(
@@ -51,16 +58,15 @@ async def create_room(
         room_config["topic"] = topic
 
     power_level_content: dict[str, Any] = {
+        "users_default": _DEFAULT_USER_POWER_LEVEL,
         "state_default": _DEFAULT_STATE_EVENT_POWER_LEVEL,
-        "events": {
-            THREAD_TAGS_EVENT_TYPE: _THREAD_TAGS_POWER_LEVEL,
-        },
+        "events": dict(_MANAGED_STATE_EVENT_POWER_LEVELS),
     }
     users: dict[str, int] = {}
     if power_users:
-        users.update(dict.fromkeys(power_users, 50))
+        users.update(dict.fromkeys(power_users, _POWER_USER_POWER_LEVEL))
     if client.user_id:
-        users[client.user_id] = 100
+        users[client.user_id] = _ROOM_ADMIN_POWER_LEVEL
     if users:
         power_level_content["users"] = users
     room_config["initial_state"] = [{"type": _POWER_LEVELS_EVENT_TYPE, "content": power_level_content}]
@@ -78,12 +84,12 @@ async def create_room(
     return None
 
 
-def _with_thread_tags_power_level(power_levels_content: dict[str, Any]) -> dict[str, Any]:
-    """Return power-level content with the thread-tags override applied."""
+def _with_managed_state_event_power_levels(power_levels_content: dict[str, Any]) -> dict[str, Any]:
+    """Return power-level content with MindRoom state-event overrides applied."""
     next_content = dict(power_levels_content)
     existing_events = power_levels_content.get("events")
     next_events = dict(existing_events) if isinstance(existing_events, dict) else {}
-    next_events[THREAD_TAGS_EVENT_TYPE] = _THREAD_TAGS_POWER_LEVEL
+    next_events.update(_MANAGED_STATE_EVENT_POWER_LEVELS)
     next_content["events"] = next_events
     return next_content
 
@@ -92,11 +98,11 @@ async def ensure_thread_tags_power_level(
     client: nio.AsyncClient,
     room_id: str,
 ) -> bool:
-    """Ensure managed rooms allow PL0 users to send the thread-tags state event."""
+    """Ensure managed rooms allow PL0 users to send MindRoom state events."""
     current_response = await client.room_get_state_event(room_id, _POWER_LEVELS_EVENT_TYPE)
     if not isinstance(current_response, nio.RoomGetStateEventResponse):
         logger.error(
-            "Failed to read room power levels for thread tags reconciliation",
+            "Failed to read room power levels for managed state-event reconciliation",
             room_id=room_id,
             error=_describe_matrix_response_error(current_response),
         )
@@ -110,13 +116,13 @@ async def ensure_thread_tags_power_level(
         return False
     current_content = current_response.content
 
-    desired_content = _with_thread_tags_power_level(current_content)
+    desired_content = _with_managed_state_event_power_levels(current_content)
     if desired_content == current_content:
         logger.debug(
-            "Thread tags power level already configured",
+            "Managed state-event power levels already configured",
             room_id=room_id,
-            event_type=THREAD_TAGS_EVENT_TYPE,
-            power_level=_THREAD_TAGS_POWER_LEVEL,
+            event_types=sorted(_MANAGED_STATE_EVENT_POWER_LEVELS),
+            power_level=_MINDROOM_STATE_EVENT_POWER_LEVEL,
         )
         return True
 
@@ -127,15 +133,15 @@ async def ensure_thread_tags_power_level(
     )
     if isinstance(response, nio.RoomPutStateResponse):
         logger.info(
-            "Updated room power levels for thread tags",
+            "Updated room power levels for managed state events",
             room_id=room_id,
-            event_type=THREAD_TAGS_EVENT_TYPE,
-            power_level=_THREAD_TAGS_POWER_LEVEL,
+            event_types=sorted(_MANAGED_STATE_EVENT_POWER_LEVELS),
+            power_level=_MINDROOM_STATE_EVENT_POWER_LEVEL,
         )
         return True
 
     logger.error(
-        "Failed to update room power levels for thread tags",
+        "Failed to update room power levels for managed state events",
         room_id=room_id,
         error=_describe_matrix_response_error(response),
         hint="Ensure the service account is joined and can update m.room.power_levels.",

@@ -21,6 +21,7 @@ from mindroom.scheduling import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
     SchedulingRuntime,
+    _persist_scheduled_task_state,
     _run_cron_task,
     _run_once_task,
     build_edited_scheduled_workflow,
@@ -1508,6 +1509,10 @@ async def test_edit_scheduled_task_rejects_non_pending() -> None:
 async def test_save_edited_scheduled_task_preserves_created_at() -> None:
     """Editing should keep created_at metadata from the original task."""
     client = AsyncMock()
+    client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state"},
+        room_id="!test:server",
+    )
     created_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     existing_workflow = ScheduledWorkflow(
         schedule_type="once",
@@ -1551,6 +1556,10 @@ async def test_save_edited_scheduled_task_preserves_created_at() -> None:
 async def test_save_edited_scheduled_task_is_state_only() -> None:
     """State-only edits should not require runtime-only scheduling collaborators."""
     client = AsyncMock()
+    client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state"},
+        room_id="!test:server",
+    )
     created_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     existing_task = ScheduledTaskRecord(
         task_id="task123",
@@ -1684,6 +1693,28 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
 
     assert task_id is None
     assert "No agents" in message
+
+
+@pytest.mark.asyncio
+async def test_persist_scheduled_task_state_raises_on_matrix_error() -> None:
+    """Schedule persistence must fail when Matrix rejects the state write."""
+    client = AsyncMock()
+    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="check logs",
+        description="check logs",
+        room_id="!test:server",
+    )
+
+    with pytest.raises(ValueError, match="Failed to persist scheduled task state"):
+        await _persist_scheduled_task_state(
+            client=client,
+            room_id="!test:server",
+            task_id="task1234",
+            workflow=workflow,
+        )
 
 
 @pytest.mark.asyncio

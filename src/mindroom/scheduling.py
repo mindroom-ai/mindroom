@@ -619,7 +619,7 @@ async def _persist_scheduled_task_state(
     created_at: datetime | str | None = None,
 ) -> None:
     """Persist scheduled task state to Matrix."""
-    await client.room_put_state(
+    response = await client.room_put_state(
         room_id=room_id,
         event_type=_SCHEDULED_TASK_EVENT_TYPE,
         content={
@@ -631,6 +631,10 @@ async def _persist_scheduled_task_state(
         },
         state_key=task_id,
     )
+    if isinstance(response, nio.RoomPutStateResponse):
+        return
+    msg = f"Failed to persist scheduled task state: {response}"
+    raise ValueError(msg)
 
 
 async def _save_pending_scheduled_task(
