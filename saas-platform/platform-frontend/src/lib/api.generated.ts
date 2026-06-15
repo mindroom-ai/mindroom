@@ -690,9 +690,7 @@ export interface paths {
         put?: never;
         /**
          * Set Sso Cookie
-         * @description Set an API-host SSO cookie with the current Supabase access token.
-         *
-         *     Tenant subdomains must not receive raw platform JWTs.
+         * @description Set an SSO cookie with the current Supabase access token.
          */
         post: operations["set_sso_cookie_my_sso_cookie_post"];
         /**

@@ -3716,7 +3716,7 @@
         "summary": "Clear Sso Cookie"
       },
       "post": {
-        "description": "Set an API-host SSO cookie with the current Supabase access token.\n\nTenant subdomains must not receive raw platform JWTs.",
+        "description": "Set an SSO cookie with the current Supabase access token.",
         "operationId": "set_sso_cookie_my_sso_cookie_post",
         "parameters": [
           {
