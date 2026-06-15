@@ -1,6 +1,7 @@
 """SSO cookie management routes."""
 
 from datetime import timedelta
+from ipaddress import ip_address
 from typing import Annotated
 
 from backend.config import PLATFORM_DOMAIN
@@ -16,9 +17,14 @@ SSO_COOKIE_MAX_AGE_SECONDS = int(timedelta(hours=1).total_seconds())
 
 def _sso_cookie_domain() -> str | None:
     domain = PLATFORM_DOMAIN.strip()
-    if not domain:
+    host = domain.lstrip(".").lower()
+    if not host or host == "localhost" or ":" in host or "." not in host:
         return None
-    return domain if domain.startswith(".") else f".{domain}"
+    try:
+        ip_address(host)
+    except ValueError:
+        return domain if domain.startswith(".") else f".{domain}"
+    return None
 
 
 def _set_cookie(
@@ -48,10 +54,16 @@ def _expire_legacy_host_only_sso_cookie(response: Response) -> None:
 
 def _expire_sso_cookie(response: Response) -> None:
     _expire_legacy_host_only_sso_cookie(response)
-    _set_cookie(response, value="", max_age=0, domain=_sso_cookie_domain())
+    domain = _sso_cookie_domain()
+    if domain is not None:
+        _set_cookie(response, value="", max_age=0, domain=domain)
 
 
-@router.post("/my/sso-cookie", response_model=StatusResponse)
+@router.post(
+    "/my/sso-cookie",
+    response_model=StatusResponse,
+    responses={401: {"description": "Missing bearer token"}},
+)
 @limiter.limit("30/minute")
 async def set_sso_cookie(
     request: Request,

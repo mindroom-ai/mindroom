@@ -3740,6 +3740,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Missing bearer token"
+          },
           "422": {
             "content": {
               "application/json": {
