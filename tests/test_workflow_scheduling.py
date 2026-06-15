@@ -783,6 +783,7 @@ class TestIntegrationWithScheduling:
     async def test_schedule_task_workflow_path(self, mock_parse_workflow: AsyncMock) -> None:
         """Test that schedule_task uses workflow parsing for complex requests."""
         client = AsyncMock()
+        client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
         mock_parse_workflow.return_value = ScheduledWorkflow(
             schedule_type="cron",
             cron_schedule=CronSchedule(minute="0", hour="9"),
