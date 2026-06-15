@@ -1352,6 +1352,33 @@ async def test_file_backend_can_update_and_delete_unstructured_file_memory_line(
 
 
 @pytest.mark.asyncio
+async def test_file_backend_rejects_path_ids_outside_memory_files(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    docs_file = workspace / "docs" / "runbook.md"
+    docs_file.parent.mkdir(parents=True, exist_ok=True)
+    docs_file.write_text("Runbook instruction.\n", encoding="utf-8")
+    soul_file = workspace / "SOUL.md"
+    soul_file.write_text("Protected instruction.\n", encoding="utf-8")
+
+    assert await get_agent_memory("file:docs/runbook.md:1", "general", storage_path, config) is None
+    assert await get_agent_memory("file:SOUL.md:1", "general", storage_path, config) is None
+
+    with pytest.raises(ValueError, match=r"No memory found with id=file:docs/runbook\.md:1"):
+        await update_agent_memory("file:docs/runbook.md:1", "Changed.", "general", storage_path, config)
+    with pytest.raises(ValueError, match=r"No memory found with id=file:SOUL\.md:1"):
+        await delete_agent_memory("file:SOUL.md:1", "general", storage_path, config)
+
+    assert docs_file.read_text(encoding="utf-8") == "Runbook instruction.\n"
+    assert soul_file.read_text(encoding="utf-8") == "Protected instruction.\n"
+
+
+@pytest.mark.asyncio
 async def test_file_backend_store_conversation_memory_uses_agent_scope_only(
     storage_path: Path,
     config: Config,

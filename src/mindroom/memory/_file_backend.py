@@ -52,6 +52,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+@dataclass(frozen=True)
+class _PathMemoryLine:
+    target_path: Path
+    relative_path: str
+    line_no: int
+    raw_line: str
+    memory: str
+
+
 def _tag_keyword_mode(result: MemoryResult) -> None:
     metadata = result.get("metadata")
     result["metadata"] = (
@@ -139,6 +148,10 @@ def _scope_markdown_files(scope_path: Path) -> list[Path]:
     return files
 
 
+def _is_unstructured_memory_line(snippet: str) -> bool:
+    return bool(snippet) and not snippet.startswith("#") and FILE_MEMORY_ENTRY_PATTERN.match(snippet) is None
+
+
 def _load_scope_id_entries(
     scope_user_id: str,
     resolution: FileMemoryResolution,
@@ -194,7 +207,7 @@ def _load_scope_unstructured_entries(
         relative_path = file_path.relative_to(scope_path).as_posix()
         for line_no, raw_line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), 1):
             snippet = raw_line.strip()
-            if not snippet or snippet.startswith("#") or FILE_MEMORY_ENTRY_PATTERN.match(snippet):
+            if not _is_unstructured_memory_line(snippet):
                 continue
             normalized_snippet = snippet.lower()
             if normalized_snippet in seen_memory_text:
@@ -388,9 +401,7 @@ def _scan_scope_memory_snippets(
         relative_path = file_path.relative_to(scope_path).as_posix()
         for line_no, raw_line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), 1):
             snippet = raw_line.strip()
-            if not snippet or snippet.startswith("#"):
-                continue
-            if FILE_MEMORY_ENTRY_PATTERN.match(snippet):
+            if not _is_unstructured_memory_line(snippet):
                 continue
             normalized_snippet = snippet.lower()
             if normalized_snippet in existing_memory_text:
@@ -411,32 +422,58 @@ def _scan_scope_memory_snippets(
     return snippet_results
 
 
-def _get_scope_memory_by_path_id(
+def _load_scope_path_memory_line(
     scope_user_id: str,
     memory_id: str,
     resolution: FileMemoryResolution,
     config: Config,
-) -> MemoryResult | None:
+) -> _PathMemoryLine | None:
     match = FILE_MEMORY_PATH_ID_PATTERN.match(memory_id)
     if match is None:
         return None
+
     line_no = int(match.group("line"))
     relative_path = match.group("path")
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
     target_path = _resolve_scope_markdown_path(scope_path, relative_path)
     if target_path is None or not target_path.exists():
         return None
+
+    eligible_paths = {path.resolve() for path in _scope_markdown_files(scope_path)}
+    if target_path not in eligible_paths:
+        return None
+
     lines = target_path.read_text(encoding="utf-8").splitlines()
     if line_no <= 0 or line_no > len(lines):
         return None
-    snippet = lines[line_no - 1].strip()
-    if not snippet:
+
+    raw_line = lines[line_no - 1]
+    snippet = raw_line.strip()
+    if not _is_unstructured_memory_line(snippet):
+        return None
+    return _PathMemoryLine(
+        target_path=target_path,
+        relative_path=relative_path,
+        line_no=line_no,
+        raw_line=raw_line,
+        memory=snippet,
+    )
+
+
+def _get_scope_memory_by_path_id(
+    scope_user_id: str,
+    memory_id: str,
+    resolution: FileMemoryResolution,
+    config: Config,
+) -> MemoryResult | None:
+    path_memory_line = _load_scope_path_memory_line(scope_user_id, memory_id, resolution, config)
+    if path_memory_line is None:
         return None
     return {
         "id": memory_id,
-        "memory": snippet,
+        "memory": path_memory_line.memory,
         "user_id": scope_user_id,
-        "metadata": {"source_file": relative_path, "line": line_no},
+        "metadata": {"source_file": path_memory_line.relative_path, "line": path_memory_line.line_no},
     }
 
 
@@ -501,32 +538,21 @@ def _replace_scope_path_memory_entry(
     resolution: FileMemoryResolution,
     config: Config,
 ) -> bool:
-    match = FILE_MEMORY_PATH_ID_PATTERN.match(memory_id)
-    if match is None:
+    path_memory_line = _load_scope_path_memory_line(scope_user_id, memory_id, resolution, config)
+    if path_memory_line is None:
         return False
 
-    line_no = int(match.group("line"))
-    relative_path = match.group("path")
-    scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    target_path = _resolve_scope_markdown_path(scope_path, relative_path)
-    if target_path is None or not target_path.exists():
-        return False
-
-    lines = target_path.read_text(encoding="utf-8").splitlines()
+    lines = path_memory_line.target_path.read_text(encoding="utf-8").splitlines()
+    line_no = path_memory_line.line_no
     if line_no <= 0 or line_no > len(lines):
-        return False
-
-    raw_line = lines[line_no - 1]
-    stripped = raw_line.strip()
-    if not stripped or stripped.startswith("#") or FILE_MEMORY_ENTRY_PATTERN.match(stripped):
         return False
 
     if content is None:
         lines[line_no - 1] = ""
     else:
-        prefix_len = len(raw_line) - len(raw_line.lstrip(" "))
-        lines[line_no - 1] = f"{raw_line[:prefix_len]}{' '.join(content.strip().split())}"
-    target_path.write_text(f"{'\n'.join(lines)}\n" if lines else "", encoding="utf-8")
+        prefix_len = len(path_memory_line.raw_line) - len(path_memory_line.raw_line.lstrip(" "))
+        lines[line_no - 1] = f"{path_memory_line.raw_line[:prefix_len]}{' '.join(content.strip().split())}"
+    path_memory_line.target_path.write_text(f"{'\n'.join(lines)}\n" if lines else "", encoding="utf-8")
     return True
 
 
