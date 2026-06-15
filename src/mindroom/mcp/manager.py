@@ -749,9 +749,14 @@ class MCPServerManager:
         state.session_close_event = None
         if owner_task is not None:
             try:
-                if close_event is not None:
+                if close_event is None:
+                    await self._cancel_session_owner_task(owner_task)
+                    close_error = RuntimeError(
+                        f"MCP server '{state.server_id}' session owner is missing close event",
+                    )
+                else:
                     close_event.set()
-                await owner_task
+                    await owner_task
             except BaseException as exc:
                 close_error = exc
         elif state.exit_stack is not None:

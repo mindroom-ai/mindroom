@@ -1719,3 +1719,29 @@ async def test_mcp_manager_disconnect_clears_state_even_when_close_fails(
     assert state.exit_stack is None
     assert state.session is None
     assert state.connected is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_disconnect_cancels_owner_task_when_close_event_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A corrupted owner handle should fail closed instead of hanging disconnect."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    await manager.sync_servers(config)
+    state = manager._states["demo"]
+    owner_task = state.session_owner_task
+    assert owner_task is not None
+    state.session_close_event = None
+
+    with pytest.raises(RuntimeError, match="missing close event"):
+        await asyncio.wait_for(manager._disconnect_state(state), timeout=1)
+
+    assert owner_task.cancelled()
+    assert state.session_owner_task is None
+    assert state.session_close_event is None
+    assert state.session is None
+    assert state.connected is False
