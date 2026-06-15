@@ -59,6 +59,7 @@ class _PathMemoryLine:
     line_no: int
     raw_line: str
     memory: str
+    lines: tuple[str, ...]
 
 
 def _tag_keyword_mode(result: MemoryResult) -> None:
@@ -152,6 +153,10 @@ def _is_unstructured_memory_line(snippet: str) -> bool:
     return bool(snippet) and not snippet.startswith("#") and FILE_MEMORY_ENTRY_PATTERN.match(snippet) is None
 
 
+def _normalize_memory_text_for_dedup(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
 def _load_scope_id_entries(
     scope_user_id: str,
     resolution: FileMemoryResolution,
@@ -203,13 +208,16 @@ def _load_scope_unstructured_entries(
 
     results: list[MemoryResult] = []
     seen_memory_text = set(existing_memory_text)
+    entrypoint_path = _scope_entrypoint_path(scope_path)
     for file_path in _scope_markdown_files(scope_path):
+        if file_path == entrypoint_path:
+            continue
         relative_path = file_path.relative_to(scope_path).as_posix()
         for line_no, raw_line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), 1):
             snippet = raw_line.strip()
             if not _is_unstructured_memory_line(snippet):
                 continue
-            normalized_snippet = snippet.lower()
+            normalized_snippet = _normalize_memory_text_for_dedup(snippet)
             if normalized_snippet in seen_memory_text:
                 continue
             seen_memory_text.add(normalized_snippet)
@@ -349,7 +357,7 @@ def _search_scope_memory_entries(
     seen_scored_text: set[str] = set()
     for entry in id_entries:
         text = entry.get("memory", "")
-        normalized_text = text.strip().lower()
+        normalized_text = _normalize_memory_text_for_dedup(text)
         if normalized_text in seen_scored_text:
             continue
         score = _match_score(query_tokens, text)
@@ -372,7 +380,9 @@ def _search_scope_memory_entries(
     entrypoint_path = _scope_entrypoint_path(scope_path)
     snippet_results: list[MemoryResult] = []
     existing_memory_text = {
-        memory_text for entry in scored_entries if (memory_text := entry.get("memory", "").strip().lower())
+        memory_text
+        for entry in scored_entries
+        if (memory_text := _normalize_memory_text_for_dedup(entry.get("memory", "")))
     }
     snippet_results = _scan_scope_memory_snippets(
         scope_user_id,
@@ -403,7 +413,7 @@ def _scan_scope_memory_snippets(
             snippet = raw_line.strip()
             if not _is_unstructured_memory_line(snippet):
                 continue
-            normalized_snippet = snippet.lower()
+            normalized_snippet = _normalize_memory_text_for_dedup(snippet)
             if normalized_snippet in existing_memory_text:
                 continue
             score = _match_score(query_tokens, snippet)
@@ -457,6 +467,7 @@ def _load_scope_path_memory_line(
         line_no=line_no,
         raw_line=raw_line,
         memory=snippet,
+        lines=tuple(lines),
     )
 
 
@@ -542,12 +553,12 @@ def _replace_scope_path_memory_entry(
     if path_memory_line is None:
         return False
 
-    lines = path_memory_line.target_path.read_text(encoding="utf-8").splitlines()
+    lines = list(path_memory_line.lines)
     line_no = path_memory_line.line_no
     if line_no <= 0 or line_no > len(lines):
         return False
 
-    if content is None:
+    if content is None or not content.strip():
         lines[line_no - 1] = ""
     else:
         prefix_len = len(path_memory_line.raw_line) - len(path_memory_line.raw_line.lstrip(" "))
@@ -963,7 +974,7 @@ class FileMemoryBackend:
             return results[:limit]
 
         existing_memory_text = {
-            memory_text.strip().lower() for entry in results if (memory_text := entry.get("memory"))
+            _normalize_memory_text_for_dedup(memory_text) for entry in results if (memory_text := entry.get("memory"))
         }
         unstructured_results = await asyncio.to_thread(
             _load_scope_unstructured_entries,

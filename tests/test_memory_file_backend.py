@@ -466,6 +466,59 @@ async def test_file_backend_lists_unstructured_daily_memory_lines(storage_path: 
 
 
 @pytest.mark.asyncio
+async def test_file_backend_deduplicates_unstructured_lines_with_internal_whitespace(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    await add_agent_memory("Bas prefers repo-grounded answers.", "general", storage_path, config)
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    daily_file = workspace / "memory" / "2026-06-13.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    daily_file.write_text(
+        "Bas   prefers\trepo-grounded   answers.\nUnique raw note.\n",
+        encoding="utf-8",
+    )
+
+    results = await list_all_agent_memories("general", storage_path, config)
+
+    assert [result["memory"] for result in results] == [
+        "Bas prefers repo-grounded answers.",
+        "Unique raw note.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_file_backend_list_all_skips_unstructured_entrypoint_lines(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    memory_file = workspace / "MEMORY.md"
+    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    memory_file.write_text(
+        "# Memory\n\nCurated raw entrypoint line.\n- [id=m_existing] Structured entrypoint note.\n",
+        encoding="utf-8",
+    )
+    daily_file = workspace / "memory" / "2026-06-13.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    daily_file.write_text("Daily raw note.\n", encoding="utf-8")
+
+    results = await list_all_agent_memories("general", storage_path, config)
+
+    assert [result["memory"] for result in results] == [
+        "Structured entrypoint note.",
+        "Daily raw note.",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_file_backend_user_scoped_workers_share_agent_memory_across_requesters(
     storage_path: Path,
     config: Config,
@@ -1347,6 +1400,26 @@ async def test_file_backend_can_update_and_delete_unstructured_file_memory_line(
     assert updated["memory"] == "Updated raw note."
 
     await delete_agent_memory(memory_id, "general", storage_path, config)
+    assert daily_file.read_text(encoding="utf-8") == "\nKeep this line.\n"
+    assert await get_agent_memory(memory_id, "general", storage_path, config) is None
+
+
+@pytest.mark.asyncio
+async def test_file_backend_whitespace_only_update_deletes_unstructured_file_memory_line(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    daily_file = workspace / "memory" / "2026-06-13.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    daily_file.write_text("  Old raw note.\nKeep this line.\n", encoding="utf-8")
+
+    memory_id = "file:memory/2026-06-13.md:1"
+    await update_agent_memory(memory_id, "   \t", "general", storage_path, config)
+
     assert daily_file.read_text(encoding="utf-8") == "\nKeep this line.\n"
     assert await get_agent_memory(memory_id, "general", storage_path, config) is None
 
