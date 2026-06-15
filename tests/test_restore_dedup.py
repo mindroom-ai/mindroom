@@ -126,8 +126,9 @@ async def test_restore_marks_ancient_missed_task_as_failed() -> None:
     assert restored == 0
 
     # Verify the task was marked as failed via room_put_state
-    client.room_put_state.assert_called_once()
+    client.room_put_state.assert_awaited_once()
     call_kwargs = client.room_put_state.call_args
+    assert call_kwargs.kwargs["content"]["task_id"] == "id-ancient"
     assert call_kwargs.kwargs["content"]["status"] == "failed"
     assert call_kwargs.kwargs["state_key"] == "id-ancient"
 
@@ -177,6 +178,7 @@ async def test_restore_marks_ancient_missed_task_failed_via_admin_when_active_wr
         "com.mindroom.scheduled.task",
         "id-ancient",
     )
+    assert call_args.args[3]["task_id"] == "id-ancient"
     assert call_args.args[3]["status"] == "failed"
     assert call_args.args[3]["workflow"] == ancient_once.model_dump_json()
 
