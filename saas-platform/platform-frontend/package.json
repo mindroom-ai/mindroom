@@ -10,6 +10,7 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
+    "test:api-check": "node --test scripts/check-api-types.test.mjs",
     "generate:api": "openapi-typescript ../platform-backend/openapi.json -o src/lib/api.generated.ts",
     "check:api": "bun scripts/check-api-types.mjs",
     "screenshot": "nix-shell --run 'node take_screenshot.js' 2>/dev/null || node take_screenshot.js"
