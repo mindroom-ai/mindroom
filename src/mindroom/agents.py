@@ -32,7 +32,7 @@ from mindroom.runtime_resolution import (
     resolve_agent_runtime,
     resolve_private_requester_scope_root,
 )
-from mindroom.timing import timed
+from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import tool_requires_approval_for_openai_compat
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -62,6 +62,7 @@ from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from contextlib import AbstractContextManager
 
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
@@ -1168,16 +1169,20 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         ValueError: If agent_name is not found in configuration
 
     """
-    del timing_scope
+
+    def agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
+        return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=timing_scope, **event_data)
+
     resolved_storage_path = runtime_paths.storage_root
     create_runtime_state = not disable_runtime_capabilities
-    agent_runtime = resolve_agent_runtime(
-        agent_name,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-        create=create_runtime_state,
-    )
+    with agent_create_timing("resolve_runtime"):
+        agent_runtime = resolve_agent_runtime(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            create=create_runtime_state,
+        )
 
     agent_config = config.get_agent(agent_name)
     if create_runtime_state:
@@ -1197,20 +1202,21 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         runtime_paths=runtime_paths,
     )
 
-    storage = (
-        None
-        if not persist_runtime_state
-        else (
-            history_storage
-            if history_storage is not None
-            else agent_storage.create_state_storage(
-                agent_name,
-                agent_runtime.state_root,
-                subdir="sessions",
-                session_table=f"{agent_name}_sessions",
+    with agent_create_timing("storage_open"):
+        storage = (
+            None
+            if not persist_runtime_state
+            else (
+                history_storage
+                if history_storage is not None
+                else agent_storage.create_state_storage(
+                    agent_name,
+                    agent_runtime.state_root,
+                    subdir="sessions",
+                    session_table=f"{agent_name}_sessions",
+                )
             )
         )
-    )
     # Dynamic tool state is keyed by agent and session scope, so team members
     # sharing one Matrix thread do not leak loaded tools across agents.
     dynamic_tool_selection = _resolve_agent_dynamic_tool_selection(
@@ -1237,32 +1243,34 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             tool_name for tool_name in dynamic_tool_selection.loaded_tools if tool_name not in disabled_tool_names
         )
     )
-    worker_tools = resolve_runtime_worker_tools(
-        agent_name,
-        config,
-        runtime_paths,
-        list(resolved_tool_configs),
-        tool_registry_preloaded=True,
-    )
+    with agent_create_timing("resolve_worker_tools"):
+        worker_tools = resolve_runtime_worker_tools(
+            agent_name,
+            config,
+            runtime_paths,
+            list(resolved_tool_configs),
+            tool_registry_preloaded=True,
+        )
     workspace = agent_runtime.workspace
     tools: list[Toolkit] = []
     for tool_name in resolved_tool_configs:
         try:
             runtime_overrides = config.get_agent_tool_runtime_overrides(agent_name, tool_name)
-            toolkit = build_agent_toolkit(
-                tool_name,
-                agent_name=agent_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                worker_tools=worker_tools,
-                runtime_overrides=runtime_overrides,
-                agent_runtime=agent_runtime,
-                tool_config_overrides=resolved_tool_configs.get(tool_name),
-                session_id=session_id,
-                execution_identity=execution_identity,
-                delegation_depth=delegation_depth,
-                refresh_scheduler=refresh_scheduler,
-            )
+            with agent_create_timing("toolkit_build.one", tool_name=tool_name):
+                toolkit = build_agent_toolkit(
+                    tool_name,
+                    agent_name=agent_name,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    worker_tools=worker_tools,
+                    runtime_overrides=runtime_overrides,
+                    agent_runtime=agent_runtime,
+                    tool_config_overrides=resolved_tool_configs.get(tool_name),
+                    session_id=session_id,
+                    execution_identity=execution_identity,
+                    delegation_depth=delegation_depth,
+                    refresh_scheduler=refresh_scheduler,
+                )
             if toolkit:
                 toolkit = _prune_openai_approval_gated_tools(
                     toolkit,
@@ -1300,15 +1308,16 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         model_provider = "AI"
         model_id = model_name
 
-    identity_context = _render_agent_identity_context(
-        agent_name,
-        agent_config.display_name,
-        config,
-        runtime_paths,
-        model_provider=model_provider,
-        model_id=model_id,
-        include_openai_compat_guidance=include_openai_compat_guidance,
-    )
+    with agent_create_timing("identity_context"):
+        identity_context = _render_agent_identity_context(
+            agent_name,
+            agent_config.display_name,
+            config,
+            runtime_paths,
+            model_provider=model_provider,
+            model_id=model_id,
+            include_openai_compat_guidance=include_openai_compat_guidance,
+        )
 
     # Add current date context with the user's configured timezone
     datetime_context = _get_datetime_context(

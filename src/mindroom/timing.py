@@ -7,6 +7,7 @@ import functools
 import inspect
 import os
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
     from structlog.stdlib import BoundLogger
 
@@ -218,6 +219,26 @@ def emit_elapsed_timing(label: str, start: float, **event_data: object) -> None:
         duration_ms=elapsed_ms_since(start),
         **event_data,
     )
+
+
+@contextmanager
+def timed_block(
+    label: str,
+    *,
+    scope: str | None = None,
+    **event_data: object,
+) -> Iterator[None]:
+    """Emit elapsed timing for a small inline block when timing diagnostics are enabled."""
+    if not _is_enabled():
+        yield
+        return
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        if scope is not None:
+            event_data["timing_scope"] = scope
+        emit_elapsed_timing(label, start, **event_data)
 
 
 def timed(label: str) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:

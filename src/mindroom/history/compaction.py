@@ -48,7 +48,7 @@ from mindroom.history.types import (
 )
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
-from mindroom.timing import timed
+from mindroom.timing import timed, timed_block
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 
@@ -810,21 +810,23 @@ def _prepare_agent_prompt_inputs_for_estimation(
     )
     model = agent.model
     assert model is not None
-    processed_tools = agent.get_tools(
-        run_response=run_response,
-        run_context=run_context,
-        session=session,
-        user_id=budget_user_id,
-    )
-    prepared_tools = determine_tools_for_model(
-        agent=agent,
-        model=model,
-        processed_tools=processed_tools,
-        run_response=run_response,
-        run_context=run_context,
-        session=session,
-        async_mode=False,
-    )
+    with timed_block("system_prompt_assembly.history_prepare.static_token_estimate.agno_get_tools"):
+        processed_tools = agent.get_tools(
+            run_response=run_response,
+            run_context=run_context,
+            session=session,
+            user_id=budget_user_id,
+        )
+    with timed_block("system_prompt_assembly.history_prepare.static_token_estimate.agno_determine_tools"):
+        prepared_tools = determine_tools_for_model(
+            agent=agent,
+            model=model,
+            processed_tools=processed_tools,
+            run_response=run_response,
+            run_context=run_context,
+            session=session,
+            async_mode=False,
+        )
     return (
         session,
         run_context,
