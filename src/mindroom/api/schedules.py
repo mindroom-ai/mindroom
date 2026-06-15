@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
+_SCHEDULER_ERROR_PREFIX = "❌ "
 
 
 class ScheduledTaskResponse(BaseModel):
@@ -104,6 +105,18 @@ def _to_response_task(task: ScheduledTaskReadModel, runtime_paths: RuntimePaths)
         room_alias=get_room_alias_from_id(task.room_id, runtime_paths=runtime_paths),
         **asdict(task),
     )
+
+
+def _scheduler_error_detail(result: str) -> str:
+    """Convert chat-formatted scheduler errors into API response details."""
+    return result.removeprefix(_SCHEDULER_ERROR_PREFIX).strip()
+
+
+def _cancel_error_status_code(detail: str) -> int:
+    """Return the HTTP status for one scheduler cancel failure detail."""
+    if detail.startswith("Task `") and detail.endswith("` not found."):
+        return 404
+    return 500
 
 
 async def _get_router_client(runtime_paths: RuntimePaths) -> AsyncClient:
@@ -219,7 +232,8 @@ async def cancel_schedule(
             cancel_in_memory=False,
         )
         if result.startswith("❌"):
-            raise HTTPException(status_code=400, detail=result)
+            detail = _scheduler_error_detail(result)
+            raise HTTPException(status_code=_cancel_error_status_code(detail), detail=detail)
     finally:
         await client.close()
 

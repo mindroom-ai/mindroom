@@ -300,8 +300,8 @@ def test_cancel_schedule_success(test_client: TestClient) -> None:
     assert cancel_mock.await_args.kwargs["room_id"] == "test_room"
 
 
-def test_cancel_schedule_returns_error_when_backend_cancel_fails(test_client: TestClient) -> None:
-    """Cancel endpoint should not report success when Matrix state persistence fails."""
+def test_cancel_schedule_returns_server_error_when_backend_cancel_fails(test_client: TestClient) -> None:
+    """Cancel endpoint should report persistence failures as server errors."""
     mock_client = _mock_matrix_client()
     existing_task = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
     cancel_mock = AsyncMock(return_value="❌ Failed to cancel task `abc12345`: Matrix rejected state write")
@@ -313,8 +313,25 @@ def test_cancel_schedule_returns_error_when_backend_cancel_fails(test_client: Te
     ):
         response = test_client.delete("/api/schedules/abc12345?room_id=test_room")
 
-    assert response.status_code == 400
-    assert "Failed to cancel task" in response.json()["detail"]
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Failed to cancel task `abc12345`: Matrix rejected state write"
+
+
+def test_cancel_schedule_returns_not_found_when_backend_cancel_reports_missing(test_client: TestClient) -> None:
+    """Cancel endpoint should preserve 404 when the task disappears after the guard read."""
+    mock_client = _mock_matrix_client()
+    existing_task = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
+    cancel_mock = AsyncMock(return_value="❌ Task `abc12345` not found.")
+    with (
+        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
+        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
+    ):
+        response = test_client.delete("/api/schedules/abc12345?room_id=test_room")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Task `abc12345` not found."
 
 
 def test_cancel_schedule_not_found(test_client: TestClient) -> None:
