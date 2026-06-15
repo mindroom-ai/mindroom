@@ -145,11 +145,22 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
         invited = await admin.invite_user("!created:localhost", "@user:localhost")
         members = await admin.get_room_members("!created:localhost")
         added = await admin.add_room_to_space("!space:localhost", "!created:localhost")
+        client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+            {"event_id": "$state"},
+            room_id="!created:localhost",
+        )
+        wrote_state = await admin.put_room_state(
+            "!created:localhost",
+            "com.mindroom.scheduled.task",
+            "task123",
+            {"status": "pending"},
+        )
 
     assert room_id == "!created:localhost"
     assert invited is True
     assert members == {"@user:localhost", "@mindroom_router:localhost"}
     assert added is True
+    assert wrote_state is True
     mock_create.assert_awaited_once_with(
         client=client,
         name="Personal Room",
@@ -158,6 +169,12 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
         power_users=None,
     )
     mock_invite.assert_awaited_once_with(client, "!created:localhost", "@user:localhost")
+    client.room_put_state.assert_awaited_once_with(
+        room_id="!created:localhost",
+        event_type="com.mindroom.scheduled.task",
+        content={"status": "pending"},
+        state_key="task123",
+    )
     mock_members.assert_awaited_once_with(client, "!created:localhost")
     mock_add.assert_awaited_once()
 

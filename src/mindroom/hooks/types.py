@@ -136,6 +136,15 @@ class HookMatrixAdmin(Protocol):
     async def add_room_to_space(self, space_room_id: str, room_id: str) -> bool:
         """Link one room into one Space."""
 
+    async def put_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+        content: dict[str, Any],
+    ) -> bool:
+        """Write one room state event."""
+
 
 type HookRoomStateQuerier = Callable[
     [str, str, str | None],

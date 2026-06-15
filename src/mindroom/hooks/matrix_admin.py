@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import nio
 
@@ -62,6 +62,22 @@ class _BoundHookMatrixAdmin:
             runtime_paths=self.runtime_paths,
         )
         return await add_room_to_space(self.client, space_room_id, room_id, server_name)
+
+    async def put_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+        content: dict[str, Any],
+    ) -> bool:
+        """Write one room state event using the bound admin-capable client."""
+        response = await self.client.room_put_state(
+            room_id=room_id,
+            event_type=event_type,
+            content=content,
+            state_key=state_key,
+        )
+        return isinstance(response, nio.RoomPutStateResponse)
 
 
 def build_hook_matrix_admin(

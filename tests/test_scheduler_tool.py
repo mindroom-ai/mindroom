@@ -258,7 +258,8 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
     """Cancel tool should call cancel_scheduled_task with correct arguments."""
     tools = SchedulerTools()
     config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
-    context = _make_context(config)
+    matrix_admin = object()
+    context = _make_context(config, matrix_admin=matrix_admin)
 
     with (
         patch(
@@ -274,6 +275,7 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
         client=context.client,
         room_id=context.room_id,
         task_id="task123",
+        matrix_admin=matrix_admin,
     )
 
 
