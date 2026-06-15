@@ -66,6 +66,7 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
@@ -6219,6 +6220,425 @@ class TestUserIdPassthrough:
         assert response == "Done."
         assert "<tool>" not in response
         assert len(tool_trace) == 1
+
+    @pytest.mark.asyncio
+    async def test_ai_response_continues_after_dynamic_tool_load(self, tmp_path: Path) -> None:
+        """Dynamic tool loads should rebuild the agent and continue the same task."""
+        first_agent = MagicMock()
+        first_agent.model = MagicMock()
+        first_agent.model.__class__.__name__ = "OpenAIChat"
+        first_agent.model.id = "test-model"
+        first_agent.name = "GeneralAgent"
+        first_agent.add_history_to_context = False
+
+        second_agent = MagicMock()
+        second_agent.model = MagicMock()
+        second_agent.model.__class__.__name__ = "OpenAIChat"
+        second_agent.model.id = "test-model"
+        second_agent.name = "GeneralAgent"
+        second_agent.add_history_to_context = False
+
+        load_tool_execution = ToolExecution(
+            tool_call_id="call-load",
+            tool_name="load_tool",
+            tool_args={"tool_name": "sleep"},
+            result=json.dumps(
+                {
+                    "status": "loaded",
+                    "takes_effect": "later_tool_call_step",
+                    "tool": "dynamic_tools",
+                    "tool_name": "sleep",
+                },
+            ),
+            stop_after_tool_call=True,
+        )
+
+        first_run_output = MagicMock()
+        first_run_output.content = ""
+        first_run_output.tools = [load_tool_execution]
+        first_run_output.status = RunStatus.completed
+        first_agent.arun = AsyncMock(return_value=first_run_output)
+
+        second_run_output = MagicMock()
+        second_run_output.content = "Used the loaded tool."
+        second_run_output.tools = []
+        second_run_output.status = RunStatus.completed
+        second_agent.arun = AsyncMock(return_value=second_run_output)
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.side_effect = [
+                _prepared_prompt_result(first_agent),
+                _prepared_prompt_result(second_agent, prompt="continuation prompt"),
+            ]
+            tool_trace: list[object] = []
+            run_ids: list[str] = []
+            response = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                run_id="run-1",
+                model_prompt="test\n\nUse attachment att_1.",
+                run_id_callback=run_ids.append,
+                show_tool_calls=False,
+                tool_trace_collector=tool_trace,
+            )
+
+        assert response == "Used the loaded tool."
+        assert mock_prepare.await_count == 2
+        assert mock_prepare.await_args_list[0].kwargs["model_prompt"] == "test\n\nUse attachment att_1."
+        assert mock_prepare.await_args_list[1].kwargs["model_prompt"] == "Use attachment att_1."
+        assert "Continue the same task" in mock_prepare.await_args_list[1].args[1]
+        first_agent.arun.assert_awaited_once()
+        second_agent.arun.assert_awaited_once()
+        assert run_ids[0] == "run-1"
+        assert len(run_ids) == 2
+        assert run_ids[1] != "run-1"
+        assert first_agent.arun.await_args.kwargs["run_id"] == "run-1"
+        assert second_agent.arun.await_args.kwargs["run_id"] == run_ids[1]
+        assert len(tool_trace) == 1
+
+    @pytest.mark.asyncio
+    async def test_ai_response_continuation_cancelled_run_preserves_dynamic_tool_trace(self, tmp_path: Path) -> None:
+        """Cancelled continuation runs should keep dynamic-tool calls in interrupted history."""
+        first_agent = MagicMock()
+        first_agent.model = MagicMock()
+        first_agent.model.__class__.__name__ = "OpenAIChat"
+        first_agent.model.id = "test-model"
+        first_agent.name = "GeneralAgent"
+        first_agent.add_history_to_context = False
+
+        second_agent = MagicMock()
+        second_agent.model = MagicMock()
+        second_agent.model.__class__.__name__ = "OpenAIChat"
+        second_agent.model.id = "test-model"
+        second_agent.name = "GeneralAgent"
+        second_agent.add_history_to_context = False
+
+        load_tool_execution = ToolExecution(
+            tool_call_id="call-load",
+            tool_name="load_tool",
+            tool_args={"tool_name": "sleep"},
+            result=json.dumps(
+                {
+                    "status": "loaded",
+                    "takes_effect": "later_tool_call_step",
+                    "tool": "dynamic_tools",
+                    "tool_name": "sleep",
+                },
+            ),
+            stop_after_tool_call=True,
+        )
+        first_run_output = MagicMock()
+        first_run_output.content = ""
+        first_run_output.tools = [load_tool_execution]
+        first_run_output.status = RunStatus.completed
+        first_agent.arun = AsyncMock(return_value=first_run_output)
+
+        second_run_output = RunOutput(
+            run_id="run-2",
+            agent_id="general",
+            session_id="session1",
+            content="Half done",
+            messages=[Message(role="assistant", content="Half done")],
+            tools=[
+                ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result="/app",
+                ),
+            ],
+            status=RunStatus.cancelled,
+        )
+        second_agent.arun = AsyncMock(return_value=second_run_output)
+        recorder = TurnRecorder(user_message="test")
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.side_effect = [
+                _prepared_prompt_result(first_agent),
+                _prepared_prompt_result(second_agent, prompt="continuation prompt"),
+            ]
+
+            with pytest.raises(asyncio.CancelledError):
+                await ai_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    run_id="run-1",
+                    show_tool_calls=False,
+                    turn_recorder=recorder,
+                )
+
+        snapshot = recorder.interrupted_snapshot()
+        assert snapshot.user_message == "test"
+        assert snapshot.partial_text == "Half done"
+        assert [tool.tool_name for tool in snapshot.completed_tools] == ["load_tool", "run_shell_command"]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_continues_after_dynamic_tool_load(self, tmp_path: Path) -> None:
+        """Streaming dynamic tool loads should rebuild the agent before continuing."""
+        first_agent = MagicMock()
+        first_agent.model = MagicMock()
+        first_agent.model.__class__.__name__ = "OpenAIChat"
+        first_agent.model.id = "test-model"
+        first_agent.name = "GeneralAgent"
+        first_agent.add_history_to_context = False
+
+        second_agent = MagicMock()
+        second_agent.model = MagicMock()
+        second_agent.model.__class__.__name__ = "OpenAIChat"
+        second_agent.model.id = "test-model"
+        second_agent.name = "GeneralAgent"
+        second_agent.add_history_to_context = False
+
+        load_tool_execution = ToolExecution(
+            tool_call_id="call-load",
+            tool_name="load_tool",
+            tool_args={"tool_name": "sleep"},
+            result=json.dumps(
+                {
+                    "status": "loaded",
+                    "takes_effect": "later_tool_call_step",
+                    "tool": "dynamic_tools",
+                    "tool_name": "sleep",
+                },
+            ),
+            stop_after_tool_call=True,
+        )
+
+        async def first_stream() -> AsyncIterator[object]:
+            yield ToolCallCompletedEvent(tool=load_tool_execution)
+            yield RunCompletedEvent(content=None)
+
+        async def second_stream() -> AsyncIterator[object]:
+            yield RunContentEvent(content="Used the loaded tool.")
+            yield RunCompletedEvent(content="Used the loaded tool.")
+
+        first_agent.arun = MagicMock(return_value=first_stream())
+        second_agent.arun = MagicMock(return_value=second_stream())
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.side_effect = [
+                _prepared_prompt_result(first_agent),
+                _prepared_prompt_result(second_agent, prompt="continuation prompt"),
+            ]
+            run_ids: list[str] = []
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    run_id="run-1",
+                    model_prompt="test\n\nUse attachment att_1.",
+                    run_id_callback=run_ids.append,
+                    show_tool_calls=False,
+                )
+            ]
+
+        assert [chunk.content for chunk in chunks if isinstance(chunk, RunContentEvent)] == ["Used the loaded tool."]
+        assert mock_prepare.await_count == 2
+        assert mock_prepare.await_args_list[0].kwargs["model_prompt"] == "test\n\nUse attachment att_1."
+        assert mock_prepare.await_args_list[1].kwargs["model_prompt"] == "Use attachment att_1."
+        assert "Continue the same task" in mock_prepare.await_args_list[1].args[1]
+        first_agent.arun.assert_called_once()
+        second_agent.arun.assert_called_once()
+        assert run_ids[0] == "run-1"
+        assert len(run_ids) == 2
+        assert run_ids[1] != "run-1"
+        assert first_agent.arun.call_args.kwargs["run_id"] == "run-1"
+        assert second_agent.arun.call_args.kwargs["run_id"] == run_ids[1]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_continuation_task_cancel_preserves_second_run_tools(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Task cancellation during a continuation run should not let the outer run overwrite recorder state."""
+        first_agent = MagicMock()
+        first_agent.model = MagicMock()
+        first_agent.model.__class__.__name__ = "OpenAIChat"
+        first_agent.model.id = "test-model"
+        first_agent.name = "GeneralAgent"
+        first_agent.add_history_to_context = False
+
+        second_agent = MagicMock()
+        second_agent.model = MagicMock()
+        second_agent.model.__class__.__name__ = "OpenAIChat"
+        second_agent.model.id = "test-model"
+        second_agent.name = "GeneralAgent"
+        second_agent.add_history_to_context = False
+
+        load_tool_execution = ToolExecution(
+            tool_call_id="call-load",
+            tool_name="load_tool",
+            tool_args={"tool_name": "sleep"},
+            result=json.dumps(
+                {
+                    "status": "loaded",
+                    "takes_effect": "later_tool_call_step",
+                    "tool": "dynamic_tools",
+                    "tool_name": "sleep",
+                },
+            ),
+            stop_after_tool_call=True,
+        )
+
+        async def first_stream() -> AsyncIterator[object]:
+            yield ToolCallCompletedEvent(tool=load_tool_execution)
+            yield RunCompletedEvent(content=None)
+
+        async def second_stream() -> AsyncIterator[object]:
+            yield RunContentEvent(content="Half done")
+            yield ToolCallCompletedEvent(
+                tool=ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result="/app",
+                ),
+            )
+            cancellation_reason = "cancelled during continuation"
+            raise asyncio.CancelledError(cancellation_reason)
+
+        first_agent.arun = MagicMock(return_value=first_stream())
+        second_agent.arun = MagicMock(return_value=second_stream())
+        recorder = TurnRecorder(user_message="test")
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.side_effect = [
+                _prepared_prompt_result(first_agent),
+                _prepared_prompt_result(second_agent, prompt="continuation prompt"),
+            ]
+
+            with pytest.raises(asyncio.CancelledError):
+                async for _chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    run_id="run-1",
+                    show_tool_calls=False,
+                    turn_recorder=recorder,
+                ):
+                    pass
+
+        snapshot = recorder.interrupted_snapshot()
+        assert snapshot.partial_text == "Half done"
+        assert [tool.tool_name for tool in snapshot.completed_tools] == ["load_tool", "run_shell_command"]
+
+    @pytest.mark.asyncio
+    async def test_ai_response_returns_message_after_dynamic_tool_limit(self, tmp_path: Path) -> None:
+        """Repeated dynamic tool manager calls should return fallback text in the default visible mode."""
+        agents = []
+        prepared_runs = []
+        for index in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+            agent = MagicMock()
+            agent.model = MagicMock()
+            agent.model.__class__.__name__ = "OpenAIChat"
+            agent.model.id = "test-model"
+            agent.name = "GeneralAgent"
+            agent.add_history_to_context = False
+
+            load_tool_execution = ToolExecution(
+                tool_call_id=f"call-load-{index}",
+                tool_name="load_tool",
+                tool_args={"tool_name": "missing_tool"},
+                result=json.dumps(
+                    {
+                        "status": "unknown",
+                        "tool": "dynamic_tools",
+                        "tool_name": "missing_tool",
+                    },
+                ),
+                stop_after_tool_call=True,
+            )
+            run_output = MagicMock()
+            run_output.content = ""
+            run_output.tools = [load_tool_execution]
+            run_output.status = RunStatus.completed
+            agent.arun = AsyncMock(return_value=run_output)
+
+            agents.append(agent)
+            prepared_runs.append(_prepared_prompt_result(agent, prompt=f"continuation prompt {index}"))
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.side_effect = prepared_runs
+            response = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+            )
+
+        assert "Dynamic tool calls did not produce a final answer" in response
+        assert "`load_tool` for `missing_tool`" in response
+        assert "`unknown`" in response
+        assert mock_prepare.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
+        assert all(agent.arun.await_count == 1 for agent in agents)
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_returns_message_after_dynamic_tool_limit(self, tmp_path: Path) -> None:
+        """Streaming repeated dynamic tool manager calls should yield visible fallback text."""
+        agents = []
+        prepared_runs = []
+        for index in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+            agent = MagicMock()
+            agent.model = MagicMock()
+            agent.model.__class__.__name__ = "OpenAIChat"
+            agent.model.id = "test-model"
+            agent.name = "GeneralAgent"
+            agent.add_history_to_context = False
+
+            load_tool_execution = ToolExecution(
+                tool_call_id=f"call-load-{index}",
+                tool_name="load_tool",
+                tool_args={"tool_name": "missing_tool"},
+                result=json.dumps(
+                    {
+                        "status": "unknown",
+                        "tool": "dynamic_tools",
+                        "tool_name": "missing_tool",
+                    },
+                ),
+                stop_after_tool_call=True,
+            )
+
+            async def stream(execution: ToolExecution = load_tool_execution) -> AsyncIterator[object]:
+                yield ToolCallCompletedEvent(tool=execution)
+                yield RunCompletedEvent(content=None)
+
+            agent.arun = MagicMock(return_value=stream())
+            agents.append(agent)
+            prepared_runs.append(_prepared_prompt_result(agent, prompt=f"continuation prompt {index}"))
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.side_effect = prepared_runs
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    show_tool_calls=False,
+                )
+            ]
+
+        content_chunks = [chunk.content for chunk in chunks if isinstance(chunk, RunContentEvent)]
+        assert len(content_chunks) == 1
+        assert "Dynamic tool calls did not produce a final answer" in content_chunks[0]
+        assert "`load_tool` for `missing_tool`" in content_chunks[0]
+        assert "`unknown`" in content_chunks[0]
+        assert mock_prepare.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
+        assert all(agent.arun.call_count == 1 for agent in agents)
 
     @pytest.mark.asyncio
     async def test_ai_response_collects_run_metadata(self, tmp_path: Path) -> None:

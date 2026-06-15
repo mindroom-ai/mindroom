@@ -35,7 +35,8 @@ No flags means the tool is eager and appears in every request.
 When an agent has at least one deferred tool and a stable session id, MindRoom injects the `dynamic_tools` manager.
 The manager exposes `list_tools()`, `tool_search(query)`, `load_tool(tool_name)`, and `unload_tool(tool_name)`.
 Search is plain keyword and exact-name lookup only.
-Loading or unloading takes effect on the next request in the same session.
+After `load_tool()` or `unload_tool()` succeeds, the agent should continue the same task in a later tool-call step in the same response.
+It should not wait for another user message, and it should not call a newly loaded tool in the same parallel tool-call batch as `load_tool()`.
 
 ## State Scope
 

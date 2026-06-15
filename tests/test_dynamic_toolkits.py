@@ -557,12 +557,48 @@ def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initia
     search_payload = _tool_payload(manager.tool_search("sleep"))
     assert [match["name"] for match in search_payload["matches"]] == ["sleep"]
 
-    assert _tool_payload(manager.load_tool("sleep"))["status"] == "loaded"
-    assert _tool_payload(manager.load_tool("sleep"))["status"] == "already_loaded"
+    loaded_payload = _tool_payload(manager.load_tool("sleep"))
+    assert loaded_payload["status"] == "loaded"
+    assert loaded_payload["takes_effect"] == "later_tool_call_step"
+    assert "After this tool result is processed" in loaded_payload["message"]
+    assert "updated tool schema" in loaded_payload["message"]
+    assert "later tool-call step" in loaded_payload["message"]
+    assert "same parallel tool-call batch" in loaded_payload["message"]
+    assert "next request" not in loaded_payload["message"]
+
+    already_loaded_payload = _tool_payload(manager.load_tool("sleep"))
+    assert already_loaded_payload["status"] == "already_loaded"
+    assert already_loaded_payload["takes_effect"] == "later_tool_call_step"
+    assert "After this tool result is processed" in already_loaded_payload["message"]
+    assert "updated tool schema" in already_loaded_payload["message"]
+    assert "next request" not in already_loaded_payload["message"]
+
     assert _tool_payload(manager.unload_tool("shell"))["status"] == "sticky"
-    assert _tool_payload(manager.unload_tool("sleep"))["status"] == "unloaded"
+
+    unloaded_payload = _tool_payload(manager.unload_tool("sleep"))
+    assert unloaded_payload["status"] == "unloaded"
+    assert unloaded_payload["takes_effect"] == "later_tool_call_step"
+    assert "current dynamic tool state" in unloaded_payload["message"]
+    assert "next request" not in unloaded_payload["message"]
+
     assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
     assert _tool_payload(manager.unload_tool("sleep"))["status"] == "not_loaded"
+
+
+def test_dynamic_tools_load_and_unload_stop_stale_agno_loop(tmp_path: Path) -> None:
+    """Dynamic surface changes should end the current Agno loop before the next provider call."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"shell": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+
+    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
+
+    assert manager.functions["load_tool"].stop_after_tool_call is True
+    assert manager.functions["unload_tool"].stop_after_tool_call is True
+    assert manager.functions["list_tools"].stop_after_tool_call is False
+    assert manager.functions["tool_search"].stop_after_tool_call is False
 
 
 def test_dynamic_tools_manager_catalog_responses_use_one_loaded_state_snapshot(
@@ -762,6 +798,11 @@ def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_pat
 
     assert static_before == static_after
     assert "shell - Execute shell commands" in static_before
+    assert "After load_tool or unload_tool succeeds" in static_before
+    assert "updated dynamic tool state" in static_before
+    assert "Do not wait for another user message" in static_before
+    assert "same parallel tool-call batch" in static_before
+    assert "next request" not in static_before
     assert suffix_before != suffix_after
     assert (
         suffix_after == "Dynamic tools currently loaded for this session: shell, sleep\n"

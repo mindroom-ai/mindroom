@@ -60,6 +60,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.credentials_sync",
+    "mindroom.dynamic_tool_continuation",
     "mindroom.error_handling",
     "mindroom.execution_preparation",
     "mindroom.history",
@@ -83,6 +84,11 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.ai_turn_state"
+depends_on = []
+visibility = ["mindroom.ai"]
+
+[[modules]]
+path = "mindroom.dynamic_tool_continuation"
 depends_on = []
 visibility = ["mindroom.ai"]
 

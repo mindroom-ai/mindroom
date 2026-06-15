@@ -48,6 +48,8 @@ class DynamicToolsToolkit(Toolkit):
             instructions=config.get_prompt("DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS"),
             tools=[self.list_tools, self.load_tool, self.unload_tool, self.tool_search],
         )
+        for tool_name in ("load_tool", "unload_tool"):
+            self.functions[tool_name].stop_after_tool_call = True
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
@@ -148,8 +150,12 @@ class DynamicToolsToolkit(Toolkit):
                 "already_loaded",
                 tool_name=tool_name,
                 loaded_tools=loaded_tools,
-                takes_effect="next_request",
-                message=f"Tool '{tool_name}' is already loaded for this session.",
+                takes_effect="later_tool_call_step",
+                message=(
+                    "After this tool result is processed, MindRoom continues the same task with the updated "
+                    f"tool schema. Call '{tool_name}' in a later tool-call step, not in the same parallel "
+                    "tool-call batch. Do not wait for another user message."
+                ),
             )
         elif result.status == "error":
             response = self._session_error(tool_name=tool_name, loaded_tools=loaded_tools)
@@ -177,8 +183,12 @@ class DynamicToolsToolkit(Toolkit):
                 "loaded",
                 tool_name=tool_name,
                 loaded_tools=loaded_tools,
-                takes_effect="next_request",
-                message=f"Tool '{tool_name}' will be available on the next request in this session.",
+                takes_effect="later_tool_call_step",
+                message=(
+                    "After this tool result is processed, MindRoom continues the same task with the updated "
+                    f"tool schema. Call '{tool_name}' in a later tool-call step, not in the same parallel "
+                    "tool-call batch. Do not wait for another user message."
+                ),
             )
         return response
 
@@ -196,8 +206,8 @@ class DynamicToolsToolkit(Toolkit):
     def load_tool(self, tool_name: str) -> str:
         """Load one deferred tool for the current session.
 
-        The requested tool becomes available on the next request in the same
-        session, not later in the current model run.
+        The requested tool becomes available after this tool-call result is
+        processed, so continue in a later tool-call step in the same response.
         """
         result = load_tool_for_session(
             agent_name=self._agent_name,
@@ -211,8 +221,8 @@ class DynamicToolsToolkit(Toolkit):
     def unload_tool(self, tool_name: str) -> str:
         """Unload one deferred tool from the current session.
 
-        The tool stops being available on the next request in the same session,
-        not later in the current model run.
+        The tool stops being available after this tool-call result is processed,
+        so continue without it in later tool-call steps in the same response.
         """
         loaded_tools = self._loaded_tools()
         deferred_tools = self._deferred_tool_names()
@@ -238,8 +248,11 @@ class DynamicToolsToolkit(Toolkit):
                 "not_loaded",
                 tool_name=tool_name,
                 loaded_tools=loaded_tools,
-                takes_effect="next_request",
-                message=f"Tool '{tool_name}' is not currently loaded for this session.",
+                takes_effect="later_tool_call_step",
+                message=(
+                    "After this tool result is processed, MindRoom continues the same task with the current "
+                    f"dynamic tool state. Tool '{tool_name}' is not currently loaded for this session."
+                ),
             )
 
         if self._session_id is None:
@@ -255,8 +268,12 @@ class DynamicToolsToolkit(Toolkit):
             "unloaded",
             tool_name=tool_name,
             loaded_tools=saved_loaded_tools,
-            takes_effect="next_request",
-            message=f"Tool '{tool_name}' will be removed on the next request in this session.",
+            takes_effect="later_tool_call_step",
+            message=(
+                "After this tool result is processed, MindRoom continues the same task with the current dynamic "
+                f"tool state. Tool '{tool_name}' is unloaded. Continue without calling it in later tool-call steps. "
+                "Do not wait for another user message."
+            ),
         )
 
     @staticmethod
