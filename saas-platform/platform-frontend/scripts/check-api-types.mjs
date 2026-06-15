@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const schemaPath = fileURLToPath(new URL('../../platform-backend/openapi.json', import.meta.url))
 const generatedPath = fileURLToPath(new URL('../src/lib/api.generated.ts', import.meta.url))
-const cliPath = fileURLToPath(new URL('../node_modules/openapi-typescript/bin/cli.js', import.meta.url))
+const cliPath = fileURLToPath(new URL('bin/cli.js', import.meta.resolve('openapi-typescript/package.json')))
 
 export function getOpenApiTypesCommand(schemaFilePath = schemaPath) {
   return {
