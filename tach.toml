@@ -54,6 +54,7 @@ path = "mindroom.ai"
 depends_on = [
     "mindroom.agents",
     "mindroom.ai_run_metadata",
+    "mindroom.ai_turn_state",
     "mindroom.ai_runtime",
     "mindroom.cancellation",
     "mindroom.constants",
@@ -79,6 +80,11 @@ path = "mindroom.ai_run_metadata"
 depends_on = [
     "mindroom.constants",
 ]
+
+[[modules]]
+path = "mindroom.ai_turn_state"
+depends_on = []
+visibility = ["mindroom.ai"]
 
 [[modules]]
 path = "mindroom.agents"
