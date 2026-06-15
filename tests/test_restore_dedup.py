@@ -133,6 +133,55 @@ async def test_restore_marks_ancient_missed_task_as_failed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_restore_marks_ancient_missed_task_failed_via_admin_when_active_write_is_forbidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ancient missed tasks should use the admin state fallback when active writes are rejected."""
+    client = AsyncMock()
+    config = AsyncMock()
+    matrix_admin = MagicMock()
+    matrix_admin.put_room_state = AsyncMock(return_value=True)
+
+    ancient_once = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=_MISSED_TASK_MAX_AGE_SECONDS + 3600),
+        message="Ancient",
+        description="Ancient task",
+        room_id="!r:server",
+        thread_id="$t",
+    )
+
+    response = nio.RoomGetStateResponse.from_dict(
+        [_make_state_event("id-ancient", ancient_once)],
+        room_id="!r:server",
+    )
+    client.room_get_state = AsyncMock(return_value=response)
+    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    monkeypatch.setattr(scheduling, "build_hook_matrix_admin", Mock(return_value=matrix_admin))
+
+    restored = await restore_scheduled_tasks(
+        client,
+        "!r:server",
+        config,
+        resolve_runtime_paths(process_env={}),
+        make_event_cache_mock(),
+        _conversation_cache(),
+    )
+
+    assert restored == 0
+    client.room_put_state.assert_awaited_once()
+    matrix_admin.put_room_state.assert_awaited_once()
+    call_args = matrix_admin.put_room_state.call_args
+    assert call_args.args[:3] == (
+        "!r:server",
+        "com.mindroom.scheduled.task",
+        "id-ancient",
+    )
+    assert call_args.args[3]["status"] == "failed"
+    assert call_args.args[3]["workflow"] == ancient_once.model_dump_json()
+
+
+@pytest.mark.asyncio
 async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
     """Future one-time tasks should be restored normally."""
     client = AsyncMock()
