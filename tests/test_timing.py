@@ -22,6 +22,7 @@ from mindroom.timing import (
     emit_timing_event,
     milliseconds,
     timed,
+    timed_block,
     timing_enabled,
     timing_scope,
 )
@@ -77,6 +78,60 @@ def test_timed_sync_logs_on_exception(
         fail()
 
     _assert_timing_logged(logger, "sync_error_label")
+
+
+def test_timed_block_logs_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inline timing blocks should emit the same timing event shape as timed()."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+
+    with timed_block("block_label", scope="scope-123", phase="setup"):
+        pass
+
+    _assert_timing_logged(logger, "block_label", scope="scope-123")
+    assert logger.debug.call_args.kwargs["phase"] == "setup"
+
+
+def test_timed_block_logs_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inline timing blocks should still emit a timing log when they raise."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+
+    def fail() -> None:
+        with timed_block("block_error_label"):
+            msg = "boom"
+            raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        fail()
+
+    _assert_timing_logged(logger, "block_error_label")
+
+
+def test_timed_block_does_not_log_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inline timing blocks should stay quiet when timing is disabled."""
+    monkeypatch.delenv("MINDROOM_TIMING", raising=False)
+    logger = _mock_timing_logger(monkeypatch)
+
+    with timed_block("block_label"):
+        pass
+
+    logger.debug.assert_not_called()
+
+
+def test_timed_block_uses_context_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inline timing blocks should inherit the active timing scope when omitted."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+
+    token = timing_scope.set("scope-456")
+    try:
+        with timed_block("block_label"):
+            pass
+    finally:
+        timing_scope.reset(token)
+
+    _assert_timing_logged(logger, "block_label", scope="scope-456")
 
 
 @pytest.mark.asyncio

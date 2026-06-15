@@ -991,6 +991,7 @@ def resolve_bound_team_scope_context(
     )
 
 
+@timed("system_prompt_assembly.history_prepare.static_token_estimate")
 def estimate_preparation_static_tokens(
     agent: Agent,
     *,
