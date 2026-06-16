@@ -669,6 +669,29 @@ _WORKER_EGRESS_PROXY_CA_FILE_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY
 _WORKER_EGRESS_NO_PROXY = "localhost,127.0.0.1,::1,.svc,.cluster.local"
 
 
+def _git_config_env(process_env: Mapping[str, str], entries: list[tuple[str, str]]) -> dict[str, str]:
+    existing_entries: list[tuple[str, str]] = []
+    try:
+        existing_count = int(process_env.get("GIT_CONFIG_COUNT", "0"))
+    except ValueError:
+        existing_count = 0
+    if existing_count > 0:
+        for index in range(existing_count):
+            key = process_env.get(f"GIT_CONFIG_KEY_{index}")
+            value = process_env.get(f"GIT_CONFIG_VALUE_{index}")
+            if key is None or value is None:
+                existing_entries = []
+                break
+            existing_entries.append((key, value))
+
+    merged_entries = [*existing_entries, *entries]
+    env = {"GIT_CONFIG_COUNT": str(len(merged_entries))}
+    for index, (key, value) in enumerate(merged_entries):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
+
+
 def worker_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]:
     """Return the per-worker egress proxy env overlay for python/shell, or ``{}``.
 
@@ -698,9 +721,21 @@ def worker_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]
         "HTTPS_PROXY": authed,
         "http_proxy": authed,
         "https_proxy": authed,
+        # Git/libcurl does not always preemptively send proxy credentials from
+        # HTTPS_PROXY userinfo on CONNECT. Environment-backed Git config makes
+        # the same proxy explicit without writing user/global git config.
         "NO_PROXY": _WORKER_EGRESS_NO_PROXY,
         "no_proxy": _WORKER_EGRESS_NO_PROXY,
     }
+    env.update(
+        _git_config_env(
+            process_env,
+            [
+                ("http.proxy", authed),
+                ("http.proxyAuthMethod", "basic"),
+            ],
+        ),
+    )
     ca_file = (process_env.get(_WORKER_EGRESS_PROXY_CA_FILE_ENV) or "").strip()
     if ca_file:
         env["REQUESTS_CA_BUNDLE"] = ca_file

@@ -43,6 +43,51 @@ def test_request_execution_env_overlays_proxy_when_no_primary_env(tmp_path: Path
     assert env["NODE_EXTRA_CA_CERTS"] == "/etc/agent-vault/ca.pem"
 
 
+def test_worker_proxy_execution_env_configures_git_proxy_auth(tmp_path: Path) -> None:
+    """Git must receive proxy auth as config, not only env proxy userinfo."""
+    _, expected_proxy = _runtime_paths_with_vault(tmp_path)
+    token_path = tmp_path / "token"
+    token_path.write_text("av_sess_worker_token\n", encoding="utf-8")
+
+    env = worker_proxy_execution_env(
+        {
+            "MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322",
+            "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(token_path),
+        },
+    )
+
+    assert env["GIT_CONFIG_COUNT"] == "2"
+    assert env["GIT_CONFIG_KEY_0"] == "http.proxy"
+    assert env["GIT_CONFIG_VALUE_0"] == expected_proxy
+    assert env["GIT_CONFIG_KEY_1"] == "http.proxyAuthMethod"
+    assert env["GIT_CONFIG_VALUE_1"] == "basic"
+
+
+def test_worker_proxy_execution_env_appends_to_existing_git_config(tmp_path: Path) -> None:
+    """Worker proxy Git config must not discard caller-supplied Git config."""
+    _, expected_proxy = _runtime_paths_with_vault(tmp_path)
+    token_path = tmp_path / "token"
+    token_path.write_text("av_sess_worker_token\n", encoding="utf-8")
+
+    env = worker_proxy_execution_env(
+        {
+            "MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322",
+            "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(token_path),
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "safe.directory",
+            "GIT_CONFIG_VALUE_0": "*",
+        },
+    )
+
+    assert env["GIT_CONFIG_COUNT"] == "3"
+    assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
+    assert env["GIT_CONFIG_VALUE_0"] == "*"
+    assert env["GIT_CONFIG_KEY_1"] == "http.proxy"
+    assert env["GIT_CONFIG_VALUE_1"] == expected_proxy
+    assert env["GIT_CONFIG_KEY_2"] == "http.proxyAuthMethod"
+    assert env["GIT_CONFIG_VALUE_2"] == "basic"
+
+
 def test_request_execution_env_overlays_proxy_onto_shipped_env(tmp_path: Path) -> None:
     """A non-empty primary execution env still gets the worker-local proxy overlaid."""
     runtime_paths, expected_proxy = _runtime_paths_with_vault(tmp_path)
