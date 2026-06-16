@@ -315,6 +315,16 @@ class _StreamingAttemptState:
 class _AgentRunContext:
     """Prepared state shared by one top-level agent response lifecycle."""
 
+    agent_name: str
+    prompt: str
+    session_id: str
+    model_prompt: str | None
+    room_id: str | None
+    thread_id: str | None
+    reply_to_event_id: str | None
+    requester_id: str | None
+    correlation_id: str
+    timing_scope: str
     prepared_run: _PreparedAgentRun
     run_input: list[Message]
     metadata: dict[str, Any] | None
@@ -764,28 +774,16 @@ async def _run_cached_agent_attempt(
 
 async def _run_non_streaming_agent_attempts(
     *,
-    agent: Agent,
+    run_context: _AgentRunContext,
     attempt: _MediaAttempt,
-    run_input: list[Message],
-    inline_media_fallback_prompt: str,
-    agent_name: str,
-    prompt: str,
-    model_prompt: str | None,
-    session_id: str,
-    room_id: str | None,
-    thread_id: str | None,
-    reply_to_event_id: str | None,
-    requester_id: str | None,
-    correlation_id: str,
-    metadata: dict[str, Any] | None,
     user_id: str | None,
     run_id: str | None,
     run_id_callback: Callable[[str], None] | None,
-    timing_scope: str,
     scope_context: ScopeSessionContext | None,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> _NonStreamingAttemptResult:
     """Run one non-streaming agent response sequence, including media fallback."""
+    agent = run_context.prepared_run.agent
     response: RunOutput | None = None
     try:
         for retried_after_media_fallback in (False, True):
@@ -795,29 +793,29 @@ async def _run_non_streaming_agent_attempts(
                     pipeline_timing.mark("model_request_sent", overwrite=True)
                 with bind_llm_request_log_context(
                     **_attempt_request_log_context(
-                        agent_id=agent_name,
-                        session_id=session_id,
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        reply_to_event_id=reply_to_event_id,
-                        requester_id=requester_id,
-                        correlation_id=correlation_id,
-                        prompt=prompt,
-                        model_prompt=model_prompt,
+                        agent_id=run_context.agent_name,
+                        session_id=run_context.session_id,
+                        room_id=run_context.room_id,
+                        thread_id=run_context.thread_id,
+                        reply_to_event_id=run_context.reply_to_event_id,
+                        requester_id=run_context.requester_id,
+                        correlation_id=run_context.correlation_id,
+                        prompt=run_context.prompt,
+                        model_prompt=run_context.model_prompt,
                         attempt_prompt=attempt.attempt_prompt,
-                        metadata=metadata,
+                        metadata=run_context.metadata,
                     ),
                 ):
                     response = await _run_cached_agent_attempt(
                         agent,
                         attempt.attempt_prompt,
-                        session_id,
+                        run_context.session_id,
                         user_id=user_id,
                         run_id=attempt.attempt_run_id,
                         run_id_callback=run_id_callback,
                         media=attempt.attempt_media_inputs,
-                        metadata=metadata,
-                        timing_scope=timing_scope,
+                        metadata=run_context.metadata,
+                        timing_scope=run_context.timing_scope,
                     )
             except Exception as e:
                 retry_decision = retry_media_inputs_after_failure(
@@ -829,20 +827,20 @@ async def _run_non_streaming_agent_attempts(
                 if not retried_after_media_fallback and retry_decision.should_retry:
                     logger.warning(
                         "Retrying AI response after inline media validation error",
-                        agent=agent_name,
+                        agent=run_context.agent_name,
                         error=str(e),
                         removed_media_kinds=sorted(retry_decision.removed_kinds),
                     )
                     attempt.retry(
-                        run_input,
-                        fallback_prompt=inline_media_fallback_prompt,
+                        run_context.run_input,
+                        fallback_prompt=run_context.inline_media_fallback_prompt,
                         extra_removed_kinds=retry_decision.removed_kinds,
                         retry_media_inputs=retry_decision.media_inputs,
                         run_id=run_id,
                     )
                     continue
 
-                logger.exception("Error generating AI response", agent=agent_name)
+                logger.exception("Error generating AI response", agent=run_context.agent_name)
                 return _NonStreamingAttemptResult(response=None, attempt=attempt, user_error=e)
 
             if response.status == RunStatus.error:
@@ -856,20 +854,24 @@ async def _run_non_streaming_agent_attempts(
                 if not retried_after_media_fallback and retry_decision.should_retry:
                     logger.warning(
                         "Retrying AI response after inline media errored run output",
-                        agent=agent_name,
+                        agent=run_context.agent_name,
                         error=error_text,
                         removed_media_kinds=sorted(retry_decision.removed_kinds),
                     )
                     attempt.retry(
-                        run_input,
-                        fallback_prompt=inline_media_fallback_prompt,
+                        run_context.run_input,
+                        fallback_prompt=run_context.inline_media_fallback_prompt,
                         extra_removed_kinds=retry_decision.removed_kinds,
                         retry_media_inputs=retry_decision.media_inputs,
                         run_id=run_id,
                     )
                     continue
 
-                logger.warning("AI response returned errored run output", agent=agent_name, error=error_text)
+                logger.warning(
+                    "AI response returned errored run output",
+                    agent=run_context.agent_name,
+                    error=error_text,
+                )
 
             break
 
@@ -879,9 +881,9 @@ async def _run_non_streaming_agent_attempts(
         ai_runtime.cleanup_queued_notice_state(
             run_output=response,
             storage=scope_context.storage if scope_context is not None else None,
-            session_id=session_id,
+            session_id=run_context.session_id,
             session_type=SessionType.AGENT,
-            entity_name=agent_name,
+            entity_name=run_context.agent_name,
         )
 
 
@@ -1163,6 +1165,16 @@ async def _prepare_agent_run_context(
         turn_recorder.set_run_metadata(metadata)
 
     return _AgentRunContext(
+        agent_name=agent_name,
+        prompt=prompt,
+        session_id=session_id,
+        model_prompt=model_prompt,
+        room_id=room_id,
+        thread_id=thread_id,
+        reply_to_event_id=reply_to_event_id,
+        requester_id=requester_id,
+        correlation_id=correlation_id,
+        timing_scope=timing_scope,
         prepared_run=prepared_run,
         run_input=prepared_run.run_input,
         metadata=metadata,
@@ -1347,32 +1359,18 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 run_id=run_id,
             )
             attempt_result = await _run_non_streaming_agent_attempts(
-                agent=agent,
+                run_context=run_context,
                 attempt=attempt,
-                run_input=run_input,
-                inline_media_fallback_prompt=run_context.inline_media_fallback_prompt,
-                agent_name=agent_name,
-                prompt=prompt,
-                model_prompt=model_prompt,
-                session_id=session_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=reply_to_event_id,
-                requester_id=resolved_requester_id,
-                correlation_id=resolved_correlation_id,
-                metadata=metadata,
                 user_id=user_id,
                 run_id=run_id,
                 run_id_callback=run_id_callback,
-                timing_scope=timing_scope,
                 scope_context=scope_context,
                 pipeline_timing=pipeline_timing,
             )
             attempt = attempt_result.attempt
             if attempt_result.user_error is not None:
                 return get_user_friendly_error_message(attempt_result.user_error, agent_name)
-            response = attempt_result.response
-            assert response is not None
+            response = cast("RunOutput", attempt_result.response)
 
             response_tool_trace = _extract_tool_trace(response)
             if tool_trace_collector is not None:
@@ -1605,44 +1603,34 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
 
 async def _stream_agent_attempt_chunks(
     *,
-    agent: Agent,
+    run_context: _AgentRunContext,
     attempt: _MediaAttempt,
     state: _StreamingAttemptState,
     show_tool_calls: bool,
-    agent_name: str,
-    session_id: str,
     user_id: str | None,
     run_id_callback: Callable[[str], None] | None,
-    prompt: str,
-    model_prompt: str | None,
-    room_id: str | None,
-    thread_id: str | None,
-    reply_to_event_id: str | None,
-    requester_id: str | None,
-    correlation_id: str,
-    metadata: dict[str, Any] | None,
     retried_after_media_fallback: bool,
-    timing_scope: str,
     state_updated: Callable[[], None] | None,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Start and consume one streaming agent attempt."""
+    agent = run_context.prepared_run.agent
     try:
         if pipeline_timing is not None:
             pipeline_timing.mark("model_request_sent", overwrite=True)
         ai_runtime.note_attempt_run_id(run_id_callback, attempt.attempt_run_id)
         request_context = _attempt_request_log_context(
-            agent_id=agent_name,
-            session_id=session_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-            requester_id=requester_id,
-            correlation_id=correlation_id,
-            prompt=prompt,
-            model_prompt=model_prompt,
+            agent_id=run_context.agent_name,
+            session_id=run_context.session_id,
+            room_id=run_context.room_id,
+            thread_id=run_context.thread_id,
+            reply_to_event_id=run_context.reply_to_event_id,
+            requester_id=run_context.requester_id,
+            correlation_id=run_context.correlation_id,
+            prompt=run_context.prompt,
+            model_prompt=run_context.model_prompt,
             attempt_prompt=attempt.attempt_prompt,
-            metadata=metadata,
+            metadata=run_context.metadata,
         )
         with bind_llm_request_log_context(**request_context):
             prepared_input = ai_runtime.attach_media_to_run_input(
@@ -1651,12 +1639,12 @@ async def _stream_agent_attempt_chunks(
             )
             stream_generator = agent.arun(
                 prepared_input,
-                session_id=session_id,
+                session_id=run_context.session_id,
                 user_id=user_id,
                 run_id=attempt.attempt_run_id,
                 stream=True,
                 stream_events=True,
-                metadata=metadata,
+                metadata=run_context.metadata,
             )
         stream_generator = stream_with_llm_request_log_context(
             stream_generator,
@@ -1666,12 +1654,12 @@ async def _stream_agent_attempt_chunks(
             stream_generator,
             state=state,
             show_tool_calls=show_tool_calls,
-            agent_name=agent_name,
+            agent_name=run_context.agent_name,
             media_route=attempt.media_route,
             media_inputs=attempt.attempt_media_inputs,
             context_media_kinds=attempt.remaining_context_media_kinds,
             retried_after_media_fallback=retried_after_media_fallback,
-            timing_scope=timing_scope,
+            timing_scope=run_context.timing_scope,
             state_updated=state_updated,
             pipeline_timing=pipeline_timing,
         ):
@@ -1685,7 +1673,7 @@ async def _stream_agent_attempt_chunks(
             context_media_kinds=attempt.remaining_context_media_kinds,
             error=e,
             log_message="Retrying streaming AI response after inline media validation error",
-            agent_name=agent_name,
+            agent_name=run_context.agent_name,
         ):
             return
         logger.exception("Error starting streaming AI response")
@@ -1886,24 +1874,13 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     state = _StreamingAttemptState()
 
                     async for stream_chunk in _stream_agent_attempt_chunks(
-                        agent=agent,
+                        run_context=run_context,
                         attempt=attempt,
                         state=state,
                         show_tool_calls=show_tool_calls,
-                        agent_name=agent_name,
-                        session_id=session_id,
                         user_id=user_id,
                         run_id_callback=run_id_callback,
-                        prompt=prompt,
-                        model_prompt=model_prompt,
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        reply_to_event_id=reply_to_event_id,
-                        requester_id=resolved_requester_id,
-                        correlation_id=resolved_correlation_id,
-                        metadata=metadata,
                         retried_after_media_fallback=retried_after_media_fallback,
-                        timing_scope=timing_scope,
                         state_updated=_sync_live_turn_recorder,
                         pipeline_timing=pipeline_timing,
                     ):
