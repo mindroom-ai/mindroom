@@ -17,8 +17,8 @@ from mindroom.workspace_automations.models import (
     WorkspaceAutomationFile,
     WorkspaceAutomationLoadError,
     WorkspaceAutomationLoadResult,
-    WorkspaceAutomationTrigger,
     is_path_safe_automation_id,
+    workspace_automation_trigger_has_rule,
 )
 from mindroom.workspace_automations.targets import resolve_action_room
 
@@ -244,13 +244,13 @@ def _policy_errors(
                 message="trigger must be present for visible workspace automation actions",
             ),
         )
-    elif not _trigger_has_rule(definition.trigger):
+    elif not workspace_automation_trigger_has_rule(definition.trigger):
         errors.append(
             WorkspaceAutomationLoadError(
                 file_path=file_path,
                 automation_id=automation_id,
-                field_path=("automations", automation_id, "trigger", "exit_code"),
-                message="trigger.exit_code must be provided",
+                field_path=("automations", automation_id, "trigger"),
+                message="trigger must include at least one rule",
             ),
         )
 
@@ -265,10 +265,6 @@ def _policy_errors(
         )
 
     return errors
-
-
-def _trigger_has_rule(trigger: WorkspaceAutomationTrigger) -> bool:
-    return trigger.exit_code is not None
 
 
 def _minimum_schedule_interval_seconds(schedule: str) -> float:

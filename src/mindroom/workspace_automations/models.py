@@ -65,6 +65,15 @@ def _validate_message(value: str | None) -> str | None:
     return stripped
 
 
+def _validate_regex(value: str) -> str:
+    try:
+        re.compile(value)
+    except re.error as exc:
+        msg = f"must be a valid regular expression: {exc}"
+        raise ValueError(msg) from exc
+    return value
+
+
 def _validate_schedule(value: str) -> str:
     stripped = value.strip()
     if len(stripped.split()) != 5 or not croniter.is_valid(stripped):
@@ -91,6 +100,7 @@ _AutomationFileVersion = Annotated[int, BeforeValidator(_validate_version)]
 _ActionRoom = Annotated[str | None, AfterValidator(_validate_room)]
 _ActionThreadId = Annotated[str | None, AfterValidator(_validate_thread_id)]
 _ActionMessage = Annotated[str | None, AfterValidator(_validate_message)]
+_TriggerRegex = Annotated[str, AfterValidator(_validate_regex)]
 
 
 class WorkspaceAutomationCheck(BaseModel):
@@ -110,6 +120,21 @@ class WorkspaceAutomationTrigger(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     exit_code: int | None = None
+    stdout_matches: _TriggerRegex | None = None
+    stderr_matches: _TriggerRegex | None = None
+    stdout_not_matches: _TriggerRegex | None = None
+    stderr_not_matches: _TriggerRegex | None = None
+
+
+def workspace_automation_trigger_has_rule(trigger: WorkspaceAutomationTrigger) -> bool:
+    """Return whether a trigger contains at least one first-version rule."""
+    return (
+        trigger.exit_code is not None
+        or trigger.stdout_matches is not None
+        or trigger.stderr_matches is not None
+        or trigger.stdout_not_matches is not None
+        or trigger.stderr_not_matches is not None
+    )
 
 
 class WorkspaceAutomationAction(BaseModel):
