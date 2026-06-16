@@ -412,6 +412,25 @@ automations:
     assert [automation.automation_id for automation in result.automations] == ["default_enabled"]
 
 
+def test_disabled_automation_with_invalid_fields_is_skipped_without_errors(tmp_path: Path) -> None:
+    """Disabled entries should not validate fields that would matter only when enabled."""
+    _write_automations(
+        tmp_path,
+        """
+version: 1
+automations:
+  disabled_broken_probe:
+    enabled: false
+    schedule: "not cron"
+""",
+    )
+
+    result = _load(tmp_path)
+
+    assert result.automations == ()
+    assert result.errors == ()
+
+
 def test_output_tail_defaults_to_one_hundred_lines(tmp_path: Path) -> None:
     """Shell check output tail should default to a bounded value."""
     _write_automations(

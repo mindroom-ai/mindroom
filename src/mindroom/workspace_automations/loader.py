@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import yaml
 from croniter import CroniterBadCronError, CroniterBadDateError, croniter
@@ -54,6 +54,9 @@ def load_workspace_automations(
     automations: list[LoadedWorkspaceAutomation] = []
     errors: list[WorkspaceAutomationLoadError] = []
     for automation_id, raw_definition in automation_file.automations.items():
+        if _raw_definition_is_disabled(raw_definition):
+            continue
+
         entry_errors = _validate_automation_id(file_path, automation_id)
         if entry_errors:
             errors.extend(entry_errors)
@@ -153,6 +156,13 @@ def _validate_automation_id(file_path: Path, automation_id: str) -> list[Workspa
             message="Automation ID must be a single path-safe identifier matching ^[A-Za-z0-9_.-]+$",
         ),
     ]
+
+
+def _raw_definition_is_disabled(raw_definition: object) -> bool:
+    if not isinstance(raw_definition, dict):
+        return False
+    definition = cast("dict[str, object]", raw_definition)
+    return definition.get("enabled") is False
 
 
 def _normalize_action_room(
