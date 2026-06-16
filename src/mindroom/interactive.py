@@ -139,6 +139,7 @@ _INTERACTIVE_PATTERN = (
     r")(.*?)\r?\n[ \t]*```[ \t]*(?=\r?\n|$)"
 )
 _INTERACTIVE_PATTERN_FLAGS = re.DOTALL | re.IGNORECASE
+_INLINE_INTERACTIVE_JSON_FENCE_PATTERN = r"```[ \t]*interactive(?:[ \t]+json)?[ \t]+(?:\{|\[)[^\r\n`]*```"
 _MAX_OPTIONS = 5
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
@@ -616,8 +617,98 @@ def build_selection_prompt(selection: InteractiveSelection) -> str:
     )
 
 
+def _coerce_interactive_option(raw_option: object) -> dict[str, str] | None:
+    """Return one normalized interactive option when the raw item is an object."""
+    if not isinstance(raw_option, dict):
+        return None
+
+    option_data = cast("dict[object, object]", raw_option)
+    label = str(option_data.get("label") or "Option")
+    value = str(option_data.get("value") or label.lower())
+    return {
+        "emoji": str(option_data.get("emoji") or "❓"),
+        "label": label,
+        "value": value,
+    }
+
+
+def _coerce_interactive_payload(raw_json: str) -> tuple[str, list[dict[str, str]]] | None:
+    """Return (question, capped options) when the fenced payload is a valid interactive object."""
+    try:
+        interactive_data = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "Interactive JSON parse failed",
+            error=str(exc),
+            preview=_preview_text(raw_json),
+        )
+        return None
+
+    if not isinstance(interactive_data, dict):
+        logger.warning(
+            "Interactive JSON payload must be an object",
+            payload_type=type(interactive_data).__name__,
+            preview=_preview_text(raw_json),
+        )
+        return None
+
+    question = str(interactive_data.get("question") or _DEFAULT_QUESTION)
+    raw_options = interactive_data.get("options")
+    if not isinstance(raw_options, list):
+        logger.warning(
+            "Interactive JSON options must be a list",
+            options_type=type(raw_options).__name__,
+            preview=_preview_text(raw_json),
+        )
+        return None
+
+    options: list[dict[str, str]] = []
+    for raw_option in raw_options:
+        option = _coerce_interactive_option(raw_option)
+        if option is None:
+            continue
+        options.append(option)
+        if len(options) == _MAX_OPTIONS:
+            break
+    if not options:
+        return None
+    return question, options
+
+
+def _render_question_text(question: str, options: list[dict[str, str]], *, include_instruction: bool) -> str:
+    """Render one interactive question as display text."""
+    option_lines = [f"{i}. {opt['emoji']} {opt['label']}" for i, opt in enumerate(options, 1)]
+    parts = [question, "", *option_lines]
+    if include_instruction:
+        parts.extend(["", _INSTRUCTION_TEXT])
+    return "\n".join(parts)
+
+
+def _remove_inline_unparsed_interactive_fences(text: str) -> str:
+    """Remove inline interactive JSON fences that the block parser cannot render."""
+    cleaned_text, count = re.subn(
+        _INLINE_INTERACTIVE_JSON_FENCE_PATTERN,
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if count == 0:
+        return text
+
+    logger.warning(
+        "Interactive block not parsed",
+        preview=_preview_text(text),
+    )
+    return cleaned_text.strip()
+
+
 def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> _InteractiveResponse:
     """Parse and format interactive content from response text.
+
+    Each interactive block is replaced in place with its formatted question so
+    surrounding prose keeps referring to the right spot. Only the first valid
+    block carries registration metadata (reaction buttons); any additional
+    blocks render as plain question text.
 
     Args:
         response_text: The response text containing interactive JSON
@@ -627,10 +718,9 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         _InteractiveResponse with formatted_text, option_map, and options_list
 
     """
-    # Find the first interactive block for processing
-    first_match = _find_interactive_match(response_text)
+    matches = list(re.finditer(_INTERACTIVE_PATTERN, response_text, _INTERACTIVE_PATTERN_FLAGS))
 
-    if not first_match:
+    if not matches:
         if _should_warn_unparsed_interactive(response_text):
             logger.warning(
                 "Interactive block not parsed",
@@ -638,63 +728,45 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
             )
         return _InteractiveResponse(response_text)
 
-    try:
-        interactive_data = json.loads(first_match.group(1))
-    except json.JSONDecodeError as exc:
-        logger.warning(
-            "Interactive JSON parse failed",
-            error=str(exc),
-            preview=_preview_text(first_match.group(1)),
-        )
+    first_payload = _coerce_interactive_payload(matches[0].group(1))
+    if first_payload is None:
         return _InteractiveResponse(response_text)
+    question, options = first_payload
 
-    if not isinstance(interactive_data, dict):
-        logger.warning(
-            "Interactive JSON payload must be an object",
-            payload_type=type(interactive_data).__name__,
-            preview=_preview_text(first_match.group(1)),
-        )
-        return _InteractiveResponse(response_text)
-
-    interactive_payload = cast("dict[str, object]", interactive_data)
-    question = str(interactive_payload.get("question") or _DEFAULT_QUESTION)
-    options = cast("list[dict[str, str]]", interactive_payload.get("options", []))
-
-    if not options:
-        return _InteractiveResponse(response_text)
-
-    options = options[:_MAX_OPTIONS]
-    clean_response = response_text.replace(first_match.group(0), "").strip()
-
-    option_lines = []
     option_map: dict[str, str] | None = {} if extract_mapping else None
     option_labels: dict[str, str] | None = {} if extract_mapping else None
-
-    for i, opt in enumerate(options, 1):
-        emoji_char = opt.get("emoji", "❓")
-        label = opt.get("label", "Option")
-        option_lines.append(f"{i}. {emoji_char} {label}")
-
-        if extract_mapping and option_map is not None:
-            value = opt.get("value", label.lower())
+    if option_map is not None and option_labels is not None:
+        for i, opt in enumerate(options, 1):
+            emoji_char = opt["emoji"]
+            label = opt["label"]
+            value = opt["value"]
             option_map[emoji_char] = value
             option_map[str(i)] = value
-            if option_labels is not None:
-                option_labels[emoji_char] = label
-                option_labels[str(i)] = label
+            option_labels[emoji_char] = label
+            option_labels[str(i)] = label
 
-    # Combine everything into the final message
-    message_parts = []
-    if clean_response:
-        message_parts.append(clean_response)
-    message_parts.append("")  # Empty line
-    message_parts.append(question)
-    message_parts.append("")  # Empty line
-    message_parts.extend(option_lines)
-    message_parts.append("")  # Empty line
-    message_parts.append(_INSTRUCTION_TEXT)
+    rendered = [(matches[0], _render_question_text(question, options, include_instruction=True))]
+    for extra_match in matches[1:]:
+        extra_payload = _coerce_interactive_payload(extra_match.group(1))
+        if extra_payload is None:
+            rendered.append((extra_match, ""))
+            continue
+        extra_question, extra_options = extra_payload
+        rendered.append((extra_match, _render_question_text(extra_question, extra_options, include_instruction=False)))
+    if len(matches) > 1:
+        logger.warning(
+            "Multiple interactive blocks in one response; only the first gets reaction buttons",
+            block_count=len(matches),
+        )
 
-    final_text = "\n".join(message_parts)
+    parts: list[str] = []
+    last_end = 0
+    for match, replacement in rendered:
+        parts.append(response_text[last_end : match.start()])
+        parts.append(replacement)
+        last_end = match.end()
+    parts.append(response_text[last_end:])
+    final_text = _remove_inline_unparsed_interactive_fences("".join(parts).strip())
 
     return _InteractiveResponse(
         final_text,
