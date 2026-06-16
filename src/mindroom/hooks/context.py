@@ -555,6 +555,20 @@ class ScheduleFiredContext(HookContext):
 
 
 @dataclass(slots=True)
+class AutomationTriggeredContext(HookContext):
+    """Context for automation:triggered hooks."""
+
+    agent_name: str
+    automation_id: str
+    workspace_root: str
+    room_id: str | None
+    thread_id: str | None
+    check_result: dict[str, Any]
+    trigger_payload: dict[str, Any]
+    action_payload: dict[str, Any]
+
+
+@dataclass(slots=True)
 class ReactionReceivedContext(HookContext):
     """Context for reaction:received hooks."""
 
