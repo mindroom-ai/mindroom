@@ -351,6 +351,37 @@ Last question:
             "1. 🔎 Verify"
         )
 
+    def test_parse_and_format_interactive_removes_unmatched_malformed_extra_blocks(self) -> None:
+        """Malformed extra fences that do not match the parser regex should not leak after a valid block."""
+        response_text = """First question:
+
+```interactive
+{
+    "question": "Which option?",
+    "options": [
+        {"emoji": "✅", "label": "Approve", "value": "approve"}
+    ]
+}
+```
+
+Broken extra: ```interactive {"question": "Bad extra"}```"""
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert "```interactive" not in response.formatted_text
+        assert '"question": "Bad extra"' not in response.formatted_text
+        assert response.formatted_text == (
+            "First question:\n"
+            "\n"
+            "Which option?\n"
+            "\n"
+            "1. ✅ Approve\n"
+            "\n"
+            "React with an emoji or type the number to respond.\n"
+            "\n"
+            "Broken extra:"
+        )
+
     def test_parse_and_format_interactive_defaults_null_question_text(self) -> None:
         """Explicit JSON null question text should use the default prompt."""
         response_text = """```interactive

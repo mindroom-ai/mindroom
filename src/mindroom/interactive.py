@@ -139,6 +139,7 @@ _INTERACTIVE_PATTERN = (
     r")(.*?)\r?\n[ \t]*```[ \t]*(?=\r?\n|$)"
 )
 _INTERACTIVE_PATTERN_FLAGS = re.DOTALL | re.IGNORECASE
+_INLINE_INTERACTIVE_JSON_FENCE_PATTERN = r"```[ \t]*interactive(?:[ \t]+json)?[ \t]+(?:\{|\[)[^\r\n`]*```"
 _MAX_OPTIONS = 5
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
@@ -683,6 +684,24 @@ def _render_question_text(question: str, options: list[dict[str, str]], *, inclu
     return "\n".join(parts)
 
 
+def _remove_inline_unparsed_interactive_fences(text: str) -> str:
+    """Remove inline interactive JSON fences that the block parser cannot render."""
+    cleaned_text, count = re.subn(
+        _INLINE_INTERACTIVE_JSON_FENCE_PATTERN,
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if count == 0:
+        return text
+
+    logger.warning(
+        "Interactive block not parsed",
+        preview=_preview_text(text),
+    )
+    return cleaned_text.strip()
+
+
 def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> _InteractiveResponse:
     """Parse and format interactive content from response text.
 
@@ -747,7 +766,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         parts.append(replacement)
         last_end = match.end()
     parts.append(response_text[last_end:])
-    final_text = "".join(parts).strip()
+    final_text = _remove_inline_unparsed_interactive_fences("".join(parts).strip())
 
     return _InteractiveResponse(
         final_text,
