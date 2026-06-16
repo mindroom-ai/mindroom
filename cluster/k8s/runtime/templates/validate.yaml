@@ -213,3 +213,51 @@
 {{- fail "workers.kubernetes.agentVault.accessTool.adminTokenSecret.name and .key must not be empty" -}}
 {{- end -}}
 {{- end -}}
+{{- $accessGrants := $agentVault.accessGrants -}}
+{{- if and $accessGrants.enabled (gt (len $accessGrants.grants) 0) -}}
+{{- if not $agentVault.enabled -}}
+{{- fail "workers.kubernetes.agentVault.accessGrants.enabled requires workers.kubernetes.agentVault.enabled=true when grants are configured" -}}
+{{- end -}}
+{{- if not (and (trim (default "" $accessGrants.adminTokenSecret.name)) (trim (default "" $accessGrants.adminTokenSecret.key))) -}}
+{{- fail "workers.kubernetes.agentVault.accessGrants.adminTokenSecret.name and .key must not be empty" -}}
+{{- end -}}
+{{- if and $agentVault.bootstrap.enabled (not (trim (default "" $agentVault.accessTool.adminAgentName))) -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.adminAgentName must not be empty when accessGrants and bootstrap are enabled" -}}
+{{- end -}}
+{{- range $index, $grant := $accessGrants.grants -}}
+{{- $path := printf "workers.kubernetes.agentVault.accessGrants.grants[%d]" $index -}}
+{{- $email := trim (default "" $grant.email) -}}
+{{- $scope := trim (default "" $grant.workerScope) -}}
+{{- $role := trim (default "admin" $grant.role) -}}
+{{- $requester := trim (default "" $grant.requester) -}}
+{{- $agent := trim (default "" $grant.agent) -}}
+{{- if not $email -}}
+{{- fail (printf "%s.email is required" $path) -}}
+{{- end -}}
+{{- if not (has $scope (list "shared" "user" "user_agent")) -}}
+{{- fail (printf "%s.workerScope must be one of: shared, user, user_agent" $path) -}}
+{{- end -}}
+{{- if ne $role "admin" -}}
+{{- fail (printf "%s.role must be admin" $path) -}}
+{{- end -}}
+{{- if eq $scope "shared" -}}
+{{- if $requester -}}
+{{- fail (printf "%s.requester must be empty for workerScope=shared" $path) -}}
+{{- end -}}
+{{- if not $agent -}}
+{{- fail (printf "%s.agent is required for workerScope=shared" $path) -}}
+{{- end -}}
+{{- else if eq $scope "user" -}}
+{{- if not $requester -}}
+{{- fail (printf "%s.requester is required for workerScope=user" $path) -}}
+{{- end -}}
+{{- else if eq $scope "user_agent" -}}
+{{- if not $requester -}}
+{{- fail (printf "%s.requester is required for workerScope=user_agent" $path) -}}
+{{- end -}}
+{{- if not $agent -}}
+{{- fail (printf "%s.agent is required for workerScope=user_agent" $path) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

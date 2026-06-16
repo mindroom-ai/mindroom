@@ -1433,6 +1433,292 @@ def test_runtime_chart_rejects_agent_vault_default_proxy_url_with_approved_egres
     assert "approvedEgress with Agent Vault must be squid-first" in completed.stderr
 
 
+def test_runtime_chart_agent_vault_access_grants_are_noop_by_default() -> None:
+    """Access grants should not add grant resources unless explicitly enabled with grants."""
+    docs = _render_runtime_chart()
+
+    assert not any(
+        doc.get("kind") in {"ConfigMap", "Job"}
+        and isinstance(doc.get("metadata"), dict)
+        and doc["metadata"].get("name") == "agent-vault-access-grants"
+        for doc in docs
+    )
+
+
+def test_runtime_chart_agent_vault_access_grants_renders_shared_grant_job(tmp_path: Path) -> None:
+    """Shared worker vault admins can be declared without inline scripts."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                    "kubernetes": {
+                        "agentVault": {
+                            "enabled": True,
+                            "cliImage": "infisical/agent-vault:test",
+                            "ownerEmail": "owner@example.test",
+                            "accessGrants": {
+                                "enabled": True,
+                                "tenantId": "tenant-42",
+                                "grants": [
+                                    {
+                                        "email": "maintainer@example.test",
+                                        "workerScope": "shared",
+                                        "agent": "example-agent",
+                                        "role": "admin",
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    config_map = _resource(docs, "ConfigMap", "agent-vault-access-grants")
+    job = _resource(docs, "Job", "agent-vault-access-grants")
+    container = _container(job, "access-grants")
+    config = yaml.safe_load(config_map["data"]["access-grants.yaml"])
+
+    assert config == {
+        "apiUrl": "http://agent-vault:14321",
+        "vaultNamePrefix": "agent-vault",
+        "tenantId": "tenant-42",
+        "grants": [
+            {
+                "email": "maintainer@example.test",
+                "workerScope": "shared",
+                "agent": "example-agent",
+                "role": "admin",
+            },
+        ],
+    }
+    assert job["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
+    assert job["metadata"]["annotations"]["helm.sh/hook-delete-policy"] == "before-hook-creation,hook-succeeded"
+    assert container["image"] == "ghcr.io/mindroom-ai/mindroom:latest"
+    assert container["command"] == [
+        "python",
+        "-m",
+        "mindroom.agent_vault_access_grants",
+        "apply",
+        "--config",
+        "/etc/mindroom-agent-vault-access-grants/access-grants.yaml",
+        "--admin-token-file",
+        "/etc/agent-vault-access-grants/token",
+        "--wait-ready-seconds",
+        "180",
+    ]
+    assert {
+        "name": "access-grants-config",
+        "mountPath": "/etc/mindroom-agent-vault-access-grants",
+        "readOnly": True,
+    } in container["volumeMounts"]
+    assert {
+        "name": "access-grants-admin-token",
+        "mountPath": "/etc/agent-vault-access-grants",
+        "readOnly": True,
+    } in container["volumeMounts"]
+
+
+def test_runtime_chart_agent_vault_access_grants_renders_user_agent_grant(tmp_path: Path) -> None:
+    """The chart passes requester-scoped grant inputs through to the helper config."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                    "kubernetes": {
+                        "agentVault": {
+                            "enabled": True,
+                            "cliImage": "infisical/agent-vault:test",
+                            "ownerEmail": "owner@example.test",
+                            "accessGrants": {
+                                "enabled": True,
+                                "grants": [
+                                    {
+                                        "email": "user@example.test",
+                                        "workerScope": "user_agent",
+                                        "requester": "@user:example.test",
+                                        "agent": "example-agent",
+                                        "role": "admin",
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    config = yaml.safe_load(_resource(docs, "ConfigMap", "agent-vault-access-grants")["data"]["access-grants.yaml"])
+
+    assert config["grants"] == [
+        {
+            "email": "user@example.test",
+            "workerScope": "user_agent",
+            "requester": "@user:example.test",
+            "agent": "example-agent",
+            "role": "admin",
+        },
+    ]
+
+
+def test_runtime_chart_agent_vault_bootstrap_publishes_access_grants_admin_token(tmp_path: Path) -> None:
+    """The bootstrap Job should publish an owner-role token for access-grant jobs."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                    "kubernetes": {
+                        "agentVault": {
+                            "enabled": True,
+                            "cliImage": "infisical/agent-vault:test",
+                            "ownerEmail": "owner@example.test",
+                            "workerCaConfigMapName": "agent-vault-ca",
+                            "bootstrap": {
+                                "enabled": True,
+                                "kubectlImage": "bitnami/kubectl:latest",
+                            },
+                            "accessGrants": {
+                                "enabled": True,
+                                "adminTokenSecret": {
+                                    "name": "agent-vault-grants-admin",
+                                    "key": "token",
+                                },
+                                "grants": [
+                                    {
+                                        "email": "maintainer@example.test",
+                                        "workerScope": "shared",
+                                        "agent": "example-agent",
+                                        "role": "admin",
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    bootstrap_job = _resource(docs, "Job", "agent-vault-bootstrap")
+    bootstrap_init = _init_container(bootstrap_job, "bootstrap-owner")
+    publish_container = _container(bootstrap_job, "publish-ca")
+    bootstrap_role = _resource(docs, "Role", "agent-vault-bootstrap")
+
+    assert 'agent-vault agent create "access-admin"' in bootstrap_init["args"][0]
+    assert 'agent-vault agent set-role "access-admin" --role owner' in bootstrap_init["args"][0]
+    assert "create secret generic agent-vault-grants-admin" in publish_container["args"][0]
+    secret_rule = next(
+        rule for rule in bootstrap_role["rules"] if "secrets" in rule.get("resources", []) and "resourceNames" in rule
+    )
+    assert "agent-vault-grants-admin" in secret_rule["resourceNames"]
+
+
+@pytest.mark.parametrize(
+    ("grant", "message"),
+    [
+        (
+            {
+                "email": "maintainer@example.test",
+                "workerScope": "shared",
+                "requester": "@user:example.test",
+                "agent": "example-agent",
+                "role": "admin",
+            },
+            "workers.kubernetes.agentVault.accessGrants.grants[0].requester must be empty for workerScope=shared",
+        ),
+        (
+            {
+                "email": "user@example.test",
+                "workerScope": "user_agent",
+                "agent": "example-agent",
+                "role": "admin",
+            },
+            "workers.kubernetes.agentVault.accessGrants.grants[0].requester is required for workerScope=user_agent",
+        ),
+        (
+            {
+                "email": "user@example.test",
+                "workerScope": "user",
+                "requester": "@user:example.test",
+                "role": "viewer",
+            },
+            "workers.kubernetes.agentVault.accessGrants.grants[0].role must be admin",
+        ),
+    ],
+)
+def test_runtime_chart_rejects_invalid_agent_vault_access_grants(
+    tmp_path: Path,
+    grant: dict[str, str],
+    message: str,
+) -> None:
+    """Grant validation should fail during Helm rendering before the Job runs."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                    "kubernetes": {
+                        "agentVault": {
+                            "enabled": True,
+                            "cliImage": "infisical/agent-vault:test",
+                            "ownerEmail": "owner@example.test",
+                            "accessGrants": {
+                                "enabled": True,
+                                "grants": [grant],
+                            },
+                        },
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert message in completed.stderr
+
+
 def test_runtime_chart_rejects_invalid_approved_egress_parent_proxy_port() -> None:
     """Parent proxy ports must be valid TCP ports before rendering Squid config."""
     completed = _run_helm_template(
