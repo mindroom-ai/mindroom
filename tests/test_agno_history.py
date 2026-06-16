@@ -56,6 +56,8 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history import PreparedHistoryState
 from mindroom.history.compaction import (
+    AgentStaticTokenEstimator,
+    TeamStaticTokenEstimator,
     _build_summary_input,
     _compaction_replay_messages,
     _emit_compaction_hook,
@@ -486,6 +488,11 @@ def test_estimate_static_tokens_includes_tool_definitions() -> None:
     )
     assert _estimate_tool_definition_tokens(baseline_agent) == 0
     assert tool_tokens > 0
+
+
+def test_static_token_estimator_cache_fields_are_not_constructor_inputs() -> None:
+    assert "_non_prompt_tokens" not in inspect.signature(AgentStaticTokenEstimator).parameters
+    assert "_non_prompt_tokens" not in inspect.signature(TeamStaticTokenEstimator).parameters
 
 
 def test_estimate_agent_static_tokens_uses_real_system_message_builder() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from html import escape
 from typing import TYPE_CHECKING, TypeGuard, cast
@@ -79,7 +79,7 @@ class AgentStaticTokenEstimator:
     """Request-local static-token estimator for one prepared agent response."""
 
     agent: Agent
-    _non_prompt_tokens: int | None = None
+    _non_prompt_tokens: int | None = field(default=None, init=False)
 
     def estimate(self, full_prompt: str) -> int:
         """Estimate static prompt tokens while reusing Agno-prepared tools."""
@@ -96,7 +96,7 @@ class TeamStaticTokenEstimator:
     """Request-local static-token estimator for one prepared team response."""
 
     team: Team
-    _non_prompt_tokens: int | None = None
+    _non_prompt_tokens: int | None = field(default=None, init=False)
 
     def estimate(self, full_prompt: str) -> int:
         """Estimate static prompt tokens while reusing Agno-prepared team tools."""
