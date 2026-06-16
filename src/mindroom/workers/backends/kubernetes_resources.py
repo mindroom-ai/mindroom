@@ -136,7 +136,7 @@ if ! agent-vault agent create "$AGENT_VAULT_VAULT" \\
 fi
 if ! agent-vault vault agent add "$AGENT_VAULT_VAULT" \\
   --vault "$AGENT_VAULT_VAULT" \\
-  --role proxy > /dev/null 2>&1; then
+  --role proxy > /dev/null; then
   agent-vault vault agent set-role "$AGENT_VAULT_VAULT" \\
     --vault "$AGENT_VAULT_VAULT" \\
     --role proxy > /dev/null
@@ -657,7 +657,7 @@ class KubernetesResourceManager:
             return []
         vault = self.agent_vault_vault_name(worker_key)
         if vault is None:
-            msg = "Agent Vault main env requested without a worker vault name."
+            msg = f"Agent Vault main env requested without a worker vault name for worker_key={worker_key!r}."
             raise WorkerBackendError(msg)
         env: list[dict[str, object]] = [
             {"name": _WORKER_EGRESS_PROXY_URL_ENV, "value": cfg.proxy_url},

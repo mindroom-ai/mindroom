@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from mindroom import constants
 from mindroom.api import sandbox_exec
 from mindroom.constants import resolve_runtime_paths, worker_proxy_execution_env
@@ -128,6 +130,35 @@ def test_worker_proxy_execution_env_percent_encodes_token(tmp_path: Path) -> Non
         },
     )
     assert env["HTTP_PROXY"] == "http://av%2Fsess%2Ba%3Ab%40c:vault%2Fa%3Ab%40c@agent-vault:14322"
+
+
+@pytest.mark.parametrize(
+    "vault_env",
+    [
+        pytest.param(None, id="absent"),
+        pytest.param(" \t\n", id="blank"),
+    ],
+)
+def test_worker_proxy_execution_env_allows_missing_vault_as_empty_proxy_password(
+    tmp_path: Path,
+    vault_env: str | None,
+) -> None:
+    """Missing/blank vault keeps the backwards-compatible token-only proxy URL."""
+    token_path = tmp_path / "token"
+    token_path.write_text("av/sess+a:b@c\n", encoding="utf-8")
+    process_env = {
+        "MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322",
+        "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(token_path),
+    }
+    if vault_env is not None:
+        process_env["MINDROOM_WORKER_EGRESS_PROXY_VAULT"] = vault_env
+
+    env = worker_proxy_execution_env(process_env)
+
+    expected_proxy = "http://av%2Fsess%2Ba%3Ab%40c:@agent-vault:14322"
+    assert env["HTTP_PROXY"] == expected_proxy
+    assert env["HTTPS_PROXY"] == expected_proxy
+    assert env["GIT_CONFIG_VALUE_0"] == expected_proxy
 
 
 def test_worker_proxy_execution_env_fail_closed_guards(tmp_path: Path) -> None:
