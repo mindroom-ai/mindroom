@@ -162,7 +162,7 @@ async def test_request_vault_access_is_idempotent_when_already_has_access(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Re-requesting when already granted reports success without error."""
-    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 409})
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 409, "/role": 200})
     _patch_client(monkeypatch, api)
 
     tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=_worker_target())
@@ -170,6 +170,23 @@ async def test_request_vault_access_is_idempotent_when_already_has_access(
 
     assert payload["status"] == "ok"
     assert payload["access"] == "already had access"
+
+
+@pytest.mark.asyncio
+async def test_request_vault_access_promotes_existing_member_to_admin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing vault members must be promoted so the tool always leaves admin access."""
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 409, "/role": 200})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=_worker_target())
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "ok"
+    role_updates = [body for path, body in api.calls if path.endswith("/role")]
+    assert role_updates == [{"role": "admin"}]
 
 
 @pytest.mark.asyncio
@@ -233,6 +250,23 @@ async def test_request_vault_access_reports_unregistered_account(
 
     assert payload["status"] == "error"
     assert "does not have an Agent Vault account" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_request_vault_access_reports_grant_error_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unexpected grant API failures should include the upstream error body."""
+    api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 409, "/users": 500})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=_worker_target())
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "error"
+    assert "500" in payload["error"]
+    assert "scripted" in payload["error"]
 
 
 @pytest.mark.asyncio

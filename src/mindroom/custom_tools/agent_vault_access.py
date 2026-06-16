@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 from urllib.parse import quote, urljoin
 
 import httpx
@@ -213,7 +213,8 @@ class AgentVaultAccessTools(Toolkit):
         if response.status_code in {200, 201}:
             return True
         if response.status_code in {409, 422}:
-            # Already a member: idempotent success.
+            # Already has vault access: ensure it is the admin role this tool promises.
+            await self._set_admin_role(vault, email, token)
             return False
         if response.status_code == 404:
             msg = (
@@ -221,8 +222,24 @@ class AgentVaultAccessTools(Toolkit):
                 "Register and verify at the vault UI first, then ask again."
             )
             raise _AgentVaultAccessError(msg)
-        response.raise_for_status()
-        return False
+        return self._raise_api_error("granting vault admin access", response)
+
+    async def _set_admin_role(self, vault: str, email: str, token: str) -> None:
+        response = await self._post(
+            f"v1/vaults/{quote(vault, safe='')}/users/{quote(email, safe='')}/role",
+            token,
+            {"role": "admin"},
+        )
+        if response.status_code in {200, 201, 204}:
+            return
+        self._raise_api_error("updating vault user role to admin", response)
+
+    def _raise_api_error(self, action: str, response: httpx.Response) -> NoReturn:
+        detail = f"Agent Vault API returned {response.status_code} while {action}"
+        body = response.text.strip()
+        if body:
+            detail = f"{detail}: {body}"
+        raise _AgentVaultAccessError(detail)
 
     def _error(self, detail: str) -> str:
         return json.dumps(
