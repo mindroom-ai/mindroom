@@ -616,6 +616,21 @@ def build_selection_prompt(selection: InteractiveSelection) -> str:
     )
 
 
+def _coerce_interactive_option(raw_option: object) -> dict[str, str] | None:
+    """Return one normalized interactive option when the raw item is an object."""
+    if not isinstance(raw_option, dict):
+        return None
+
+    option_data = cast("dict[object, object]", raw_option)
+    label = str(option_data.get("label") or "Option")
+    value = str(option_data.get("value") or label.lower())
+    return {
+        "emoji": str(option_data.get("emoji") or "❓"),
+        "label": label,
+        "value": value,
+    }
+
+
 def _coerce_interactive_payload(raw_json: str) -> tuple[str, list[dict[str, str]]] | None:
     """Return (question, capped options) when the fenced payload is a valid interactive object."""
     try:
@@ -636,17 +651,32 @@ def _coerce_interactive_payload(raw_json: str) -> tuple[str, list[dict[str, str]
         )
         return None
 
-    interactive_payload = cast("dict[str, object]", interactive_data)
-    question = str(interactive_payload.get("question") or _DEFAULT_QUESTION)
-    options = cast("list[dict[str, str]]", interactive_payload.get("options", []))
+    question = str(interactive_data.get("question") or _DEFAULT_QUESTION)
+    raw_options = interactive_data.get("options")
+    if not isinstance(raw_options, list):
+        logger.warning(
+            "Interactive JSON options must be a list",
+            options_type=type(raw_options).__name__,
+            preview=_preview_text(raw_json),
+        )
+        return None
+
+    options: list[dict[str, str]] = []
+    for raw_option in raw_options:
+        option = _coerce_interactive_option(raw_option)
+        if option is None:
+            continue
+        options.append(option)
+        if len(options) == _MAX_OPTIONS:
+            break
     if not options:
         return None
-    return question, options[:_MAX_OPTIONS]
+    return question, options
 
 
 def _render_question_text(question: str, options: list[dict[str, str]], *, include_instruction: bool) -> str:
     """Render one interactive question as display text."""
-    option_lines = [f"{i}. {opt.get('emoji', '❓')} {opt.get('label', 'Option')}" for i, opt in enumerate(options, 1)]
+    option_lines = [f"{i}. {opt['emoji']} {opt['label']}" for i, opt in enumerate(options, 1)]
     parts = [question, "", *option_lines]
     if include_instruction:
         parts.extend(["", _INSTRUCTION_TEXT])
@@ -688,9 +718,9 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     option_labels: dict[str, str] | None = {} if extract_mapping else None
     if option_map is not None and option_labels is not None:
         for i, opt in enumerate(options, 1):
-            emoji_char = opt.get("emoji", "❓")
-            label = opt.get("label", "Option")
-            value = opt.get("value", label.lower())
+            emoji_char = opt["emoji"]
+            label = opt["label"]
+            value = opt["value"]
             option_map[emoji_char] = value
             option_map[str(i)] = value
             option_labels[emoji_char] = label
@@ -700,6 +730,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     for extra_match in matches[1:]:
         extra_payload = _coerce_interactive_payload(extra_match.group(1))
         if extra_payload is None:
+            rendered.append((extra_match, ""))
             continue
         extra_question, extra_options = extra_payload
         rendered.append((extra_match, _render_question_text(extra_question, extra_options, include_instruction=False)))
