@@ -6,7 +6,8 @@
 **Goal:** Build agent-owned declarative workspace automations that run deterministic cron checks through the existing worker backend and only invoke Matrix, hooks, or LLM work when explicit trigger rules match.
 
 **Architecture:** Automation definitions live in `<agent-workspace>/.mindroom/automations.yaml`, while the primary MindRoom runtime owns discovery, validation, scheduling, execution, and supervision.
-Worker containers remain ephemeral execution environments and are woken on demand through the same worker routing path used by shell/file/python tools.
+Worker containers are provisioned on demand through the same worker routing path used by shell/file/python tools.
+In Kubernetes, workers may scale to zero between runs while persistent worker state may survive; automation correctness must not depend on a live container.
 The first implementation supports shared agent workspaces and leaves requester-private workspace automations blocked until a durable execution-identity registry exists.
 
 **Tech Stack:** Python 3.13, Pydantic, croniter, PyYAML, asyncio, existing MindRoom worker routing, existing hook registry, existing Matrix delivery helpers, pytest.
@@ -69,8 +70,8 @@ Add an effective policy helper for one agent.
 Modify `src/mindroom/workspaces.py`.
 Allow workspace creation for agents with workspace automations enabled even when file-backed memory is not enabled.
 
-Modify `src/mindroom/runtime_resolution.py`.
-Pass the new workspace requirement through normal runtime resolution.
+Inspect `src/mindroom/runtime_resolution.py`.
+Verify normal runtime resolution passes through automation-only workspaces without file memory roots.
 
 Modify `src/mindroom/orchestrator.py`.
 Wire the service lifecycle and hook registry snapshot into the primary runtime.
@@ -150,6 +151,7 @@ Per-agent values override defaults field-by-field.
 If `enabled` is false, the runtime ignores that agent's automation file and the automation tool reports that automations are disabled.
 If an action is not in `allowed_actions`, the loader rejects that automation entry and logs the validation error.
 Agents that need `matrix_message` or `hook` must opt into those actions explicitly.
+`max_output_bytes` caps the returned, trigger-evaluated, and persisted command output for one check run.
 The first version should default to disabled at both defaults and agent levels.
 
 ## Task 1: Add Config Policy Models
@@ -229,7 +231,6 @@ git commit -m "feat: add workspace automation policy config"
 **Files:**
 
 - Modify: `src/mindroom/workspaces.py`
-- Modify: `src/mindroom/runtime_resolution.py`
 - Test: `tests/test_workspace_automations_workspace.py`
 
 - [ ] **Step 1: Write failing workspace tests**
@@ -261,19 +262,26 @@ Use this helper in `_resolve_workspace` for non-private agents instead of checki
 Set `file_memory_path` to `root` only when file memory is enabled.
 Set `file_memory_path` to `None` when the workspace exists only for automations.
 
-- [ ] **Step 5: Run focused workspace tests**
+- [ ] **Step 5: Verify runtime pass-through**
+
+Confirm `src/mindroom/runtime_resolution.py` already uses `workspace.root` for tool base directories and `workspace.file_memory_path` only for file-memory roots.
+Modify it only if the focused tests expose a pass-through gap.
+
+- [ ] **Step 6: Run focused workspace tests**
 
 Run: `uv run pytest tests/test_workspace_automations_workspace.py -q`.
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 Run:
 
 ```bash
-git add src/mindroom/workspaces.py src/mindroom/runtime_resolution.py tests/test_workspace_automations_workspace.py
+git add src/mindroom/workspaces.py tests/test_workspace_automations_workspace.py
 git commit -m "feat: resolve workspaces for workspace automations"
 ```
+
+If `src/mindroom/runtime_resolution.py` changed because the pass-through test exposed a real gap, add it explicitly in the same commit.
 
 ## Task 3: Add Automation YAML Models and Loader
 
@@ -425,7 +433,7 @@ git commit -m "feat: resolve workspace automation targets"
 Use strict fakes around toolkit construction.
 Verify the shell check runs with `cwd` equal to the workspace through the shell `base_dir` override.
 Verify worker scope is the resolved agent execution scope.
-Verify timeout and tail are passed to `run_shell_command_structured`.
+Verify timeout, tail, and byte cap are passed to `run_shell_command_structured`.
 Verify execution errors are returned as failed check results, not raised out of the service loop.
 
 - [ ] **Step 2: Run focused executor tests and verify failure**
@@ -435,18 +443,20 @@ Expected: FAIL because executor does not exist.
 
 - [ ] **Step 3: Build automation execution identity**
 
-For shared agents, build a `ToolExecutionIdentity` with:
+For shared agents, call `build_tool_execution_identity(...)` from `src/mindroom/tool_system/worker_routing.py`.
+Pass:
 
 - `channel="matrix"`
 - `agent_name=<agent>`
 - `transport_agent_name=<agent>`
+- `runtime_paths=runtime_paths`
 - `requester_id=None`
 - `room_id=None`
 - `thread_id=None`
 - `resolved_thread_id=None`
 - `session_id=f"workspace-automation:{agent}:{automation_id}"`
-- tenant/account from `runtime_paths`
 
+Tenant and account IDs come from `runtime_paths.env_value("CUSTOMER_ID")` and `runtime_paths.env_value("ACCOUNT_ID")` through this helper.
 Keep requester-scoped execution out of scope until private automation support exists.
 Do not place a room display name or alias into `ToolExecutionIdentity.room_id`; Matrix target resolution belongs to the action layer.
 
@@ -475,6 +485,7 @@ The dict must contain:
 
 The public `run_shell_command` response remains unchanged.
 The automation executor must never parse the human-readable `run_shell_command` text to infer exit codes.
+The structured helper must enforce the effective `max_output_bytes` cap before returning stdout, stderr, and raw output.
 
 - [ ] **Step 6: Add shell structured execution helper**
 
@@ -482,6 +493,7 @@ Add `run_shell_command_structured` to `src/mindroom/tools/shell.py`.
 Register it in the toolkit's `tools=[...]` list and in the tool metadata `function_names`.
 Accept that agents with the shell tool can call this function because it grants no new capability beyond shell execution and only changes result shape.
 Return a JSON-safe mapping with numeric `exit_code`.
+Accept the effective `max_output_bytes` cap and truncate returned stdout, stderr, and raw output by bytes.
 Do not return a dataclass across the worker boundary.
 Keep `run_shell_command` behavior unchanged.
 Test this helper in `tests/test_shell_tool.py` or a new focused file.
@@ -593,7 +605,8 @@ For `agent_message`, send a Matrix message with dispatch-triggering metadata usi
 For `hook`, emit `automation:triggered` with the context and no Matrix message by default.
 For `none`, record the run and do nothing visible.
 Use a router-bot `nio.AsyncClient` supplied by the service through a bot provider.
-Build the hook message sender from that router client and pass `trigger_dispatch=True` only for `agent_message`.
+Build the hook message sender from that router client, the active config, runtime paths, and the orchestrator conversation cache.
+Pass `trigger_dispatch=True` only for `agent_message`.
 If the router bot or its client is not ready at fire time, record a transient action failure and retry on the next scheduled occurrence.
 
 - [ ] **Step 6: Run focused action tests**
@@ -631,8 +644,8 @@ Expected: FAIL because service does not exist.
 
 Create `WorkspaceAutomationService` with:
 
-- `start(config, runtime_paths, hook_registry, bot_provider)`
-- `refresh(config, hook_registry, bot_provider)`
+- `start(config, runtime_paths, hook_registry, bot_provider, conversation_cache)`
+- `refresh(config, hook_registry, bot_provider, conversation_cache)`
 - `shutdown()`
 - `scan_now()`
 - `list_loaded()`
@@ -641,6 +654,7 @@ Keep task dictionaries private to the service.
 Use stable keys `(agent_name, automation_id, workspace_root)`.
 The `bot_provider` follows the existing orchestrator pattern used by `ApprovalMatrixTransport`.
 The service uses `bot_provider(ROUTER_AGENT_NAME)` for Matrix delivery and never embeds delivery logic in `orchestrator.py`.
+The `conversation_cache` comes from the orchestrator runtime support event cache and is passed to `build_hook_message_sender`.
 
 - [ ] **Step 4: Implement cron loop**
 
@@ -665,6 +679,7 @@ Refresh it when config reload succeeds and hook registry changes.
 Shutdown it before worker manager shutdown.
 Keep `orchestrator.py` changes limited to lifecycle calls and dependency injection.
 It may pass `bot_provider=lambda agent_name: self.agent_bots.get(agent_name)` just like existing runtime services.
+It should pass the existing conversation cache rather than constructing a new cache.
 
 - [ ] **Step 6: Run focused service tests**
 
@@ -796,7 +811,7 @@ Document the difference between scheduled agent tasks and deterministic workspac
 Document `.mindroom/automations.yaml`.
 Document policy gates.
 Document Kubernetes behavior.
-Document that worker containers may scale to zero between runs.
+Document that worker containers may scale to zero between runs while persistent worker state may survive.
 Document that private workspace automations are not supported in the first version.
 
 - [ ] **Step 2: Keep Markdown style**
