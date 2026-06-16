@@ -12,6 +12,7 @@ import pytest
 from mindroom.agents import (
     _build_dynamic_tooling_instruction_block,
     _build_dynamic_tooling_state_suffix,
+    build_agent_toolkit,
     get_agent_toolkit_names,
 )
 from mindroom.config.main import Config
@@ -557,12 +558,85 @@ def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initia
     search_payload = _tool_payload(manager.tool_search("sleep"))
     assert [match["name"] for match in search_payload["matches"]] == ["sleep"]
 
-    assert _tool_payload(manager.load_tool("sleep"))["status"] == "loaded"
-    assert _tool_payload(manager.load_tool("sleep"))["status"] == "already_loaded"
+    loaded_payload = _tool_payload(manager.load_tool("sleep"))
+    assert loaded_payload["status"] == "loaded"
+    assert "takes_effect" not in loaded_payload
+    assert "is now loaded" in loaded_payload["message"]
+    assert "becomes callable once it appears" in loaded_payload["message"]
+    assert "same parallel tool-call batch" in loaded_payload["message"]
+    assert "next request" not in loaded_payload["message"]
+
+    already_loaded_payload = _tool_payload(manager.load_tool("sleep"))
+    assert already_loaded_payload["status"] == "already_loaded"
+    assert "takes_effect" not in already_loaded_payload
+    assert already_loaded_payload["message"] == "Tool 'sleep' is already loaded for this session."
+
     assert _tool_payload(manager.unload_tool("shell"))["status"] == "sticky"
-    assert _tool_payload(manager.unload_tool("sleep"))["status"] == "unloaded"
+
+    unloaded_payload = _tool_payload(manager.unload_tool("sleep"))
+    assert unloaded_payload["status"] == "unloaded"
+    assert "takes_effect" not in unloaded_payload
+    assert unloaded_payload["message"] == "Tool 'sleep' is now unloaded for this session."
+
     assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
     assert _tool_payload(manager.unload_tool("sleep"))["status"] == "not_loaded"
+
+
+def test_dynamic_tools_stop_after_tool_call_only_when_continuation_enabled(tmp_path: Path) -> None:
+    """The manager stops the Agno loop only for the standalone continuation path."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"shell": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+
+    continuation_manager = DynamicToolsToolkit(
+        agent_name="code",
+        config=config,
+        session_id="thread-a",
+        stop_after_tool_call=True,
+    )
+    assert continuation_manager.functions["load_tool"].stop_after_tool_call is True
+    assert continuation_manager.functions["unload_tool"].stop_after_tool_call is True
+    assert continuation_manager.functions["list_tools"].stop_after_tool_call is False
+    assert continuation_manager.functions["tool_search"].stop_after_tool_call is False
+
+    # Team members and other embedded agents run without the continuation loop,
+    # so the manager must not truncate their run after a load/unload.
+    member_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
+    assert member_manager.functions["load_tool"].stop_after_tool_call is False
+    assert member_manager.functions["unload_tool"].stop_after_tool_call is False
+
+
+def test_build_agent_toolkit_gates_dynamic_tool_continuation(tmp_path: Path) -> None:
+    """The continuation stop flag survives the build pipeline into the live toolkit."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+    runtime_paths = _runtime_paths(tmp_path)
+
+    def _build(*, dynamic_tool_continuation: bool) -> object:
+        return build_agent_toolkit(
+            "dynamic_tools",
+            agent_name="code",
+            config=config,
+            runtime_paths=runtime_paths,
+            worker_tools=[],
+            runtime_overrides=None,
+            execution_identity=None,
+            session_id="thread-a",
+            dynamic_tool_continuation=dynamic_tool_continuation,
+        )
+
+    standalone = _build(dynamic_tool_continuation=True)
+    assert standalone is not None
+    assert standalone.functions["load_tool"].stop_after_tool_call is True
+    assert standalone.functions["unload_tool"].stop_after_tool_call is True
+
+    member = _build(dynamic_tool_continuation=False)
+    assert member is not None
+    assert member.functions["load_tool"].stop_after_tool_call is False
+    assert member.functions["unload_tool"].stop_after_tool_call is False
 
 
 def test_dynamic_tools_manager_catalog_responses_use_one_loaded_state_snapshot(
@@ -762,6 +836,11 @@ def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_pat
 
     assert static_before == static_after
     assert "shell - Execute shell commands" in static_before
+    assert "becomes callable once it appears in your available tools" in static_before
+    assert "same parallel tool-call batch" in static_before
+    assert "each member manages its own dynamic tool state" in static_before
+    assert "next request" not in static_before
+    assert "Do not wait for another user message" not in static_before
     assert suffix_before != suffix_after
     assert (
         suffix_after == "Dynamic tools currently loaded for this session: shell, sleep\n"

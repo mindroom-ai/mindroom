@@ -40,6 +40,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     RuntimePaths,
 )
+from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history import (
@@ -86,6 +87,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
+    from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.history import CompactionLifecycle
@@ -127,17 +129,68 @@ def _compose_current_turn_prompt(
         prompt_chunks.append(raw_prompt)
     if prompt_parts.turn_context:
         prompt_chunks.append(prompt_parts.turn_context)
-    model_tail = raw_prompt if not model_prompt else strip_user_turn_time_prefix(model_prompt)
-    normalized_raw_prompt = raw_prompt.strip()
-    normalized_model_tail = model_tail.strip()
-    if raw_prompt and normalized_model_tail == normalized_raw_prompt:
-        model_tail = ""
-    elif raw_prompt and normalized_model_tail.startswith(f"{normalized_raw_prompt}\n\n"):
-        model_tail = normalized_model_tail[len(normalized_raw_prompt) + 2 :].lstrip()
-    if model_tail:
-        prompt_chunks.append(model_tail)
+    model_prompt_tail = _model_prompt_tail_after_raw_prompt(raw_prompt=raw_prompt, model_prompt=model_prompt)
+    if model_prompt_tail:
+        prompt_chunks.append(model_prompt_tail)
 
     return "\n\n".join(prompt_chunks)
+
+
+def _model_prompt_tail_after_raw_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
+    """Return model-only additions after the raw user prompt prefix."""
+    if not model_prompt:
+        return ""
+    model_prompt_tail = strip_user_turn_time_prefix(model_prompt)
+    normalized_raw_prompt = raw_prompt.strip()
+    normalized_model_prompt_tail = model_prompt_tail.strip()
+    if raw_prompt and normalized_model_prompt_tail == normalized_raw_prompt:
+        return ""
+    if raw_prompt and normalized_model_prompt_tail.startswith(f"{normalized_raw_prompt}\n\n"):
+        return normalized_model_prompt_tail[len(normalized_raw_prompt) + 2 :].lstrip()
+    return model_prompt_tail
+
+
+@dataclass(frozen=True)
+class _DynamicContinuationRunState:
+    """Prompt and run identity for a dynamic-tool continuation sequence."""
+
+    original_prompt: str
+    active_prompt: str
+    active_model_prompt: str | None
+    active_run_id: str | None
+    continuation_model_prompt_tail: str
+
+    @classmethod
+    def initial(
+        cls,
+        *,
+        prompt: str,
+        model_prompt: str | None,
+        run_id: str | None,
+    ) -> _DynamicContinuationRunState:
+        return cls(
+            original_prompt=prompt,
+            active_prompt=prompt,
+            active_model_prompt=model_prompt,
+            active_run_id=run_id,
+            continuation_model_prompt_tail=_model_prompt_tail_after_raw_prompt(
+                raw_prompt=prompt,
+                model_prompt=model_prompt,
+            ),
+        )
+
+    def advance(
+        self,
+        *,
+        continuation_prompt: str,
+        previous_run_id: str | None,
+    ) -> _DynamicContinuationRunState:
+        return replace(
+            self,
+            active_prompt=continuation_prompt,
+            active_model_prompt=self.continuation_model_prompt_tail or None,
+            active_run_id=ai_runtime.next_retry_run_id(previous_run_id),
+        )
 
 
 @dataclass(frozen=True)
@@ -256,6 +309,55 @@ def _build_timing_scope(
     return "unknown"
 
 
+def _reset_turn_state_for_dynamic_continuation(
+    *,
+    turn_recorder: TurnRecorder | None,
+    run_metadata: dict[str, Any] | None,
+    completed_tools_for_turn: Sequence[ToolTraceEntry],
+) -> AITurnState:
+    turn_state = AITurnState(prior_completed_tools=completed_tools_for_turn)
+    turn_state.sync_partial(
+        turn_recorder,
+        run_metadata=run_metadata,
+        assistant_text="",
+        completed_tools=[],
+        interrupted_tools=[],
+    )
+    return turn_state
+
+
+def _advance_dynamic_continuation(
+    *,
+    agent: Agent | None,
+    scope_context: ScopeSessionContext | None,
+    continuation_state: _DynamicContinuationRunState,
+    next_prompt: str | None,
+    previous_run_id: str | None,
+    turn_recorder: TurnRecorder | None,
+    run_metadata: dict[str, Any] | None,
+    completed_tools_for_turn: Sequence[ToolTraceEntry],
+) -> tuple[_DynamicContinuationRunState, AITurnState]:
+    """Close the spent agent and prepare run state for one more continuation.
+
+    Shared by the blocking and streaming loops so the continuation handoff stays
+    identical across both paths.
+    """
+    close_agent_runtime_state_dbs(
+        agent,
+        shared_scope_storage=scope_context.storage if scope_context is not None else None,
+    )
+    advanced_state = continuation_state.advance(
+        continuation_prompt=next_prompt or continuation_state.original_prompt,
+        previous_run_id=previous_run_id,
+    )
+    turn_state = _reset_turn_state_for_dynamic_continuation(
+        turn_recorder=turn_recorder,
+        run_metadata=run_metadata,
+        completed_tools_for_turn=completed_tools_for_turn,
+    )
+    return advanced_state, turn_state
+
+
 @timed("system_prompt_assembly.system_enrichment_render")
 def _render_system_enrichment_context(
     system_enrichment_items: Sequence[EnrichmentItem],
@@ -293,6 +395,7 @@ class _StreamingAttemptState:
     cancelled_run_event: RunCancelledEvent | None = None
     completed_run_event: RunCompletedEvent | None = None
     canonical_final_body_candidate: str | None = None
+    completed_tool_executions: list[ToolExecution] = field(default_factory=list)
     request_metric_totals: dict[str, int] = field(default_factory=empty_request_metric_totals)
     first_token_latency: float | None = None
     first_token_logged: bool = False
@@ -608,6 +711,8 @@ def _track_stream_tool_completed(
     agent_name: str,
 ) -> None:
     """Track completed tool-call metadata for streaming output."""
+    if event.tool is not None:
+        state.completed_tool_executions.append(event.tool)
     completion = state.tool_tracker.complete(event.tool)
     if completion is None:
         return
@@ -1002,6 +1107,7 @@ async def _prepare_agent_and_prompt(
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
             timing_scope=timing_scope,
+            dynamic_tool_continuation=True,
         )
         return runtime_model, agent
 
@@ -1108,7 +1214,7 @@ async def _prepare_agent_run_context(
 ) -> _AgentRunContext:
     """Prepare one agent response lifecycle through metadata assembly."""
     if pipeline_timing is not None:
-        pipeline_timing.mark("ai_prepare_start")
+        pipeline_timing.mark("ai_prepare_start", overwrite=True)
     prepared_run = await _prepare_agent_and_prompt(
         agent_name,
         prompt,
@@ -1139,7 +1245,7 @@ async def _prepare_agent_run_context(
         pipeline_timing=pipeline_timing,
     )
     if pipeline_timing is not None:
-        pipeline_timing.mark("history_ready")
+        pipeline_timing.mark("history_ready", overwrite=True)
         note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
 
     agent = prepared_run.agent
@@ -1183,7 +1289,7 @@ async def _prepare_agent_run_context(
     )
 
 
-async def ai_response(  # noqa: C901, PLR0912, PLR0915
+async def ai_response(  # noqa: C901, PLR0915
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -1297,23 +1403,15 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             _assert_agent_target(agent_name, config)
         except ValueError as e:
             return get_user_friendly_error_message(e, agent_name)
-        with open_resolved_scope_session_context(
-            agent_name=agent_name,
-            scope=HistoryScope(kind="agent", scope_id=agent_name),
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-        ) as opened_scope_context:
-            scope_context = opened_scope_context
-            ai_runtime.scrub_queued_notice_session_context(
-                scope_context=scope_context,
-                entity_name=agent_name,
-            )
+
+        async def _run_blocking_attempt(continuation_count: int) -> str | None:  # noqa: C901, PLR0912
+            """Run one agent attempt; return final text, or None to continue the turn."""
+            nonlocal agent, attempt, continuation_state, metadata, run_extra_content
+            nonlocal standalone_interrupted_replay_persisted, turn_state, unseen_event_ids
             try:
                 run_context = await _prepare_agent_run_context(
                     agent_name=agent_name,
-                    prompt=prompt,
+                    prompt=continuation_state.active_prompt,
                     session_id=session_id,
                     runtime_paths=runtime_paths,
                     config=config,
@@ -1333,7 +1431,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     refresh_scheduler=refresh_scheduler,
                     system_enrichment_items=system_enrichment_items,
                     timing_scope=timing_scope,
-                    model_prompt=model_prompt,
+                    model_prompt=continuation_state.active_model_prompt,
                     user_id=user_id,
                     requester_id=resolved_requester_id,
                     correlation_id=resolved_correlation_id,
@@ -1356,13 +1454,13 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 media_inputs,
                 agent.model,
                 fallback_prompt=run_context.inline_media_fallback_prompt,
-                run_id=run_id,
+                run_id=continuation_state.active_run_id,
             )
             attempt_result = await _run_non_streaming_agent_attempts(
                 run_context=run_context,
                 attempt=attempt,
                 user_id=user_id,
-                run_id=run_id,
+                run_id=continuation_state.active_run_id,
                 run_id_callback=run_id_callback,
                 scope_context=scope_context,
                 pipeline_timing=pipeline_timing,
@@ -1425,15 +1523,76 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     agent_name,
                 )
 
+            continuation_decision = continuation_decision_from_tools(
+                response.tools,
+                original_prompt=continuation_state.original_prompt,
+                continuation_count=continuation_count,
+            )
+            completed_tools_for_turn = turn_state.completed_tools_for(response_tool_trace)
+            if continuation_decision.should_continue:
+                continuation_state, turn_state = _advance_dynamic_continuation(
+                    agent=agent,
+                    scope_context=scope_context,
+                    continuation_state=continuation_state,
+                    next_prompt=continuation_decision.next_prompt,
+                    previous_run_id=attempt.attempt_run_id,
+                    turn_recorder=turn_recorder,
+                    run_metadata=metadata,
+                    completed_tools_for_turn=completed_tools_for_turn,
+                )
+                agent = None
+                return None
+            if continuation_decision.limit_message is not None and continuation_decision.continuation is not None:
+                logger.warning(
+                    "Dynamic tool continuation limit reached",
+                    agent=agent_name,
+                    function_name=continuation_decision.continuation.function_name,
+                    tool_name=continuation_decision.continuation.tool_name,
+                    status=continuation_decision.continuation.status,
+                )
+
             response_text = _extract_response_content(response, show_tool_calls=show_tool_calls)
+            if continuation_decision.limit_message is not None and not response.content:
+                response_text = continuation_decision.limit_message
             if turn_recorder is not None:
+                replayable_response_text = _extract_replayable_response_text(response)
+                if continuation_decision.limit_message is not None and not response.content:
+                    replayable_response_text = continuation_decision.limit_message
                 turn_state.record_completed(
                     turn_recorder,
                     run_metadata=metadata,
-                    assistant_text=_extract_replayable_response_text(response),
+                    assistant_text=replayable_response_text,
                     completed_tools=response_tool_trace,
                 )
             return response_text
+
+        with open_resolved_scope_session_context(
+            agent_name=agent_name,
+            scope=HistoryScope(kind="agent", scope_id=agent_name),
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+        ) as opened_scope_context:
+            scope_context = opened_scope_context
+            ai_runtime.scrub_queued_notice_session_context(
+                scope_context=scope_context,
+                entity_name=agent_name,
+            )
+            continuation_state = _DynamicContinuationRunState.initial(
+                prompt=prompt,
+                model_prompt=model_prompt,
+                run_id=run_id,
+            )
+            for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+                attempt_text = await _run_blocking_attempt(continuation_count)
+                if attempt_text is not None:
+                    return attempt_text
+            # The continuation loop always returns on its final iteration: at
+            # continuation_count == DYNAMIC_TOOL_CONTINUATION_LIMIT the decision
+            # carries a limit_message and never asks to continue.
+            msg = "dynamic tool continuation loop must return within its iteration budget"
+            raise AssertionError(msg)
     except asyncio.CancelledError:
         if turn_recorder is not None:
             turn_state.record_interrupted_from_recorder(
@@ -1680,7 +1839,7 @@ async def _stream_agent_attempt_chunks(
         state.user_error = e
 
 
-async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
+async def stream_agent_response(  # noqa: C901, PLR0915
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -1786,7 +1945,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     metadata: dict[str, Any] | None = None
     run_extra_content: dict[str, Any] | None = None
     attempt: _MediaAttempt | None = None
-    prepared_context_input_tokens: int | None = None
     state = _StreamingAttemptState()
 
     try:
@@ -1795,23 +1953,17 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         except ValueError as e:
             yield get_user_friendly_error_message(e, agent_name)
             return
-        with open_resolved_scope_session_context(
-            agent_name=agent_name,
-            scope=HistoryScope(kind="agent", scope_id=agent_name),
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-        ) as opened_scope_context:
-            scope_context = opened_scope_context
-            ai_runtime.scrub_queued_notice_session_context(
-                scope_context=scope_context,
-                entity_name=agent_name,
-            )
+
+        async def _run_streaming_attempt(  # noqa: C901, PLR0912, PLR0915
+            continuation_count: int,
+        ) -> AsyncGenerator[AIStreamChunk, None]:
+            """Stream one agent attempt; set keep_going when the turn should continue."""
+            nonlocal agent, attempt, continuation_state, keep_going, metadata, run_extra_content
+            nonlocal standalone_interrupted_replay_persisted, state, turn_state, unseen_event_ids
             try:
                 run_context = await _prepare_agent_run_context(
                     agent_name=agent_name,
-                    prompt=prompt,
+                    prompt=continuation_state.active_prompt,
                     session_id=session_id,
                     runtime_paths=runtime_paths,
                     config=config,
@@ -1831,7 +1983,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     refresh_scheduler=refresh_scheduler,
                     system_enrichment_items=system_enrichment_items,
                     timing_scope=timing_scope,
-                    model_prompt=model_prompt,
+                    model_prompt=continuation_state.active_model_prompt,
                     user_id=user_id,
                     requester_id=resolved_requester_id,
                     correlation_id=resolved_correlation_id,
@@ -1856,22 +2008,27 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 media_inputs,
                 agent.model,
                 fallback_prompt=run_context.inline_media_fallback_prompt,
-                run_id=run_id,
+                run_id=continuation_state.active_run_id,
             )
             state = _StreamingAttemptState()
-
-            def _sync_live_turn_recorder() -> None:
-                turn_state.sync_partial(
-                    turn_recorder,
-                    run_metadata=metadata,
-                    assistant_text=state.assistant_text,
-                    completed_tools=state.completed_tools,
-                    interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
-                )
 
             try:
                 for retried_after_media_fallback in (False, True):
                     state = _StreamingAttemptState()
+
+                    def _sync_live_turn_recorder(
+                        *,
+                        state_ref: _StreamingAttemptState = state,
+                        turn_state_ref: AITurnState = turn_state,
+                        metadata_ref: dict[str, Any] | None = metadata,
+                    ) -> None:
+                        turn_state_ref.sync_partial(
+                            turn_recorder,
+                            run_metadata=metadata_ref,
+                            assistant_text=state_ref.assistant_text,
+                            completed_tools=state_ref.completed_tools,
+                            interrupted_tools=[pending.trace_entry for pending in state_ref.pending_tools],
+                        )
 
                     async for stream_chunk in _stream_agent_attempt_chunks(
                         run_context=run_context,
@@ -1892,7 +2049,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             fallback_prompt=run_context.inline_media_fallback_prompt,
                             extra_removed_kinds=state.media_fallback_removed_kinds,
                             retry_media_inputs=state.media_fallback_retry_inputs or MediaInputs(),
-                            run_id=run_id,
+                            run_id=continuation_state.active_run_id,
                         )
                         continue
 
@@ -1974,6 +2131,38 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
                     break
 
+                continuation_decision = continuation_decision_from_tools(
+                    state.completed_tool_executions,
+                    original_prompt=continuation_state.original_prompt,
+                    continuation_count=continuation_count,
+                )
+                completed_tools_for_turn = turn_state.completed_tools_for(state.completed_tools)
+                if continuation_decision.should_continue:
+                    continuation_state, turn_state = _advance_dynamic_continuation(
+                        agent=agent,
+                        scope_context=scope_context,
+                        continuation_state=continuation_state,
+                        next_prompt=continuation_decision.next_prompt,
+                        previous_run_id=attempt.attempt_run_id,
+                        turn_recorder=turn_recorder,
+                        run_metadata=metadata,
+                        completed_tools_for_turn=completed_tools_for_turn,
+                    )
+                    agent = None
+                    keep_going = True
+                    return
+                if continuation_decision.limit_message is not None and continuation_decision.continuation is not None:
+                    logger.warning(
+                        "Dynamic tool continuation limit reached during streaming",
+                        agent=agent_name,
+                        function_name=continuation_decision.continuation.function_name,
+                        tool_name=continuation_decision.continuation.tool_name,
+                        status=continuation_decision.continuation.status,
+                    )
+                    if not state.assistant_text and not state.canonical_final_body_candidate:
+                        state.assistant_text = continuation_decision.limit_message
+                        yield RunContentEvent(content=continuation_decision.limit_message)
+
                 if run_metadata_collector is not None:
                     fallback_metrics = build_model_request_metrics_fallback(
                         state.request_metric_totals,
@@ -2022,6 +2211,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         assistant_text=final_visible_body,
                         completed_tools=state.completed_tools,
                     )
+                return
             finally:
                 ai_runtime.cleanup_queued_notice_state(
                     run_output=None,
@@ -2030,6 +2220,36 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     session_type=SessionType.AGENT,
                     entity_name=agent_name,
                 )
+
+        with open_resolved_scope_session_context(
+            agent_name=agent_name,
+            scope=HistoryScope(kind="agent", scope_id=agent_name),
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+        ) as opened_scope_context:
+            scope_context = opened_scope_context
+            ai_runtime.scrub_queued_notice_session_context(
+                scope_context=scope_context,
+                entity_name=agent_name,
+            )
+            continuation_state = _DynamicContinuationRunState.initial(
+                prompt=prompt,
+                model_prompt=model_prompt,
+                run_id=run_id,
+            )
+            for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+                keep_going = False
+                async for stream_chunk in _run_streaming_attempt(continuation_count):
+                    yield stream_chunk
+                if not keep_going:
+                    return
+            # The continuation loop always returns on its final iteration: at
+            # continuation_count == DYNAMIC_TOOL_CONTINUATION_LIMIT the decision
+            # carries a limit_message and never asks to continue.
+            msg = "dynamic tool continuation loop must return within its iteration budget"
+            raise AssertionError(msg)
     except asyncio.CancelledError:
         interrupted_tools = [pending.trace_entry for pending in state.pending_tools]
         if turn_recorder is not None:

@@ -39,6 +39,7 @@ class DynamicToolsToolkit(Toolkit):
         agent_name: str,
         config: Config,
         session_id: str | None,
+        stop_after_tool_call: bool = False,
     ) -> None:
         self._agent_name = agent_name
         self._config = config
@@ -48,6 +49,11 @@ class DynamicToolsToolkit(Toolkit):
             instructions=config.get_prompt("DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS"),
             tools=[self.list_tools, self.load_tool, self.unload_tool, self.tool_search],
         )
+        # Same-turn continuation is only driven by the standalone agent run loop
+        # in ai.py. Team members and other embedded agents run without it, so
+        # only stop the provider loop when the caller will resume the turn.
+        for tool_name in ("load_tool", "unload_tool"):
+            self.functions[tool_name].stop_after_tool_call = stop_after_tool_call
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
@@ -148,7 +154,6 @@ class DynamicToolsToolkit(Toolkit):
                 "already_loaded",
                 tool_name=tool_name,
                 loaded_tools=loaded_tools,
-                takes_effect="next_request",
                 message=f"Tool '{tool_name}' is already loaded for this session.",
             )
         elif result.status == "error":
@@ -177,8 +182,10 @@ class DynamicToolsToolkit(Toolkit):
                 "loaded",
                 tool_name=tool_name,
                 loaded_tools=loaded_tools,
-                takes_effect="next_request",
-                message=f"Tool '{tool_name}' will be available on the next request in this session.",
+                message=(
+                    f"Tool '{tool_name}' is now loaded for this session. It becomes callable once it appears "
+                    "in your available tools; do not call it in the same parallel tool-call batch as load_tool."
+                ),
             )
         return response
 
@@ -196,8 +203,8 @@ class DynamicToolsToolkit(Toolkit):
     def load_tool(self, tool_name: str) -> str:
         """Load one deferred tool for the current session.
 
-        The requested tool becomes available on the next request in the same
-        session, not later in the current model run.
+        The tool becomes callable once it appears in the agent's available
+        tools; it is never callable in the same parallel batch as this call.
         """
         result = load_tool_for_session(
             agent_name=self._agent_name,
@@ -209,11 +216,7 @@ class DynamicToolsToolkit(Toolkit):
         return self._load_tool_response(tool_name, result)
 
     def unload_tool(self, tool_name: str) -> str:
-        """Unload one deferred tool from the current session.
-
-        The tool stops being available on the next request in the same session,
-        not later in the current model run.
-        """
+        """Unload one deferred tool from the current session."""
         loaded_tools = self._loaded_tools()
         deferred_tools = self._deferred_tool_names()
         if tool_name not in deferred_tools:
@@ -238,7 +241,6 @@ class DynamicToolsToolkit(Toolkit):
                 "not_loaded",
                 tool_name=tool_name,
                 loaded_tools=loaded_tools,
-                takes_effect="next_request",
                 message=f"Tool '{tool_name}' is not currently loaded for this session.",
             )
 
@@ -255,8 +257,7 @@ class DynamicToolsToolkit(Toolkit):
             "unloaded",
             tool_name=tool_name,
             loaded_tools=saved_loaded_tools,
-            takes_effect="next_request",
-            message=f"Tool '{tool_name}' will be removed on the next request in this session.",
+            message=f"Tool '{tool_name}' is now unloaded for this session.",
         )
 
     @staticmethod

@@ -557,12 +557,17 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     session_id: str | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+    dynamic_tool_continuation: bool = False,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
     Callers own runtime override resolution before invoking this builder.
     Returns ``None`` when the configured tool should be skipped, such as an
     explicit ``delegate`` entry without valid delegation targets.
+
+    ``dynamic_tool_continuation`` is only set by the standalone agent run loop
+    in ai.py, which resumes the turn after a load/unload. It stops the dynamic
+    tools manager's provider loop so the rebuilt agent sees the new schema.
     """
     agent_config = config.get_agent(agent_name)
     if agent_runtime is None:
@@ -696,6 +701,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 agent_name=agent_name,
                 config=config,
                 session_id=session_id,
+                stop_after_tool_call=dynamic_tool_continuation,
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
@@ -1129,6 +1135,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     timing_scope: str | None = None,
+    dynamic_tool_continuation: bool = False,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -1161,6 +1168,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             passed through to delegated child agents.
         timing_scope: Optional correlated timing scope id for nested
             `system_prompt_assembly` sub-timers.
+        dynamic_tool_continuation: Whether this agent runs under the standalone
+            ai.py turn loop that resumes after a dynamic load/unload. Only that
+            loop stops the dynamic tools manager mid-turn; team members and other
+            embedded agents leave it False so a load/unload takes effect on the
+            next request instead of truncating the run.
 
     Returns:
         Configured Agent instance
@@ -1270,6 +1282,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                     execution_identity=execution_identity,
                     delegation_depth=delegation_depth,
                     refresh_scheduler=refresh_scheduler,
+                    dynamic_tool_continuation=dynamic_tool_continuation,
                 )
             if toolkit:
                 toolkit = _prune_openai_approval_gated_tools(
