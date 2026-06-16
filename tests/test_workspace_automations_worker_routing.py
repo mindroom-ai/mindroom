@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -22,7 +23,56 @@ from mindroom.workspace_automations.models import (
 )
 from mindroom.workspace_automations.targets import WorkspaceAutomationTarget
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
+
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
+_WORKSPACE_AUTOMATION_RESOURCE_SCAN_ROOTS = (
+    Path("src/mindroom/workspace_automations"),
+    Path("src/mindroom/orchestrator.py"),
+    Path("src/mindroom/custom_tools/workspace_automation.py"),
+    Path("src/mindroom/tools/workspace_automation.py"),
+    Path("src/mindroom/workers/backends"),
+    Path("cluster/k8s"),
+    Path("cluster/terraform/terraform-k8s/manifests"),
+)
+_WORKSPACE_AUTOMATION_RESOURCE_SCAN_SUFFIXES = {
+    ".j2",
+    ".py",
+    ".tf",
+    ".tpl",
+    ".yaml",
+    ".yml",
+}
+_WORKSPACE_AUTOMATION_SCOPE_MARKERS = (
+    "workspace automation",
+    "workspace automations",
+    "workspace-automation",
+    "workspace-automations",
+    "workspace_automation",
+    "workspace_automations",
+    "workspaceautomation",
+    "workspaceautomations",
+)
+_FORBIDDEN_WORKSPACE_AUTOMATION_KUBERNETES_MARKERS = (
+    "apiVersion: batch/v1",
+    "batch/v1",
+    "CronJob",
+    "cronjob",
+    "kind: Job",
+    "kind: CronJob",
+    "kind: Pod",
+    "kind: Deployment",
+    "kind: StatefulSet",
+    "kind: DaemonSet",
+    "kind: HorizontalPodAutoscaler",
+    "replicas:",
+    "keep-alive",
+    "keepalive",
+    "keep_alive",
+    "always-on",
+    "always_on",
+)
 
 
 class _RecordingKubernetesWorkerManager:
@@ -96,6 +146,48 @@ class _WorkerManagerLease:
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         return None
+
+
+def _find_forbidden_workspace_automation_kubernetes_resources(
+    scan_roots: Iterable[Path] = _WORKSPACE_AUTOMATION_RESOURCE_SCAN_ROOTS,
+) -> list[str]:
+    """Return workspace-automation-scoped Kubernetes resources that would bypass worker routing."""
+    matches: list[str] = []
+    for source_path in _iter_workspace_automation_resource_scan_files(scan_roots):
+        source_text = source_path.read_text(encoding="utf-8")
+        if not _is_workspace_automation_scoped_source(source_path, source_text):
+            continue
+        source_text_lower = source_text.lower()
+        matches.extend(
+            f"{source_path}:{marker}"
+            for marker in _FORBIDDEN_WORKSPACE_AUTOMATION_KUBERNETES_MARKERS
+            if marker.lower() in source_text_lower
+        )
+    return sorted(matches)
+
+
+def _iter_workspace_automation_resource_scan_files(scan_roots: Iterable[Path]) -> Iterator[Path]:
+    for root in scan_roots:
+        if root.is_file():
+            if _should_scan_workspace_automation_resource_file(root):
+                yield root
+            continue
+        if not root.exists():
+            continue
+        for source_path in root.rglob("*"):
+            if source_path.is_file() and _should_scan_workspace_automation_resource_file(source_path):
+                yield source_path
+
+
+def _should_scan_workspace_automation_resource_file(source_path: Path) -> bool:
+    return source_path.name in {"Chart.yaml", "values.yaml"} or (
+        source_path.suffix in _WORKSPACE_AUTOMATION_RESOURCE_SCAN_SUFFIXES
+    )
+
+
+def _is_workspace_automation_scoped_source(source_path: Path, source_text: str) -> bool:
+    source_identity = f"{source_path.as_posix()}\n{source_text}".lower()
+    return any(marker in source_identity for marker in _WORKSPACE_AUTOMATION_SCOPE_MARKERS)
 
 
 @pytest.fixture
@@ -368,15 +460,54 @@ async def test_due_automation_run_ensures_worker_again_after_kubernetes_idle_cle
 
 def test_workspace_automations_do_not_define_kubernetes_cronjobs() -> None:
     """Workspace automation scheduling should stay in the service/executor path."""
-    relevant_roots = (
-        Path("src/mindroom/workspace_automations"),
-        Path("src/mindroom/workers/backends"),
-    )
-    forbidden_markers = ("CronJob", "cronjob", "batch/v1")
-    matches: list[str] = []
-    for root in relevant_roots:
-        for source_path in root.rglob("*.py"):
-            source_text = source_path.read_text(encoding="utf-8")
-            matches.extend(f"{source_path}:{marker}" for marker in forbidden_markers if marker in source_text)
+    assert _find_forbidden_workspace_automation_kubernetes_resources() == []
 
-    assert matches == []
+
+def test_kubernetes_resource_scan_catches_workspace_automation_cronjobs_and_keepalive(
+    tmp_path: Path,
+) -> None:
+    """The negative scan should catch automation-specific manifests outside Python roots."""
+    manifest_path = tmp_path / "cluster" / "k8s" / "runtime" / "templates" / "workspace-automation-cronjob.yaml"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        """
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: workspace-automation-shell-check
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workspace-automation-keepalive
+  labels:
+    app.kubernetes.io/component: workspace-automation-keepalive
+spec:
+  replicas: 1
+""",
+        encoding="utf-8",
+    )
+
+    matches = _find_forbidden_workspace_automation_kubernetes_resources((tmp_path,))
+
+    assert any("batch/v1" in match for match in matches)
+    assert any("CronJob" in match for match in matches)
+    assert any("kind: Deployment" in match for match in matches)
+    assert any("keepalive" in match for match in matches)
+
+
+def test_kubernetes_resource_scan_ignores_unrelated_cronjobs(tmp_path: Path) -> None:
+    """Existing unrelated Kubernetes resources should not make the guard brittle."""
+    manifest_path = tmp_path / "cluster" / "k8s" / "runtime" / "templates" / "agent-vault-bootstrap.yaml"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        """
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: agent-vault-bootstrap
+""",
+        encoding="utf-8",
+    )
+
+    assert _find_forbidden_workspace_automation_kubernetes_resources((tmp_path,)) == []
