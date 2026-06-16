@@ -326,6 +326,7 @@ approvedEgress:
 
 With this setup, workers mint Agent Vault tokens through the API port (`14321`), workers proxy tool egress to the approved egress Service, Squid enforces allowlists and dynamic grants using the real worker IP, and Squid forwards requests carrying `Proxy-Authorization` to Agent Vault (`login=PASSTHRU`) for credential injection.
 Tokenless traffic egresses directly from Squid after the normal policy check.
+When `agentVault.accessTool.enabled` is set, self-service vault grants also keep `agentVault.ownerEmail` as an admin on each worker vault; the Kubernetes worker init container uses that owner account to mint and attach the proxy-role agent token.
 The chart rejects the unsafe default combination of chart-managed approved egress plus Agent Vault without `approvedEgress.parentProxy`, because that would be vault-first and break dynamic grants.
 
 Use `egressProxy` when another chart or platform layer already manages the proxy:

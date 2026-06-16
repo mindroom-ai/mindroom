@@ -6777,6 +6777,18 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Agent Vault owner account used by Kubernetes worker init when minting proxy tokens. When set, self-service grants keep this account admin on the worker vault too.",
+          "label": "Agent Vault Owner Email",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,

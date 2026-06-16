@@ -87,6 +87,7 @@ AGENT_VAULT_ACCESS_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
         "ui_base_url": "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL",
         "email_domain": "MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN",
         "vault_name_prefix": "MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX",
+        "owner_email": "MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL",
     },
 )
 

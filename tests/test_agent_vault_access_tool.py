@@ -219,6 +219,69 @@ async def test_request_vault_access_joins_worker_created_vault(
 
 
 @pytest.mark.asyncio
+async def test_request_vault_access_keeps_worker_token_owner_admin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Self-service grants must also keep the worker token-mint owner as vault admin."""
+    env = {**_ENV, "MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL": "owner@example.test"}
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 201})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=_worker_target())
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "ok"
+    grant_calls = [body for path, body in api.calls if path.endswith("/users")]
+    assert grant_calls == [
+        {"email": "owner@example.test", "role": "admin"},
+        {"email": "bas.nijholt@example.test", "role": "admin"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_request_vault_access_skips_duplicate_owner_grant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A requester who is also the configured owner should be granted once."""
+    env = {**_ENV, "MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL": "owner@example.test"}
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 201})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(
+        runtime_paths=_runtime_paths(tmp_path, env=env),
+        worker_target=_worker_target(requester="@owner:example.test"),
+    )
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "ok"
+    grant_calls = [body for path, body in api.calls if path.endswith("/users")]
+    assert grant_calls == [{"email": "owner@example.test", "role": "admin"}]
+
+
+@pytest.mark.asyncio
+async def test_request_vault_access_reports_owner_account_setup_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owner-account setup errors should not look like requester signup work."""
+    env = {**_ENV, "MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL": "owner@example.test"}
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 404})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=_worker_target())
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "error"
+    assert "configured worker token-mint owner account" in payload["error"]
+    assert "operator" in payload["error"]
+    assert "Register and verify at the vault UI first, then ask again" not in payload["error"]
+    grant_calls = [body for path, body in api.calls if path.endswith("/users")]
+    assert grant_calls == [{"email": "owner@example.test", "role": "admin"}]
+
+
+@pytest.mark.asyncio
 async def test_request_vault_access_reports_non_owner_token_on_join(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -372,7 +372,10 @@ workers:
       # Agent Vault CLI image used by the init container to mint per-worker
       # proxy-role agent tokens. Required when enabled.
       cliImage: ""
-      # Agent Vault instance owner email used for provisioning. Required when enabled.
+      # Agent Vault instance owner email used for provisioning and worker token
+      # minting. Required when enabled. When accessTool is enabled, self-service
+      # grants also keep this owner admin on each worker vault so the init
+      # container can attach the proxy-role agent even for user-created vaults.
       ownerEmail: ""
       # Prefix for the per-worker vault name (worker_id_for_key); the
       # agent_vault_access tool must use the same prefix

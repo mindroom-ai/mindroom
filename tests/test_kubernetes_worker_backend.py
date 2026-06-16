@@ -3104,10 +3104,12 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert mint["name"] == "agent-vault-mint-token"
     assert mint["image"] == "example.test/agent-vault:1"
     mint_script = mint["command"][2]
+    assert "agent-vault owner vault join" in mint_script
     assert "agent-vault agent create" in mint_script
     assert "agent-vault agent rotate" in mint_script
     assert "agent-vault vault agent add" in mint_script
     assert "agent-vault vault agent set-role" in mint_script
+    assert mint_script.index("agent-vault owner vault join") < mint_script.index("agent-vault agent create")
     assert "--role proxy > /dev/null 2>&1" not in mint_script
     assert ":proxy" in mint_script
     # The owner CLI session must not land on the shared token volume, or the

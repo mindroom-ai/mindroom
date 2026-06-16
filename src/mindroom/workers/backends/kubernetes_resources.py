@@ -129,6 +129,7 @@ agent-vault auth login \\
   --email "$AGENT_VAULT_OWNER_EMAIL" \\
   --password-stdin < "{bootstrap_path}/{owner_password_key}" > /dev/null
 agent-vault vault create "$AGENT_VAULT_VAULT" > /dev/null 2>&1 || true
+agent-vault owner vault join "$AGENT_VAULT_VAULT" > /dev/null 2>&1 || true
 if ! agent-vault agent create "$AGENT_VAULT_VAULT" \\
   --vault "$AGENT_VAULT_VAULT:proxy" \\
   --token-only > "{token_path}"; then

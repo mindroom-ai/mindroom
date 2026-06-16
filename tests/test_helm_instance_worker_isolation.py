@@ -1390,6 +1390,30 @@ def test_runtime_chart_approved_egress_can_chain_agent_vault_parent(tmp_path: Pa
     assert "name=agentvault" not in conf
 
 
+def test_runtime_chart_agent_vault_access_tool_sets_owner_email() -> None:
+    """The self-service access tool must know the owner used by worker token minting."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "workers.kubernetes.agentVault.enabled=true",
+        "workers.kubernetes.agentVault.cliImage=infisical/agent-vault:test",
+        "workers.kubernetes.agentVault.ownerEmail=owner@example.test",
+        "workers.kubernetes.agentVault.accessTool.enabled=true",
+        "workers.kubernetes.agentVault.accessTool.uiBaseUrl=https://example.test/agent-vault",
+        "workers.kubernetes.agentVault.accessTool.emailDomain=example.test",
+        "eventCache.postgres.auth.password=test-password",
+        release_name="mindroom-runtime",
+    )
+
+    runtime_container = _container(_resource(docs, "Deployment", "mindroom-runtime"), "mindroom")
+    runtime_env = _env_by_name(runtime_container)
+
+    assert runtime_env["MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL"]["value"] == "owner@example.test"
+    assert runtime_env["MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX"]["value"] == "agent-vault"
+    assert runtime_env["MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE"]["value"] == "/etc/agent-vault-access/token"
+
+
 def test_runtime_chart_rejects_agent_vault_default_proxy_url_with_approved_egress() -> None:
     """Agent Vault must not stay vault-first when approved egress owns dynamic grants."""
     completed = _run_helm_template(

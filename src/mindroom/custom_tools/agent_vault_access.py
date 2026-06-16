@@ -55,6 +55,7 @@ class AgentVaultAccessTools(Toolkit):
         self._vault_name_prefix = (
             runtime_paths.env_value(env["vault_name_prefix"]) or _DEFAULT_VAULT_NAME_PREFIX
         ).strip()
+        self._owner_email = (runtime_paths.env_value(env["owner_email"]) or "").strip()
         missing = [
             name
             for name, value in (
@@ -104,6 +105,19 @@ class AgentVaultAccessTools(Toolkit):
             token = self._resolve_admin_token()
             await self._ensure_vault(vault, token)
             await self._ensure_vault_admin(vault, token)
+            # Worker init logs in as the configured owner account to mint the
+            # proxy token, so keep that account admin on self-service vaults too.
+            if self._owner_email and self._owner_email.casefold() != email.casefold():
+                await self._grant_admin(
+                    vault,
+                    self._owner_email,
+                    token,
+                    missing_account_message=(
+                        "Agent Vault access is not ready: the configured worker token-mint owner account "
+                        "could not be kept as vault admin. Ask an operator to verify "
+                        f"{AGENT_VAULT_ACCESS_ENV_BY_KEY['owner_email']} is registered in Agent Vault."
+                    ),
+                )
             granted = await self._grant_admin(vault, email, token)
         except _AgentVaultAccessError as exc:
             return self._error(str(exc))
@@ -204,7 +218,14 @@ class AgentVaultAccessTools(Toolkit):
             raise _AgentVaultAccessError(msg)
         response.raise_for_status()
 
-    async def _grant_admin(self, vault: str, email: str, token: str) -> bool:
+    async def _grant_admin(
+        self,
+        vault: str,
+        email: str,
+        token: str,
+        *,
+        missing_account_message: str | None = None,
+    ) -> bool:
         response = await self._post(
             f"v1/vaults/{quote(vault, safe='')}/users",
             token,
@@ -218,7 +239,8 @@ class AgentVaultAccessTools(Toolkit):
             return False
         if response.status_code == 404:
             msg = (
-                f"{email} does not have an Agent Vault account yet. "
+                missing_account_message
+                or f"{email} does not have an Agent Vault account yet. "
                 "Register and verify at the vault UI first, then ask again."
             )
             raise _AgentVaultAccessError(msg)
