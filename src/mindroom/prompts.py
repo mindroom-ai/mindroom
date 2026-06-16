@@ -153,10 +153,7 @@ Deferred tools are available by exact name and can be loaded for this session.
 </available-deferred-tools>
 Use load_tool(tool_name) to load one by exact name.
 Use tool_search(query) for keyword lookup across deferred tools.
-After load_tool or unload_tool succeeds, continue the same task with the updated dynamic tool state in a later tool-call step.
-After load_tool succeeds, call the newly loaded tool only in that later tool-call step.
-Do not wait for another user message.
-Do not call a newly loaded tool in the same parallel tool-call batch as load_tool.
+A loaded tool becomes callable once it appears in your available tools; do not call it in the same parallel tool-call batch as load_tool.
 In team conversations, each member manages its own dynamic tool state."""
 
 PREVIOUS_CONVERSATION_THREAD_HEADER = "Previous conversation in this thread:"
@@ -426,9 +423,8 @@ CODEX_DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
 DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS = (
     "Manage deferred tools for this session. "
     "Use list_tools() or tool_search() when unsure. "
-    "After load_tool() or unload_tool() succeeds, continue the same task with the updated dynamic tool state "
-    "in a later tool-call step. After load_tool() succeeds, call the loaded tool only in that later step. "
-    "Do not wait for another user message or call a newly loaded tool in the same parallel tool-call batch."
+    "A tool loaded with load_tool() becomes callable once it appears in your available tools, and "
+    "unload_tool() removes one. Do not call a newly loaded tool in the same parallel tool-call batch as load_tool()."
 )
 DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can delegate tasks to the following agents:
 {agent_descriptions}

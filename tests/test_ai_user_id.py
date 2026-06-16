@@ -6245,7 +6245,6 @@ class TestUserIdPassthrough:
             result=json.dumps(
                 {
                     "status": "loaded",
-                    "takes_effect": "later_tool_call_step",
                     "tool": "dynamic_tools",
                     "tool_name": "sleep",
                 },
@@ -6323,7 +6322,6 @@ class TestUserIdPassthrough:
             result=json.dumps(
                 {
                     "status": "loaded",
-                    "takes_effect": "later_tool_call_step",
                     "tool": "dynamic_tools",
                     "tool_name": "sleep",
                 },
@@ -6401,7 +6399,6 @@ class TestUserIdPassthrough:
             result=json.dumps(
                 {
                     "status": "loaded",
-                    "takes_effect": "later_tool_call_step",
                     "tool": "dynamic_tools",
                     "tool_name": "sleep",
                 },
@@ -6481,7 +6478,6 @@ class TestUserIdPassthrough:
             result=json.dumps(
                 {
                     "status": "loaded",
-                    "takes_effect": "later_tool_call_step",
                     "tool": "dynamic_tools",
                     "tool_name": "sleep",
                 },

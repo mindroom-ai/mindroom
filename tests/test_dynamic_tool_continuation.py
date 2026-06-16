@@ -12,17 +12,21 @@ from mindroom.dynamic_tool_continuation import (
 )
 
 
-def _dynamic_tool_execution(status: str = "loaded") -> ToolExecution:
+def _dynamic_tool_execution(
+    status: str = "loaded",
+    *,
+    function_name: str = "load_tool",
+    tool_name: str = "sleep",
+) -> ToolExecution:
     return ToolExecution(
-        tool_call_id="call-load",
-        tool_name="load_tool",
-        tool_args={"tool_name": "sleep"},
+        tool_call_id=f"call-{function_name}",
+        tool_name=function_name,
+        tool_args={"tool_name": tool_name},
         result=json.dumps(
             {
                 "status": status,
-                "takes_effect": "later_tool_call_step",
                 "tool": "dynamic_tools",
-                "tool_name": "sleep",
+                "tool_name": tool_name,
             },
         ),
         stop_after_tool_call=True,
@@ -45,6 +49,34 @@ def test_continuation_decision_detects_dynamic_tool_call() -> None:
     assert "updated tool schema" in decision.next_prompt
     assert "Continue the same task" in decision.next_prompt
     assert "loaded" in decision.next_prompt
+
+
+def test_continuation_decision_detects_unload_tool_call() -> None:
+    """An unload_tool manager call continues the same task without the tool."""
+    decision = continuation_decision_from_tools(
+        [_dynamic_tool_execution(status="unloaded", function_name="unload_tool")],
+        original_prompt="Tidy up the tools",
+        continuation_count=0,
+    )
+
+    assert decision.should_continue is True
+    assert decision.next_prompt is not None
+    assert "unload_tool" in decision.next_prompt
+    assert "without the unloaded tool" in decision.next_prompt
+    assert "If the requested tool is unavailable" not in decision.next_prompt
+
+
+def test_continuation_decision_limit_message_names_unload_tool() -> None:
+    """The limit fallback names the unload_tool call that did not converge."""
+    decision = continuation_decision_from_tools(
+        [_dynamic_tool_execution(status="unloaded", function_name="unload_tool")],
+        original_prompt="Tidy up the tools",
+        continuation_count=DYNAMIC_TOOL_CONTINUATION_LIMIT,
+    )
+
+    assert decision.should_continue is False
+    assert decision.limit_message is not None
+    assert "`unload_tool` for `sleep`" in decision.limit_message
 
 
 def test_continuation_decision_handles_failed_dynamic_tool_call_without_assuming_availability() -> None:

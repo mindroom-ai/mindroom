@@ -326,6 +326,38 @@ def _reset_turn_state_for_dynamic_continuation(
     return turn_state
 
 
+def _advance_dynamic_continuation(
+    *,
+    agent: Agent | None,
+    scope_context: ScopeSessionContext | None,
+    continuation_state: _DynamicContinuationRunState,
+    next_prompt: str | None,
+    previous_run_id: str | None,
+    turn_recorder: TurnRecorder | None,
+    run_metadata: dict[str, Any] | None,
+    completed_tools_for_turn: Sequence[ToolTraceEntry],
+) -> tuple[_DynamicContinuationRunState, AITurnState]:
+    """Close the spent agent and prepare run state for one more continuation.
+
+    Shared by the blocking and streaming loops so the continuation handoff stays
+    identical across both paths.
+    """
+    close_agent_runtime_state_dbs(
+        agent,
+        shared_scope_storage=scope_context.storage if scope_context is not None else None,
+    )
+    advanced_state = continuation_state.advance(
+        continuation_prompt=next_prompt or continuation_state.original_prompt,
+        previous_run_id=previous_run_id,
+    )
+    turn_state = _reset_turn_state_for_dynamic_continuation(
+        turn_recorder=turn_recorder,
+        run_metadata=run_metadata,
+        completed_tools_for_turn=completed_tools_for_turn,
+    )
+    return advanced_state, turn_state
+
+
 @timed("system_prompt_assembly.system_enrichment_render")
 def _render_system_enrichment_context(
     system_enrichment_items: Sequence[EnrichmentItem],
@@ -1075,6 +1107,7 @@ async def _prepare_agent_and_prompt(
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
             timing_scope=timing_scope,
+            dynamic_tool_continuation=True,
         )
         return runtime_model, agent
 
@@ -1511,20 +1544,17 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 )
                 completed_tools_for_turn = turn_state.completed_tools_for(response_tool_trace)
                 if continuation_decision.should_continue:
-                    close_agent_runtime_state_dbs(
-                        agent,
-                        shared_scope_storage=scope_context.storage if scope_context is not None else None,
-                    )
-                    agent = None
-                    continuation_state = continuation_state.advance(
-                        continuation_prompt=continuation_decision.next_prompt or continuation_state.original_prompt,
+                    continuation_state, turn_state = _advance_dynamic_continuation(
+                        agent=agent,
+                        scope_context=scope_context,
+                        continuation_state=continuation_state,
+                        next_prompt=continuation_decision.next_prompt,
                         previous_run_id=attempt.attempt_run_id,
-                    )
-                    turn_state = _reset_turn_state_for_dynamic_continuation(
                         turn_recorder=turn_recorder,
                         run_metadata=metadata,
                         completed_tools_for_turn=completed_tools_for_turn,
                     )
+                    agent = None
                     continue
                 if continuation_decision.limit_message is not None and continuation_decision.continuation is not None:
                     logger.warning(
@@ -1549,11 +1579,11 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                         completed_tools=response_tool_trace,
                     )
                 return response_text
-            logger.warning("AI response exhausted dynamic tool continuation loop", agent=agent_name)
-            return get_user_friendly_error_message(
-                Exception("Dynamic tool continuation did not produce a final response"),
-                agent_name,
-            )
+            # The continuation loop always returns on its final iteration: at
+            # continuation_count == DYNAMIC_TOOL_CONTINUATION_LIMIT the decision
+            # carries a limit_message and never asks to continue.
+            msg = "dynamic tool continuation loop must return within its iteration budget"
+            raise AssertionError(msg)
     except asyncio.CancelledError:
         if turn_recorder is not None:
             turn_state.record_interrupted_from_recorder(
@@ -2112,20 +2142,17 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     )
                     completed_tools_for_turn = turn_state.completed_tools_for(state.completed_tools)
                     if continuation_decision.should_continue:
-                        close_agent_runtime_state_dbs(
-                            agent,
-                            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-                        )
-                        agent = None
-                        continuation_state = continuation_state.advance(
-                            continuation_prompt=continuation_decision.next_prompt or continuation_state.original_prompt,
+                        continuation_state, turn_state = _advance_dynamic_continuation(
+                            agent=agent,
+                            scope_context=scope_context,
+                            continuation_state=continuation_state,
+                            next_prompt=continuation_decision.next_prompt,
                             previous_run_id=attempt.attempt_run_id,
-                        )
-                        turn_state = _reset_turn_state_for_dynamic_continuation(
                             turn_recorder=turn_recorder,
                             run_metadata=metadata,
                             completed_tools_for_turn=completed_tools_for_turn,
                         )
+                        agent = None
                         continue
                     if (
                         continuation_decision.limit_message is not None

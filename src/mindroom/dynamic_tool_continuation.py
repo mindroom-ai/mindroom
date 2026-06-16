@@ -16,16 +16,7 @@ __all__ = ["DYNAMIC_TOOL_CONTINUATION_LIMIT", "continuation_decision_from_tools"
 DYNAMIC_TOOL_CONTINUATION_LIMIT = 4
 _DYNAMIC_TOOL_FUNCTION_NAMES = frozenset({"load_tool", "unload_tool"})
 _LOADED_STATUSES = frozenset({"loaded", "already_loaded"})
-
-
-def _string_key_dict(value: object) -> dict[str, object] | None:
-    """Return a string-keyed dict from one decoded structured payload."""
-    if not isinstance(value, dict):
-        return None
-    raw_payload = cast("dict[object, object]", value)
-    if not all(isinstance(key, str) for key in raw_payload):
-        return None
-    return cast("dict[str, object]", raw_payload)
+_UNLOADED_STATUS = "unloaded"
 
 
 @dataclass(frozen=True)
@@ -53,17 +44,15 @@ class _DynamicToolContinuationDecision:
 
 def _dynamic_tool_payload(result: object) -> dict[str, object] | None:
     """Return the structured dynamic-tools payload from one tool result."""
-    if isinstance(result, str):
-        try:
-            decoded = json.loads(result)
-        except json.JSONDecodeError:
-            return None
-        payload = _string_key_dict(decoded)
-    else:
-        payload = _string_key_dict(result)
-    if payload is None:
+    if not isinstance(result, str):
         return None
-
+    try:
+        decoded = json.loads(result)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    payload = cast("dict[str, object]", decoded)
     if payload.get("tool") != "dynamic_tools":
         return None
     return payload
@@ -103,6 +92,12 @@ def _dynamic_tool_continuation_prompt(
         continuation_instruction = (
             "After this tool result is processed, MindRoom continues the same task with the updated tool schema. "
             "Continue the same task now and call the loaded tool in a later tool-call step. "
+            "Do not wait for another user message."
+        )
+    elif continuation.status == _UNLOADED_STATUS:
+        continuation_instruction = (
+            "After this tool result is processed, MindRoom continues the same task with the updated tool schema. "
+            "Continue the same task now without the unloaded tool. "
             "Do not wait for another user message."
         )
     else:
