@@ -670,6 +670,11 @@ _WORKER_EGRESS_NO_PROXY = "localhost,127.0.0.1,::1,.svc,.cluster.local"
 
 
 def _git_config_env(process_env: Mapping[str, str], entries: list[tuple[str, str]]) -> dict[str, str]:
+    """Append entries to any well-formed environment-backed Git config.
+
+    A malformed incoming block is discarded so Git never receives an
+    inconsistent count/key/value set.
+    """
     existing_entries: list[tuple[str, str]] = []
     try:
         existing_count = int(process_env.get("GIT_CONFIG_COUNT", "0"))

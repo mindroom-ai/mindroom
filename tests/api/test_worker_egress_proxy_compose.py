@@ -47,7 +47,6 @@ def test_worker_proxy_execution_env_configures_git_proxy_auth(tmp_path: Path) ->
     """Git must receive proxy auth as config, not only env proxy userinfo."""
     _, expected_proxy = _runtime_paths_with_vault(tmp_path)
     token_path = tmp_path / "token"
-    token_path.write_text("av_sess_worker_token\n", encoding="utf-8")
 
     env = worker_proxy_execution_env(
         {
@@ -67,7 +66,6 @@ def test_worker_proxy_execution_env_appends_to_existing_git_config(tmp_path: Pat
     """Worker proxy Git config must not discard caller-supplied Git config."""
     _, expected_proxy = _runtime_paths_with_vault(tmp_path)
     token_path = tmp_path / "token"
-    token_path.write_text("av_sess_worker_token\n", encoding="utf-8")
 
     env = worker_proxy_execution_env(
         {
