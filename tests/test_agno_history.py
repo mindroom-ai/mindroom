@@ -5068,21 +5068,17 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
         make_visible_message(sender="bob", body="Recent context"),
     ]
 
-    def fake_estimate_preparation_static_tokens(
-        agent: Agent,
-        *,
-        full_prompt: str,
-    ) -> int:
-        assert agent is live_agent
-        return estimate_text_tokens(full_prompt)
+    class FakeAgentStaticTokenEstimator:
+        def __init__(self, agent: Agent) -> None:
+            assert agent is live_agent
+
+        def estimate(self, full_prompt: str) -> int:
+            return estimate_text_tokens(full_prompt)
 
     with (
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch(
-            "mindroom.execution_preparation.estimate_preparation_static_tokens",
-            side_effect=fake_estimate_preparation_static_tokens,
-        ),
+        patch("mindroom.execution_preparation.AgentStaticTokenEstimator", FakeAgentStaticTokenEstimator),
         patch(
             "mindroom.execution_preparation.prepare_scope_history",
             new=AsyncMock(return_value=MagicMock()),

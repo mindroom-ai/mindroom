@@ -3220,6 +3220,7 @@ from = ["mindroom.tool_system.worker_routing"]
 
 [[interfaces]]
 expose = [
+    "AgentStaticTokenEstimator",
     "CompactionOutcome",
     "HistoryPolicy",
     "HistoryScope",
@@ -3230,6 +3231,7 @@ expose = [
     "ResolvedHistorySettings",
     "ResolvedReplayPlan",
     "ScopeSessionContext",
+    "TeamStaticTokenEstimator",
     "add_pending_force_compaction_scope",
     "agent_tool_definition_payloads_for_logging",
     "apply_replay_plan",

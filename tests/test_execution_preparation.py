@@ -3,31 +3,43 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from agno.agent import Agent
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
+from agno.tools.function import Function
 
+import mindroom.history.compaction as compaction_module
 from mindroom import execution_preparation
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
+from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import (
     _build_thread_history_messages,
     _build_unseen_context_messages,
     _fallback_static_token_budget,
     _prepare_execution_context_common,
     _ThreadAttachmentContext,
+    prepare_agent_execution_context,
     render_prepared_messages_text,
 )
-from mindroom.history import HistoryPolicy, HistoryScope, PreparedScopeHistory, ResolvedHistorySettings
+from mindroom.history import (
+    HistoryPolicy,
+    HistoryScope,
+    PreparedHistoryState,
+    PreparedScopeHistory,
+    ResolvedHistorySettings,
+)
+from mindroom.history.compaction import estimate_agent_static_tokens
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.runtime import _ResolvedPreparationInputs
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
-from tests.conftest import make_visible_message
+from tests.conftest import FakeModel, bind_runtime_paths, make_visible_message
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -35,6 +47,35 @@ if TYPE_CHECKING:
 
 def _config() -> Config:
     return Config.model_validate({})
+
+
+def _runtime_paths(tmp_path: Path) -> RuntimePaths:
+    return resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+
+
+def _bound_agent_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.model_validate(
+        {
+            "agents": {"test_agent": {"display_name": "Test Agent"}},
+            "defaults": {"tools": [], "compaction": {"enabled": False, "reserve_tokens": 0}},
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "test-model",
+                    "context_window": 8_000,
+                },
+            },
+        },
+    )
+    return bind_runtime_paths(config, runtime_paths), runtime_paths
 
 
 def _tool_trace_content() -> dict[str, object]:
@@ -135,6 +176,71 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
 
     assert prepared.replays_persisted_history is True
     assert prepared.context_messages[0].content == "@alice:localhost: older context"
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_execution_context_reuses_agno_tool_determination_for_static_estimates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One prompt assembly should determine Agno tools once for repeated static estimates."""
+
+    def search_docs(query: str) -> str:
+        """Search indexed documentation."""
+        return query
+
+    agent = Agent(
+        id="test_agent",
+        name="Test Agent",
+        model=FakeModel(id="fake-model", provider="fake"),
+        tools=[Function(name="search_docs", entrypoint=search_docs)],
+    )
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    prepare_scope_history = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare_scope_history)
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False),
+    )
+
+    original_determine_tools = compaction_module.determine_tools_for_model
+    count_determine_tools = True
+    determine_tools_calls = 0
+
+    def counting_determine_tools(*args: object, **kwargs: object) -> list[object]:
+        nonlocal determine_tools_calls
+        if count_determine_tools:
+            determine_tools_calls += 1
+        return original_determine_tools(*args, **kwargs)
+
+    monkeypatch.setattr(compaction_module, "determine_tools_for_model", counting_determine_tools)
+
+    prepared = await prepare_agent_execution_context(
+        scope_context=None,
+        agent=agent,
+        agent_name="test_agent",
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="Earlier context", event_id="$older"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+        ],
+        runtime_paths=runtime_paths,
+        config=config,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        reply_to_event_id="$current",
+        active_event_ids=(),
+        compaction_outcomes_collector=None,
+        current_sender_id="@alice:localhost",
+    )
+
+    preparation_determine_tools_calls = determine_tools_calls
+    count_determine_tools = False
+    assert prepared.prepared_context_tokens == estimate_agent_static_tokens(agent, prepared.final_prompt)
+    assert prepared.estimated_context_tokens == prepared.prepared_context_tokens
+    assert preparation_determine_tools_calls == 1
+    assert prepare_scope_history.await_count == 1
 
 
 def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> None:

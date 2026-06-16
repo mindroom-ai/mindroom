@@ -1015,19 +1015,15 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
     mock_team = _make_test_team(name="General Team")
     captured_prompts: list[tuple[str, str | None]] = []
 
-    def fake_estimate_static_tokens(
-        team: AgnoTeam,
-        *,
-        full_prompt: str,
-    ) -> int:
-        assert team is mock_team
-        captured_prompts.append((full_prompt, None))
-        return 0
+    class FakeTeamStaticTokenEstimator:
+        def __init__(self, team: AgnoTeam) -> None:
+            assert team is mock_team
 
-    with patch(
-        "mindroom.execution_preparation.estimate_preparation_static_tokens_for_team",
-        side_effect=fake_estimate_static_tokens,
-    ):
+        def estimate(self, full_prompt: str) -> int:
+            captured_prompts.append((full_prompt, None))
+            return 0
+
+    with patch("mindroom.execution_preparation.TeamStaticTokenEstimator", FakeTeamStaticTokenEstimator):
         prepared = await _prepare_bound_team_execution_context(
             scope_context=None,
             agents=[fake_agent],
@@ -1059,6 +1055,7 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
         ("user", "Analyze this."),
     )
     assert captured_prompts == [
+        ("Analyze this.", None),
         ("Analyze this.", None),
         ("assistant: Previous team reply\n\nAnalyze this.", None),
     ]

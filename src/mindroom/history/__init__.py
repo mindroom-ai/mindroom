@@ -2,6 +2,8 @@
 
 from mindroom.history import agno_team_patch
 from mindroom.history.compaction import (
+    AgentStaticTokenEstimator,
+    TeamStaticTokenEstimator,
     agent_tool_definition_payloads_for_logging,
     compute_prompt_token_breakdown,
     normalize_compaction_budget_tokens,
@@ -62,6 +64,7 @@ from mindroom.history.types import (
 agno_team_patch.apply_patch()
 
 __all__ = [
+    "AgentStaticTokenEstimator",
     "CompactionDecision",
     "CompactionLifecycle",
     "CompactionLifecycleFailure",
@@ -80,6 +83,7 @@ __all__ = [
     "ResolvedHistorySettings",
     "ResolvedReplayPlan",
     "ScopeSessionContext",
+    "TeamStaticTokenEstimator",
     "add_pending_force_compaction_scope",
     "agent_tool_definition_payloads_for_logging",
     "apply_replay_plan",

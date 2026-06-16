@@ -26,14 +26,14 @@ from mindroom.constants import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history import (
+    AgentStaticTokenEstimator,
     PreparedHistoryState,
     PreparedScopeHistory,
     ResolvedReplayPlan,
     ScopeSessionContext,
+    TeamStaticTokenEstimator,
     apply_replay_plan,
     context_budget_after_reserve,
-    estimate_preparation_static_tokens,
-    estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
     prepare_bound_scope_history,
     prepare_scope_history,
@@ -769,6 +769,7 @@ async def prepare_agent_execution_context(
         thread_id=thread_id,
         runtime_paths=runtime_paths,
     )
+    static_token_estimator = AgentStaticTokenEstimator(agent)
 
     async def _prepare_agent_scope_history(
         prepared_prompt: str,
@@ -783,10 +784,7 @@ async def prepare_agent_execution_context(
             scope_context=scope_context,
             active_model_name=runtime_model.model_name,
             active_context_window=runtime_model.context_window,
-            static_prompt_tokens=estimate_preparation_static_tokens(
-                agent,
-                full_prompt=prepared_prompt,
-            ),
+            static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
             timing_scope=timing_scope,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
@@ -795,10 +793,7 @@ async def prepare_agent_execution_context(
     def _estimate_agent_static_tokens(
         prepared_prompt: str,
     ) -> int:
-        return estimate_preparation_static_tokens(
-            agent,
-            full_prompt=prepared_prompt,
-        )
+        return static_token_estimator.estimate(prepared_prompt)
 
     return await _prepare_execution_context_common(
         scope_context=scope_context,
@@ -849,6 +844,7 @@ async def _prepare_bound_team_execution_context(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
+    static_token_estimator = TeamStaticTokenEstimator(team)
 
     async def _prepare_team_scope_history(
         prepared_prompt: str,
@@ -864,6 +860,7 @@ async def _prepare_bound_team_execution_context(
             team_name=team_name,
             active_model_name=active_model_name,
             active_context_window=active_context_window,
+            static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
         )
@@ -871,10 +868,7 @@ async def _prepare_bound_team_execution_context(
     def _estimate_team_static_tokens(
         prepared_prompt: str,
     ) -> int:
-        return estimate_preparation_static_tokens_for_team(
-            team,
-            full_prompt=prepared_prompt,
-        )
+        return static_token_estimator.estimate(prepared_prompt)
 
     return await _prepare_execution_context_common(
         scope_context=scope_context,

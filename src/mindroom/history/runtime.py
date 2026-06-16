@@ -886,6 +886,7 @@ async def prepare_bound_scope_history(
     team_name: str | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
+    static_prompt_tokens: int | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedScopeHistory:
@@ -896,10 +897,10 @@ async def prepare_bound_scope_history(
         team_name=team_name,
     )
     if bound_scope is None:
-        resolved_inputs = _resolve_entity_preparation_inputs(
-            config=config,
-            entity_name=team_name if team_name in config.teams else None,
-            static_prompt_tokens=(
+        resolved_static_prompt_tokens = (
+            static_prompt_tokens
+            if static_prompt_tokens is not None
+            else (
                 estimate_preparation_static_tokens_for_team(
                     team,
                     full_prompt=full_prompt,
@@ -908,7 +909,12 @@ async def prepare_bound_scope_history(
                 else _estimate_preparation_prompt_tokens(
                     full_prompt=full_prompt,
                 )
-            ),
+            )
+        )
+        resolved_inputs = _resolve_entity_preparation_inputs(
+            config=config,
+            entity_name=team_name if team_name in config.teams else None,
+            static_prompt_tokens=resolved_static_prompt_tokens,
             active_model_name=active_model_name,
             active_context_window=active_context_window,
         )
@@ -918,20 +924,24 @@ async def prepare_bound_scope_history(
             resolved_inputs=resolved_inputs,
         )
 
-    static_prompt_tokens = (
-        estimate_preparation_static_tokens_for_team(
-            team,
-            full_prompt=full_prompt,
-        )
-        if team is not None
-        else _estimate_preparation_prompt_tokens(
-            full_prompt=full_prompt,
+    resolved_static_prompt_tokens = (
+        static_prompt_tokens
+        if static_prompt_tokens is not None
+        else (
+            estimate_preparation_static_tokens_for_team(
+                team,
+                full_prompt=full_prompt,
+            )
+            if team is not None
+            else _estimate_preparation_prompt_tokens(
+                full_prompt=full_prompt,
+            )
         )
     )
     resolved_inputs = _resolve_entity_preparation_inputs(
         config=config,
         entity_name=team_name if team_name in config.teams else None,
-        static_prompt_tokens=static_prompt_tokens,
+        static_prompt_tokens=resolved_static_prompt_tokens,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
     )
@@ -948,7 +958,7 @@ async def prepare_bound_scope_history(
         has_authored_compaction_config=resolved_inputs.execution_plan.authored_compaction_config,
         active_model_name=resolved_inputs.active_model_name,
         active_context_window=resolved_inputs.active_context_window,
-        static_prompt_tokens=static_prompt_tokens,
+        static_prompt_tokens=resolved_static_prompt_tokens,
         scope=bound_scope.scope,
         execution_plan=resolved_inputs.execution_plan,
         compaction_lifecycle=compaction_lifecycle,

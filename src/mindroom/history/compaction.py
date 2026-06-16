@@ -74,6 +74,40 @@ _EXCERPT_METADATA_OMIT_KEYS = frozenset(
 type _ToolDefinition = dict[str, object]
 
 
+@dataclass(slots=True)
+class AgentStaticTokenEstimator:
+    """Request-local static-token estimator for one prepared agent response."""
+
+    agent: Agent
+    _non_prompt_tokens: int | None = None
+
+    def estimate(self, full_prompt: str) -> int:
+        """Estimate static prompt tokens while reusing Agno-prepared tools."""
+        return estimate_text_tokens(full_prompt) + self._resolved_non_prompt_tokens()
+
+    def _resolved_non_prompt_tokens(self) -> int:
+        if self._non_prompt_tokens is None:
+            self._non_prompt_tokens = _estimate_agent_non_prompt_static_tokens(self.agent)
+        return self._non_prompt_tokens
+
+
+@dataclass(slots=True)
+class TeamStaticTokenEstimator:
+    """Request-local static-token estimator for one prepared team response."""
+
+    team: Team
+    _non_prompt_tokens: int | None = None
+
+    def estimate(self, full_prompt: str) -> int:
+        """Estimate static prompt tokens while reusing Agno-prepared team tools."""
+        return estimate_text_tokens(full_prompt) + self._resolved_non_prompt_tokens()
+
+    def _resolved_non_prompt_tokens(self) -> int:
+        if self._non_prompt_tokens is None:
+            self._non_prompt_tokens = _estimate_team_non_prompt_static_tokens(self.team)
+        return self._non_prompt_tokens
+
+
 @dataclass(frozen=True)
 class _ExcerptBlock:
     open_tag: str
@@ -559,7 +593,12 @@ async def _emit_lifecycle_progress_after_persist(
 
 def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:
     """Estimate the non-history agent prompt using Agno's real system-message builder."""
-    static_tokens = estimate_text_tokens(full_prompt)
+    return AgentStaticTokenEstimator(agent).estimate(full_prompt)
+
+
+def _estimate_agent_non_prompt_static_tokens(agent: Agent) -> int:
+    """Estimate system-message and tool tokens that do not depend on the prompt text."""
+    static_tokens = 0
     previous_tool_instructions = agent._tool_instructions
     try:
         session, run_context, prepared_tools = _prepare_agent_prompt_inputs_for_estimation(agent)
@@ -587,7 +626,12 @@ def _estimate_tool_definition_tokens(agent: Agent) -> int:
 
 def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
     """Estimate the non-history team prompt using Agno's team system-message builder."""
-    static_tokens = estimate_text_tokens(full_prompt)
+    return TeamStaticTokenEstimator(team).estimate(full_prompt)
+
+
+def _estimate_team_non_prompt_static_tokens(team: Team) -> int:
+    """Estimate team system-message and tool tokens that do not depend on prompt text."""
+    static_tokens = 0
     previous_tool_instructions = team._tool_instructions
     try:
         session, prepared_tools = _prepare_team_prompt_inputs_for_estimation(team)
@@ -737,6 +781,7 @@ def _default_function_parameters() -> dict[str, object]:
     return {"type": "object", "properties": {}, "required": []}
 
 
+@timed("system_prompt_assembly.history_prepare.static_token_estimate.agno_determine_tools")
 def _prepare_team_prompt_inputs_for_estimation(
     team: Team,
 ) -> tuple[TeamSession, list[Function | _ToolDefinition]]:
@@ -776,6 +821,7 @@ def _prepare_team_prompt_inputs_for_estimation(
     return session, [tool for tool in prepared_tools if isinstance(tool, Function) or _is_tool_definition_dict(tool)]
 
 
+@timed("system_prompt_assembly.history_prepare.static_token_estimate.agno_determine_tools")
 def _prepare_agent_prompt_inputs_for_estimation(
     agent: Agent,
 ) -> tuple[AgentSession, RunContext, list[Function | _ToolDefinition]]:
