@@ -74,11 +74,9 @@ class CoalescingConfig(BaseModel):
 
 
 def _validate_unique_workspace_automation_actions(
-    actions: list[WorkspaceAutomationActionName] | None,
-) -> list[WorkspaceAutomationActionName] | None:
+    actions: list[WorkspaceAutomationActionName],
+) -> list[WorkspaceAutomationActionName]:
     """Ensure each visible automation action appears at most once."""
-    if actions is None:
-        return None
     duplicates = duplicate_items([str(action) for action in actions])
     if duplicates:
         msg = "Duplicate workspace automation allowed actions are not allowed: " + ", ".join(duplicates)
@@ -87,7 +85,7 @@ def _validate_unique_workspace_automation_actions(
 
 
 _WorkspaceAutomationAllowedActions = Annotated[
-    list[WorkspaceAutomationActionName] | None,
+    list[WorkspaceAutomationActionName],
     AfterValidator(_validate_unique_workspace_automation_actions),
 ]
 
@@ -97,27 +95,27 @@ class WorkspaceAutomationPolicyConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool | None = Field(
-        default=None,
+    enabled: bool = Field(
+        default=False,
         description="Whether workspace-authored unattended automation may run",
     )
-    min_interval_seconds: int | None = Field(  # noqa: F841, RUF100
-        default=None,
+    min_interval_seconds: int = Field(
+        default=60,
         ge=60,
         description="Minimum allowed interval between workspace-authored automation check runs",
     )
-    max_timeout_seconds: int | None = Field(  # noqa: F841, RUF100
-        default=None,
+    max_timeout_seconds: int = Field(
+        default=30,
         ge=1,
         description="Maximum allowed timeout for one workspace-authored automation check run",
     )
-    max_output_bytes: int | None = Field(  # noqa: F841, RUF100
-        default=None,
+    max_output_bytes: int = Field(
+        default=65536,
         ge=1024,
         description="Maximum bytes of command output returned, trigger-evaluated, and persisted for one check run",
     )
     allowed_actions: _WorkspaceAutomationAllowedActions = Field(
-        default=None,
+        default_factory=list,
         description="Visible workspace-authored automation actions allowed for this policy scope",
     )
 
@@ -379,13 +377,7 @@ class DefaultsConfig(BaseModel):
         description="Default destructive compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)",
     )
     workspace_automations: WorkspaceAutomationPolicyConfig = Field(
-        default_factory=lambda: WorkspaceAutomationPolicyConfig(
-            enabled=False,
-            min_interval_seconds=60,
-            max_timeout_seconds=30,
-            max_output_bytes=65536,
-            allowed_actions=[],
-        ),
+        default_factory=WorkspaceAutomationPolicyConfig,
         description=(
             "Default gates for workspace-authored unattended automation; does not affect normal scheduled tasks"
         ),

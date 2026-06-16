@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.config.main import Config
-from mindroom.config.models import WorkspaceAutomationActionName
+from mindroom.config.models import WorkspaceAutomationActionName, WorkspaceAutomationPolicyConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 
 if TYPE_CHECKING:
@@ -31,6 +31,17 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
 def test_workspace_automation_action_type_is_public() -> None:
     """Workspace automation action names should be importable from config models."""
     assert get_args(WorkspaceAutomationActionName) == ("agent_message", "matrix_message", "hook")
+
+
+def test_workspace_automation_policy_model_defaults_are_concrete() -> None:
+    """The effective policy model should have non-null defaults at construction."""
+    policy = WorkspaceAutomationPolicyConfig()
+
+    assert policy.enabled is False
+    assert policy.min_interval_seconds == 60
+    assert policy.max_timeout_seconds == 30
+    assert policy.max_output_bytes == 65536
+    assert policy.allowed_actions == []
 
 
 def test_workspace_automation_policy_defaults_disabled(runtime_paths: RuntimePaths) -> None:
@@ -90,7 +101,6 @@ def test_workspace_automation_policy_merges_agent_fields_over_defaults(runtime_p
                     "display_name": "Ops",
                     "workspace_automations": {
                         "max_timeout_seconds": 5,
-                        "allowed_actions": ["matrix_message"],
                     },
                 },
             },
@@ -104,7 +114,39 @@ def test_workspace_automation_policy_merges_agent_fields_over_defaults(runtime_p
     assert policy.min_interval_seconds == 120
     assert policy.max_timeout_seconds == 5
     assert policy.max_output_bytes == 4096
-    assert policy.allowed_actions == ["matrix_message"]
+    assert policy.allowed_actions == ["agent_message", "hook"]
+
+
+def test_workspace_automation_empty_agent_policy_preserves_defaults(runtime_paths: RuntimePaths) -> None:
+    """An empty per-agent override should not wipe explicitly authored defaults."""
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {
+                "workspace_automations": {
+                    "enabled": True,
+                    "min_interval_seconds": 180,
+                    "max_timeout_seconds": 15,
+                    "max_output_bytes": 8192,
+                    "allowed_actions": ["hook"],
+                },
+            },
+            "agents": {
+                "ops": {
+                    "display_name": "Ops",
+                    "workspace_automations": {},
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+    policy = config.get_agent_workspace_automation_policy("ops")
+
+    assert policy.enabled is True
+    assert policy.min_interval_seconds == 180
+    assert policy.max_timeout_seconds == 15
+    assert policy.max_output_bytes == 8192
+    assert policy.allowed_actions == ["hook"]
 
 
 def test_workspace_automation_policy_rejects_invalid_action_names(runtime_paths: RuntimePaths) -> None:
