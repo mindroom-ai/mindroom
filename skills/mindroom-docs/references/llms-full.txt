@@ -15682,7 +15682,8 @@ For non-Kubernetes deployments, point worker egress at a shared proxy you run yo
 ### Self-service vault access
 
 The `agent_vault_access` tool lets a user ask their own agent for a link to manage that agent's vault.
-It resolves the caller's worker target to that worker's vault (`worker_id_for_key(worker_key, prefix)`, matching `agentVault.vaultNamePrefix`), grants the caller's Agent Vault account membership of that vault through the API, and returns the gated UI link.
+It resolves the caller's worker target to that worker's vault (`worker_id_for_key(worker_key, prefix)`, matching `agentVault.vaultNamePrefix`), grants the caller's Agent Vault account admin access to that vault through the API, and returns the gated UI link.
+It only self-grants for requester-isolated worker scopes (`user` or `user_agent`); shared worker vaults require operator-managed credentials.
 Configure it per deployment:
 
 ```bash

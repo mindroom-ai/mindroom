@@ -38,7 +38,11 @@ def _runtime_paths(tmp_path: Path, *, env: dict[str, str] | None = None) -> Runt
     )
 
 
-def _worker_target(*, requester: str | None = "@bas.nijholt:example.test") -> object:
+def _worker_target(
+    *,
+    requester: str | None = "@bas.nijholt:example.test",
+    worker_scope: str = "user_agent",
+) -> object:
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="mind",
@@ -50,7 +54,7 @@ def _worker_target(*, requester: str | None = "@bas.nijholt:example.test") -> ob
         tenant_id=None,
     )
     return resolve_worker_target(
-        "user_agent",
+        worker_scope,
         "mind",
         execution_identity=identity,
         private_agent_names=frozenset({"mind"}),
@@ -113,7 +117,7 @@ async def test_request_vault_access_grants_and_returns_link(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A first request resolves the vault, grants membership, and returns the link."""
+    """A first request resolves the vault, grants admin access, and returns the link."""
     target = _worker_target()
     expected_vault = worker_id_for_key(target.worker_key, prefix="agent-vault")
     api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 409, "/users": 201})
@@ -129,15 +133,35 @@ async def test_request_vault_access_grants_and_returns_link(
     assert payload["url"] == f"https://example.test/agent-vault/vaults/{expected_vault}"
     # The grant must target the resolved vault and the derived email.
     grant_calls = [body for path, body in api.calls if path.endswith("/users")]
-    assert grant_calls == [{"email": "bas.nijholt@example.test", "role": "member"}]
+    assert grant_calls == [{"email": "bas.nijholt@example.test", "role": "admin"}]
 
 
 @pytest.mark.asyncio
-async def test_request_vault_access_is_idempotent_when_already_member(
+async def test_request_vault_access_rejects_shared_scope_admin_grant(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Re-requesting when already a member reports success without error."""
+    """Shared worker vaults are not requester-owned, so the tool must not grant admin."""
+    api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 409, "/users": 201})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        worker_target=_worker_target(worker_scope="shared"),
+    )
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "error"
+    assert "requester-isolated" in payload["error"]
+    assert api.calls == []
+
+
+@pytest.mark.asyncio
+async def test_request_vault_access_is_idempotent_when_already_has_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-requesting when already granted reports success without error."""
     api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 409})
     _patch_client(monkeypatch, api)
 

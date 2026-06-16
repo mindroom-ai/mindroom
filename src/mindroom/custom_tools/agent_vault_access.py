@@ -3,12 +3,12 @@
 Lets a user ask their own agent for a link to manage that agent's Agent
 Vault secrets. MindRoom resolves the caller's worker target to the vault that
 backs that worker (the deterministic per-worker vault name), grants the
-caller's Agent Vault account membership of that vault, and returns the gated
+caller's Agent Vault account admin access to that vault, and returns the gated
 UI link.
 
 This grants *UI management access* only. The runtime secret boundary is still
 the per-worker vault scope plus the in-pod proxy-role token: that token can
-exercise a credential but cannot read it, and membership here never changes
+exercise a credential but cannot read it, and UI admin access here never changes
 which worker reaches which vault.
 """
 
@@ -76,15 +76,15 @@ class AgentVaultAccessTools(Toolkit):
         """Grant yourself access to manage this agent's Agent Vault secrets and return a link.
 
         Resolves the vault that backs your worker identity for this agent,
-        grants your Agent Vault account membership, and returns the UI link
+        grants your Agent Vault account admin access, and returns the UI link
         where you can add or update the secrets this agent's tools will use.
         """
         target = self._worker_target
-        if target is None or not target.worker_key:
-            return self._error(
-                "no worker identity is available for this agent, so it has no dedicated vault. "
-                "Agent Vault access requires a worker-scoped agent.",
-            )
+        if target_error := self._target_error(target):
+            return self._error(target_error)
+        assert target is not None  # Narrowed by _target_error.
+        worker_key = target.worker_key
+        assert worker_key is not None  # Narrowed by _target_error.
         identity = target.execution_identity
         requester_id = identity.requester_id if identity is not None else None
         if not requester_id:
@@ -97,14 +97,14 @@ class AgentVaultAccessTools(Toolkit):
                 "expected a Matrix ID whose localpart maps to the configured email domain.",
             )
 
-        vault = worker_id_for_key(target.worker_key, prefix=self._vault_name_prefix)
+        vault = worker_id_for_key(worker_key, prefix=self._vault_name_prefix)
         try:
             # One token read per request: both API calls must use the same
             # token, or a rotation between them could 401 the second call.
             token = self._resolve_admin_token()
             await self._ensure_vault(vault, token)
             await self._ensure_vault_admin(vault, token)
-            granted = await self._grant_member(vault, email, token)
+            granted = await self._grant_admin(vault, email, token)
         except _AgentVaultAccessError as exc:
             return self._error(str(exc))
         except httpx.HTTPError as exc:
@@ -127,6 +127,20 @@ class AgentVaultAccessTools(Toolkit):
             },
             sort_keys=True,
         )
+
+    def _target_error(self, target: ResolvedWorkerTarget | None) -> str | None:
+        if target is None or not target.worker_key:
+            return (
+                "no worker identity is available for this agent, so it has no dedicated vault. "
+                "Agent Vault access requires a worker-scoped agent."
+            )
+        if target.worker_scope not in {"user", "user_agent"}:
+            return (
+                "Agent Vault self-service admin access requires a requester-isolated worker vault "
+                "(worker_scope=user or worker_scope=user_agent). This agent uses a shared worker scope, "
+                "so ask an operator to configure shared credentials or give the agent a private worker scope."
+            )
+        return None
 
     def _requester_email(self, requester_id: str) -> str | None:
         # Matrix IDs look like @localpart:server; map localpart to the configured domain.
@@ -190,11 +204,11 @@ class AgentVaultAccessTools(Toolkit):
             raise _AgentVaultAccessError(msg)
         response.raise_for_status()
 
-    async def _grant_member(self, vault: str, email: str, token: str) -> bool:
+    async def _grant_admin(self, vault: str, email: str, token: str) -> bool:
         response = await self._post(
             f"v1/vaults/{quote(vault, safe='')}/users",
             token,
-            {"email": email, "role": "member"},
+            {"email": email, "role": "admin"},
         )
         if response.status_code in {200, 201}:
             return True

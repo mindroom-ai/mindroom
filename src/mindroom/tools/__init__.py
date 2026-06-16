@@ -374,7 +374,7 @@ def _homeassistant_tools() -> type[Toolkit]:
             required=False,
             description=(
                 "Instance-owner session or agent token used to create vaults, join them as "
-                "vault-admin (the /join step is owner-only), and grant membership. "
+                "vault-admin (the /join step is owner-only), and grant vault admin access. "
                 "Provide this or the admin token file."
             ),
         ),

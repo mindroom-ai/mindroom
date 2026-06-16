@@ -6721,7 +6721,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Instance-owner session or agent token used to create vaults, join them as vault-admin (the /join step is owner-only), and grant membership. Provide this or the admin token file.",
+          "description": "Instance-owner session or agent token used to create vaults, join them as vault-admin (the /join step is owner-only), and grant vault admin access. Provide this or the admin token file.",
           "label": "Agent Vault Admin Token",
           "name": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN",
           "options": null,
