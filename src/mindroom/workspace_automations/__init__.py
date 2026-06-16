@@ -11,6 +11,12 @@ from mindroom.workspace_automations.models import (
     WorkspaceAutomationLoadResult,
     WorkspaceAutomationTrigger,
 )
+from mindroom.workspace_automations.service import (
+    AutomationKey,
+    WorkspaceAutomationLoadedStatus,
+    WorkspaceAutomationScanResult,
+    WorkspaceAutomationService,
+)
 from mindroom.workspace_automations.targets import (
     WorkspaceAutomationTarget,
     iter_workspace_automation_targets,
@@ -19,6 +25,7 @@ from mindroom.workspace_automations.targets import (
 
 __all__ = [
     "AUTOMATIONS_RELATIVE_PATH",
+    "AutomationKey",
     "LoadedWorkspaceAutomation",
     "WorkspaceAutomationAction",
     "WorkspaceAutomationCheck",
@@ -26,6 +33,9 @@ __all__ = [
     "WorkspaceAutomationFile",
     "WorkspaceAutomationLoadError",
     "WorkspaceAutomationLoadResult",
+    "WorkspaceAutomationLoadedStatus",
+    "WorkspaceAutomationScanResult",
+    "WorkspaceAutomationService",
     "WorkspaceAutomationTarget",
     "WorkspaceAutomationTrigger",
     "iter_workspace_automation_targets",

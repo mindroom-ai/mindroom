@@ -76,6 +76,7 @@ from mindroom.tool_system.plugins import (
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 from mindroom.workers.runtime import clear_worker_validation_snapshot_cache, shutdown_primary_worker_manager
+from mindroom.workspace_automations.service import WorkspaceAutomationService
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
@@ -115,6 +116,7 @@ if TYPE_CHECKING:
     from types import FrameType
 
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
     from .constants import RuntimePaths
     from .orchestration.config_updates import ConfigUpdatePlan
@@ -222,6 +224,7 @@ class _MultiAgentOrchestrator:
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
     _startup_maintenance: StartupMaintenanceController = field(init=False, repr=False)
+    _workspace_automation_service: WorkspaceAutomationService = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Store canonical derived paths from the explicit runtime context."""
@@ -250,6 +253,7 @@ class _MultiAgentOrchestrator:
             config_provider=lambda: self.config,
             event_cache_provider=lambda: self._runtime_support.event_cache,
         )
+        self._workspace_automation_service = WorkspaceAutomationService()
         self._startup_maintenance = StartupMaintenanceController(
             setup_rooms_and_memberships=lambda bots: run_with_retry(
                 "Setting up Matrix rooms and memberships",
@@ -309,6 +313,42 @@ class _MultiAgentOrchestrator:
         )
         self._memory_auto_flush_worker = worker
         self._memory_auto_flush_task = asyncio.create_task(worker.run(), name="memory_auto_flush_worker")
+
+    def _router_conversation_cache(self) -> ConversationCacheProtocol | None:
+        """Return the existing router conversation cache when the router bot exists."""
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if router_bot is None:
+            return None
+        return router_bot._conversation_cache
+
+    async def _start_workspace_automation_service(self, config: Config) -> None:
+        """Start workspace automation supervision once router runtime support is ready."""
+        conversation_cache = self._router_conversation_cache()
+        if conversation_cache is None:
+            logger.warning("Workspace automations skipped because the router conversation cache is unavailable")
+            return
+        await self._workspace_automation_service.start(
+            config,
+            self.runtime_paths,
+            self.hook_registry,
+            lambda agent_name: self.agent_bots.get(agent_name),
+            conversation_cache,
+        )
+
+    async def _refresh_workspace_automation_service(self, config: Config) -> None:
+        """Refresh workspace automation supervision after config or hook-registry updates."""
+        if not self._workspace_automation_service.is_started:
+            return
+        conversation_cache = self._router_conversation_cache()
+        if conversation_cache is None:
+            logger.warning("Workspace automations refresh skipped because the router conversation cache is unavailable")
+            return
+        await self._workspace_automation_service.refresh(
+            config,
+            self.hook_registry,
+            lambda agent_name: self.agent_bots.get(agent_name),
+            conversation_cache,
+        )
 
     def _reset_runtime_shutdown_event(self) -> asyncio.Event:
         """Create the shutdown event for the current orchestrator run."""
@@ -563,6 +603,7 @@ class _MultiAgentOrchestrator:
         await self._sync_event_cache_service(config)
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
+        await self._refresh_workspace_automation_service(config)
 
     async def _stop_mcp_manager(self) -> None:
         """Stop the MCP manager and clear the active runtime binding."""
@@ -747,11 +788,13 @@ class _MultiAgentOrchestrator:
                     self.runtime_paths,
                 )
                 self._activate_hook_registry(recovery_result.hook_registry)
+                await self._refresh_workspace_automation_service(config)
                 clear_worker_validation_snapshot_cache()
                 self.plugin_watch.refresh(config)
                 logger.warning(warning_message, source=source, **warning_kwargs)
                 raise
             self._activate_hook_registry(result.hook_registry)
+            await self._refresh_workspace_automation_service(config)
             clear_worker_validation_snapshot_cache()
             self.plugin_watch.refresh(config)
             logger.info(
@@ -1067,6 +1110,10 @@ class _MultiAgentOrchestrator:
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
         self.running = True
+
+        phase_started = log_startup_phase_started("start_workspace_automations")
+        await self._start_workspace_automation_service(config)
+        log_startup_phase_finished("start_workspace_automations", phase_started)
 
         # Create sync tasks for each bot with automatic restart on failure.
         set_runtime_starting("Starting Matrix sync loops")
@@ -1622,6 +1669,7 @@ class _MultiAgentOrchestrator:
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
         await self._startup_maintenance.cancel()
+        await self._workspace_automation_service.shutdown()
         await self._stop_memory_auto_flush_worker()
         await self._knowledge_source_watcher.shutdown()
         await self._knowledge_refresh_scheduler.shutdown()
