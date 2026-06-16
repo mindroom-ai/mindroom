@@ -40,16 +40,16 @@ Create `src/mindroom/workspace_automations/targets.py`.
 This file resolves enabled shared agents, workspaces, worker scope, and Matrix action targets.
 
 Create `src/mindroom/workspace_automations/executor.py`.
-This file executes deterministic checks through registered toolkits with existing worker routing.
+This file executes deterministic checks through the shell toolkit's structured command function with existing worker routing.
 
 Create `src/mindroom/workspace_automations/triggers.py`.
-This file evaluates exit code, stdout/stderr regex, and JSON field trigger rules.
+This file evaluates exit code and stdout/stderr regex trigger rules.
 
 Create `src/mindroom/workspace_automations/actions.py`.
-This file performs `agent_message`, `matrix_message`, and `hook` actions after a trigger matches.
+This file performs `agent_message`, `matrix_message`, and `hook` actions after a trigger matches using router-bot Matrix bindings supplied by the service.
 
 Create `src/mindroom/workspace_automations/service.py`.
-This file owns the runtime scanner, cron loop, task lifecycle, config refresh, and shutdown.
+This file owns the runtime scanner, cron loop, task lifecycle, active-service accessor, config refresh, and shutdown.
 
 Create `src/mindroom/custom_tools/workspace_automation.py`.
 This file provides the optional agent-facing tool for validating, listing, and reloading workspace automations.
@@ -78,9 +78,9 @@ Wire the service lifecycle and hook registry snapshot into the primary runtime.
 Modify `src/mindroom/tools/__init__.py`.
 Export the new tool registration function.
 
-Modify docs.
-Add a user-facing page under `docs/automation.md` or `docs/workspace-automations.md`.
+Create `docs/workspace-automations.md`.
 Add a short deployment note to `docs/deployment/sandbox-proxy.md`.
+Modify `docs/scheduling.md`.
 
 Add focused tests under `tests/`.
 Prefer new files over growing unrelated large tests.
@@ -120,6 +120,7 @@ Rules:
 - `check.timeout_seconds` must be at least `1` and no larger than the effective policy limit.
 - `trigger` must be present for visible actions.
 - `action.type` may be `none`, `agent_message`, `matrix_message`, or `hook`.
+- `none` is always permitted and is not listed in `allowed_actions`.
 - `agent_message` and `matrix_message` require an explicit `room` unless the owning agent has exactly one configured room.
 - `thread_id` is optional and must be literal Matrix thread/root event ID when provided.
 - Environment variables are not declared in automation YAML.
@@ -136,18 +137,19 @@ defaults:
     min_interval_seconds: 60
     max_timeout_seconds: 30
     max_output_bytes: 65536
-    allowed_actions: [agent_message]
+    allowed_actions: []
 
 agents:
   ops:
     workspace_automations:
       enabled: true
-      allowed_actions: [agent_message, matrix_message, hook]
+      allowed_actions: [agent_message]
 ```
 
 Per-agent values override defaults field-by-field.
 If `enabled` is false, the runtime ignores that agent's automation file and the automation tool reports that automations are disabled.
 If an action is not in `allowed_actions`, the loader rejects that automation entry and logs the validation error.
+Agents that need `matrix_message` or `hook` must opt into those actions explicitly.
 The first version should default to disabled at both defaults and agent levels.
 
 ## Task 1: Add Config Policy Models
@@ -194,6 +196,7 @@ class WorkspaceAutomationPolicyConfig(BaseModel):
 ```
 
 Normalize duplicates in `allowed_actions` with the existing duplicate validation style.
+Do not include `none` in this policy type because `none` is always allowed and never visible.
 
 - [ ] **Step 4: Add defaults and agent fields**
 
@@ -413,14 +416,16 @@ git commit -m "feat: resolve workspace automation targets"
 **Files:**
 
 - Create: `src/mindroom/workspace_automations/executor.py`
+- Modify: `src/mindroom/tools/shell.py`
 - Test: `tests/test_workspace_automations_executor.py`
+- Test: `tests/test_shell_tool.py`
 
 - [ ] **Step 1: Write failing executor tests**
 
 Use strict fakes around toolkit construction.
 Verify the shell check runs with `cwd` equal to the workspace through the shell `base_dir` override.
 Verify worker scope is the resolved agent execution scope.
-Verify timeout and tail are passed to `run_shell_command`.
+Verify timeout and tail are passed to `run_shell_command_structured`.
 Verify execution errors are returned as failed check results, not raised out of the service loop.
 
 - [ ] **Step 2: Run focused executor tests and verify failure**
@@ -436,23 +441,29 @@ For shared agents, build a `ToolExecutionIdentity` with:
 - `agent_name=<agent>`
 - `transport_agent_name=<agent>`
 - `requester_id=None`
-- `room_id=<resolved action room or None>`
-- `thread_id=<action thread or None>`
-- `resolved_thread_id=<action thread or None>`
+- `room_id=None`
+- `thread_id=None`
+- `resolved_thread_id=None`
 - `session_id=f"workspace-automation:{agent}:{automation_id}"`
 - tenant/account from `runtime_paths`
 
 Keep requester-scoped execution out of scope until private automation support exists.
+Do not place a room display name or alias into `ToolExecutionIdentity.room_id`; Matrix target resolution belongs to the action layer.
 
 - [ ] **Step 4: Reuse existing toolkit construction**
 
 Call `build_agent_toolkit("shell", ...)` rather than manually constructing proxy payloads.
 Pass the resolved `agent_runtime` and `execution_identity`.
 Use `config.get_agent_tool_runtime_overrides(agent_name, "shell")` so existing shell env passthrough policy still applies.
+Invoke the structured shell function described below rather than `run_shell_command`.
 
 - [ ] **Step 5: Normalize shell result**
 
-Return a `ShellCheckResult` with:
+The worker-routed shell function must return a plain JSON-serializable `dict`, not a dataclass.
+The sandbox runner serializes tool results through `to_json_compatible`, and non-mapping custom objects would be stringified.
+The primary executor reconstructs `ShellCheckResult` from that dict after the proxy call returns.
+
+The dict must contain:
 
 - `ok`
 - `exit_code`
@@ -462,13 +473,17 @@ Return a `ShellCheckResult` with:
 - `timed_out`
 - `error`
 
-The existing shell tool returns rendered text rather than structured exit metadata, so the first implementation should require scripts to signal trigger state by exit code only when the shell tool exposes it.
-If the shell tool cannot expose exit code cleanly, add a narrow internal helper to `src/mindroom/tools/shell.py` instead of parsing human text.
+The public `run_shell_command` response remains unchanged.
+The automation executor must never parse the human-readable `run_shell_command` text to infer exit codes.
 
-- [ ] **Step 6: Add shell structured execution helper if needed**
+- [ ] **Step 6: Add shell structured execution helper**
 
-If needed, add an internal function in `src/mindroom/tools/shell.py` that returns a typed result for command execution.
-Keep the public tool response unchanged.
+Add `run_shell_command_structured` to `src/mindroom/tools/shell.py`.
+Register it in the toolkit's `tools=[...]` list and in the tool metadata `function_names`.
+Accept that agents with the shell tool can call this function because it grants no new capability beyond shell execution and only changes result shape.
+Return a JSON-safe mapping with numeric `exit_code`.
+Do not return a dataclass across the worker boundary.
+Keep `run_shell_command` behavior unchanged.
 Test this helper in `tests/test_shell_tool.py` or a new focused file.
 
 - [ ] **Step 7: Run focused executor tests**
@@ -496,6 +511,7 @@ git commit -m "feat: execute workspace automation shell checks"
 - [ ] **Step 1: Write failing trigger tests**
 
 Cover exit code match, exit code mismatch, stdout regex match, stderr regex match, missing output, invalid regex validation, and combined trigger semantics.
+Assert exit-code triggers use the structured shell result and do not parse human output.
 
 - [ ] **Step 2: Run focused trigger tests and verify failure**
 
@@ -513,7 +529,7 @@ Support first-version fields:
 - `stdout_not_matches`
 - `stderr_not_matches`
 
-Leave JSON field triggers out of the first PR unless the implementation remains small and tested.
+Leave JSON field triggers out of the first PR.
 
 - [ ] **Step 4: Run focused trigger tests**
 
@@ -576,6 +592,9 @@ For `matrix_message`, send a visible Matrix message without triggering dispatch.
 For `agent_message`, send a Matrix message with dispatch-triggering metadata using existing hook sender semantics where possible.
 For `hook`, emit `automation:triggered` with the context and no Matrix message by default.
 For `none`, record the run and do nothing visible.
+Use a router-bot `nio.AsyncClient` supplied by the service through a bot provider.
+Build the hook message sender from that router client and pass `trigger_dispatch=True` only for `agent_message`.
+If the router bot or its client is not ready at fire time, record a transient action failure and retry on the next scheduled occurrence.
 
 - [ ] **Step 6: Run focused action tests**
 
@@ -612,14 +631,16 @@ Expected: FAIL because service does not exist.
 
 Create `WorkspaceAutomationService` with:
 
-- `start(config, runtime_paths, hook_registry)`
-- `refresh(config, hook_registry)`
+- `start(config, runtime_paths, hook_registry, bot_provider)`
+- `refresh(config, hook_registry, bot_provider)`
 - `shutdown()`
 - `scan_now()`
 - `list_loaded()`
 
 Keep task dictionaries private to the service.
 Use stable keys `(agent_name, automation_id, workspace_root)`.
+The `bot_provider` follows the existing orchestrator pattern used by `ApprovalMatrixTransport`.
+The service uses `bot_provider(ROUTER_AGENT_NAME)` for Matrix delivery and never embeds delivery logic in `orchestrator.py`.
 
 - [ ] **Step 4: Implement cron loop**
 
@@ -633,13 +654,17 @@ Each automation loop should:
 6. Run action only when matched.
 7. Record status in memory and a small JSON state file under `storage_root/workspace_automations/state.json`.
 
+Protect state-file writes with an `asyncio.Lock`.
+If the state shape grows beyond a small status map, shard by automation key or move to SQLite before adding concurrent writers.
+
 - [ ] **Step 5: Wire orchestrator lifecycle**
 
 Instantiate the service in `MultiAgentOrchestrator.__post_init__`.
 Start it after config and hook registry activation.
 Refresh it when config reload succeeds and hook registry changes.
 Shutdown it before worker manager shutdown.
-Keep `orchestrator.py` changes limited to lifecycle calls.
+Keep `orchestrator.py` changes limited to lifecycle calls and dependency injection.
+It may pass `bot_provider=lambda agent_name: self.agent_bots.get(agent_name)` just like existing runtime services.
 
 - [ ] **Step 6: Run focused service tests**
 
@@ -684,19 +709,32 @@ Expose methods:
 Do not add a tool method that writes arbitrary YAML in the first version.
 Agents can use the file tool to edit the file, then use this tool to validate and reload.
 
-- [ ] **Step 4: Register metadata**
+- [ ] **Step 4: Add live service accessor**
+
+In `src/mindroom/workspace_automations/service.py`, expose module-level helpers:
+
+```python
+def set_active_workspace_automation_service(service: WorkspaceAutomationService | None) -> None: ...
+def get_active_workspace_automation_service() -> WorkspaceAutomationService | None: ...
+```
+
+Update the orchestrator lifecycle to set the active service on start and clear it on shutdown.
+The management tool uses this accessor for `list_automations()` and `reload_automations()`.
+`validate_automations()` can run directly from the current tool runtime context without requiring a live service.
+
+- [ ] **Step 5: Register metadata**
 
 Register tool name `workspace_automation`.
 Use category productivity or development.
 Set setup type none.
 Keep default execution target primary because it manages runtime service state.
 
-- [ ] **Step 5: Run focused tool tests**
+- [ ] **Step 6: Run focused tool tests**
 
 Run: `uv run pytest tests/test_workspace_automation_tool.py -q`.
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 Run:
 
