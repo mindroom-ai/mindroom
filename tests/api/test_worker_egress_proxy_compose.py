@@ -20,6 +20,7 @@ def _runtime_paths_with_vault(tmp_path: Path, *, with_ca: bool = True) -> tuple[
     env = {
         "MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322",
         "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(token_path),
+        "MINDROOM_WORKER_EGRESS_PROXY_VAULT": "agent-vault-worker",
     }
     if with_ca:
         env["MINDROOM_WORKER_EGRESS_PROXY_CA_FILE"] = "/etc/agent-vault/ca.pem"
@@ -28,7 +29,7 @@ def _runtime_paths_with_vault(tmp_path: Path, *, with_ca: bool = True) -> tuple[
         storage_path=tmp_path,
         process_env=env,
     )
-    return runtime_paths, "http://av_sess_worker_token:@agent-vault:14322"
+    return runtime_paths, "http://av_sess_worker_token:agent-vault-worker@agent-vault:14322"
 
 
 def test_request_execution_env_overlays_proxy_when_no_primary_env(tmp_path: Path) -> None:
@@ -52,6 +53,7 @@ def test_worker_proxy_execution_env_configures_git_proxy_auth(tmp_path: Path) ->
         {
             "MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322",
             "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(token_path),
+            "MINDROOM_WORKER_EGRESS_PROXY_VAULT": "agent-vault-worker",
         },
     )
 
@@ -71,6 +73,7 @@ def test_worker_proxy_execution_env_appends_to_existing_git_config(tmp_path: Pat
         {
             "MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322",
             "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(token_path),
+            "MINDROOM_WORKER_EGRESS_PROXY_VAULT": "agent-vault-worker",
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "safe.directory",
             "GIT_CONFIG_VALUE_0": "*",
@@ -114,16 +117,17 @@ def test_request_execution_env_skips_non_execution_tools(tmp_path: Path) -> None
 
 
 def test_worker_proxy_execution_env_percent_encodes_token(tmp_path: Path) -> None:
-    """A token with URL-significant characters must be percent-encoded into the proxy URL."""
+    """Proxy userinfo with URL-significant characters must be percent-encoded."""
     token_path = tmp_path / "token"
     token_path.write_text("av/sess+a:b@c\n", encoding="utf-8")
     env = worker_proxy_execution_env(
         {
             "MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322",
             "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(token_path),
+            "MINDROOM_WORKER_EGRESS_PROXY_VAULT": "vault/a:b@c",
         },
     )
-    assert env["HTTP_PROXY"] == "http://av%2Fsess%2Ba%3Ab%40c:@agent-vault:14322"
+    assert env["HTTP_PROXY"] == "http://av%2Fsess%2Ba%3Ab%40c:vault%2Fa%3Ab%40c@agent-vault:14322"
 
 
 def test_worker_proxy_execution_env_fail_closed_guards(tmp_path: Path) -> None:
@@ -133,6 +137,7 @@ def test_worker_proxy_execution_env_fail_closed_guards(tmp_path: Path) -> None:
     base = {
         "MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322",
         "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(token_path),
+        "MINDROOM_WORKER_EGRESS_PROXY_VAULT": "agent-vault-worker",
     }
     # scheme-less proxy URL
     assert worker_proxy_execution_env({**base, "MINDROOM_WORKER_EGRESS_PROXY_URL": "agent-vault:14322"}) == {}
@@ -161,6 +166,11 @@ def test_worker_egress_proxy_env_names_have_single_source() -> None:
         resources._WORKER_EGRESS_PROXY_TOKEN_FILE_ENV
         == constants._WORKER_EGRESS_PROXY_TOKEN_FILE_ENV
         == WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
+    )
+    assert (
+        resources._WORKER_EGRESS_PROXY_VAULT_ENV
+        == constants._WORKER_EGRESS_PROXY_VAULT_ENV
+        == WORKER_EGRESS_PROXY_ENV_BY_KEY["vault"]
     )
     assert (
         resources._WORKER_EGRESS_PROXY_CA_FILE_ENV

@@ -356,7 +356,7 @@ workers:
     # Per-worker Agent Vault egress. When enabled, each dedicated worker pod
     # gets an init container that mints a proxy-role Agent Vault token for that
     # worker's vault into an in-pod volume; the sandbox runner composes
-    # http://<token>:@<proxyUrl host> for python/shell egress. No separate
+    # http://<token>:<vault>@<proxyUrl host> for python/shell egress. No separate
     # bridge pod or Service is created.
     #
     # NOTE: if egressProxy/approvedEgress NetworkPolicies are also enabled,

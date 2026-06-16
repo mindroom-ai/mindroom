@@ -104,8 +104,8 @@ class KubernetesAgentVaultConfig:
     When present, each dedicated worker pod gets an init container that mints
     (or rotates) a proxy-role Agent Vault agent token for that worker's vault
     and writes it to a shared in-pod volume. The sandbox runner composes
-    ``http://<token>:@<proxy host>`` for python/shell egress so Agent Vault
-    injects credentials in transit. The owner password is mounted only on the
+    ``http://<token>:<vault>@<proxy host>`` for python/shell egress so Agent
+    Vault injects credentials in transit. The owner password is mounted only on the
     init container, never on the agent-executing container.
     """
 

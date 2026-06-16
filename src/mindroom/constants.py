@@ -665,6 +665,7 @@ EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 # primary; it is minted into the worker pod and read here at execution time.
 _WORKER_EGRESS_PROXY_URL_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["proxy_url"]
 _WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
+_WORKER_EGRESS_PROXY_VAULT_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["vault"]
 _WORKER_EGRESS_PROXY_CA_FILE_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
 _WORKER_EGRESS_NO_PROXY = "localhost,127.0.0.1,::1,.svc,.cluster.local"
 
@@ -701,10 +702,10 @@ def worker_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]
     """Return the per-worker egress proxy env overlay for python/shell, or ``{}``.
 
     General mechanism, provider-agnostic: reads a per-worker proxy endpoint plus
-    a token file written into the worker pod and composes ``http://<token>:@<host>``
-    (the token becomes the proxy basic-auth username, which credential-injecting
-    forward proxies such as Agent Vault accept). Returns empty when no per-worker
-    egress proxy is configured for this worker or the token is not yet present.
+    a token file written into the worker pod and composes proxy basic-auth
+    userinfo. The token becomes the username; when configured, the vault name
+    becomes the password. Returns empty when no per-worker egress proxy is
+    configured for this worker or the token is not yet present.
     """
     proxy_url = (process_env.get(_WORKER_EGRESS_PROXY_URL_ENV) or "").strip()
     token_file = (process_env.get(_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV) or "").strip()
@@ -716,11 +717,11 @@ def worker_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]
         return {}
     if not token:
         return {}
+    vault = (process_env.get(_WORKER_EGRESS_PROXY_VAULT_ENV) or "").strip()
     scheme, _, rest = proxy_url.partition("://")
-    # Percent-encode the token: it becomes proxy basic-auth userinfo, so any
-    # URL-significant character (@ : / # ? % +, whitespace) would otherwise make
-    # HTTP clients mis-parse the proxy URL and silently break auth.
-    authed = f"{scheme}://{quote(token, safe='')}:@{rest}"
+    # Percent-encode proxy basic-auth userinfo so URL-significant characters
+    # (@ : / # ? % +, whitespace) cannot make HTTP clients mis-parse auth.
+    authed = f"{scheme}://{quote(token, safe='')}:{quote(vault, safe='')}@{rest}"
     env = {
         "HTTP_PROXY": authed,
         "HTTPS_PROXY": authed,

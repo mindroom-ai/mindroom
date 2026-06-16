@@ -4,7 +4,8 @@
 This proves the per-worker Agent Vault isolation model: one vault per worker
 identity plus one proxy-role agent per worker, against a single shared Agent
 Vault server. Each worker egresses by pointing HTTP(S)_PROXY straight at the
-vault MITM proxy with its proxy-role token as the basic-auth username (no
+vault MITM proxy with its proxy-role token as the basic-auth username and the
+vault name as the basic-auth password (no
 bridge pod or adapter).
 
 1. agent A's token injects only vault A's credential
@@ -290,6 +291,7 @@ def _agent_cli(
 def _run_worker(
     network: str,
     proxy_endpoint: str,
+    vault: str,
     token: str,
     target_host: str,
     *,
@@ -298,9 +300,10 @@ def _run_worker(
     """Run a worker that egresses through the vault with its token in the proxy URL.
 
     This is the no-bridge model: the worker points HTTP(S)_PROXY straight at the
-    Agent Vault MITM proxy with its proxy-role token as the basic-auth username.
+    Agent Vault MITM proxy with its proxy-role token as the basic-auth username
+    and the vault name as the basic-auth password.
     """
-    proxy_url = f"http://{token}:@{proxy_endpoint}"
+    proxy_url = f"http://{token}:{vault}@{proxy_endpoint}"
     worker_code = r"""
 import json
 import urllib.request
@@ -448,11 +451,11 @@ def main() -> int:  # noqa: PLR0915
 
         # 1 + 2: each token injects exactly its own vault's credential.
         shared_via_a = _parse_worker_headers(
-            _run_worker(network, proxy_endpoint, token_a, SHARED_ECHO_HOST).stdout,
+            _run_worker(network, proxy_endpoint, VAULT_A, token_a, SHARED_ECHO_HOST).stdout,
         )
-        only_b_via_a = _run_worker(network, proxy_endpoint, token_a, ONLY_B_ECHO_HOST, check=False)
+        only_b_via_a = _run_worker(network, proxy_endpoint, VAULT_A, token_a, ONLY_B_ECHO_HOST, check=False)
         shared_via_b = _parse_worker_headers(
-            _run_worker(network, proxy_endpoint, token_b, SHARED_ECHO_HOST).stdout,
+            _run_worker(network, proxy_endpoint, VAULT_B, token_b, SHARED_ECHO_HOST).stdout,
         )
 
         _assert(
@@ -482,6 +485,7 @@ def main() -> int:  # noqa: PLR0915
         garbage_result = _run_worker(
             network,
             proxy_endpoint,
+            VAULT_A,
             "garbage-token-that-should-never-work",
             SHARED_ECHO_HOST,
             check=False,

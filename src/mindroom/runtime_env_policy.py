@@ -98,6 +98,7 @@ WORKER_EGRESS_PROXY_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
         "proxy_url": "MINDROOM_WORKER_EGRESS_PROXY_URL",
         "token_file": "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE",
+        "vault": "MINDROOM_WORKER_EGRESS_PROXY_VAULT",
         "ca_file": "MINDROOM_WORKER_EGRESS_PROXY_CA_FILE",
     },
 )

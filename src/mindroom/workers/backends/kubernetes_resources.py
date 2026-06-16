@@ -90,7 +90,7 @@ _LABEL_NAME_VALUE = "mindroom-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 # Agent Vault per-worker egress: an init container in the worker pod mints the
 # worker's proxy-role token into a shared in-pod volume; the sandbox runner
-# composes http://<token>:@<proxy host> for python/shell. No separate bridge pod.
+# composes http://<token>:<vault>@<proxy host> for python/shell. No separate bridge pod.
 _AGENT_VAULT_MINT_CONTAINER_NAME = "agent-vault-mint-token"
 _AGENT_VAULT_TOKEN_MOUNT_DIR = "/agent-vault"  # noqa: S105
 _AGENT_VAULT_TOKEN_FILE = "token"  # noqa: S105
@@ -106,6 +106,7 @@ _AGENT_VAULT_WORKER_CA_PATH = f"{_AGENT_VAULT_WORKER_CA_MOUNT_DIR}/{_AGENT_VAULT
 # Worker pod env consumed by the sandbox runner to compose python/shell proxy env.
 _WORKER_EGRESS_PROXY_URL_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["proxy_url"]
 _WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
+_WORKER_EGRESS_PROXY_VAULT_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["vault"]
 _WORKER_EGRESS_PROXY_CA_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
 # HOME is kept on the init container's own ephemeral filesystem (not the shared
 # token volume) so the owner CLI session never lands on a volume the
@@ -132,6 +133,13 @@ if ! agent-vault agent create "$AGENT_VAULT_VAULT" \\
   --vault "$AGENT_VAULT_VAULT:proxy" \\
   --token-only > "{token_path}"; then
   agent-vault agent rotate "$AGENT_VAULT_VAULT" --token-only > "{token_path}"
+fi
+if ! agent-vault vault agent add "$AGENT_VAULT_VAULT" \\
+  --vault "$AGENT_VAULT_VAULT" \\
+  --role proxy > /dev/null 2>&1; then
+  agent-vault vault agent set-role "$AGENT_VAULT_VAULT" \\
+    --vault "$AGENT_VAULT_VAULT" \\
+    --role proxy > /dev/null
 fi
 test -s "{token_path}"
 """
@@ -643,13 +651,18 @@ class KubernetesResourceManager:
             "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
         }
 
-    def _agent_vault_main_env(self) -> list[dict[str, object]]:
+    def _agent_vault_main_env(self, *, worker_key: str) -> list[dict[str, object]]:
         cfg = self.config.agent_vault
         if cfg is None:
             return []
+        vault = self.agent_vault_vault_name(worker_key)
+        if vault is None:
+            msg = "Agent Vault main env requested without a worker vault name."
+            raise WorkerBackendError(msg)
         env: list[dict[str, object]] = [
             {"name": _WORKER_EGRESS_PROXY_URL_ENV, "value": cfg.proxy_url},
             {"name": _WORKER_EGRESS_PROXY_TOKEN_FILE_ENV, "value": _AGENT_VAULT_TOKEN_PATH},
+            {"name": _WORKER_EGRESS_PROXY_VAULT_ENV, "value": vault},
         ]
         if cfg.worker_ca_configmap_name is not None:
             env.append({"name": _WORKER_EGRESS_PROXY_CA_FILE_ENV, "value": _AGENT_VAULT_WORKER_CA_PATH})
@@ -1100,7 +1113,7 @@ class KubernetesResourceManager:
         if credentials_encryption_key_env is not None:
             env.append(credentials_encryption_key_env)
 
-        env.extend(self._agent_vault_main_env())
+        env.extend(self._agent_vault_main_env(worker_key=worker_key))
 
         for name, value in sorted(worker_extra_env(self.config.extra_env).items()):
             env.append({"name": name, "value": value})
