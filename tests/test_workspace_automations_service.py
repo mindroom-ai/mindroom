@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -48,6 +49,7 @@ class _ControlledClock:
     def __init__(self, now: datetime) -> None:
         self.now = now
         self.requests: list[_SleepRequest] = []
+        self._request_added = asyncio.Event()
 
     def current_time(self) -> datetime:
         return self.now
@@ -55,13 +57,24 @@ class _ControlledClock:
     async def sleep(self, delay: float) -> None:
         future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self.requests.append(_SleepRequest(delay=delay, future=future))
+        self._request_added.set()
         await future
 
     async def wait_for_sleep_count(self, expected_count: int) -> None:
-        for _ in range(100):
+        deadline = time.monotonic() + 5
+        while True:
             if len(self.requests) >= expected_count:
                 return
-            await asyncio.sleep(0)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._request_added.clear()
+            if len(self.requests) >= expected_count:
+                return
+            try:
+                await asyncio.wait_for(self._request_added.wait(), timeout=remaining)
+            except TimeoutError:
+                break
         msg = f"Timed out waiting for {expected_count} sleep request(s); got {len(self.requests)}"
         raise AssertionError(msg)
 
@@ -377,10 +390,7 @@ async def test_scan_interval_rescans_loaded_targets(
     assert clock.requests[0].delay == 12.5
 
     clock.resolve_next_sleep()
-    for _ in range(100):
-        if target_call_count == 2:
-            break
-        await asyncio.sleep(0)
+    await clock.wait_for_sleep_count(1)
     assert target_call_count == 2
 
     await service.shutdown()
@@ -424,10 +434,7 @@ async def test_scan_loop_continues_after_transient_scan_failure(
         assert not service._scan_task.done()
 
         clock.resolve_next_sleep()
-        for _ in range(100):
-            if target_call_count == 3:
-                break
-            await asyncio.sleep(0)
+        await clock.wait_for_sleep_count(1)
         assert target_call_count == 3
     finally:
         await service.shutdown()
