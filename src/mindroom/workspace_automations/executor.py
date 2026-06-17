@@ -69,7 +69,7 @@ async def run_shell_check(
             worker_tools=worker_tools,
             runtime_overrides=config.get_agent_tool_runtime_overrides(target.agent_name, "shell"),
             agent_runtime=target.agent_runtime,
-            tool_config_overrides=None,
+            tool_config_overrides=_shell_tool_config_overrides(config, target.agent_name),
             execution_identity=execution_identity,
         )
         if toolkit is None:
@@ -110,6 +110,13 @@ def _result_from_payload(automation_id: str, payload: object) -> ShellCheckResul
         timed_out=typed_payload.get("timed_out") is True,
         error=None if error_value is None else str(error_value),
     )
+
+
+def _shell_tool_config_overrides(config: Config, agent_name: str) -> dict[str, object] | None:
+    for entry in config.get_agent_tool_configs(agent_name):
+        if entry.name == "shell":
+            return dict(entry.tool_config_overrides)
+    return None
 
 
 def _payload_text(value: object) -> str:

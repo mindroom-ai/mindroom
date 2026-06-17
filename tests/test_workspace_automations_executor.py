@@ -292,6 +292,40 @@ async def test_shell_check_runs_through_worker_routed_shell_toolkit(  # noqa: PL
 
 
 @pytest.mark.asyncio
+async def test_shell_check_honors_shell_tool_config_overrides(runtime_paths: RuntimePaths) -> None:
+    """Automation shell checks should fail closed when shell execution is disabled."""
+    config = Config.validate_with_runtime(
+        {
+            "memory": {"backend": "none"},
+            "defaults": {"worker_tools": ["shell"]},
+            "agents": {
+                "ops": {
+                    "display_name": "Ops",
+                    "tools": [{"shell": {"enable_run_shell_command": False}}],
+                    "worker_scope": "shared",
+                    "workspace_automations": {
+                        "enabled": True,
+                        "max_output_bytes": 4096,
+                    },
+                },
+            },
+        },
+        runtime_paths,
+    )
+    target = _resolve_target(config, runtime_paths, execution_identity=None)
+
+    result = await run_shell_check(
+        config=config,
+        runtime_paths=runtime_paths,
+        target=target,
+        automation=_automation(target),
+    )
+
+    assert result.ok is False
+    assert result.error == "Shell toolkit did not expose structured execution."
+
+
+@pytest.mark.asyncio
 async def test_shell_check_uses_private_target_persisted_execution_identity(
     monkeypatch: pytest.MonkeyPatch,
     runtime_paths: RuntimePaths,
