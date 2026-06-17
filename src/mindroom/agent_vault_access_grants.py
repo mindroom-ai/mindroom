@@ -171,24 +171,25 @@ async def apply_agent_vault_access_grants(
 ) -> AgentVaultAccessGrantApplyResult:
     """Apply declarative Agent Vault access grants idempotently."""
     resolved_token = _resolve_admin_token(config, admin_token=admin_token, admin_token_file=admin_token_file)
-    client = _AgentVaultClient(config.api_url, resolved_token)
     applied = 0
     already_admin = 0
     warnings: list[str] = []
 
-    for target in resolve_agent_vault_access_grant_targets(config):
-        await client.ensure_vault(target.vault)
-        await client.ensure_vault_admin(target.vault)
-        outcome = await client.grant_admin(target.vault, target.grant.email)
-        if outcome == "granted":
-            applied += 1
-        elif outcome == "already_admin":
-            already_admin += 1
-        else:
-            warnings.append(
-                f"{target.grant.email} does not have an Agent Vault account yet; "
-                "ask them to register and verify before rerunning this grant.",
-            )
+    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as http_client:
+        client = _AgentVaultClient(config.api_url, resolved_token, http_client)
+        for target in resolve_agent_vault_access_grant_targets(config):
+            await client.ensure_vault(target.vault)
+            await client.ensure_vault_admin(target.vault)
+            outcome = await client.grant_admin(target.vault, target.grant.email)
+            if outcome == "granted":
+                applied += 1
+            elif outcome == "already_admin":
+                already_admin += 1
+            else:
+                warnings.append(
+                    f"{target.grant.email} does not have an Agent Vault account yet; "
+                    "ask them to register and verify before rerunning this grant.",
+                )
 
     return AgentVaultAccessGrantApplyResult(
         applied=applied,
@@ -197,7 +198,7 @@ async def apply_agent_vault_access_grants(
     )
 
 
-async def wait_for_agent_vault_ready(api_url: str, *, timeout_seconds: int) -> None:
+async def wait_for_agent_vault_ready(api_url: str, *, timeout_seconds: float) -> None:
     """Wait until the Agent Vault health endpoint is ready."""
     if timeout_seconds <= 0:
         return
@@ -211,7 +212,7 @@ async def wait_for_agent_vault_ready(api_url: str, *, timeout_seconds: int) -> N
             except httpx.HTTPError as exc:
                 last_error = str(exc)
             else:
-                if response.status_code < 500:
+                if 200 <= response.status_code < 300:
                     return
                 last_error = f"HTTP {response.status_code}"
             await asyncio.sleep(2)
@@ -224,9 +225,10 @@ async def wait_for_agent_vault_ready(api_url: str, *, timeout_seconds: int) -> N
 class _AgentVaultClient:
     """Small Agent Vault admin API client for idempotent grants."""
 
-    def __init__(self, api_url: str, token: str) -> None:
+    def __init__(self, api_url: str, token: str, client: httpx.AsyncClient) -> None:
         self._api_url = api_url
         self._token = token
+        self._client = client
 
     async def ensure_vault(self, vault: str) -> None:
         response = await self._post("v1/vaults", {"name": vault})
@@ -255,7 +257,7 @@ class _AgentVaultClient:
             return "granted"
         if response.status_code in {409, 422}:
             await self._set_admin_role(vault, email)
-            return "already_admin"
+            return "granted"
         if response.status_code == 404:
             return "missing_account"
         return self._raise_api_error("granting vault admin access", response)
@@ -270,12 +272,11 @@ class _AgentVaultClient:
         self._raise_api_error("updating vault user role to admin", response)
 
     async def _post(self, path: str, payload: dict[str, object] | None = None) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
-            return await client.post(
-                urljoin(self._api_url.rstrip("/") + "/", path),
-                headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
-                json=payload,
-            )
+        return await self._client.post(
+            urljoin(self._api_url.rstrip("/") + "/", path),
+            headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
+            json=payload,
+        )
 
     def _raise_api_error(self, action: str, response: httpx.Response) -> NoReturn:
         detail = f"Agent Vault API returned {response.status_code} while {action}"
@@ -412,10 +413,10 @@ def _resolve_admin_token(
         try:
             token = Path(token_file).read_text(encoding="utf-8").strip()
         except OSError as exc:
-            msg = f"could not read the Agent Vault admin token file {token_file!r}: {exc}"
+            msg = f"could not read adminTokenFile {token_file!r}: {exc}"
             raise AgentVaultAccessGrantError(msg) from exc
         if not token:
-            msg = f"the Agent Vault admin token file {token_file!r} is empty"
+            msg = f"adminTokenFile {token_file!r} is empty"
             raise AgentVaultAccessGrantError(msg)
         return token
 

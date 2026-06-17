@@ -1583,6 +1583,57 @@ def test_runtime_chart_agent_vault_access_grants_renders_user_agent_grant(tmp_pa
     ]
 
 
+def test_runtime_chart_agent_vault_access_grants_renders_user_grant(tmp_path: Path) -> None:
+    """The chart passes user-scoped grant inputs through without an agent."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                    "kubernetes": {
+                        "agentVault": {
+                            "enabled": True,
+                            "cliImage": "infisical/agent-vault:test",
+                            "ownerEmail": "owner@example.test",
+                            "accessGrants": {
+                                "enabled": True,
+                                "grants": [
+                                    {
+                                        "email": "user@example.test",
+                                        "workerScope": "user",
+                                        "requester": "@user:example.test",
+                                        "role": "admin",
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    config = yaml.safe_load(_resource(docs, "ConfigMap", "agent-vault-access-grants")["data"]["access-grants.yaml"])
+
+    assert config["grants"] == [
+        {
+            "email": "user@example.test",
+            "workerScope": "user",
+            "requester": "@user:example.test",
+            "role": "admin",
+        },
+    ]
+
+
 def test_runtime_chart_agent_vault_bootstrap_publishes_access_grants_admin_token(tmp_path: Path) -> None:
     """The bootstrap Job should publish an owner-role token for access-grant jobs."""
     values_path = tmp_path / "values.yaml"
@@ -1675,6 +1726,15 @@ def test_runtime_chart_agent_vault_bootstrap_publishes_access_grants_admin_token
                 "role": "viewer",
             },
             "workers.kubernetes.agentVault.accessGrants.grants[0].role must be admin",
+        ),
+        (
+            {
+                "email": "user@example.test",
+                "workerScope": "invalid",
+                "requester": "@user:example.test",
+                "role": "admin",
+            },
+            "workers.kubernetes.agentVault.accessGrants.grants[0].workerScope must be one of: shared, user, user_agent",
         ),
     ],
 )

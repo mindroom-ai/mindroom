@@ -14,6 +14,7 @@ from mindroom.agent_vault_access_grants import (
     AgentVaultAccessGrantsConfig,
     apply_agent_vault_access_grants,
     resolve_agent_vault_access_grant_targets,
+    wait_for_agent_vault_ready,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, worker_id_for_key
 
@@ -181,6 +182,44 @@ async def test_apply_grants_creates_joins_and_grants_admin(
 
 
 @pytest.mark.asyncio
+async def test_apply_grants_counts_existing_member_role_updates_as_applied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing members are still counted as applied when their role is ensured as admin."""
+    path = _config_path(
+        tmp_path,
+        {
+            "apiUrl": "http://agent-vault:14321",
+            "adminToken": "owner-token",
+            "grants": [
+                {
+                    "email": "maintainer@example.test",
+                    "workerScope": "shared",
+                    "agent": "example-agent",
+                    "role": "admin",
+                },
+            ],
+        },
+    )
+    config = AgentVaultAccessGrantsConfig.from_file(path)
+    target = resolve_agent_vault_access_grant_targets(config)[0]
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 409, "/users": 409, "/role": 200})
+    _patch_client(monkeypatch, api)
+
+    result = await apply_agent_vault_access_grants(config)
+
+    assert result.applied == 1
+    assert result.already_admin == 0
+    assert [path for path, _ in api.calls] == [
+        "/v1/vaults",
+        f"/v1/vaults/{target.vault}/join",
+        f"/v1/vaults/{target.vault}/users",
+        f"/v1/vaults/{target.vault}/users/maintainer@example.test/role",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_apply_grants_warns_for_unregistered_account(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -209,6 +248,146 @@ async def test_apply_grants_warns_for_unregistered_account(
     assert result.applied == 0
     assert len(result.warnings) == 1
     assert "missing@example.test does not have an Agent Vault account" in result.warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_apply_grants_uses_config_admin_token_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AdminTokenFile from config is preferred over inline config tokens."""
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("file-token\n", encoding="utf-8")
+    path = _config_path(
+        tmp_path,
+        {
+            "apiUrl": "http://agent-vault:14321",
+            "adminToken": "ignored-token",
+            "adminTokenFile": str(token_file),
+            "grants": [
+                {
+                    "email": "maintainer@example.test",
+                    "workerScope": "shared",
+                    "agent": "example-agent",
+                    "role": "admin",
+                },
+            ],
+        },
+    )
+    api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 200, "/users": 201})
+    _patch_client(monkeypatch, api)
+
+    await apply_agent_vault_access_grants(AgentVaultAccessGrantsConfig.from_file(path))
+
+    assert api.auth_headers == ["Bearer file-token", "Bearer file-token", "Bearer file-token"]
+
+
+@pytest.mark.asyncio
+async def test_apply_grants_explicit_admin_token_file_overrides_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI-provided admin token file wins over the config token file."""
+    config_token_file = tmp_path / "config-admin-token"
+    config_token_file.write_text("config-token\n", encoding="utf-8")
+    override_token_file = tmp_path / "override-admin-token"
+    override_token_file.write_text("override-token\n", encoding="utf-8")
+    path = _config_path(
+        tmp_path,
+        {
+            "apiUrl": "http://agent-vault:14321",
+            "adminTokenFile": str(config_token_file),
+            "grants": [
+                {
+                    "email": "maintainer@example.test",
+                    "workerScope": "shared",
+                    "agent": "example-agent",
+                    "role": "admin",
+                },
+            ],
+        },
+    )
+    api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 200, "/users": 201})
+    _patch_client(monkeypatch, api)
+
+    await apply_agent_vault_access_grants(
+        AgentVaultAccessGrantsConfig.from_file(path),
+        admin_token_file=str(override_token_file),
+    )
+
+    assert api.auth_headers == ["Bearer override-token", "Bearer override-token", "Bearer override-token"]
+
+
+@pytest.mark.asyncio
+async def test_apply_grants_rejects_missing_admin_token_file(tmp_path: Path) -> None:
+    """Missing adminTokenFile fails before any Agent Vault API call."""
+    config = AgentVaultAccessGrantsConfig.from_payload(
+        {
+            "apiUrl": "http://agent-vault:14321",
+            "adminTokenFile": str(tmp_path / "missing-token"),
+            "grants": [],
+        },
+    )
+
+    with pytest.raises(AgentVaultAccessGrantError, match="could not read adminTokenFile"):
+        await apply_agent_vault_access_grants(config)
+
+
+@pytest.mark.asyncio
+async def test_apply_grants_rejects_empty_admin_token_file(tmp_path: Path) -> None:
+    """Empty adminTokenFile fails before any Agent Vault API call."""
+    token_file = tmp_path / "empty-token"
+    token_file.write_text("", encoding="utf-8")
+    config = AgentVaultAccessGrantsConfig.from_payload(
+        {
+            "apiUrl": "http://agent-vault:14321",
+            "adminTokenFile": str(token_file),
+            "grants": [],
+        },
+    )
+
+    with pytest.raises(AgentVaultAccessGrantError, match=r"adminTokenFile .* is empty"):
+        await apply_agent_vault_access_grants(config)
+
+
+@pytest.mark.asyncio
+async def test_apply_grants_requires_admin_token_or_file() -> None:
+    """Access grants require some owner/admin token source."""
+    config = AgentVaultAccessGrantsConfig.from_payload(
+        {
+            "apiUrl": "http://agent-vault:14321",
+            "grants": [],
+        },
+    )
+
+    with pytest.raises(AgentVaultAccessGrantError, match="adminToken or adminTokenFile"):
+        await apply_agent_vault_access_grants(config)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_agent_vault_ready_accepts_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 2xx health response marks Agent Vault as ready."""
+    api = _FakeVaultAPI({"/health": 204})
+    _patch_client(monkeypatch, api)
+
+    await wait_for_agent_vault_ready("http://agent-vault:14321", timeout_seconds=1)
+
+    assert [path for path, _ in api.calls] == ["/health"]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_agent_vault_ready_rejects_client_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 4xx health response should not be treated as readiness."""
+    api = _FakeVaultAPI({"/health": 404})
+    _patch_client(monkeypatch, api)
+
+    async def sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("mindroom.agent_vault_access_grants.asyncio.sleep", sleep)
+
+    with pytest.raises(AgentVaultAccessGrantError, match="HTTP 404"):
+        await wait_for_agent_vault_ready("http://agent-vault:14321", timeout_seconds=0.001)
 
 
 def test_config_rejects_shared_requester(tmp_path: Path) -> None:
