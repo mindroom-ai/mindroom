@@ -490,6 +490,8 @@ workers:
         resources: {}
         # Each grant gives an email raw UI/admin access to the resolved worker
         # vault. Supported workerScope values are shared, user, and user_agent.
+        # For workerScope=user, omit agent; use workerScope=user_agent when the
+        # vault should be both requester- and agent-specific.
         # Supported role is admin.
         grants: []
         # Example:

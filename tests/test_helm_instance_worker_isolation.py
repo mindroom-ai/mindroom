@@ -1736,6 +1736,16 @@ def test_runtime_chart_agent_vault_bootstrap_publishes_access_grants_admin_token
             },
             "workers.kubernetes.agentVault.accessGrants.grants[0].workerScope must be one of: shared, user, user_agent",
         ),
+        (
+            {
+                "email": "user@example.test",
+                "workerScope": "user",
+                "requester": "@user:example.test",
+                "agent": "example-agent",
+                "role": "admin",
+            },
+            "workers.kubernetes.agentVault.accessGrants.grants[0].agent must be empty for workerScope=user",
+        ),
     ],
 )
 def test_runtime_chart_rejects_invalid_agent_vault_access_grants(

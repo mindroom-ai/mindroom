@@ -46,7 +46,7 @@ __all__ = [
 ]
 
 _GrantRole = Literal["admin"]
-_GrantOutcome = Literal["granted", "already_admin", "missing_account"]
+_GrantOutcome = Literal["granted", "missing_account"]
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -152,7 +152,6 @@ class AgentVaultAccessGrantApplyResult:
     """Summary of one access-grant application run."""
 
     applied: int
-    already_admin: int
     warnings: tuple[str, ...]
 
 
@@ -172,7 +171,6 @@ async def apply_agent_vault_access_grants(
     """Apply declarative Agent Vault access grants idempotently."""
     resolved_token = _resolve_admin_token(config, admin_token=admin_token, admin_token_file=admin_token_file)
     applied = 0
-    already_admin = 0
     warnings: list[str] = []
 
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as http_client:
@@ -183,8 +181,6 @@ async def apply_agent_vault_access_grants(
             outcome = await client.grant_admin(target.vault, target.grant.email)
             if outcome == "granted":
                 applied += 1
-            elif outcome == "already_admin":
-                already_admin += 1
             else:
                 warnings.append(
                     f"{target.grant.email} does not have an Agent Vault account yet; "
@@ -193,7 +189,6 @@ async def apply_agent_vault_access_grants(
 
     return AgentVaultAccessGrantApplyResult(
         applied=applied,
-        already_admin=already_admin,
         warnings=tuple(warnings),
     )
 
@@ -272,11 +267,13 @@ class _AgentVaultClient:
         self._raise_api_error("updating vault user role to admin", response)
 
     async def _post(self, path: str, payload: dict[str, object] | None = None) -> httpx.Response:
-        return await self._client.post(
-            urljoin(self._api_url.rstrip("/") + "/", path),
-            headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
-            json=payload,
-        )
+        headers = {"Authorization": f"Bearer {self._token}"}
+        url = urljoin(self._api_url.rstrip("/") + "/", path)
+        if payload is None:
+            return await self._client.post(url, headers=headers)
+
+        headers["Content-Type"] = "application/json"
+        return await self._client.post(url, headers=headers, json=payload)
 
     def _raise_api_error(self, action: str, response: httpx.Response) -> NoReturn:
         detail = f"Agent Vault API returned {response.status_code} while {action}"
@@ -337,6 +334,18 @@ def _parse_grant(payload: object, index: int) -> AgentVaultAccessGrant:
     requester = _optional_string(raw_payload, "requester", label=f"{label}.requester")
     agent = _optional_string(raw_payload, "agent", label=f"{label}.agent")
 
+    _validate_grant_scope_fields(worker_scope, requester=requester, agent=agent)
+
+    return AgentVaultAccessGrant(
+        email=email,
+        worker_scope=worker_scope,
+        role=role,
+        requester=requester,
+        agent=agent,
+    )
+
+
+def _validate_grant_scope_fields(worker_scope: WorkerScope, *, requester: str | None, agent: str | None) -> None:
     if worker_scope == "shared":
         if requester is not None:
             msg = "shared grants must not set requester"
@@ -348,6 +357,9 @@ def _parse_grant(payload: object, index: int) -> AgentVaultAccessGrant:
         if requester is None:
             msg = "user grants require requester"
             raise AgentVaultAccessGrantError(msg)
+        if agent is not None:
+            msg = "user grants must not set agent"
+            raise AgentVaultAccessGrantError(msg)
     elif worker_scope == "user_agent":
         if requester is None:
             msg = "user_agent grants require requester"
@@ -355,14 +367,6 @@ def _parse_grant(payload: object, index: int) -> AgentVaultAccessGrant:
         if agent is None:
             msg = "user_agent grants require agent"
             raise AgentVaultAccessGrantError(msg)
-
-    return AgentVaultAccessGrant(
-        email=email,
-        worker_scope=worker_scope,
-        role=role,
-        requester=requester,
-        agent=agent,
-    )
 
 
 def _parse_worker_scope(value: str, *, label: str) -> WorkerScope:
@@ -486,8 +490,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     for warning in result.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     print(
-        "Agent Vault access grants applied: "
-        f"granted={result.applied} already_admin={result.already_admin} warnings={len(result.warnings)}",
+        f"Agent Vault access grants applied: granted={result.applied} warnings={len(result.warnings)}",
     )
     return 0
 

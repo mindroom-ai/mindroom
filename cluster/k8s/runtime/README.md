@@ -379,7 +379,7 @@ If an email has not registered and verified in Agent Vault yet, the helper repor
 
 For `workerScope: shared`, `agent` is required and `requester` must be omitted.
 For `workerScope: user_agent`, both `requester` and `agent` are required.
-For `workerScope: user`, `requester` is required and `agent` is not used in the worker key.
+For `workerScope: user`, `requester` is required and `agent` must be omitted because the worker key is per-user, not per-agent.
 The initial supported role is `admin`.
 If your deployment sets `CUSTOMER_ID` or `ACCOUNT_ID` for tenant-specific worker keys, set `accessGrants.tenantId` or `accessGrants.accountId` to the same value.
 When `agentVault.bootstrap.enabled` is true, the bootstrap Job publishes the owner-role admin token Secret used by the access-grant Job.

@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from mindroom.agent_vault_access_grants import (
+    AgentVaultAccessGrantApplyResult,
     AgentVaultAccessGrantError,
     AgentVaultAccessGrantsConfig,
     apply_agent_vault_access_grants,
@@ -29,12 +30,14 @@ class _FakeVaultAPI:
         self.responses = responses
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.auth_headers: list[str] = []
+        self.content_type_headers: list[str | None] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         body = json.loads(request.content.decode()) if request.content else {}
         self.calls.append((path, body))
         self.auth_headers.append(request.headers.get("authorization", ""))
+        self.content_type_headers.append(request.headers.get("content-type"))
         for suffix, status in self.responses.items():
             if path.endswith(suffix):
                 payload = {"name": body.get("name", "")} if status < 300 else {"error": "scripted"}
@@ -170,8 +173,7 @@ async def test_apply_grants_creates_joins_and_grants_admin(
 
     result = await apply_agent_vault_access_grants(config)
 
-    assert result.applied == 1
-    assert not result.warnings
+    assert result == AgentVaultAccessGrantApplyResult(applied=1, warnings=())
     assert [path for path, _ in api.calls] == [
         "/v1/vaults",
         f"/v1/vaults/{target.vault}/join",
@@ -179,6 +181,7 @@ async def test_apply_grants_creates_joins_and_grants_admin(
     ]
     assert api.calls[-1][1] == {"email": "maintainer@example.test", "role": "admin"}
     assert api.auth_headers == ["Bearer owner-token", "Bearer owner-token", "Bearer owner-token"]
+    assert api.content_type_headers == ["application/json", None, "application/json"]
 
 
 @pytest.mark.asyncio
@@ -210,7 +213,6 @@ async def test_apply_grants_counts_existing_member_role_updates_as_applied(
     result = await apply_agent_vault_access_grants(config)
 
     assert result.applied == 1
-    assert result.already_admin == 0
     assert [path for path, _ in api.calls] == [
         "/v1/vaults",
         f"/v1/vaults/{target.vault}/join",
@@ -432,6 +434,29 @@ def test_config_rejects_user_agent_without_requester(tmp_path: Path) -> None:
     )
 
     with pytest.raises(AgentVaultAccessGrantError, match="user_agent grants require requester"):
+        AgentVaultAccessGrantsConfig.from_file(path)
+
+
+def test_config_rejects_user_grant_with_agent(tmp_path: Path) -> None:
+    """User worker grants must not accept an agent that is ignored by worker-key resolution."""
+    path = _config_path(
+        tmp_path,
+        {
+            "apiUrl": "http://agent-vault:14321",
+            "adminToken": "owner-token",
+            "grants": [
+                {
+                    "email": "user@example.test",
+                    "workerScope": "user",
+                    "requester": "@user:example.test",
+                    "agent": "example-agent",
+                    "role": "admin",
+                },
+            ],
+        },
+    )
+
+    with pytest.raises(AgentVaultAccessGrantError, match="user grants must not set agent"):
         AgentVaultAccessGrantsConfig.from_file(path)
 
 

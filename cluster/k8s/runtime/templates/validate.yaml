@@ -251,6 +251,9 @@
 {{- if not $requester -}}
 {{- fail (printf "%s.requester is required for workerScope=user" $path) -}}
 {{- end -}}
+{{- if $agent -}}
+{{- fail (printf "%s.agent must be empty for workerScope=user" $path) -}}
+{{- end -}}
 {{- else if eq $scope "user_agent" -}}
 {{- if not $requester -}}
 {{- fail (printf "%s.requester is required for workerScope=user_agent" $path) -}}
