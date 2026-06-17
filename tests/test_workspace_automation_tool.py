@@ -13,10 +13,11 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools import workspace_automation as workspace_automation_module
 from mindroom.custom_tools.workspace_automation import WorkspaceAutomationTools
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.metadata import SetupType, ToolCategory, ToolExecutionTarget, ToolStatus
 from mindroom.tool_system.registry_state import TOOL_METADATA, TOOL_REGISTRY
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.workspace_automations.service import (
     WorkspaceAutomationLoadedStatus,
     WorkspaceAutomationScanResult,
@@ -24,10 +25,11 @@ from mindroom.workspace_automations.service import (
     get_active_workspace_automation_service,
     set_active_workspace_automation_service,
 )
+from mindroom.workspace_automations.targets import WorkspaceAutomationTarget, iter_workspace_automation_targets
 from tests.conftest import make_event_cache_mock
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 
@@ -65,6 +67,14 @@ def _config(runtime_paths: RuntimePaths) -> Config:
                         "allowed_actions": ["agent_message"],
                     },
                 },
+                "other": {
+                    "display_name": "Other",
+                    "rooms": ["Other"],
+                    "workspace_automations": {
+                        "enabled": True,
+                        "allowed_actions": ["agent_message"],
+                    },
+                },
             },
         },
         runtime_paths,
@@ -84,6 +94,41 @@ def _tool_context(runtime_paths: RuntimePaths) -> ToolRuntimeContext:
         conversation_cache=AsyncMock(),
         event_cache=make_event_cache_mock(),
         room=None,
+    )
+
+
+def _private_identity(agent_name: str, requester_id: str) -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent_name,
+        requester_id=requester_id,
+        room_id="!room:localhost",
+        thread_id="$thread:localhost",
+        resolved_thread_id="$thread:localhost",
+        session_id="session-1",
+        transport_agent_name=agent_name,
+    )
+
+
+def _private_tool_context(
+    runtime_paths: RuntimePaths,
+    config: Config,
+    identity: ToolExecutionIdentity,
+) -> ToolRuntimeContext:
+    return ToolRuntimeContext(
+        agent_name=identity.agent_name,
+        room_id=identity.room_id or "!room:localhost",
+        thread_id=identity.thread_id,
+        resolved_thread_id=identity.resolved_thread_id,
+        requester_id=identity.requester_id or "@user:localhost",
+        client=AsyncMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_cache=AsyncMock(),
+        event_cache=make_event_cache_mock(),
+        room=None,
+        session_id=identity.session_id,
+        transport_agent_name=identity.transport_agent_name,
     )
 
 
@@ -119,9 +164,30 @@ automations:
     )
 
 
+def _write_other_automations(workspace_root: Path) -> None:
+    file_path = workspace_root / ".mindroom" / "automations.yaml"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(
+        """
+version: 1
+automations:
+  other_only:
+    schedule: "* * * * *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    action:
+      type: none
+""",
+        encoding="utf-8",
+    )
+
+
 class _FakeWorkspaceAutomationService:
-    def __init__(self) -> None:
+    def __init__(self, targets: tuple[WorkspaceAutomationTarget, ...] = ()) -> None:
         self.scan_now_call_count = 0
+        self.targets_by_agent = {target.agent_name: target for target in targets}
         self._automations = (
             WorkspaceAutomationLoadedStatus(
                 agent_name="ops",
@@ -134,18 +200,49 @@ class _FakeWorkspaceAutomationService:
                 last_error=None,
                 last_event_id="$event:localhost",
             ),
+            WorkspaceAutomationLoadedStatus(
+                agent_name="other",
+                automation_id="other_poll",
+                workspace_root="/workspace/other",
+                schedule="* * * * *",
+                last_status="action_succeeded",
+                last_run_at="2026-06-16T12:00:00+00:00",
+                last_exit_code=0,
+                last_error=None,
+                last_event_id="$other:localhost",
+            ),
         )
 
     @property
     def is_started(self) -> bool:
         return True
 
-    def list_loaded(self) -> tuple[WorkspaceAutomationLoadedStatus, ...]:
-        return self._automations
+    def list_loaded(
+        self,
+        target_filter: Callable[[WorkspaceAutomationTarget], bool] | None = None,
+    ) -> tuple[WorkspaceAutomationLoadedStatus, ...]:
+        if target_filter is None:
+            return self._automations
+        return tuple(
+            status
+            for status in self._automations
+            if status.agent_name in self.targets_by_agent and target_filter(self.targets_by_agent[status.agent_name])
+        )
 
-    async def scan_now(self) -> WorkspaceAutomationScanResult:
+    async def scan_now(
+        self,
+        target_filter: Callable[[WorkspaceAutomationTarget], bool] | None = None,
+    ) -> WorkspaceAutomationScanResult:
         self.scan_now_call_count += 1
-        return WorkspaceAutomationScanResult(loaded_count=1, error_count=0)
+        return WorkspaceAutomationScanResult(loaded_count=len(self.list_loaded(target_filter)), error_count=0)
+
+
+def _targets(runtime_paths: RuntimePaths) -> tuple[WorkspaceAutomationTarget, ...]:
+    return tuple(iter_workspace_automation_targets(_config(runtime_paths), runtime_paths))
+
+
+def _targeted_service(runtime_paths: RuntimePaths) -> _FakeWorkspaceAutomationService:
+    return _FakeWorkspaceAutomationService(_targets(runtime_paths))
 
 
 @pytest.mark.asyncio
@@ -176,7 +273,9 @@ async def test_validate_automations_scans_context_without_active_service(
         fail_if_accessor_is_used,
     )
     workspace_root = agent_workspace_root_path(runtime_paths.storage_root, "ops")
+    other_workspace_root = agent_workspace_root_path(runtime_paths.storage_root, "other")
     _write_automations(workspace_root)
+    _write_automations(other_workspace_root)
 
     with tool_runtime_context(_tool_context(runtime_paths)):
         payload = json.loads(await WorkspaceAutomationTools().validate_automations())
@@ -189,14 +288,58 @@ async def test_validate_automations_scans_context_without_active_service(
     assert payload["automations"][0]["schedule"] == "* * * * *"
     assert payload["errors"][0]["automation_id"] == "too_slow"
     assert "timeout_seconds" in payload["errors"][0]["message"]
+    assert {automation["agent_name"] for automation in payload["automations"]} == {"ops"}
+    assert {error["automation_id"] for error in payload["errors"]} == {"too_slow"}
 
 
 @pytest.mark.asyncio
-async def test_list_automations_returns_unavailable_when_active_service_is_missing() -> None:
+async def test_validate_automations_scopes_private_targets_to_current_requester(
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Private automation validation should not expose sibling requester workspaces."""
+    config = Config.validate_with_runtime(
+        {
+            "memory": {"backend": "none"},
+            "agents": {
+                "mind": {
+                    "display_name": "Mind",
+                    "rooms": ["Lobby"],
+                    "private": {"per": "user"},
+                    "workspace_automations": {
+                        "enabled": True,
+                        "allowed_actions": ["agent_message"],
+                    },
+                },
+            },
+        },
+        runtime_paths,
+    )
+    alice_identity = _private_identity("mind", "@alice:localhost")
+    bob_identity = _private_identity("mind", "@bob:localhost")
+    alice_runtime = resolve_agent_runtime("mind", config, runtime_paths, alice_identity, create=True)
+    bob_runtime = resolve_agent_runtime("mind", config, runtime_paths, bob_identity, create=True)
+    assert alice_runtime.workspace is not None
+    assert bob_runtime.workspace is not None
+    _write_automations(alice_runtime.workspace.root)
+    _write_other_automations(bob_runtime.workspace.root)
+
+    with tool_runtime_context(_private_tool_context(runtime_paths, config, alice_identity)):
+        payload = json.loads(await WorkspaceAutomationTools().validate_automations())
+
+    assert payload["status"] == "ok"
+    assert [automation["automation_id"] for automation in payload["automations"]] == ["urgent_email_poll"]
+    assert [error["automation_id"] for error in payload["errors"]] == ["too_slow"]
+
+
+@pytest.mark.asyncio
+async def test_list_automations_returns_unavailable_when_active_service_is_missing(
+    runtime_paths: RuntimePaths,
+) -> None:
     """Listing should return a structured unavailable payload instead of raising."""
     assert get_active_workspace_automation_service() is None
 
-    payload = json.loads(await WorkspaceAutomationTools().list_automations())
+    with tool_runtime_context(_tool_context(runtime_paths)):
+        payload = json.loads(await WorkspaceAutomationTools().list_automations())
 
     assert payload["status"] == "error"
     assert payload["tool"] == "workspace_automation"
@@ -205,12 +348,15 @@ async def test_list_automations_returns_unavailable_when_active_service_is_missi
 
 
 @pytest.mark.asyncio
-async def test_list_automations_returns_statuses_from_active_service() -> None:
+async def test_list_automations_returns_context_scoped_statuses_from_active_service(
+    runtime_paths: RuntimePaths,
+) -> None:
     """Listing should expose service status snapshots as JSON payloads."""
-    service = _FakeWorkspaceAutomationService()
+    service = _targeted_service(runtime_paths)
     set_active_workspace_automation_service(cast("WorkspaceAutomationService", service))
 
-    payload = json.loads(await WorkspaceAutomationTools().list_automations())
+    with tool_runtime_context(_tool_context(runtime_paths)):
+        payload = json.loads(await WorkspaceAutomationTools().list_automations())
 
     assert payload["status"] == "ok"
     assert payload["automations"] == [
@@ -229,12 +375,15 @@ async def test_list_automations_returns_statuses_from_active_service() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reload_automations_scans_and_returns_updated_statuses() -> None:
+async def test_reload_automations_scans_and_returns_context_scoped_statuses(
+    runtime_paths: RuntimePaths,
+) -> None:
     """Reloading should run a service scan and include fresh counts and loaded statuses."""
-    service = _FakeWorkspaceAutomationService()
+    service = _targeted_service(runtime_paths)
     set_active_workspace_automation_service(cast("WorkspaceAutomationService", service))
 
-    payload = json.loads(await WorkspaceAutomationTools().reload_automations())
+    with tool_runtime_context(_tool_context(runtime_paths)):
+        payload = json.loads(await WorkspaceAutomationTools().reload_automations())
 
     assert service.scan_now_call_count == 1
     assert payload["status"] == "ok"

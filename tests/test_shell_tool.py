@@ -102,6 +102,26 @@ async def test_run_shell_command_structured_enforces_byte_cap_on_returned_output
 
 
 @pytest.mark.asyncio
+async def test_run_shell_command_structured_rejects_output_cap_above_hard_limit(tmp_path: Path) -> None:
+    """Callers should not be able to allocate unbounded output buffers."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command_structured"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint("true", max_output_bytes=50 * 1024 + 1)
+
+    assert result == {
+        "ok": False,
+        "exit_code": None,
+        "stdout": "",
+        "stderr": "",
+        "raw_output": "",
+        "timed_out": False,
+        "error": "max_output_bytes must be between 1 and 51200.",
+    }
+
+
+@pytest.mark.asyncio
 async def test_run_shell_command_structured_zero_tail_returns_empty_output(tmp_path: Path) -> None:
     """A zero-line tail should return no output, not bypass output limiting."""
     tool = _get_toolkit(tmp_path)

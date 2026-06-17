@@ -329,6 +329,63 @@ Tokenless traffic egresses directly from Squid after the normal policy check.
 When `agentVault.accessTool.enabled` is set, self-service vault grants also keep `agentVault.ownerEmail` as an admin on each worker vault; the Kubernetes worker init container uses that owner account to mint and attach the proxy-role agent token.
 The chart rejects the unsafe default combination of chart-managed approved egress plus Agent Vault without `approvedEgress.parentProxy`, because that would be vault-first and break dynamic grants.
 
+### Agent Vault Access Grants
+
+Agent Vault has two separate access questions.
+Runtime use is controlled by MindRoom worker scope and tool authorization.
+Raw secret visibility is controlled by Agent Vault vault membership.
+
+Use `worker_scope: user` or `worker_scope: user_agent` when each requester should manage and use their own credentials.
+Those requester-isolated workers can use the self-service `agent_vault_access` tool to grant the requester admin access to their own worker vault.
+
+Use `worker_scope: shared` when a shared agent should use a common service credential.
+In that model, all users who can invoke credential-capable tools on that shared agent may indirectly use the credentials through the worker proxy path.
+Only trusted maintainers should receive Agent Vault admin access, because admin access lets them view, edit, and manage the raw secret values in the vault.
+Access grants do not restrict who can cause a shared worker to use credentials at runtime.
+
+Set `workers.kubernetes.agentVault.accessGrants` to declaratively grant vault admin access without deployment-specific inline scripts:
+
+```yaml
+workers:
+  backend: kubernetes
+  kubernetes:
+    agentVault:
+      enabled: true
+      cliImage: infisical/agent-vault:<pinned>
+      ownerEmail: owner@example.test
+      accessGrants:
+        enabled: true
+        grants:
+          - email: maintainer@example.com
+            workerScope: shared
+            agent: example-agent
+            role: admin
+          - email: user@example.com
+            workerScope: user_agent
+            requester: "@user:example.com"
+            agent: example-agent
+            role: admin
+          - email: user@example.com
+            workerScope: user
+            requester: "@user:example.com"
+            role: admin
+```
+
+The chart renders no access-grant resources by default.
+When access grants are enabled and at least one grant is configured, the chart renders a ConfigMap plus a post-install/post-upgrade Job that runs `python -m mindroom.agent_vault_access_grants apply` from the MindRoom image.
+The helper resolves worker keys and vault names through MindRoom's worker-routing code, creates or joins the vault when needed, and grants the configured email the `admin` role.
+The Job is idempotent and safe to rerun on each deploy.
+If an email has not registered and verified in Agent Vault yet, the helper reports a warning and the grant can be applied again after registration.
+
+For `workerScope: shared`, `agent` is required and `requester` must be omitted.
+For `workerScope: user_agent`, both `requester` and `agent` are required.
+For `workerScope: user`, `requester` is required and `agent` must be omitted because the worker key is per-user, not per-agent.
+The initial supported role is `admin`.
+If your deployment sets `CUSTOMER_ID` or `ACCOUNT_ID` for tenant-specific worker keys, set `accessGrants.tenantId` or `accessGrants.accountId` to the same value.
+When `agentVault.bootstrap.enabled` is true, the bootstrap Job publishes the owner-role admin token Secret used by the access-grant Job.
+If `accessTool` and `accessGrants` use the same admin-token Secret name, configure the same key for both or use different Secret names.
+When bootstrap is disabled, provide `accessGrants.adminTokenSecret` yourself.
+
 Use `egressProxy` when another chart or platform layer already manages the proxy:
 
 ```yaml

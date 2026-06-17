@@ -61,6 +61,49 @@ def test_missing_automation_file_returns_empty_result(tmp_path: Path) -> None:
     assert result.errors == ()
 
 
+def test_symlinked_automation_file_returns_structured_error(tmp_path: Path) -> None:
+    """Workspace automation files should not follow symlinks out of the workspace."""
+    outside_file = tmp_path / "outside.yaml"
+    outside_file.write_text("version: 1\nautomations: {}\n", encoding="utf-8")
+    automation_file = tmp_path / ".mindroom" / "automations.yaml"
+    automation_file.parent.mkdir(parents=True)
+    automation_file.symlink_to(outside_file)
+
+    result = _load(tmp_path)
+
+    assert result.automations == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].automation_id is None
+    assert "workspace root" in result.errors[0].message
+
+
+def test_oversized_automation_file_returns_structured_error(tmp_path: Path) -> None:
+    """Workspace automation files should be capped before YAML parsing."""
+    automation_file = tmp_path / ".mindroom" / "automations.yaml"
+    automation_file.parent.mkdir(parents=True)
+    automation_file.write_text("x" * (loader._MAX_AUTOMATIONS_FILE_BYTES + 1), encoding="utf-8")
+
+    result = _load(tmp_path)
+
+    assert result.automations == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].automation_id is None
+    assert "must not exceed" in result.errors[0].message
+
+
+def test_directory_automation_file_returns_structured_error(tmp_path: Path) -> None:
+    """Workspace automation path must be a regular file, not a directory or device."""
+    automation_file = tmp_path / ".mindroom" / "automations.yaml"
+    automation_file.mkdir(parents=True)
+
+    result = _load(tmp_path)
+
+    assert result.automations == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].automation_id is None
+    assert "regular file" in result.errors[0].message
+
+
 def test_disabled_policy_returns_empty_result_without_reading_file(tmp_path: Path) -> None:
     """Policy-disabled agents should ignore workspace-authored automations."""
     _write_automations(tmp_path, "this: [is: not: valid")
@@ -582,6 +625,58 @@ automations:
 
     assert result.errors == ()
     assert result.automations[0].action.room == "Ops"
+
+
+def test_hook_action_may_omit_room_when_agent_has_multiple_rooms(tmp_path: Path) -> None:
+    """Roomless hook actions should stay roomless when no single fallback exists."""
+    _write_automations(
+        tmp_path,
+        """
+version: 1
+automations:
+  roomless_hook:
+    schedule: "*/1 * * * *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    trigger:
+      exit_code: 0
+    action:
+      type: hook
+""",
+    )
+
+    result = _load(tmp_path, rooms=["Ops", "Alerts"])
+
+    assert result.errors == ()
+    assert result.automations[0].action.room is None
+
+
+def test_hook_action_may_omit_room_when_agent_has_no_rooms(tmp_path: Path) -> None:
+    """Roomless hooks should still work for unscoped hook observers."""
+    _write_automations(
+        tmp_path,
+        """
+version: 1
+automations:
+  unscoped_hook:
+    schedule: "*/1 * * * *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    trigger:
+      exit_code: 0
+    action:
+      type: hook
+""",
+    )
+
+    result = _load(tmp_path, rooms=[])
+
+    assert result.errors == ()
+    assert result.automations[0].action.room is None
 
 
 def test_hook_action_room_must_belong_to_owning_agent(tmp_path: Path) -> None:

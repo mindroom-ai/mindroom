@@ -468,6 +468,49 @@ workers:
         adminTokenSecret:
           name: agent-vault-access-admin
           key: token
+      # Optional declarative Agent Vault UI/admin grants for worker vaults.
+      # This controls raw secret visibility and management only. It does not
+      # restrict which users may cause a shared agent to use credentials at
+      # runtime.
+      accessGrants:
+        enabled: false
+        # Optional tenant/account identifiers used in MindRoom worker-key
+        # derivation. Set these to the same values the runtime receives through
+        # CUSTOMER_ID or ACCOUNT_ID when your deployment uses tenant-specific
+        # worker keys. Leave empty for the runtime default tenant.
+        tenantId: ""
+        accountId: ""
+        # Existing Secret holding an owner/admin token for Agent Vault. When
+        # bootstrap.enabled is true, the bootstrap Job publishes the same
+        # owner-role token it uses for accessTool into this Secret too.
+        # If accessTool uses the same Secret name, use the same key or a
+        # different Secret name so bootstrap never applies one Secret twice.
+        adminTokenSecret:
+          name: agent-vault-access-admin
+          key: token
+        waitReadySeconds: 180
+        resources: {}
+        # Each grant gives an email raw UI/admin access to the resolved worker
+        # vault. Supported workerScope values are shared, user, and user_agent.
+        # For workerScope=user, omit agent; use workerScope=user_agent when the
+        # vault should be both requester- and agent-specific.
+        # Supported role is admin.
+        grants: []
+        # Example:
+        # grants:
+        #   - email: user@example.com
+        #     workerScope: shared
+        #     agent: example-agent
+        #     role: admin
+        #   - email: user@example.com
+        #     workerScope: user_agent
+        #     requester: "@user:example.com"
+        #     agent: example-agent
+        #     role: admin
+        #   - email: user@example.com
+        #     workerScope: user
+        #     requester: "@user:example.com"
+        #     role: admin
 
 # Optional external HTTP proxy for dedicated Kubernetes workers.
 # This chart can point worker pods at an existing proxy Service and, when

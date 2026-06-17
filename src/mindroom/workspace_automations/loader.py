@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -21,6 +22,7 @@ from mindroom.workspace_automations.models import (
     workspace_automation_trigger_has_rule,
 )
 from mindroom.workspace_automations.targets import resolve_action_room
+from mindroom.workspaces import resolve_relative_path_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -28,6 +30,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import WorkspaceAutomationPolicyConfig
 
 AUTOMATIONS_RELATIVE_PATH = Path(".mindroom") / "automations.yaml"
+_MAX_AUTOMATIONS_FILE_BYTES = 256 * 1024
 _SCHEDULE_INTERVAL_BASE = datetime(2026, 1, 1, tzinfo=UTC)
 # Five-field cron has no year column, but month/day gaps repeat on the Gregorian
 # 400-year leap cycle. Dense schedules hit the max-run cap after seeing short gaps.
@@ -44,9 +47,15 @@ def load_workspace_automations(
     policy: WorkspaceAutomationPolicyConfig,
 ) -> WorkspaceAutomationLoadResult:
     """Load and validate workspace automations for one agent workspace."""
-    file_path = workspace_root / AUTOMATIONS_RELATIVE_PATH
-    if not policy.enabled or not file_path.exists():
+    if not policy.enabled:
         return WorkspaceAutomationLoadResult()
+
+    resolved_file = _resolve_automation_file(workspace_root)
+    if resolved_file is None:
+        return WorkspaceAutomationLoadResult()
+    if isinstance(resolved_file, WorkspaceAutomationLoadError):
+        return WorkspaceAutomationLoadResult(errors=(resolved_file,))
+    file_path = resolved_file
 
     loaded_yaml = _load_yaml_file(file_path)
     if isinstance(loaded_yaml, WorkspaceAutomationLoadError):
@@ -60,55 +69,121 @@ def load_workspace_automations(
     automations: list[LoadedWorkspaceAutomation] = []
     errors: list[WorkspaceAutomationLoadError] = []
     for automation_id, raw_definition in automation_file.automations.items():
-        if _raw_definition_is_disabled(raw_definition):
-            continue
-
-        entry_errors = _validate_automation_id(file_path, automation_id)
-        if entry_errors:
-            errors.extend(entry_errors)
-            continue
-
-        try:
-            definition = WorkspaceAutomationDefinition.model_validate(raw_definition)
-        except ValidationError as exc:
-            errors.extend(_validation_errors(file_path, automation_id, ("automations", automation_id), exc))
-            continue
-
-        if not definition.enabled:
-            continue
-
-        normalized_action = _normalize_action_room(definition.action, agent_rooms)
-        policy_errors = _policy_errors(
+        loaded_automation, entry_errors = _load_automation_entry(
+            agent_name=agent_name,
+            workspace_root=workspace_root,
             file_path=file_path,
             automation_id=automation_id,
-            definition=definition,
-            action=normalized_action,
+            raw_definition=raw_definition,
             agent_rooms=agent_rooms,
             policy=policy,
         )
-        if policy_errors:
-            errors.extend(policy_errors)
-            continue
-
-        automations.append(
-            LoadedWorkspaceAutomation(
-                agent_name=agent_name,
-                automation_id=automation_id,
-                workspace_root=workspace_root,
-                file_path=file_path,
-                schedule=definition.schedule,
-                check=definition.check,
-                trigger=definition.trigger,
-                action=normalized_action,
-            ),
-        )
+        errors.extend(entry_errors)
+        if loaded_automation is not None:
+            automations.append(loaded_automation)
 
     return WorkspaceAutomationLoadResult(automations=tuple(automations), errors=tuple(errors))
 
 
+def _load_automation_entry(
+    *,
+    agent_name: str,
+    workspace_root: Path,
+    file_path: Path,
+    automation_id: str,
+    raw_definition: object,
+    agent_rooms: Sequence[str],
+    policy: WorkspaceAutomationPolicyConfig,
+) -> tuple[LoadedWorkspaceAutomation | None, list[WorkspaceAutomationLoadError]]:
+    if _raw_definition_is_disabled(raw_definition):
+        return None, []
+
+    entry_errors = _validate_automation_id(file_path, automation_id)
+    if entry_errors:
+        return None, entry_errors
+
+    try:
+        definition = WorkspaceAutomationDefinition.model_validate(raw_definition)
+    except ValidationError as exc:
+        return None, _validation_errors(file_path, automation_id, ("automations", automation_id), exc)
+
+    if not definition.enabled:
+        return None, []
+
+    normalized_action = _normalize_action_room(definition.action, agent_rooms)
+    policy_errors = _policy_errors(
+        file_path=file_path,
+        automation_id=automation_id,
+        definition=definition,
+        action=normalized_action,
+        agent_rooms=agent_rooms,
+        policy=policy,
+    )
+    if policy_errors:
+        return None, policy_errors
+
+    return (
+        LoadedWorkspaceAutomation(
+            agent_name=agent_name,
+            automation_id=automation_id,
+            workspace_root=workspace_root,
+            file_path=file_path,
+            schedule=definition.schedule,
+            check=definition.check,
+            trigger=definition.trigger,
+            action=normalized_action,
+        ),
+        [],
+    )
+
+
+def _resolve_automation_file(workspace_root: Path) -> Path | WorkspaceAutomationLoadError | None:
+    file_path = workspace_root / AUTOMATIONS_RELATIVE_PATH
+    try:
+        resolved_file = resolve_relative_path_within_root(
+            workspace_root,
+            AUTOMATIONS_RELATIVE_PATH,
+            field_name="Workspace automation file",
+            root_label="workspace root",
+        )
+    except ValueError as exc:
+        return WorkspaceAutomationLoadError(
+            file_path=file_path,
+            automation_id=None,
+            field_path=(),
+            message=str(exc),
+        )
+    if not resolved_file.exists():
+        return None
+    return resolved_file
+
+
 def _load_yaml_file(file_path: Path) -> object | WorkspaceAutomationLoadError:
     try:
-        return yaml.safe_load(file_path.read_text(encoding="utf-8"))
+        file_stat = file_path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(file_stat.st_mode):
+            return WorkspaceAutomationLoadError(
+                file_path=file_path,
+                automation_id=None,
+                field_path=(),
+                message="Automation YAML must be a regular file",
+            )
+        if file_stat.st_size > _MAX_AUTOMATIONS_FILE_BYTES:
+            return WorkspaceAutomationLoadError(
+                file_path=file_path,
+                automation_id=None,
+                field_path=(),
+                message=f"Automation YAML must not exceed {_MAX_AUTOMATIONS_FILE_BYTES} bytes",
+            )
+        raw_content = file_path.read_bytes()
+        if len(raw_content) > _MAX_AUTOMATIONS_FILE_BYTES:
+            return WorkspaceAutomationLoadError(
+                file_path=file_path,
+                automation_id=None,
+                field_path=(),
+                message=f"Automation YAML must not exceed {_MAX_AUTOMATIONS_FILE_BYTES} bytes",
+            )
+        return yaml.safe_load(raw_content.decode("utf-8"))
     except yaml.YAMLError as exc:
         return WorkspaceAutomationLoadError(
             file_path=file_path,
@@ -282,7 +357,9 @@ def _action_room_errors(
         return []
 
     errors: list[WorkspaceAutomationLoadError] = []
-    if action.room is None and action.type in {"agent_message", "matrix_message"}:
+    if action.room is None:
+        if action.type == "hook":
+            return errors
         errors.append(
             WorkspaceAutomationLoadError(
                 file_path=file_path,

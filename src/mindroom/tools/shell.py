@@ -575,7 +575,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
         ) -> dict[str, object]:
             """Run a shell command and return a JSON-safe structured result."""
             self._sweep_stale_records()
-            if max_output_bytes < 1:
+            if max_output_bytes < 1 or max_output_bytes > _MAX_OUTPUT_BYTES:
                 return _structured_shell_result(
                     ok=False,
                     exit_code=None,
@@ -583,7 +583,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     stderr="",
                     raw_output="",
                     timed_out=False,
-                    error="max_output_bytes must be at least 1.",
+                    error=f"max_output_bytes must be between 1 and {_MAX_OUTPUT_BYTES}.",
                 )
 
             try:

@@ -154,6 +154,7 @@ def _automation(
     automation_id: str = "urgent_email_poll",
     schedule: str = "* * * * *",
     trigger_exit_code: int | None = 42,
+    action_type: str = "agent_message",
 ) -> LoadedWorkspaceAutomation:
     return LoadedWorkspaceAutomation(
         agent_name="ops",
@@ -169,10 +170,10 @@ def _automation(
         ),
         trigger=WorkspaceAutomationTrigger(exit_code=trigger_exit_code) if trigger_exit_code is not None else None,
         action=WorkspaceAutomationAction(
-            type="agent_message",
-            room="Lobby",
-            thread_id="$thread",
-            message="Urgent email condition matched.",
+            type=action_type,
+            room="Lobby" if action_type != "none" else None,
+            thread_id="$thread" if action_type != "none" else None,
+            message="Urgent email condition matched." if action_type != "none" else None,
         ),
     )
 
@@ -563,6 +564,43 @@ async def test_cron_due_run_skips_action_when_trigger_does_not_match(
     loaded = service.list_loaded()
     assert loaded[0].last_status == "not_matched"
     assert loaded[0].last_exit_code == 42
+
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_none_action_without_trigger_records_successful_noop(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Triggerless none actions should record the check instead of always not_matching."""
+    config = _config(runtime_paths)
+    automation = _automation(tmp_path, trigger_exit_code=None, action_type="none")
+    clock = _ControlledClock(datetime(2026, 1, 1, 0, 0, 59, tzinfo=UTC))
+
+    async def check_runner(**_kwargs: object) -> ShellCheckResult:
+        return _check_result(exit_code=0)
+
+    service = WorkspaceAutomationService(
+        target_loader=lambda _config, _runtime_paths: [_target(tmp_path)],
+        automation_loader=lambda **_kwargs: WorkspaceAutomationLoadResult(automations=(automation,)),
+        check_runner=check_runner,
+        now=clock.current_time,
+        sleep=clock.sleep,
+        scan_interval_seconds=None,
+    )
+
+    await service.start(config, runtime_paths, HookRegistry.empty(), _bot_provider, object())
+    await clock.wait_for_sleep_count(1)
+    clock.resolve_next_sleep()
+    for _ in range(100):
+        if service.list_loaded()[0].last_status is not None:
+            break
+        await asyncio.sleep(0)
+
+    loaded = service.list_loaded()
+    assert loaded[0].last_status == "action_succeeded"
+    assert loaded[0].last_exit_code == 0
 
     await service.shutdown()
 

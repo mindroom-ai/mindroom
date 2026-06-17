@@ -57,6 +57,7 @@ type _Sleep = Callable[[float], Awaitable[None]]
 type _Now = Callable[[], datetime]
 type _TaskFactory = Callable[..., asyncio.Task[None]]
 type _MessageSenderBuilder = Callable[..., "HookMessageSender"]
+type _TargetFilter = Callable[[WorkspaceAutomationTarget], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,12 +225,12 @@ class WorkspaceAutomationService:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def scan_now(self) -> WorkspaceAutomationScanResult:
+    async def scan_now(self, target_filter: _TargetFilter | None = None) -> WorkspaceAutomationScanResult:
         """Reload automation files and reconcile supervised cron loops."""
         async with self._scan_lock:
-            return await self._scan_now_locked()
+            return await self._scan_now_locked(target_filter=target_filter)
 
-    async def _scan_now_locked(self) -> WorkspaceAutomationScanResult:
+    async def _scan_now_locked(self, target_filter: _TargetFilter | None = None) -> WorkspaceAutomationScanResult:
         context = self._require_context()
         loaded_entries, errors = await asyncio.to_thread(
             _load_automation_entries,
@@ -237,20 +238,26 @@ class WorkspaceAutomationService:
             context.runtime_paths,
             self.target_loader,
             self.automation_loader,
+            target_filter,
         )
 
         self._log_load_errors(errors)
-        await self._reconcile_tasks(loaded_entries)
+        if target_filter is None:
+            await self._reconcile_tasks(loaded_entries)
+        else:
+            await self._reconcile_filtered_tasks(loaded_entries, target_filter)
         return WorkspaceAutomationScanResult(
             loaded_count=len(loaded_entries),
             error_count=len(errors),
             errors=tuple(errors),
         )
 
-    def list_loaded(self) -> tuple[WorkspaceAutomationLoadedStatus, ...]:
+    def list_loaded(self, target_filter: _TargetFilter | None = None) -> tuple[WorkspaceAutomationLoadedStatus, ...]:
         """Return a stable snapshot of loaded automations and their latest statuses."""
         items: list[WorkspaceAutomationLoadedStatus] = []
         for key, entry in sorted(self._loaded.items(), key=lambda item: item[0].state_id()):
+            if target_filter is not None and not target_filter(entry.target):
+                continue
             status = self._run_status.get(key)
             items.append(
                 WorkspaceAutomationLoadedStatus(
@@ -292,6 +299,38 @@ class WorkspaceAutomationService:
         self._loaded = dict(loaded_entries)
 
         for key in sorted(self._loaded, key=AutomationKey.state_id):
+            task = self._tasks.get(key)
+            if task is None or task.done():
+                self._tasks[key] = self._create_task(
+                    self._automation_loop(key),
+                    name=f"workspace_automation:{key.agent_name}:{key.automation_id}",
+                )
+        if removed_status:
+            await self._write_state_file()
+
+    async def _reconcile_filtered_tasks(
+        self,
+        loaded_entries: Mapping[AutomationKey, _LoadedAutomationEntry],
+        target_filter: _TargetFilter,
+    ) -> None:
+        kept_entries = {key: entry for key, entry in self._loaded.items() if not target_filter(entry.target)}
+        removed_keys = set(self._loaded) - set(kept_entries) - set(loaded_entries)
+        removed_status = False
+        for key in sorted(removed_keys, key=AutomationKey.state_id):
+            await self._cancel_task(key)
+            removed_status = self._run_status.pop(key, None) is not None or removed_status
+
+        changed_schedule_keys = {
+            key
+            for key in set(self._loaded) & set(loaded_entries)
+            if self._loaded[key].automation.schedule != loaded_entries[key].automation.schedule
+        }
+        for key in sorted(changed_schedule_keys, key=AutomationKey.state_id):
+            await self._cancel_task(key)
+
+        self._loaded = {**kept_entries, **dict(loaded_entries)}
+
+        for key in sorted(loaded_entries, key=AutomationKey.state_id):
             task = self._tasks.get(key)
             if task is None or task.done():
                 self._tasks[key] = self._create_task(
@@ -367,7 +406,9 @@ class WorkspaceAutomationService:
             target=entry.target,
             automation=automation,
         )
-        matched = self.trigger_matcher(automation.trigger, check_result)
+        matched = automation.action.type == "none" and automation.trigger is None
+        if not matched:
+            matched = self.trigger_matcher(automation.trigger, check_result)
         if not matched:
             await self._record_status(
                 key,
@@ -460,11 +501,14 @@ def _load_automation_entries(
     runtime_paths: RuntimePaths,
     target_loader: _TargetLoader,
     automation_loader: _AutomationLoader,
+    target_filter: _TargetFilter | None = None,
 ) -> tuple[dict[AutomationKey, _LoadedAutomationEntry], list[WorkspaceAutomationLoadError]]:
     loaded_entries: dict[AutomationKey, _LoadedAutomationEntry] = {}
     errors: list[WorkspaceAutomationLoadError] = []
 
     for target in target_loader(config, runtime_paths):
+        if target_filter is not None and not target_filter(target):
+            continue
         result = automation_loader(
             agent_name=target.agent_name,
             workspace_root=target.workspace_root,
