@@ -179,15 +179,24 @@ async def user_has_room_admin_power(
     user_ids: Iterable[str],
 ) -> bool:
     """Return whether any supplied user ID has Matrix room admin power."""
-    concrete_user_ids = {user_id for user_id in user_ids if user_id}
+    return (await room_admin_power_user(client, room_id, user_ids)) is not None
+
+
+async def room_admin_power_user(
+    client: nio.AsyncClient,
+    room_id: str,
+    user_ids: Iterable[str],
+) -> str | None:
+    """Return the first supplied user ID with Matrix room admin power."""
+    concrete_user_ids = list(dict.fromkeys(user_id for user_id in user_ids if user_id))
     if not concrete_user_ids:
-        return False
+        return None
 
     try:
         current_response = await client.room_get_state_event(room_id, _POWER_LEVELS_EVENT_TYPE)
     except Exception as exc:  # fail closed for chat-admin checks
         logger.warning("Failed to read room power levels for admin check", room_id=room_id, error=str(exc))
-        return False
+        return None
 
     if not isinstance(current_response, nio.RoomGetStateEventResponse):
         logger.warning(
@@ -196,7 +205,7 @@ async def user_has_room_admin_power(
             user_ids=sorted(concrete_user_ids),
             error=_describe_matrix_response_error(current_response),
         )
-        return False
+        return None
     if not isinstance(current_response.content, dict):
         logger.warning(
             "Room power levels state has unexpected content shape for admin check",
@@ -204,12 +213,12 @@ async def user_has_room_admin_power(
             user_ids=sorted(concrete_user_ids),
             content=current_response.content,
         )
-        return False
+        return None
 
-    return any(
-        _room_power_level_for_user(current_response.content, user_id) >= _ROOM_ADMIN_POWER_LEVEL
-        for user_id in concrete_user_ids
-    )
+    for user_id in concrete_user_ids:
+        if _room_power_level_for_user(current_response.content, user_id) >= _ROOM_ADMIN_POWER_LEVEL:
+            return user_id
+    return None
 
 
 async def ensure_room_admin_power_levels(
@@ -607,5 +616,6 @@ __all__ = [
     "invite_to_room",
     "join_room",
     "leave_room",
+    "room_admin_power_user",
     "user_has_room_admin_power",
 ]

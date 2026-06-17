@@ -24,6 +24,7 @@ from mindroom.room_thread_modes import (
     _load_cache,
     _store_path,
     clear_room_thread_mode_override,
+    get_room_thread_mode_override,
     set_room_thread_mode_override,
 )
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
@@ -310,6 +311,27 @@ async def test_thread_mode_command_admin_sets_runtime_override_without_config_wr
     context.record_handled_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id("$event", response_event_id="$reply"),
     )
+
+
+@pytest.mark.asyncio
+async def test_thread_mode_command_records_sender_when_sender_authorizes_requester(tmp_path: Path) -> None:
+    """Audit metadata should name the Matrix user who satisfied the admin check."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = _power_levels_response(users={"@bridge-admin:localhost": 100})
+    context = _thread_mode_context(tmp_path, client)
+    command = Command(type=CommandType.THREAD_MODE, args={"args_text": "room"}, raw_text="!thread_mode room")
+
+    await handle_command(
+        context=context,
+        room=SimpleNamespace(room_id=ROOM_ID),
+        event=_thread_mode_event("@bridge-admin:localhost", "!thread_mode room"),
+        command=command,
+        requester_user_id="@puppet-user:localhost",
+    )
+
+    override = get_room_thread_mode_override(context.runtime_paths, ROOM_ID)
+    assert override.mode == "room"
+    assert override.set_by == "@bridge-admin:localhost"
 
 
 @pytest.mark.asyncio

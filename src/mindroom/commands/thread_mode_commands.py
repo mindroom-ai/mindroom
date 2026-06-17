@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from mindroom.matrix.client_room_admin import user_has_room_admin_power
+from mindroom.matrix.client_room_admin import room_admin_power_user
 from mindroom.room_thread_modes import (
     RoomThreadMode,
     clear_room_thread_mode_override,
@@ -54,8 +54,8 @@ async def handle_thread_mode_command(
     if requested not in _VALID_MODES and requested not in _RESET_ARGUMENTS:
         return f"❌ Unknown thread mode `{args_text.strip()}`.\n\n{_USAGE}"
 
-    requester_candidates = {requester_user_id, sender_user_id}
-    if not await user_has_room_admin_power(client, room_id, requester_candidates):
+    admin_user_id = await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id))
+    if admin_user_id is None:
         return "❌ Room admin only."
 
     if requested in _RESET_ARGUMENTS:
@@ -68,7 +68,7 @@ async def handle_thread_mode_command(
         runtime_paths,
         room_id=room_id,
         mode=mode,
-        set_by=requester_user_id,
+        set_by=admin_user_id,
     )
     return (
         f"✅ This room now uses `{mode}` thread mode for future agent replies.\n\n"
