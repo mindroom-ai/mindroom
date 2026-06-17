@@ -20,6 +20,9 @@ from mindroom.credential_policy import (
         ("google_drive_oauth", "user", True),
         ("google_drive_oauth", "user_agent", True),
         ("google_drive_oauth", "shared", False),
+        ("acme_oauth", "user", True),
+        ("acme_oauth", "user_agent", True),
+        ("acme_oauth", "shared", False),
         ("openai", "user", False),
         ("homeassistant", "user_agent", True),
     ],
@@ -34,6 +37,7 @@ def test_primary_runtime_scoped_service_policy(service: str, worker_scope: str, 
     [
         ("google_drive", "shared", True),
         ("google_drive_oauth", "shared", True),
+        ("acme_oauth", "shared", True),
         ("gmail", "shared", True),
         ("openai", "shared", False),
         ("google_drive", "user", False),
@@ -68,6 +72,19 @@ def test_credential_service_policy_classifies_google_oauth_user_scope() -> None:
     assert policy.uses_primary_runtime_scoped_credentials is True
     assert policy.uses_local_shared_credentials is False
     assert policy.worker_grantable_supported is False
+
+
+def test_credential_service_policy_classifies_plugin_oauth_token_service() -> None:
+    """Plugin OAuth token services should use primary-runtime storage and reject worker grants."""
+    shared_policy = credential_service_policy("acme_oauth", "shared")
+    user_agent_policy = credential_service_policy("acme_oauth", "user_agent")
+
+    assert shared_policy.uses_local_shared_credentials is True
+    assert shared_policy.uses_primary_runtime_scoped_credentials is False
+    assert shared_policy.worker_grantable_supported is False
+    assert user_agent_policy.uses_local_shared_credentials is False
+    assert user_agent_policy.uses_primary_runtime_scoped_credentials is True
+    assert user_agent_policy.worker_grantable_supported is False
 
 
 def test_credential_service_policy_classifies_oauth_client_config_as_global_primary_runtime() -> None:

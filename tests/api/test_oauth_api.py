@@ -1917,6 +1917,102 @@ def test_shared_scope_oauth_token_uses_shared_store_not_worker_path(tmp_path: Pa
     assert manager.for_worker(worker_key).load_credentials(provider.credential_service) is None
 
 
+def test_shared_scope_plugin_oauth_token_uses_shared_store_not_worker_path(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
+    provider = _fake_provider(
+        provider_id="acme",
+        credential_service="acme_oauth",
+        tool_config_service="acme",
+        client_config_services=("acme_oauth_client",),
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "acme_oauth_client",
+        {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "_source": "ui",
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+            state = _state_from_auth_url(connect_response.json()["auth_url"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 307
+    shared_credentials = manager.shared_manager().load_credentials(provider.credential_service)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_key = resolve_worker_key("shared", identity, agent_name="general")
+    assert worker_key is not None
+    assert shared_credentials is not None
+    assert shared_credentials["token"] == "acme-access-token"
+    assert manager.for_worker(worker_key).load_credentials(provider.credential_service) is None
+
+
+def test_user_agent_scope_plugin_oauth_token_uses_private_store_not_worker_path(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(
+        provider_id="acme",
+        credential_service="acme_oauth",
+        tool_config_service="acme",
+        client_config_services=("acme_oauth_client",),
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "acme_oauth_client",
+        {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "_source": "ui",
+        },
+    )
+    owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+            state = _state_from_auth_url(connect_response.json()["auth_url"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 307
+    stored_credentials = manager.for_primary_runtime_scope("@alice:example.org", "general").load_credentials(
+        provider.credential_service,
+    )
+    assert stored_credentials is not None
+    assert stored_credentials["token"] == "acme-access-token"
+    assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
+
+
 def test_dashboard_private_oauth_rejects_unbound_standalone_requester(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
