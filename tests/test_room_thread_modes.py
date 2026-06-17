@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -26,9 +26,6 @@ from mindroom.room_thread_modes import (
     set_room_thread_mode_override,
 )
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 ROOM_ID = "!room:localhost"
 
@@ -135,6 +132,51 @@ def test_room_thread_mode_store_drops_invalid_records(tmp_path: Path) -> None:
 
     assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) is None
     assert _get_room_thread_mode_override(runtime_paths, "!other:localhost") is None
+
+
+def test_room_thread_mode_store_detects_file_created_after_missing_read(tmp_path: Path) -> None:
+    """A missing-file read should not hide a later externally-created store."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    path = _store_path(runtime_paths)
+
+    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) is None
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({ROOM_ID: {"mode": "thread", "set_at": "2026-06-17T00:00:00+00:00"}}),
+        encoding="utf-8",
+    )
+
+    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) == "thread"
+
+
+def test_room_thread_mode_store_removes_temp_file_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed atomic replacement should not leave orphaned .tmp files."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    path = _store_path(runtime_paths)
+    real_replace = Path.replace
+
+    def fail_room_mode_replace(self: Path, target: Path) -> Path:
+        if target == path:
+            message = "replace failed"
+            raise OSError(message)
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", fail_room_mode_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        set_room_thread_mode_override(
+            runtime_paths,
+            room_id=ROOM_ID,
+            mode="room",
+            set_by="@admin:localhost",
+        )
+
+    assert not list(path.parent.glob("*.tmp"))
+    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) is None
 
 
 def test_get_entity_thread_mode_prefers_runtime_room_override(tmp_path: Path) -> None:

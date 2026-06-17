@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -62,7 +63,12 @@ def _save_overrides(path: Path, overrides: dict[str, dict[str, str]]) -> None:
     with tempfile.NamedTemporaryFile("w", dir=path.parent, suffix=".tmp", delete=False, encoding="utf-8") as temp_file:
         temp_file.write(json.dumps(overrides, indent=2, sort_keys=True))
         temp_path = Path(temp_file.name)
-    temp_path.replace(path)
+    try:
+        temp_path.replace(path)
+    except OSError:
+        with suppress(OSError):
+            temp_path.unlink()
+        raise
     _load_cache.pop(path, None)
 
 
