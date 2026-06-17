@@ -52,7 +52,7 @@ Display available commands or get detailed help on a specific topic.
 !help edit_schedule
 ```
 
-**Topics:** `schedule`, `config`, `model`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
+**Topics:** `schedule`, `config`, `model`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
 
 ### `!hi`
 
