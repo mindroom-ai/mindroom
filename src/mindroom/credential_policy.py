@@ -31,6 +31,8 @@ OAUTH_CREDENTIAL_FIELDS = frozenset(
 
 _OAUTH_CLIENT_CONFIG_SERVICE_SUFFIX = "_oauth_client"
 _OAUTH_TOKEN_SERVICE_SUFFIX = "_oauth"  # noqa: S105
+# OAuth provider token services use the *_oauth naming contract. The separate
+# *_oauth_client app-client config contract intentionally does not match it.
 
 _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     {
@@ -50,17 +52,13 @@ _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
 _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
     {
         "google_vertex_adc",
-        "google_calendar_oauth",
-        "google_drive_oauth",
-        "google_gmail_oauth",
-        "google_sheets_oauth",
     },
 )
 
 
 def _is_oauth_token_service(service: str) -> bool:
     """Return whether a service name follows the OAuth token naming contract."""
-    return service.endswith(_OAUTH_TOKEN_SERVICE_SUFFIX) and not is_oauth_client_config_service(service)
+    return service.endswith(_OAUTH_TOKEN_SERVICE_SUFFIX)
 
 
 @dataclass(frozen=True, slots=True)

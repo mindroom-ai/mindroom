@@ -55,12 +55,17 @@ def test_local_shared_service_policy(service: str, worker_scope: str, expected: 
         "google_drive_oauth",
         "google_gmail_oauth",
         "google_sheets_oauth",
-        "google_vertex_adc",
     ],
 )
-def test_worker_grantable_policy_rejects_sensitive_google_services(service: str) -> None:
-    """Sensitive Google credential services should stay unsupported for worker mirroring."""
-    assert service in _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
+def test_worker_grantable_policy_rejects_google_oauth_token_services(service: str) -> None:
+    """Google OAuth token services should stay unsupported for worker mirroring."""
+    assert credential_service_policy(service, "shared").worker_grantable_supported is False
+
+
+def test_worker_grantable_policy_rejects_sensitive_google_services() -> None:
+    """Sensitive non-OAuth Google credential services should stay unsupported for worker mirroring."""
+    assert frozenset({"google_vertex_adc"}) == _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
+    assert credential_service_policy("google_vertex_adc", "shared").worker_grantable_supported is False
 
 
 def test_credential_service_policy_classifies_google_oauth_user_scope() -> None:
