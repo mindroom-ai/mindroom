@@ -107,7 +107,7 @@ def _read_registry_payload(registry_path: Path) -> dict[str, object]:
         return {"version": _REGISTRY_VERSION, "instances": {}}
     try:
         raw_payload = json.loads(registry_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return {"version": _REGISTRY_VERSION, "instances": {}}
     if not isinstance(raw_payload, dict):
         return {"version": _REGISTRY_VERSION, "instances": {}}

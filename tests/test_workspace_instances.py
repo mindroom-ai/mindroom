@@ -184,6 +184,34 @@ def test_malformed_workspace_instance_entries_are_skipped(runtime_paths: Runtime
     assert load_workspace_instance_records(runtime_paths) == [expected]
 
 
+def test_invalid_utf8_registry_is_treated_as_malformed_and_recovered(
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Invalid registry bytes should not break runtime materialization."""
+    config = _config(runtime_paths)
+    identity = _identity("@alice:example.org")
+    registry_path = workspace_instance_registry_path(runtime_paths)
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_bytes(b"\xff\xfeinvalid-json")
+
+    assert load_workspace_instance_records(runtime_paths) == []
+
+    runtime = resolve_agent_runtime(
+        "mind",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+
+    assert runtime.workspace is not None
+    assert runtime.worker_key is not None
+    records = load_workspace_instance_records(runtime_paths)
+    assert len(records) == 1
+    assert records[0].worker_key == runtime.worker_key
+    assert records[0].workspace_root == runtime.workspace.root
+
+
 def test_concurrent_private_runtime_materializations_do_not_lose_workspace_instance_records(
     runtime_paths: RuntimePaths,
 ) -> None:
