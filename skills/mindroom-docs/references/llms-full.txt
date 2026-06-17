@@ -13449,6 +13449,7 @@ agents:
 `min_interval_seconds` rejects cron schedules that can run more often than the configured interval.
 `max_timeout_seconds` caps `check.timeout_seconds` for one shell check.
 `max_output_bytes` caps command output returned from the check, used for trigger evaluation, and included in the `automation:triggered` hook check-result payload.
+The value must be between 1024 and 65536 bytes.
 `allowed_actions` lists visible or side-effecting action types that the workspace file may use.
 `none` is always allowed and is not listed in `allowed_actions`.
 
