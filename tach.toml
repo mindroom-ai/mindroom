@@ -1206,6 +1206,7 @@ depends_on = [
     "mindroom.mcp.config",
     "mindroom.prompt_templates",
     "mindroom.prompts",
+    "mindroom.room_thread_modes",
     "mindroom.thread_models",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",
@@ -1667,6 +1668,7 @@ visibility = [
     "mindroom.api.matrix_operations",
     "mindroom.bot",
     "mindroom.bot_room_lifecycle",
+    "mindroom.commands.thread_mode_commands",
     "mindroom.hooks.matrix_admin",
     "mindroom.matrix.client",
     "mindroom.matrix.room_cleanup",
@@ -1787,6 +1789,12 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.thread_models"
+depends_on = [
+    "mindroom.constants",
+]
+
+[[modules]]
+path = "mindroom.room_thread_modes"
 depends_on = [
     "mindroom.constants",
 ]
@@ -2058,6 +2066,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.commands.thread_mode_commands"
+depends_on = [
+    "mindroom.matrix.client_room_admin",
+    "mindroom.room_thread_modes",
+]
+visibility = ["mindroom.commands.handler"]
+
+[[modules]]
 path = "mindroom.commands.parsing"
 depends_on = [
     "mindroom.constants",
@@ -2072,6 +2088,7 @@ depends_on = [
     "mindroom.commands.config_confirmation",
     "mindroom.commands.model_commands",
     "mindroom.commands.parsing",
+    "mindroom.commands.thread_mode_commands",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.handled_turns",
@@ -2927,6 +2944,7 @@ expose = [
     "invite_to_room",
     "join_room",
     "leave_room",
+    "user_has_room_admin_power",
 ]
 from = ["mindroom.matrix.client_room_admin"]
 

@@ -79,6 +79,7 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
+from mindroom.room_thread_modes import resolve_room_thread_mode_override
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.plugin_imports import PluginValidationError
@@ -1714,6 +1715,10 @@ class Config(BaseModel):
         In ambiguous cases, default to "thread".
         """
         from mindroom.entity_resolution import resolve_agent_thread_mode, router_agents_for_room  # noqa: PLC0415
+
+        runtime_room_override = resolve_room_thread_mode_override(runtime_paths, room_id)
+        if runtime_room_override is not None:
+            return runtime_room_override
 
         if entity_name in self.agents:
             return resolve_agent_thread_mode(

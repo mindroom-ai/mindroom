@@ -24,6 +24,7 @@ class CommandType(Enum):
     EDIT_SCHEDULE = "edit_schedule"
     CONFIG = "config"  # Configuration command
     MODEL = "model"  # Per-thread model override command
+    THREAD_MODE = "thread_mode"  # Room-level thread mode override command
     HI = "hi"  # Welcome message command
     UNKNOWN = "unknown"  # Special type for unrecognized commands
 
@@ -38,6 +39,10 @@ _COMMAND_DOCS = {
     CommandType.RELOAD_PLUGINS: ("!reload-plugins", "Reload configured plugins (admin only)"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
     CommandType.MODEL: ("!model [name|list|reset]", "Show or switch the model used in the current thread"),
+    CommandType.THREAD_MODE: (
+        "!thread_mode [room|thread|reset]",
+        "Show or switch the thread mode used in the current room (room admin only)",
+    ),
     CommandType.HI: ("!hi", "Show welcome message"),
 }
 _WELCOME_COMMAND_TYPES = (CommandType.HI, CommandType.SCHEDULE, CommandType.HELP)
@@ -106,6 +111,7 @@ class _CommandParser:
     EDIT_SCHEDULE_PATTERN = re.compile(r"^!edit[_-]?schedule\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
     MODEL_PATTERN = re.compile(r"^!model(?:\s+(.+))?$", re.IGNORECASE)
+    THREAD_MODE_PATTERN = re.compile(r"^!thread[_-]?mode(?:\s+(.+))?$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
 
     def parse(self, message: str) -> Command | None:  # noqa: C901, PLR0911
@@ -193,6 +199,15 @@ class _CommandParser:
             args_text = match.group(1).strip() if match.group(1) else ""
             return Command(
                 type=CommandType.MODEL,
+                args={"args_text": args_text},
+                raw_text=message,
+            )
+
+        match = self.THREAD_MODE_PATTERN.match(message)
+        if match:
+            args_text = match.group(1).strip() if match.group(1) else ""
+            return Command(
+                type=CommandType.THREAD_MODE,
                 args={"args_text": args_text},
                 raw_text=message,
             )
@@ -343,6 +358,22 @@ How it works:
 - Model names come from the `models:` section of config.yaml
 - The override is scoped to one thread and survives restarts; other threads and rooms are unaffected
 - Room-wide overrides are configured separately via `room_models` in config.yaml"""
+
+    if topic == "thread_mode":
+        return """**Thread Mode Command**
+
+Usage: `!thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room
+
+**Examples:**
+- `!thread_mode` or `!thread_mode show` - Show the current room override
+- `!thread_mode room` - Use one continuous conversation for the whole room
+- `!thread_mode thread` - Use Matrix threads for separate conversations in this room
+- `!thread_mode reset` - Remove the room override and use configured modes again
+
+How it works:
+- The override applies to future agent replies in the current Matrix room
+- The override is stored in MindRoom runtime state, not config.yaml
+- Only Matrix room admins can set or reset the override"""
 
     # General help - dynamically generated from COMMAND_DOCS
     commands_text = "\n".join(_get_command_entries(format_code=True))

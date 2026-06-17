@@ -14,6 +14,7 @@ Commands start with `!` and are handled by the router agent.
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
+| `!thread_mode [room\|thread\|reset]` | Show or switch the thread mode used in the current room |
 | `!config <operation>` | View and modify configuration (disabled by default, admin only when enabled) |
 | `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
@@ -158,6 +159,25 @@ Model names come from the `models:` section of `config.yaml`.
 The override applies from the next message in the thread and survives restarts.
 Other threads and rooms keep their configured models; room-wide overrides are configured via `room_models` in `config.yaml`.
 Agents can also switch the thread model themselves when they have the `thread_model` tool.
+
+### `!thread_mode`
+
+Show or switch how future agent replies are grouped in the current Matrix room.
+
+```
+!thread_mode
+!thread_mode show
+!thread_mode room
+!thread_mode thread
+!thread_mode reset
+```
+
+`!thread_mode` and `!thread_mode show` show the current room override.
+`!thread_mode room` uses one continuous conversation for the whole room.
+`!thread_mode thread` uses Matrix threads for separate conversations in this room.
+`!thread_mode reset` removes the room override so agents use configured `thread_mode` and `room_thread_modes` values again.
+Set and reset are Matrix room-admin-only actions.
+The override is stored in MindRoom runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
 
 ### `!config`
 

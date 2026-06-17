@@ -162,6 +162,56 @@ def _with_room_admin_power_levels(
     return next_content
 
 
+def _room_power_level_for_user(power_levels_content: dict[str, Any], user_id: str) -> int:
+    """Return one user's current room power level from power-level state content."""
+    users = power_levels_content.get("users")
+    if isinstance(users, dict):
+        user_level = users.get(user_id)
+        if isinstance(user_level, int):
+            return user_level
+    users_default = power_levels_content.get("users_default")
+    return users_default if isinstance(users_default, int) else _DEFAULT_USER_POWER_LEVEL
+
+
+async def user_has_room_admin_power(
+    client: nio.AsyncClient,
+    room_id: str,
+    user_ids: Iterable[str],
+) -> bool:
+    """Return whether any supplied user ID has Matrix room admin power."""
+    concrete_user_ids = {user_id for user_id in user_ids if user_id}
+    if not concrete_user_ids:
+        return False
+
+    try:
+        current_response = await client.room_get_state_event(room_id, _POWER_LEVELS_EVENT_TYPE)
+    except Exception as exc:  # fail closed for chat-admin checks
+        logger.warning("Failed to read room power levels for admin check", room_id=room_id, error=str(exc))
+        return False
+
+    if not isinstance(current_response, nio.RoomGetStateEventResponse):
+        logger.warning(
+            "Room power levels unavailable for admin check",
+            room_id=room_id,
+            user_ids=sorted(concrete_user_ids),
+            error=_describe_matrix_response_error(current_response),
+        )
+        return False
+    if not isinstance(current_response.content, dict):
+        logger.warning(
+            "Room power levels state has unexpected content shape for admin check",
+            room_id=room_id,
+            user_ids=sorted(concrete_user_ids),
+            content=current_response.content,
+        )
+        return False
+
+    return any(
+        _room_power_level_for_user(current_response.content, user_id) >= _ROOM_ADMIN_POWER_LEVEL
+        for user_id in concrete_user_ids
+    )
+
+
 async def ensure_room_admin_power_levels(
     client: nio.AsyncClient,
     room_id: str,
@@ -557,4 +607,5 @@ __all__ = [
     "invite_to_room",
     "join_room",
     "leave_room",
+    "user_has_room_admin_power",
 ]
