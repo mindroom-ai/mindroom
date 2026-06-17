@@ -6,6 +6,8 @@ import pytest
 from agno.models.response import ToolExecution
 
 from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.mcp.results import MCPAppToolResult
+from mindroom.mcp.types import MCPAppResource
 from mindroom.tool_system.events import (
     _MAX_TOOL_RESULT_DISPLAY_CHARS,
     _MAX_TOOL_TRACE_EVENTS,
@@ -442,6 +444,43 @@ def test_streaming_tool_tracker_updates_visible_trace_slot() -> None:
     ]
 
 
+def test_streaming_tool_tracker_preserves_mcp_app_input_on_visible_completion() -> None:
+    """Visible MCP App completions should retain the pending tool input for iframe notifications."""
+    app_resource = MCPAppResource(
+        uri="ui://demo/chart",
+        mime_type="text/html;profile=mcp-app",
+        html="<html><body>chart</body></html>",
+    )
+    app_result = MCPAppToolResult(
+        content="chart ready",
+        mcp_app_resources=[app_resource],
+        mcp_app_tool_result={
+            "content": [{"type": "text", "text": "chart ready"}],
+            "isError": False,
+        },
+    )
+    tracker = StreamingToolTracker()
+    visible_trace: list[ToolTraceEntry] = []
+    _tool_msg, trace_entry = tracker.start(
+        ToolExecution(tool_name="show_chart", tool_args={"chart": "sales", "api_key": "plain-secret"}),
+        tool_index=1,
+    )
+    assert trace_entry is not None
+    visible_trace.append(trace_entry)
+
+    completed = tracker.complete(ToolExecution(tool_name="show_chart", result=app_result))
+
+    assert completed is not None
+    _tool_name, _result, pending_tool, completed_trace = completed
+    assert tracker.update_visible_trace_entry(visible_trace, pending_tool, completed_trace) is True
+    assert visible_trace[0].mcp_app_resources == [app_resource]
+    assert visible_trace[0].mcp_app_tool_input == {"arguments": {"chart": "sales", "api_key": "***redacted***"}}
+    assert visible_trace[0].mcp_app_tool_result == {
+        "content": [{"type": "text", "text": "chart ready"}],
+        "isError": False,
+    }
+
+
 def test_build_tool_trace_content_preserves_all_events_for_v2_indexing() -> None:
     """V2 tool trace keeps all events so `[N] -> events[N-1]` remains valid."""
     entries = [
@@ -472,6 +511,77 @@ def test_build_tool_trace_content_redacts_raw_trace_entries() -> None:
     event = payload[_TOOL_TRACE_KEY]["events"][0]
     assert event["args_preview"] == "api_key=***redacted***"
     assert event["result_preview"] == "token=***redacted***"
+
+
+def test_build_tool_trace_content_preserves_mcp_apps_resources() -> None:
+    """Trace metadata should preserve MCP Apps resources for chat clients to render."""
+    payload = build_tool_trace_content(
+        [
+            ToolTraceEntry(
+                type="tool_call_completed",
+                tool_name="show_chart",
+                result_preview="chart ready",
+                mcp_app_tool_input={"arguments": {"chart": "sales"}},
+                mcp_app_tool_result={
+                    "content": [{"type": "text", "text": "chart ready"}],
+                    "isError": False,
+                },
+                mcp_app_resources=[
+                    MCPAppResource(
+                        uri="ui://demo/chart",
+                        mime_type="text/html;profile=mcp-app",
+                        html="<html><body>chart</body></html>",
+                        meta={"ui": {"prefersBorder": True}},
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    assert payload is not None
+    event = payload[_TOOL_TRACE_KEY]["events"][0]
+    assert event["mcp_apps"] == [
+        {
+            "uri": "ui://demo/chart",
+            "mime_type": "text/html;profile=mcp-app",
+            "html": "<html><body>chart</body></html>",
+            "meta": {"ui": {"prefersBorder": True}},
+        },
+    ]
+    assert event["mcp_tool_input"] == {"arguments": {"chart": "sales"}}
+    assert event["mcp_tool_result"] == {
+        "content": [{"type": "text", "text": "chart ready"}],
+        "isError": False,
+    }
+
+
+def test_format_tool_combined_preserves_mcp_apps_resources_from_tool_result() -> None:
+    """Completed MCP tool events should carry app resources without polluting result preview."""
+    app_resource = MCPAppResource(
+        uri="ui://demo/chart",
+        mime_type="text/html;profile=mcp-app",
+        html="<html><body>chart</body></html>",
+    )
+    _visible, trace = format_tool_combined(
+        "show_chart",
+        {"chart": "sales", "api_key": "plain-secret"},
+        MCPAppToolResult(
+            content="chart ready",
+            mcp_app_resources=[app_resource],
+            mcp_app_tool_result={
+                "content": [{"type": "text", "text": "chart ready"}],
+                "isError": False,
+            },
+        ),
+    )
+
+    assert trace.result_preview == "chart ready"
+    assert trace.mcp_app_resources == [app_resource]
+    assert trace.mcp_app_tool_input == {"arguments": {"chart": "sales", "api_key": "***redacted***"}}
+    assert trace.mcp_app_tool_result == {
+        "content": [{"type": "text", "text": "chart ready"}],
+        "isError": False,
+    }
 
 
 def test_render_tool_trace_for_context_pins_started_and_completed_format() -> None:

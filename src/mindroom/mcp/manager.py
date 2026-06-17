@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 from contextlib import AsyncExitStack
@@ -26,7 +27,7 @@ from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
 from mindroom.mcp.results import tool_result_from_call_result
 from mindroom.mcp.transports import build_transport_handle
-from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog, MCPServerState
+from mindroom.mcp.types import MCPAppResource, MCPDiscoveredTool, MCPServerCatalog, MCPServerState
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError
 from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url, oauth_credentials_usable
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
@@ -43,6 +44,47 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+
+
+_MCP_APP_HTML_MIME_TYPE = "text/html;profile=mcp-app"
+
+
+def _mcp_tool_ui_resource_uri(tool: mcp_types.Tool) -> str | None:
+    meta = tool.meta
+    if not isinstance(meta, dict):
+        return None
+    ui_meta = meta.get("ui")
+    if not isinstance(ui_meta, dict):
+        return None
+    resource_uri = ui_meta.get("resourceUri")
+    if not isinstance(resource_uri, str):
+        return None
+    resource_uri = resource_uri.strip()
+    return resource_uri if resource_uri.startswith("ui://") else None
+
+
+def _mcp_app_resource_from_content(content: object) -> MCPAppResource | None:
+    if not isinstance(content, mcp_types.TextResourceContents | mcp_types.BlobResourceContents):
+        return None
+
+    mime_type = content.mimeType or ""
+    if mime_type.lower() != _MCP_APP_HTML_MIME_TYPE:
+        return None
+
+    uri = str(content.uri)
+    if not uri.startswith("ui://"):
+        return None
+
+    if isinstance(content, mcp_types.TextResourceContents):
+        html = content.text
+    else:
+        try:
+            html = base64.b64decode(content.blob).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    return MCPAppResource(uri=uri, mime_type=mime_type, html=html, meta=content.meta)
+
 
 logger = get_logger(__name__)
 
@@ -445,7 +487,43 @@ class MCPServerManager:
             )
         except Exception as exc:
             raise self._wrap_runtime_exception(state.server_id, exc) from exc
-        return tool_result_from_call_result(state.server_id, result)
+        app_resources = await self._read_mcp_app_resources_for_tool(state, remote_tool_name)
+        return tool_result_from_call_result(state.server_id, result, app_resources=app_resources)
+
+    async def _read_mcp_app_resources_for_tool(
+        self,
+        state: MCPServerState,
+        remote_tool_name: str,
+    ) -> list[MCPAppResource] | None:
+        session = state.session
+        catalog = state.catalog
+        if session is None or catalog is None:
+            return None
+
+        tool = next((candidate for candidate in catalog.tools if candidate.remote_name == remote_tool_name), None)
+        if tool is None or tool.ui_resource_uri is None:
+            return None
+
+        resource_uri = mcp_types.AnyUrl(tool.ui_resource_uri)
+        try:
+            result = await session.read_resource(resource_uri)
+        except Exception as exc:
+            logger.warning(
+                "MCP app resource read failed; falling back to text result",
+                server_id=state.server_id,
+                tool_name=tool.function_name,
+                remote_tool_name=tool.remote_name,
+                resource_uri=str(resource_uri),
+                error=str(exc),
+            )
+            return None
+
+        resources = [
+            app_resource
+            for content in result.contents
+            if (app_resource := _mcp_app_resource_from_content(content)) is not None
+        ]
+        return resources or None
 
     async def _refresh_server_catalog(
         self,
@@ -623,6 +701,7 @@ class MCPServerManager:
                     input_schema=tool.inputSchema,
                     output_schema=tool.outputSchema,
                     title=(tool.annotations.title if tool.annotations is not None else tool.title),
+                    ui_resource_uri=_mcp_tool_ui_resource_uri(tool),
                 ),
             )
 
@@ -633,6 +712,7 @@ class MCPServerManager:
                 "description": tool.description,
                 "input_schema": tool.input_schema,
                 "output_schema": tool.output_schema,
+                "ui_resource_uri": tool.ui_resource_uri,
             }
             for tool in filtered_tools
         ]

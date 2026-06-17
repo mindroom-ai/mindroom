@@ -18,7 +18,8 @@ from mcp.types import (
 )
 
 from mindroom.mcp.errors import MCPToolCallError
-from mindroom.mcp.results import tool_result_from_call_result
+from mindroom.mcp.results import MCPAppToolResult, tool_result_from_call_result
+from mindroom.mcp.types import MCPAppResource
 
 
 def test_tool_result_from_call_result_converts_text_images_and_resources() -> None:
@@ -131,3 +132,27 @@ def test_tool_result_from_call_result_keeps_invalid_base64_media_as_utf8_bytes()
     assert result.audios is not None
     assert result.audios[0].content == audio_data.encode("utf-8")
     assert result.audios[0].mime_type == "audio/wav"
+
+
+def test_tool_result_from_call_result_attaches_mcp_app_resources() -> None:
+    """Attach MCP Apps resources to a typed ToolResult without changing visible content."""
+    app_resource = MCPAppResource(
+        uri="ui://demo/chart",
+        mime_type="text/html;profile=mcp-app",
+        html="<html><body>chart</body></html>",
+        meta={"ui": {"prefersBorder": True}},
+    )
+
+    result = tool_result_from_call_result(
+        "demo",
+        CallToolResult(content=[TextContent(type="text", text="chart ready")]),
+        app_resources=[app_resource],
+    )
+
+    assert isinstance(result, MCPAppToolResult)
+    assert result.content == "chart ready"
+    assert result.mcp_app_resources == [app_resource]
+    assert result.mcp_app_tool_result == {
+        "content": [{"type": "text", "text": "chart ready"}],
+        "isError": False,
+    }
