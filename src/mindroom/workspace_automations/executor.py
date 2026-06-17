@@ -42,17 +42,19 @@ async def run_shell_check(
 ) -> ShellCheckResult:
     """Run one workspace automation shell check through the agent shell toolkit."""
     try:
-        execution_identity = build_tool_execution_identity(
-            channel="matrix",
-            agent_name=target.agent_name,
-            transport_agent_name=target.agent_name,
-            runtime_paths=runtime_paths,
-            requester_id=None,
-            room_id=None,
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=f"workspace-automation:{target.agent_name}:{automation.automation_id}",
-        )
+        execution_identity = target.agent_runtime.execution_identity
+        if execution_identity is None:
+            execution_identity = build_tool_execution_identity(
+                channel="matrix",
+                agent_name=target.agent_name,
+                transport_agent_name=target.agent_name,
+                runtime_paths=runtime_paths,
+                requester_id=None,
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=f"workspace-automation:{target.agent_name}:{automation.automation_id}",
+            )
         worker_tools = resolve_runtime_worker_tools(
             target.agent_name,
             config,
