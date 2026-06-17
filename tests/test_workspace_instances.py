@@ -57,6 +57,22 @@ def _config(runtime_paths: RuntimePaths, *, private_per: str = "user") -> Config
     )
 
 
+def _shared_workspace_config(runtime_paths: RuntimePaths) -> Config:
+    return Config.validate_with_runtime(
+        {
+            "memory": {"backend": "none"},
+            "agents": {
+                "mind": {
+                    "display_name": "Mind",
+                    "memory_backend": "file",
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+
 def _identity(requester_id: str, *, session_id: str = "session-1") -> ToolExecutionIdentity:
     return ToolExecutionIdentity(
         channel="matrix",
@@ -114,6 +130,28 @@ def test_resolving_private_runtime_writes_one_durable_workspace_instance_record(
     assert registry_path == runtime_paths.storage_root / "workspace_instances" / "instances.json"
     assert registry_path.is_file()
     assert records == [expected]
+
+
+def test_resolving_shared_requester_scoped_workspace_does_not_persist_execution_identity(
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Only private workspace instances should enter the automation registry."""
+    config = _shared_workspace_config(runtime_paths)
+    identity = _identity("@alice:example.org")
+
+    runtime = resolve_agent_runtime(
+        "mind",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+
+    assert runtime.workspace is not None
+    assert runtime.is_private is False
+    assert runtime.execution_identity == identity
+    assert load_workspace_instance_records(runtime_paths) == []
+    assert not workspace_instance_registry_path(runtime_paths).exists()
 
 
 def test_workspace_instance_record_round_trips_serialized_execution_identity_and_paths(

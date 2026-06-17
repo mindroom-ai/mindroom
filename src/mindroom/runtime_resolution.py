@@ -257,7 +257,7 @@ def resolve_agent_runtime(
         tool_base_dir=tool_base_dir,
         file_memory_root=file_memory_root,
     )
-    if workspace is not None and workspace.root.exists():
+    if runtime.is_private and workspace is not None and workspace.root.exists():
         record_workspace_instance(
             runtime_paths,
             WorkspaceInstanceRecord(

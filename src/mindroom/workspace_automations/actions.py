@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_AUTOMATION_TRIGGERED,
@@ -120,6 +121,7 @@ async def _run_hook_action(
     context = _automation_context(
         config=config,
         runtime_paths=runtime_paths,
+        target=target,
         automation=automation,
         check_result=check_result,
         room_id=room_id,
@@ -147,6 +149,7 @@ async def _run_visible_action(
     if isinstance(prepared, str):
         return _failure(automation, prepared)
 
+    trigger_dispatch = automation.action.type == "agent_message"
     try:
         event_id = await prepared.message_sender(
             prepared.room_id,
@@ -156,9 +159,12 @@ async def _run_visible_action(
             _extra_content_for_visible_action(
                 config=config,
                 runtime_paths=runtime_paths,
+                target=target,
                 automation=automation,
-            ),
-            trigger_dispatch=automation.action.type == "agent_message",
+            )
+            if trigger_dispatch
+            else None,
+            trigger_dispatch=trigger_dispatch,
         )
     except Exception as exc:
         return _failure(automation, f"{type(exc).__name__}: {exc}")
@@ -207,18 +213,24 @@ def _extra_content_for_visible_action(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    target: WorkspaceAutomationTarget,
     automation: LoadedWorkspaceAutomation,
 ) -> dict[str, Any] | None:
     if automation.action.type != "agent_message":
         return None
     owner_user_id = entity_identity_registry(config, runtime_paths).current_id(automation.agent_name).full_id
-    return {"m.mentions": {"user_ids": [owner_user_id]}}
+    extra_content: dict[str, Any] = {"m.mentions": {"user_ids": [owner_user_id]}}
+    requester_id = _automation_requester_id(target)
+    if requester_id is not None:
+        extra_content[ORIGINAL_SENDER_KEY] = requester_id
+    return extra_content
 
 
 def _automation_context(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    target: WorkspaceAutomationTarget,
     automation: LoadedWorkspaceAutomation,
     check_result: ShellCheckResult,
     room_id: str | None,
@@ -238,6 +250,7 @@ def _automation_context(
         ),
         correlation_id=f"{EVENT_AUTOMATION_TRIGGERED}:{automation.agent_name}:{automation.automation_id}",
         message_sender=message_sender,
+        requester_id=_automation_requester_id(target),
         agent_name=automation.agent_name,
         automation_id=automation.automation_id,
         workspace_root=str(automation.workspace_root),
@@ -258,6 +271,15 @@ def _resolved_trigger_payload(
     if automation.trigger is None:
         return {}
     return automation.trigger.model_dump(exclude_none=True)
+
+
+def _automation_requester_id(target: WorkspaceAutomationTarget) -> str | None:
+    if not target.agent_runtime.is_private:
+        return None
+    execution_identity = target.agent_runtime.execution_identity
+    if execution_identity is None:
+        return None
+    return execution_identity.requester_id or None
 
 
 def _success(
