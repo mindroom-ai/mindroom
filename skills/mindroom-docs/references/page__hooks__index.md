@@ -639,6 +639,7 @@ RoomMemberJoinedContext(
 AutomationTriggeredContext(
     agent_name: str,
     automation_id: str,
+    requester_id: str | None,
     workspace_root: str,
     room_id: str | None,  # resolved Matrix room ID when a hook action has a configured or inferred room
     thread_id: str | None,

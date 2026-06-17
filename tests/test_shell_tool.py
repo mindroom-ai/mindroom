@@ -108,7 +108,7 @@ async def test_run_shell_command_structured_rejects_output_cap_above_hard_limit(
     entrypoint = tool.async_functions["run_shell_command_structured"].entrypoint
     assert entrypoint is not None
 
-    result = await entrypoint("true", max_output_bytes=50 * 1024 + 1)
+    result = await entrypoint("true", max_output_bytes=64 * 1024 + 1)
 
     assert result == {
         "ok": False,
@@ -117,7 +117,7 @@ async def test_run_shell_command_structured_rejects_output_cap_above_hard_limit(
         "stderr": "",
         "raw_output": "",
         "timed_out": False,
-        "error": "max_output_bytes must be between 1 and 51200.",
+        "error": "max_output_bytes must be between 1 and 65536.",
     }
 
 

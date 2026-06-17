@@ -10,9 +10,10 @@ from agno.tools import Toolkit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    execution_identity_matches_tool_runtime_context,
+    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
+from mindroom.tool_system.worker_routing import resolve_worker_key
 from mindroom.workspace_automations.loader import load_workspace_automations
 from mindroom.workspace_automations.service import get_active_workspace_automation_service
 from mindroom.workspace_automations.targets import WorkspaceAutomationTarget, iter_workspace_automation_targets
@@ -142,13 +143,18 @@ def _target_filter_for_context(context: ToolRuntimeContext) -> Callable[[Workspa
 def _target_matches_context(target: WorkspaceAutomationTarget, context: ToolRuntimeContext) -> bool:
     if target.agent_name != context.agent_name:
         return False
-    execution_identity = target.agent_runtime.execution_identity
     if target.agent_runtime.is_private:
-        return execution_identity is not None and execution_identity_matches_tool_runtime_context(
-            execution_identity,
-            context,
-        )
-    return execution_identity is None
+        return _private_target_matches_context(target, context)
+    return target.agent_runtime.execution_identity is None
+
+
+def _private_target_matches_context(target: WorkspaceAutomationTarget, context: ToolRuntimeContext) -> bool:
+    execution_scope = target.agent_runtime.execution_scope
+    worker_key = target.agent_runtime.worker_key
+    if execution_scope is None or worker_key is None:
+        return False
+    context_identity = build_execution_identity_from_runtime_context(context)
+    return resolve_worker_key(execution_scope, context_identity, agent_name=target.agent_name) == worker_key
 
 
 def _loaded_status_payload(status: WorkspaceAutomationLoadedStatus) -> dict[str, object]:
