@@ -224,6 +224,9 @@
 {{- if and $agentVault.bootstrap.enabled (not (trim (default "" $agentVault.accessTool.adminAgentName))) -}}
 {{- fail "workers.kubernetes.agentVault.accessTool.adminAgentName must not be empty when accessGrants and bootstrap are enabled" -}}
 {{- end -}}
+{{- if and $agentVault.bootstrap.enabled $agentVault.accessTool.enabled (eq (trim (default "" $agentVault.accessTool.adminTokenSecret.name)) (trim (default "" $accessGrants.adminTokenSecret.name))) (ne (trim (default "" $agentVault.accessTool.adminTokenSecret.key)) (trim (default "" $accessGrants.adminTokenSecret.key))) -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.adminTokenSecret.key must match workers.kubernetes.agentVault.accessGrants.adminTokenSecret.key when both use the same Secret name" -}}
+{{- end -}}
 {{- range $index, $grant := $accessGrants.grants -}}
 {{- $path := printf "workers.kubernetes.agentVault.accessGrants.grants[%d]" $index -}}
 {{- $email := trim (default "" $grant.email) -}}

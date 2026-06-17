@@ -1696,6 +1696,71 @@ def test_runtime_chart_agent_vault_bootstrap_publishes_access_grants_admin_token
     assert "agent-vault-grants-admin" in secret_rule["resourceNames"]
 
 
+def test_runtime_chart_rejects_agent_vault_access_token_same_secret_different_keys(tmp_path: Path) -> None:
+    """Bootstrap must not apply the same Secret twice with different admin-token keys."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                    "kubernetes": {
+                        "agentVault": {
+                            "enabled": True,
+                            "cliImage": "infisical/agent-vault:test",
+                            "ownerEmail": "owner@example.test",
+                            "workerCaConfigMapName": "agent-vault-ca",
+                            "bootstrap": {
+                                "enabled": True,
+                                "kubectlImage": "bitnami/kubectl:latest",
+                            },
+                            "accessTool": {
+                                "enabled": True,
+                                "uiBaseUrl": "https://example.test/agent-vault",
+                                "emailDomain": "example.test",
+                                "adminTokenSecret": {
+                                    "name": "agent-vault-access-admin",
+                                    "key": "tool-token",
+                                },
+                            },
+                            "accessGrants": {
+                                "enabled": True,
+                                "adminTokenSecret": {
+                                    "name": "agent-vault-access-admin",
+                                    "key": "grants-token",
+                                },
+                                "grants": [
+                                    {
+                                        "email": "maintainer@example.test",
+                                        "workerScope": "shared",
+                                        "agent": "example-agent",
+                                        "role": "admin",
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "workers.kubernetes.agentVault.accessTool.adminTokenSecret.key must match "
+        "workers.kubernetes.agentVault.accessGrants.adminTokenSecret.key when both use the same Secret name"
+    ) in completed.stderr
+
+
 @pytest.mark.parametrize(
     ("grant", "message"),
     [

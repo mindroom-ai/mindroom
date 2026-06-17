@@ -383,6 +383,7 @@ For `workerScope: user`, `requester` is required and `agent` must be omitted bec
 The initial supported role is `admin`.
 If your deployment sets `CUSTOMER_ID` or `ACCOUNT_ID` for tenant-specific worker keys, set `accessGrants.tenantId` or `accessGrants.accountId` to the same value.
 When `agentVault.bootstrap.enabled` is true, the bootstrap Job publishes the owner-role admin token Secret used by the access-grant Job.
+If `accessTool` and `accessGrants` use the same admin-token Secret name, configure the same key for both or use different Secret names.
 When bootstrap is disabled, provide `accessGrants.adminTokenSecret` yourself.
 
 Use `egressProxy` when another chart or platform layer already manages the proxy:

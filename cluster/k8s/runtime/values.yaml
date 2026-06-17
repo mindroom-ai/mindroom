@@ -483,6 +483,8 @@ workers:
         # Existing Secret holding an owner/admin token for Agent Vault. When
         # bootstrap.enabled is true, the bootstrap Job publishes the same
         # owner-role token it uses for accessTool into this Secret too.
+        # If accessTool uses the same Secret name, use the same key or a
+        # different Secret name so bootstrap never applies one Secret twice.
         adminTokenSecret:
           name: agent-vault-access-admin
           key: token
