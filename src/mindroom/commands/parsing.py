@@ -40,7 +40,7 @@ _COMMAND_DOCS = {
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
     CommandType.MODEL: ("!model [name|list|reset]", "Show or switch the model used in the current thread"),
     CommandType.THREAD_MODE: (
-        "!thread_mode [room|thread|reset]",
+        "!thread_mode [room|thread|reset|show]",
         "Show or switch the thread mode used in the current room (room admin only)",
     ),
     CommandType.HI: ("!hi", "Show welcome message"),
@@ -359,7 +359,7 @@ How it works:
 - The override is scoped to one thread and survives restarts; other threads and rooms are unaffected
 - Room-wide overrides are configured separately via `room_models` in config.yaml"""
 
-    if topic == "thread_mode":
+    if topic in {"thread_mode", "thread-mode", "threadmode"}:
         return """**Thread Mode Command**
 
 Usage: `!thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room

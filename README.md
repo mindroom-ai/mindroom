@@ -261,7 +261,7 @@ Plain replies that never reach threaded context still stay plain replies.
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
 - `!config <operation>` - Manage configuration
 - `!model [name|list|reset]` - Show or switch the model used in the current thread
-- `!thread_mode [room|thread|reset]` - Show or switch the thread mode used in the current room (room admin only)
+- `!thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room (room admin only)
 - `!hi` - Show welcome message
 
 <!-- OUTPUT:END -->

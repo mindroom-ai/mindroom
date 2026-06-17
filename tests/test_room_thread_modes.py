@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -11,7 +12,7 @@ import nio
 import pytest
 
 from mindroom.commands.handler import CommandHandlerContext, handle_command
-from mindroom.commands.parsing import Command, CommandType, command_parser
+from mindroom.commands.parsing import Command, CommandType, command_parser, get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -28,6 +29,14 @@ from mindroom.room_thread_modes import (
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 
 ROOM_ID = "!room:localhost"
+
+
+@dataclass(frozen=True)
+class _ThreadModeEvent:
+    sender: str
+    event_id: str
+    body: str
+    source: dict[str, dict[str, str]]
 
 
 def _runtime_bound_config(config: Config, tmp_path: Path) -> Config:
@@ -67,8 +76,8 @@ def _thread_mode_context(tmp_path: Path, client: AsyncMock) -> CommandHandlerCon
     )
 
 
-def _thread_mode_event(sender: str, body: str) -> SimpleNamespace:
-    return SimpleNamespace(
+def _thread_mode_event(sender: str, body: str) -> _ThreadModeEvent:
+    return _ThreadModeEvent(
         sender=sender,
         event_id="$event",
         body=body,
@@ -240,6 +249,22 @@ def test_thread_mode_command_parsing() -> None:
     assert command is not None
     assert command.type == CommandType.THREAD_MODE
     assert command.args["args_text"] == "reset"
+
+    command = command_parser.parse("!thread_mode thread")
+    assert command is not None
+    assert command.type == CommandType.THREAD_MODE
+    assert command.args["args_text"] == "thread"
+
+    command = command_parser.parse("!thread_mode show")
+    assert command is not None
+    assert command.type == CommandType.THREAD_MODE
+    assert command.args["args_text"] == "show"
+
+
+def test_thread_mode_help_accepts_command_aliases() -> None:
+    """Help should show the thread-mode topic for every command spelling."""
+    for topic in ("thread_mode", "thread-mode", "threadmode"):
+        assert "**Thread Mode Command**" in get_command_help(topic)
 
 
 @pytest.mark.asyncio

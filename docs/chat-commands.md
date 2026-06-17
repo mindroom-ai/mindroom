@@ -18,7 +18,7 @@ Commands start with `!` and are handled by the router agent.
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
-| `!thread_mode [room\|thread\|reset]` | Show or switch the thread mode used in the current room |
+| `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room |
 | `!config <operation>` | View and modify configuration (disabled by default, admin only when enabled) |
 | `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
