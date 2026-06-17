@@ -581,7 +581,7 @@ Their `check.type: shell` checks use the same worker-routed `shell` tool path as
 The primary runtime resolves the agent runtime, builds the same shell toolkit route, and sends the check to the configured worker backend when shell is worker-routed.
 The shell command runs from the owning agent workspace and receives the same workspace home contract, worker env filtering, and credential lease behavior as other shell tool calls.
 Shell checks honor effective shell tool config, but they run unattended.
-They fail closed when shell tool approval would be required or when any `tool:before_call` hook is registered instead of waiting on live interactive gates.
+They fail closed when shell tool approval would be required or when any `tool:before_call` or `tool:after_call` hook is registered instead of waiting on live interactive gates.
 
 Dedicated workers are demand-driven for workspace automations.
 If a worker has scaled down or been cleaned up between cron runs, the next due automation run re-ensures or recreates that worker before executing the check.

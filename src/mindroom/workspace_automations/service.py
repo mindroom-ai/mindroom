@@ -407,6 +407,21 @@ class WorkspaceAutomationService:
             target=entry.target,
             automation=automation,
         )
+        if check_result.error is not None:
+            await self._record_status(
+                key,
+                _RunStatus(
+                    agent_name=key.agent_name,
+                    automation_id=key.automation_id,
+                    workspace_root=key.workspace_root,
+                    last_status="check_failed",
+                    last_run_at=self._now_iso(),
+                    last_exit_code=check_result.exit_code,
+                    last_error=check_result.error,
+                ),
+            )
+            return
+
         matched = automation.action.type == "none" and automation.trigger is None
         if not matched:
             matched = self.trigger_matcher(automation.trigger, check_result)

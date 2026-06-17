@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL
+from mindroom.hooks import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL
 from mindroom.tool_approval import evaluate_tool_approval
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
@@ -48,10 +48,10 @@ async def run_shell_check(
 ) -> ShellCheckResult:
     """Run one workspace automation shell check through the agent shell toolkit."""
     try:
-        if hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL):
+        if hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL) or hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL):
             return _failed_result(
                 automation.automation_id,
-                "Workspace automation shell checks cannot run while tool:before_call hooks are registered.",
+                "Workspace automation shell checks cannot run while tool call hooks are registered.",
             )
         approval_error = await _tool_approval_error(
             config=config,

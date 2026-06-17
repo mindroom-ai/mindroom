@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -564,6 +564,61 @@ async def test_cron_due_run_skips_action_when_trigger_does_not_match(
     loaded = service.list_loaded()
     assert loaded[0].last_status == "not_matched"
     assert loaded[0].last_exit_code == 42
+
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cron_due_run_records_check_failed_without_triggering_actions(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Internal check failures should never satisfy negative-output triggers."""
+    config = _config(runtime_paths)
+    automation = replace(
+        _automation(tmp_path, trigger_exit_code=None),
+        trigger=WorkspaceAutomationTrigger(stdout_not_matches="do-not-match-empty-output"),
+    )
+    clock = _ControlledClock(datetime(2026, 1, 1, 0, 0, 59, tzinfo=UTC))
+
+    async def check_runner(**_kwargs: object) -> ShellCheckResult:
+        return ShellCheckResult(
+            automation_id=automation.automation_id,
+            ok=False,
+            exit_code=None,
+            stdout="",
+            stderr="",
+            raw_output="",
+            timed_out=False,
+            error="tool gate blocked",
+        )
+
+    async def action_runner(**_kwargs: object) -> WorkspaceAutomationActionResult:
+        msg = "action_runner should not be called when the check failed internally"
+        raise AssertionError(msg)
+
+    service = WorkspaceAutomationService(
+        target_loader=lambda _config, _runtime_paths: [_target(tmp_path)],
+        automation_loader=lambda **_kwargs: WorkspaceAutomationLoadResult(automations=(automation,)),
+        check_runner=check_runner,
+        action_runner=action_runner,
+        now=clock.current_time,
+        sleep=clock.sleep,
+        scan_interval_seconds=None,
+    )
+
+    await service.start(config, runtime_paths, HookRegistry.empty(), _bot_provider, object())
+    await clock.wait_for_sleep_count(1)
+    clock.resolve_next_sleep()
+    for _ in range(100):
+        if service.list_loaded()[0].last_status == "check_failed":
+            break
+        await asyncio.sleep(0)
+
+    loaded = service.list_loaded()
+    assert loaded[0].last_status == "check_failed"
+    assert loaded[0].last_error == "tool gate blocked"
+    assert loaded[0].last_exit_code is None
 
     await service.shutdown()
 

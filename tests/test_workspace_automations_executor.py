@@ -10,7 +10,7 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, hook
+from mindroom.hooks import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL, HookRegistry, hook
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.workspace_automations.executor import run_shell_check
@@ -369,22 +369,24 @@ async def test_shell_check_fails_closed_when_shell_approval_is_required(
 
 
 @pytest.mark.asyncio
-async def test_shell_check_fails_closed_when_tool_before_call_hooks_exist(
+@pytest.mark.parametrize("event_name", [EVENT_TOOL_BEFORE_CALL, EVENT_TOOL_AFTER_CALL])
+async def test_shell_check_fails_closed_when_tool_call_hooks_exist(
+    event_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     target: WorkspaceAutomationTarget,
 ) -> None:
-    """Unattended automation checks should not bypass tool before-call gates."""
+    """Unattended automation checks should not bypass tool call hooks."""
 
-    @hook(EVENT_TOOL_BEFORE_CALL)
-    async def guard(_context: object) -> None:
+    @hook(event_name)
+    async def observer(_context: object) -> None:
         return None
 
     hook_registry = HookRegistry.from_plugins(
         [
             SimpleNamespace(
                 name="shell-guard",
-                discovered_hooks=(guard,),
+                discovered_hooks=(observer,),
                 entry_config=PluginEntryConfig(path="./plugins/shell-guard"),
                 plugin_order=0,
             ),
@@ -400,7 +402,7 @@ async def test_shell_check_fails_closed_when_tool_before_call_hooks_exist(
     )
 
     assert result.ok is False
-    assert result.error == "Workspace automation shell checks cannot run while tool:before_call hooks are registered."
+    assert result.error == "Workspace automation shell checks cannot run while tool call hooks are registered."
 
 
 @pytest.mark.asyncio
