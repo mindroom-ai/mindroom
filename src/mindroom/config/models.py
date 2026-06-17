@@ -112,6 +112,7 @@ class WorkspaceAutomationPolicyConfig(BaseModel):
     max_output_bytes: int = Field(
         default=65536,
         ge=1024,
+        le=65536,
         description=(
             "Maximum bytes of command output returned from one workspace automation check, "
             "used for trigger evaluation, and included in automation hook check-result payloads"

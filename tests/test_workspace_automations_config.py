@@ -207,3 +207,18 @@ def test_workspace_automation_policy_rejects_minimum_bound_violations(
             },
             runtime_paths,
         )
+
+
+def test_workspace_automation_policy_rejects_output_cap_above_shell_limit(runtime_paths: RuntimePaths) -> None:
+    """The policy cap should not validate values the shell runner rejects."""
+    with pytest.raises(ValidationError, match="max_output_bytes"):
+        Config.validate_with_runtime(
+            {
+                "defaults": {
+                    "workspace_automations": {
+                        "max_output_bytes": 65537,
+                    },
+                },
+            },
+            runtime_paths,
+        )
