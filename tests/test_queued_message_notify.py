@@ -368,10 +368,6 @@ class _FakeStorage:
 
 
 class _FakeModel:
-    id = "test-model"
-    provider = "openai"
-    supports_native_structured_outputs = False
-
     def format_function_call_results(
         self,
         messages: list[Message],
