@@ -2945,7 +2945,6 @@ expose = [
     "join_room",
     "leave_room",
     "room_admin_power_user",
-    "user_has_room_admin_power",
 ]
 from = ["mindroom.matrix.client_room_admin"]
 

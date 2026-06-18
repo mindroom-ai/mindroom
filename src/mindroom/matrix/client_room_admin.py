@@ -173,15 +173,6 @@ def _room_power_level_for_user(power_levels_content: dict[str, Any], user_id: st
     return users_default if isinstance(users_default, int) else _DEFAULT_USER_POWER_LEVEL
 
 
-async def user_has_room_admin_power(
-    client: nio.AsyncClient,
-    room_id: str,
-    user_ids: Iterable[str],
-) -> bool:
-    """Return whether any supplied user ID has Matrix room admin power."""
-    return (await room_admin_power_user(client, room_id, user_ids)) is not None
-
-
 async def room_admin_power_user(
     client: nio.AsyncClient,
     room_id: str,
@@ -617,5 +608,4 @@ __all__ = [
     "join_room",
     "leave_room",
     "room_admin_power_user",
-    "user_has_room_admin_power",
 ]
