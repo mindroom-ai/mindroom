@@ -273,6 +273,26 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_hook_matrix_admin_invite_user_with_config_delegates_to_raw_invite(tmp_path: Path) -> None:
+    """Single-user invite should not run managed private-room reconciliation."""
+    module = _matrix_admin_module()
+    config = _private_room_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+
+    with patch("mindroom.hooks.matrix_admin.invite_to_room", new=AsyncMock(return_value=False)) as mock_invite:
+        admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+        invited = await admin.invite_user("!created:localhost", "@user:localhost")
+
+    assert invited is False
+    client.joined_members.assert_not_awaited()
+    mock_invite.assert_awaited_once_with(client, "!created:localhost", "@user:localhost")
+    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, ROUTER_AGENT_NAME)) == set()
+    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, "general")) == set()
+
+
+@pytest.mark.asyncio
 async def test_hook_matrix_admin_repairs_missing_router_despite_stale_invited_state(tmp_path: Path) -> None:
     """Private-room reconciliation should trust live membership over stale plugin invite flags."""
     module = _matrix_admin_module()

@@ -62,25 +62,8 @@ class _BoundHookMatrixAdmin:
         )
 
     async def invite_user(self, room_id: str, user_id: str) -> bool:
-        """Invite one user into one room; use ensure_room_members for bulk reconciliation."""
-        current_members: set[str] | None = None
-        if self.config is not None:
-            current_members = await self._get_room_members_or_none(room_id)
-            if current_members is not None and user_id in current_members:
-                self._persist_invited_room_for_managed_entity(room_id, user_id)
-                return True
-
-        invited = await invite_to_room(self.client, room_id, user_id)
-        if invited:
-            self._persist_invited_room_for_managed_entity(room_id, user_id)
-            return True
-
-        if self.config is not None and current_members is None:
-            refreshed_members = await self._get_room_members_or_none(room_id)
-            if refreshed_members is not None and user_id in refreshed_members:
-                self._persist_invited_room_for_managed_entity(room_id, user_id)
-                return True
-        return False
+        """Invite one user into one room."""
+        return await invite_to_room(self.client, room_id, user_id)
 
     async def ensure_room_members(self, room_id: str, user_ids: list[str]) -> set[str]:
         """Invite missing users into one room and return users newly invited."""
@@ -177,16 +160,6 @@ class _BoundHookMatrixAdmin:
         )
         return isinstance(response, nio.RoomPutStateResponse)
 
-    def _persist_invited_room_for_managed_entity(self, room_id: str, user_id: str) -> None:
-        """Record plugin-managed rooms for bot lifecycle cleanup preservation."""
-        if self.config is None:
-            return
-
-        entity_name = self._managed_entity_name_for_user_id(user_id)
-        if entity_name is None:
-            return
-        self._persist_invited_room_for_entity(room_id, entity_name)
-
     def _persist_invited_room_for_entities(self, room_id: str, entity_names: set[str]) -> None:
         """Record one plugin-managed room for configured bot entities."""
         for entity_name in sorted(entity_names):
@@ -202,22 +175,6 @@ class _BoundHookMatrixAdmin:
             return
         room_ids.add(room_id)
         save_invited_rooms(path, room_ids)
-
-    def _managed_entity_name_for_user_id(self, user_id: str) -> str | None:
-        """Return configured bot entity name for one persisted Matrix user ID."""
-        if self.config is None:
-            return None
-
-        domain = self.config.get_domain(self.runtime_paths)
-        for entity_name in invited_room_entity_names(self.config):
-            entity_user_id = managed_account_user_id(
-                managed_account_key(entity_name),
-                domain,
-                self.runtime_paths,
-            )
-            if entity_user_id == user_id:
-                return entity_name
-        return None
 
     def _managed_entity_names_by_user_id(self) -> dict[str, str]:
         """Return persisted Matrix user IDs keyed to configured bot entity names."""
