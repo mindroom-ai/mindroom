@@ -1214,7 +1214,11 @@ class TurnController:
         if orchestrator is not None:
             matrix_admin = orchestrator.hook_matrix_admin()
         elif self.deps.agent_name == ROUTER_AGENT_NAME:
-            matrix_admin = build_hook_matrix_admin(self._client(), self.deps.runtime_paths)
+            matrix_admin = build_hook_matrix_admin(
+                self._client(),
+                self.deps.runtime_paths,
+                config=self.deps.runtime.config,
+            )
         reload_plugins = (
             (lambda: orchestrator.reload_plugins_now(source="command")) if orchestrator is not None else None
         )

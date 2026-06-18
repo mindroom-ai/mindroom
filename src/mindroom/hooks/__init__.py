@@ -80,6 +80,7 @@ from .types import (
 if TYPE_CHECKING:
     import nio
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 __all__ = [
@@ -171,8 +172,10 @@ __all__ = [
 def build_hook_matrix_admin(
     client: nio.AsyncClient,
     runtime_paths: RuntimePaths,
+    *,
+    config: Config | None = None,
 ) -> HookMatrixAdmin:
     """Lazily import the concrete matrix admin builder to avoid package cycles."""
     from .matrix_admin import build_hook_matrix_admin  # noqa: PLC0415
 
-    return build_hook_matrix_admin(client, runtime_paths)
+    return build_hook_matrix_admin(client, runtime_paths, config=config)

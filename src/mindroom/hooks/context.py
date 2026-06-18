@@ -197,7 +197,11 @@ class HookContextSupport:
             if admin is not None:
                 return admin
         if self.agent_name == ROUTER_AGENT_NAME and self.runtime.client is not None:
-            return hook_matrix_admin.build_hook_matrix_admin(self.runtime.client, self.runtime_paths)
+            return hook_matrix_admin.build_hook_matrix_admin(
+                self.runtime.client,
+                self.runtime_paths,
+                config=self.runtime.config,
+            )
         return None
 
     def base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
