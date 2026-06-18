@@ -10,6 +10,7 @@ from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
+from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
 from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
@@ -372,6 +373,16 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             room_id=room.room_id,
             thread_id=effective_thread_id,
             requester_user_id=requester_user_id,
+        )
+
+    elif command.type == CommandType.THREAD_MODE:
+        response_text = await handle_thread_mode_command(
+            command.args.get("args_text", ""),
+            client=context.client,
+            runtime_paths=context.runtime_paths,
+            room_id=room.room_id,
+            requester_user_id=requester_user_id,
+            sender_user_id=event.sender,
         )
 
     elif command.type == CommandType.UNKNOWN:
