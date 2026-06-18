@@ -128,7 +128,7 @@ class HookMatrixAdmin(Protocol):
         """Create one room and return the room ID on success."""
 
     async def invite_user(self, room_id: str, user_id: str) -> bool:
-        """Invite one user into one room."""
+        """Invite one user into one room; use ensure_room_members for bulk reconciliation."""
 
     async def ensure_room_members(self, room_id: str, user_ids: list[str]) -> set[str]:
         """Invite missing users into one room and return users newly invited."""

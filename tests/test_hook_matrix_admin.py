@@ -103,6 +103,18 @@ async def _reconcile_known_private_room(
     return room_id
 
 
+async def _repair_private_room_members(
+    admin: _PrivateRoomAdmin,
+    *,
+    room_id: str,
+    expected_user_ids: list[str],
+    plugin_already_invited_user_ids: set[str],
+) -> set[str]:
+    repaired_user_ids = await admin.ensure_room_members(room_id, expected_user_ids)
+    plugin_already_invited_user_ids.update(repaired_user_ids)
+    return repaired_user_ids
+
+
 def _router_user(user_id: str) -> AgentMatrixUser:
     return AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
@@ -261,7 +273,8 @@ async def test_hook_matrix_admin_repairs_missing_router_despite_stale_invited_st
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
     user_id = "@user:localhost"
-    stale_already_invited = {ids[ROUTER_AGENT_NAME].full_id}
+    # This models plugin-local cache, not MindRoom lifecycle invited_rooms.json.
+    plugin_already_invited_user_ids = {ids[ROUTER_AGENT_NAME].full_id}
     client = AsyncMock(spec=nio.AsyncClient)
     client.homeserver = "http://localhost:8008"
 
@@ -274,13 +287,16 @@ async def test_hook_matrix_admin_repairs_missing_router_despite_stale_invited_st
     ):
         admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
 
-        assert ids[ROUTER_AGENT_NAME].full_id in stale_already_invited
-        repaired = await admin.ensure_room_members(
-            "!private:localhost",
-            [user_id, ids["general"].full_id, ids[ROUTER_AGENT_NAME].full_id],
+        assert ids[ROUTER_AGENT_NAME].full_id in plugin_already_invited_user_ids
+        repaired = await _repair_private_room_members(
+            admin,
+            room_id="!private:localhost",
+            expected_user_ids=[user_id, ids["general"].full_id, ids[ROUTER_AGENT_NAME].full_id],
+            plugin_already_invited_user_ids=plugin_already_invited_user_ids,
         )
 
     assert repaired == {ids[ROUTER_AGENT_NAME].full_id}
+    assert plugin_already_invited_user_ids == {ids[ROUTER_AGENT_NAME].full_id}
     mock_members.assert_awaited_once_with(client, "!private:localhost")
     mock_invite.assert_awaited_once_with(client, "!private:localhost", ids[ROUTER_AGENT_NAME].full_id)
 
