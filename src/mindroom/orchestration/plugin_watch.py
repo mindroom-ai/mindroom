@@ -109,7 +109,7 @@ async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
                 last_change_at = None
                 watch_state_revision = watch_state.revision
             pending_changes = _filter_pending_plugin_changes(pending_changes, configured_roots)
-            changed_paths = _collect_plugin_root_changes(configured_roots, watch_state.last_snapshot_by_root)
+            changed_paths = await _collect_plugin_root_changes(configured_roots, watch_state.last_snapshot_by_root)
 
             if changed_paths:
                 pending_changes.update(changed_paths)
@@ -140,20 +140,26 @@ def _filter_pending_plugin_changes(
     return {path for path in pending_changes if _path_is_under_any_root(path, configured_roots)}
 
 
-def _collect_plugin_root_changes(
+async def _collect_plugin_root_changes(
     configured_roots: tuple[Path, ...],
     last_snapshot_by_root: dict[Path, dict[Path, int]],
 ) -> set[Path]:
     """Collect edits across all currently configured plugin roots."""
+    current_snapshots = await asyncio.to_thread(_capture_plugin_root_snapshots, configured_roots)
     changed_paths = set()
     for root in configured_roots:
-        current_snapshot = file_watcher._tree_snapshot(root)
+        current_snapshot = current_snapshots[root]
         previous_snapshot = last_snapshot_by_root.get(root)
         last_snapshot_by_root[root] = current_snapshot
         if previous_snapshot is None:
             continue
         changed_paths.update(file_watcher._tree_changed_paths(previous_snapshot, current_snapshot))
     return changed_paths
+
+
+def _capture_plugin_root_snapshots(configured_roots: tuple[Path, ...]) -> dict[Path, dict[Path, int]]:
+    """Capture plugin root snapshots away from the event loop."""
+    return {root: file_watcher._tree_snapshot(root) for root in configured_roots}
 
 
 def _drop_unconfigured_plugin_root_snapshots(

@@ -16288,7 +16288,7 @@ class TestMultiAgentOrchestrator:
             loaded_hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
             assert loaded_hooks_module.VALUE == 1
 
-            changed_paths = _collect_plugin_root_changes(
+            changed_paths = await _collect_plugin_root_changes(
                 tuple(orchestrator.plugin_watch.last_snapshot_by_root),
                 orchestrator.plugin_watch.last_snapshot_by_root,
             )
