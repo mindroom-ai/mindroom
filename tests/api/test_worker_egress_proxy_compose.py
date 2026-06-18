@@ -34,6 +34,14 @@ def _runtime_paths_with_vault(tmp_path: Path, *, with_ca: bool = True) -> tuple[
     return runtime_paths, "http://av_sess_worker_token:agent-vault-worker@agent-vault:14322"
 
 
+def _git_config_value(env: dict[str, str], key: str) -> str:
+    count = int(env.get("GIT_CONFIG_COUNT", "0"))
+    for index in range(count):
+        if env.get(f"GIT_CONFIG_KEY_{index}") == key:
+            return env[f"GIT_CONFIG_VALUE_{index}"]
+    pytest.fail(f"missing env-backed Git config key {key!r}")
+
+
 def test_request_execution_env_overlays_proxy_when_no_primary_env(tmp_path: Path) -> None:
     """When the primary ships no execution env, the worker still composes the proxy."""
     runtime_paths, expected_proxy = _runtime_paths_with_vault(tmp_path)
@@ -44,6 +52,40 @@ def test_request_execution_env_overlays_proxy_when_no_primary_env(tmp_path: Path
     # git and node ignore the curl/python bundles; they need their own keys.
     assert env["GIT_SSL_CAINFO"] == "/etc/agent-vault/ca.pem"
     assert env["NODE_EXTRA_CA_CERTS"] == "/etc/agent-vault/ca.pem"
+
+
+def test_request_execution_env_overlays_proxy_in_dedicated_worker_from_pod_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dedicated workers must use their pod-local Agent Vault token file."""
+    token_path = tmp_path / "token"
+    token_path.write_text("av_sess_worker_token\n", encoding="utf-8")
+    monkeypatch.setenv("MINDROOM_WORKER_EGRESS_PROXY_URL", "http://agent-vault:14322")
+    monkeypatch.setenv("MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("MINDROOM_WORKER_EGRESS_PROXY_VAULT", "agent-vault-worker")
+    monkeypatch.setenv("MINDROOM_WORKER_EGRESS_PROXY_CA_FILE", "/etc/agent-vault/ca.pem")
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1",
+            "HTTP_PROXY": "http://mindroom-egress-proxy:3128",
+            "HTTPS_PROXY": "http://mindroom-egress-proxy:3128",
+            "http_proxy": "http://mindroom-egress-proxy:3128",
+            "https_proxy": "http://mindroom-egress-proxy:3128",
+        },
+    )
+
+    env = sandbox_exec.request_execution_env("shell", None, runtime_paths)
+
+    expected_proxy = "http://av_sess_worker_token:agent-vault-worker@agent-vault:14322"
+    assert env["HTTP_PROXY"] == expected_proxy
+    assert env["HTTPS_PROXY"] == expected_proxy
+    assert env["http_proxy"] == expected_proxy
+    assert env["https_proxy"] == expected_proxy
+    assert _git_config_value(env, "http.proxy") == expected_proxy
 
 
 def test_worker_proxy_execution_env_configures_git_proxy_auth(tmp_path: Path) -> None:
