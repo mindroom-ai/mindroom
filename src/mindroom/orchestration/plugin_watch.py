@@ -145,11 +145,14 @@ async def _collect_plugin_root_changes(
     last_snapshot_by_root: dict[Path, dict[Path, int]],
 ) -> set[Path]:
     """Collect edits across all currently configured plugin roots."""
+    previous_snapshot_by_root = {root: last_snapshot_by_root.get(root) for root in configured_roots}
     current_snapshots = await asyncio.to_thread(_capture_plugin_root_snapshots, configured_roots)
     changed_paths = set()
     for root in configured_roots:
         current_snapshot = current_snapshots[root]
-        previous_snapshot = last_snapshot_by_root.get(root)
+        previous_snapshot = previous_snapshot_by_root[root]
+        if last_snapshot_by_root.get(root) is not previous_snapshot:
+            continue
         last_snapshot_by_root[root] = current_snapshot
         if previous_snapshot is None:
             continue
