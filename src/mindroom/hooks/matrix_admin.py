@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import add_room_to_space, create_room, get_room_members, invite_to_room
 from mindroom.matrix.identity import managed_account_key, managed_account_user_id
 from mindroom.matrix.invited_rooms_store import (
@@ -23,6 +24,9 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
     from .types import HookMatrixAdmin
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,37 +63,52 @@ class _BoundHookMatrixAdmin:
 
     async def invite_user(self, room_id: str, user_id: str) -> bool:
         """Invite one user into one room; use ensure_room_members for bulk reconciliation."""
+        current_members: set[str] | None = None
         if self.config is not None:
-            current_members = await get_room_members(self.client, room_id)
-            if user_id in current_members:
+            current_members = await self._get_room_members_or_none(room_id)
+            if current_members is not None and user_id in current_members:
                 self._persist_invited_room_for_managed_entity(room_id, user_id)
                 return True
 
         invited = await invite_to_room(self.client, room_id, user_id)
         if invited:
             self._persist_invited_room_for_managed_entity(room_id, user_id)
-        return invited
+            return True
+
+        if self.config is not None and current_members is None:
+            refreshed_members = await self._get_room_members_or_none(room_id)
+            if refreshed_members is not None and user_id in refreshed_members:
+                self._persist_invited_room_for_managed_entity(room_id, user_id)
+                return True
+        return False
 
     async def ensure_room_members(self, room_id: str, user_ids: list[str]) -> set[str]:
         """Invite missing users into one room and return users newly invited."""
-        current_members = await get_room_members(self.client, room_id)
+        current_members = await self._get_room_members_or_none(room_id)
+        known_members = current_members or set()
         invited_user_ids: set[str] = set()
         entity_names_by_user_id = self._managed_entity_names_by_user_id()
         entities_to_persist: set[str] = set()
+        unverified_user_ids: set[str] = set()
 
         for user_id in sorted(set(user_ids)):
-            if user_id in current_members:
-                entity_name = entity_names_by_user_id.get(user_id)
-                if entity_name is not None:
-                    entities_to_persist.add(entity_name)
+            if user_id in known_members:
+                self._record_managed_entity_for_user_id(user_id, entity_names_by_user_id, entities_to_persist)
                 continue
 
             if await invite_to_room(self.client, room_id, user_id):
-                current_members.add(user_id)
+                known_members.add(user_id)
                 invited_user_ids.add(user_id)
-                entity_name = entity_names_by_user_id.get(user_id)
-                if entity_name is not None:
-                    entities_to_persist.add(entity_name)
+                self._record_managed_entity_for_user_id(user_id, entity_names_by_user_id, entities_to_persist)
+            elif current_members is None:
+                unverified_user_ids.add(user_id)
+
+        await self._record_verified_members_after_failed_invites(
+            room_id,
+            unverified_user_ids,
+            entity_names_by_user_id,
+            entities_to_persist,
+        )
 
         self._persist_invited_room_for_entities(room_id, entities_to_persist)
         return invited_user_ids
@@ -97,6 +116,42 @@ class _BoundHookMatrixAdmin:
     async def get_room_members(self, room_id: str) -> set[str]:
         """Return the current joined members for one room."""
         return await get_room_members(self.client, room_id)
+
+    async def _get_room_members_or_none(self, room_id: str) -> set[str] | None:
+        """Return room members, or None when Matrix did not return authoritative membership."""
+        response = await self.client.joined_members(room_id)
+        if isinstance(response, nio.JoinedMembersResponse):
+            return {member.user_id for member in response.members}
+        logger.warning("matrix_room_members_fetch_failed", room_id=room_id)
+        return None
+
+    async def _record_verified_members_after_failed_invites(
+        self,
+        room_id: str,
+        unverified_user_ids: set[str],
+        entity_names_by_user_id: dict[str, str],
+        entities_to_persist: set[str],
+    ) -> None:
+        """Persist managed users found by a retry after initial membership was unavailable."""
+        if not unverified_user_ids:
+            return
+        refreshed_members = await self._get_room_members_or_none(room_id)
+        if refreshed_members is None:
+            return
+        for user_id in sorted(unverified_user_ids):
+            if user_id in refreshed_members:
+                self._record_managed_entity_for_user_id(user_id, entity_names_by_user_id, entities_to_persist)
+
+    @staticmethod
+    def _record_managed_entity_for_user_id(
+        user_id: str,
+        entity_names_by_user_id: dict[str, str],
+        entities_to_persist: set[str],
+    ) -> None:
+        """Add the configured entity for one managed user ID, when known."""
+        entity_name = entity_names_by_user_id.get(user_id)
+        if entity_name is not None:
+            entities_to_persist.add(entity_name)
 
     async def add_room_to_space(self, space_room_id: str, room_id: str) -> bool:
         """Link one room under an existing Matrix Space."""
