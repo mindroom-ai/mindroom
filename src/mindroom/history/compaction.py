@@ -11,7 +11,6 @@ from html import escape
 from typing import TYPE_CHECKING, TypeGuard, cast
 from uuid import uuid4
 
-from agno.agent._tools import determine_tools_for_model
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -50,6 +49,7 @@ from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, Comp
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed, timed_block
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.tool_schema_cache import process_function_schema_for_prompt
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
@@ -692,10 +692,14 @@ def _prepare_tools_for_estimation(tools: object) -> tuple[list[Function | _ToolD
                 continue
             seen_names.add(tool_name)
             prepared_tools.append(prepared_tool)
+            if (
+                isinstance(prepared_tool, Function)
+                and prepared_tool.add_instructions
+                and prepared_tool.instructions is not None
+            ):
+                tool_instructions.append(prepared_tool.instructions)
 
         if isinstance(tool, Toolkit) and tool.add_instructions and tool.instructions is not None:
-            tool_instructions.append(tool.instructions)
-        if isinstance(tool, Function) and tool.add_instructions and tool.instructions is not None:
             tool_instructions.append(tool.instructions)
     return prepared_tools, tool_instructions
 
@@ -727,7 +731,7 @@ def _prepare_function_for_estimation(function: Function) -> Function:
     prepared_function = function.model_copy(deep=True)
     if not prepared_function.skip_entrypoint_processing and prepared_function.entrypoint is not None:
         effective_strict = False if prepared_function.strict is None else prepared_function.strict
-        prepared_function.process_entrypoint(strict=effective_strict)
+        process_function_schema_for_prompt(prepared_function, strict=effective_strict)
     return prepared_function
 
 
@@ -794,19 +798,7 @@ def _prepare_team_prompt_inputs_for_estimation(
     MindRoom. This logic is verified against `agno==2.5.13`; if Agno changes those
     internals, update this estimator to match the new team prompt builder.
     """
-    budget_session_id = "history-budget"
-    session = TeamSession(session_id=budget_session_id, team_id=team.id)
-    run_response = TeamRunOutput(
-        run_id=budget_session_id,
-        team_id=team.id,
-        session_id=budget_session_id,
-        session_state={},
-    )
-    run_context = RunContext(
-        run_id=budget_session_id,
-        session_id=budget_session_id,
-        session_state={},
-    )
+    session, run_response, run_context = _team_prompt_estimation_inputs(team)
     model = team.model
     assert model is not None
     prepared_tools = _determine_tools_for_model(
@@ -821,18 +813,48 @@ def _prepare_team_prompt_inputs_for_estimation(
     return session, [tool for tool in prepared_tools if isinstance(tool, Function) or _is_tool_definition_dict(tool)]
 
 
-@timed("system_prompt_assembly.history_prepare.static_token_estimate.agno_determine_tools")
+@timed("system_prompt_assembly.history_prepare.static_token_estimate.tool_schema_prepare")
 def _prepare_agent_prompt_inputs_for_estimation(
     agent: Agent,
 ) -> tuple[AgentSession, RunContext, list[Function | _ToolDefinition]]:
     """Reuse Agno's agent tool-preparation path for prompt budgeting.
 
-    Agno exposes `Agent.get_system_message()` publicly, but the prepared tool
-    payload and `_tool_instructions` that feed that prompt are only finalized by
-    the shared `agno.agent._tools.determine_tools_for_model()` path. Using that
-    single internal entrypoint keeps MindRoom aligned with Agno without
-    re-implementing several private agent helpers.
+    The estimator only needs model-visible schemas and tool instructions, not
+    executable validate-call wrappers. Preparing those schemas here lets us reuse
+    cached Function schema metadata across fresh Agent instances.
     """
+    session, run_response, run_context = _agent_prompt_estimation_inputs(agent)
+    with timed_block("system_prompt_assembly.history_prepare.static_token_estimate.agno_get_tools"):
+        processed_tools = agent.get_tools(
+            run_response=run_response,
+            run_context=run_context,
+            session=session,
+            user_id=run_context.user_id,
+        )
+    with timed_block("system_prompt_assembly.history_prepare.static_token_estimate.tool_schema_prepare"):
+        prepared_tools, tool_instructions = _prepare_tools_for_estimation(processed_tools)
+    agent._tool_instructions = list(tool_instructions)
+    return session, run_context, prepared_tools
+
+
+def _team_prompt_estimation_inputs(team: Team) -> tuple[TeamSession, TeamRunOutput, RunContext]:
+    budget_session_id = "history-budget"
+    session = TeamSession(session_id=budget_session_id, team_id=team.id)
+    run_response = TeamRunOutput(
+        run_id=budget_session_id,
+        team_id=team.id,
+        session_id=budget_session_id,
+        session_state={},
+    )
+    run_context = RunContext(
+        run_id=budget_session_id,
+        session_id=budget_session_id,
+        session_state={},
+    )
+    return session, run_response, run_context
+
+
+def _agent_prompt_estimation_inputs(agent: Agent) -> tuple[AgentSession, RunOutput, RunContext]:
     budget_session_id = "history-budget"
     budget_user_id = "history-budget-user"
     session = AgentSession(
@@ -854,30 +876,7 @@ def _prepare_agent_prompt_inputs_for_estimation(
         user_id=budget_user_id,
         session_state={},
     )
-    model = agent.model
-    assert model is not None
-    with timed_block("system_prompt_assembly.history_prepare.static_token_estimate.agno_get_tools"):
-        processed_tools = agent.get_tools(
-            run_response=run_response,
-            run_context=run_context,
-            session=session,
-            user_id=budget_user_id,
-        )
-    with timed_block("system_prompt_assembly.history_prepare.static_token_estimate.agno_determine_tools"):
-        prepared_tools = determine_tools_for_model(
-            agent=agent,
-            model=model,
-            processed_tools=processed_tools,
-            run_response=run_response,
-            run_context=run_context,
-            session=session,
-            async_mode=False,
-        )
-    return (
-        session,
-        run_context,
-        [tool for tool in prepared_tools if isinstance(tool, Function) or _is_tool_definition_dict(tool)],
-    )
+    return session, run_response, run_context
 
 
 def resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
