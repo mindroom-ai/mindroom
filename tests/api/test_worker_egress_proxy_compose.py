@@ -38,7 +38,10 @@ def _git_config_value(env: dict[str, str], key: str) -> str:
     count = int(env.get("GIT_CONFIG_COUNT", "0"))
     for index in range(count):
         if env.get(f"GIT_CONFIG_KEY_{index}") == key:
-            return env[f"GIT_CONFIG_VALUE_{index}"]
+            value = env.get(f"GIT_CONFIG_VALUE_{index}")
+            if value is None:
+                pytest.fail(f"missing env-backed Git config value for key {key!r}")
+            return value
     pytest.fail(f"missing env-backed Git config key {key!r}")
 
 
@@ -65,6 +68,9 @@ def test_request_execution_env_overlays_proxy_in_dedicated_worker_from_pod_env(
     monkeypatch.setenv("MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE", str(token_path))
     monkeypatch.setenv("MINDROOM_WORKER_EGRESS_PROXY_VAULT", "agent-vault-worker")
     monkeypatch.setenv("MINDROOM_WORKER_EGRESS_PROXY_CA_FILE", "/etc/agent-vault/ca.pem")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "*")
 
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -85,6 +91,10 @@ def test_request_execution_env_overlays_proxy_in_dedicated_worker_from_pod_env(
     assert env["HTTPS_PROXY"] == expected_proxy
     assert env["http_proxy"] == expected_proxy
     assert env["https_proxy"] == expected_proxy
+    assert env["REQUESTS_CA_BUNDLE"] == "/etc/agent-vault/ca.pem"
+    assert env["GIT_SSL_CAINFO"] == "/etc/agent-vault/ca.pem"
+    assert env["NODE_EXTRA_CA_CERTS"] == "/etc/agent-vault/ca.pem"
+    assert _git_config_value(env, "safe.directory") == "*"
     assert _git_config_value(env, "http.proxy") == expected_proxy
 
 
