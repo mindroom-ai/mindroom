@@ -13,7 +13,6 @@ from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.tools.function import Function
 
-import mindroom.history.compaction as compaction_module
 from mindroom import execution_preparation
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.config.main import Config
@@ -38,6 +37,7 @@ from mindroom.history import (
 from mindroom.history.compaction import estimate_agent_static_tokens
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.runtime import _ResolvedPreparationInputs
+from mindroom.tool_schema_cache import clear_tool_schema_cache
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import FakeModel, bind_runtime_paths, make_visible_message
 
@@ -179,22 +179,25 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_execution_context_reuses_agno_tool_determination_for_static_estimates(
+async def test_prepare_agent_execution_context_reuses_function_schema_processing_for_static_estimates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One prompt assembly should determine Agno tools once for repeated static estimates."""
+    """One prompt assembly should process stable function schemas once for repeated static estimates."""
 
     def search_docs(query: str) -> str:
         """Search indexed documentation."""
         return query
 
-    agent = Agent(
-        id="test_agent",
-        name="Test Agent",
-        model=FakeModel(id="fake-model", provider="fake"),
-        tools=[Function(name="search_docs", entrypoint=search_docs)],
-    )
+    def make_agent() -> Agent:
+        return Agent(
+            id="test_agent",
+            name="Test Agent",
+            model=FakeModel(id="fake-model", provider="fake"),
+            tools=[Function(name="search_docs", entrypoint=search_docs)],
+        )
+
+    agent = make_agent()
     config, runtime_paths = _bound_agent_config(tmp_path)
     prepare_scope_history = AsyncMock(return_value=MagicMock())
     monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare_scope_history)
@@ -203,18 +206,19 @@ async def test_prepare_agent_execution_context_reuses_agno_tool_determination_fo
         "finalize_history_preparation",
         lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False),
     )
+    clear_tool_schema_cache()
 
-    original_determine_tools = compaction_module.determine_tools_for_model
-    count_determine_tools = True
-    determine_tools_calls = 0
+    original_process_entrypoint = Function.process_entrypoint
+    count_schema_processing = True
+    process_entrypoint_calls = 0
 
-    def counting_determine_tools(*args: object, **kwargs: object) -> list[object]:
-        nonlocal determine_tools_calls
-        if count_determine_tools:
-            determine_tools_calls += 1
-        return original_determine_tools(*args, **kwargs)
+    def counting_process_entrypoint(self: Function, strict: bool = False) -> None:
+        nonlocal process_entrypoint_calls
+        if count_schema_processing:
+            process_entrypoint_calls += 1
+        original_process_entrypoint(self, strict=strict)
 
-    monkeypatch.setattr(compaction_module, "determine_tools_for_model", counting_determine_tools)
+    monkeypatch.setattr(Function, "process_entrypoint", counting_process_entrypoint)
 
     prepared = await prepare_agent_execution_context(
         scope_context=None,
@@ -235,12 +239,109 @@ async def test_prepare_agent_execution_context_reuses_agno_tool_determination_fo
         current_sender_id="@alice:localhost",
     )
 
-    preparation_determine_tools_calls = determine_tools_calls
-    count_determine_tools = False
+    preparation_process_entrypoint_calls = process_entrypoint_calls
+    count_schema_processing = False
     assert prepared.prepared_context_tokens == estimate_agent_static_tokens(agent, prepared.final_prompt)
     assert prepared.estimated_context_tokens == prepared.prepared_context_tokens
-    assert preparation_determine_tools_calls == 1
+    assert preparation_process_entrypoint_calls == 1
     assert prepare_scope_history.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_execution_context_reuses_function_schema_processing_across_turns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stable agent tool schema prep should be reused across prompt assemblies."""
+
+    def search_docs(query: str) -> str:
+        """Search indexed documentation."""
+        return query
+
+    def make_agent() -> Agent:
+        return Agent(
+            id="test_agent",
+            name="Test Agent",
+            model=FakeModel(id="fake-model", provider="fake"),
+            tools=[Function(name="search_docs", entrypoint=search_docs)],
+        )
+
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    prepare_scope_history = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare_scope_history)
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False),
+    )
+    clear_tool_schema_cache()
+
+    original_process_entrypoint = Function.process_entrypoint
+    process_entrypoint_calls = 0
+
+    def counting_process_entrypoint(self: Function, strict: bool = False) -> None:
+        nonlocal process_entrypoint_calls
+        process_entrypoint_calls += 1
+        original_process_entrypoint(self, strict=strict)
+
+    monkeypatch.setattr(Function, "process_entrypoint", counting_process_entrypoint)
+
+    for prompt in ("Current request", "Follow-up request"):
+        await prepare_agent_execution_context(
+            scope_context=None,
+            agent=make_agent(),
+            agent_name="test_agent",
+            prompt=prompt,
+            thread_history=[
+                make_visible_message(sender="@alice:localhost", body="Earlier context", event_id="$older"),
+                make_visible_message(sender="@alice:localhost", body=prompt, event_id="$current"),
+            ],
+            runtime_paths=runtime_paths,
+            config=config,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            reply_to_event_id="$current",
+            active_event_ids=(),
+            compaction_outcomes_collector=None,
+            current_sender_id="@alice:localhost",
+        )
+
+    assert process_entrypoint_calls == 1
+    assert prepare_scope_history.await_count == 2
+
+
+def test_estimate_agent_static_tokens_reuses_function_schema_processing_across_fresh_agents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stable function schema processing should be reused across fresh agent instances."""
+
+    def search_docs(query: str) -> str:
+        """Search indexed documentation."""
+        return query
+
+    def make_agent() -> Agent:
+        return Agent(
+            id="test_agent",
+            name="Test Agent",
+            model=FakeModel(id="fake-model", provider="fake"),
+            tools=[Function(name="search_docs", entrypoint=search_docs)],
+        )
+
+    original_process_entrypoint = Function.process_entrypoint
+    process_entrypoint_calls = 0
+
+    def counting_process_entrypoint(self: Function, strict: bool = False) -> None:
+        nonlocal process_entrypoint_calls
+        process_entrypoint_calls += 1
+        original_process_entrypoint(self, strict=strict)
+
+    monkeypatch.setattr(Function, "process_entrypoint", counting_process_entrypoint)
+    clear_tool_schema_cache()
+
+    for _ in range(2):
+        estimate_agent_static_tokens(make_agent(), "Current request")
+
+    assert process_entrypoint_calls == 1
 
 
 def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> None:

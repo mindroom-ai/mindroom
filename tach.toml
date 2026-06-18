@@ -40,6 +40,14 @@ path = "mindroom.path_globs"
 depends_on = []
 
 [[modules]]
+path = "mindroom.tool_schema_cache"
+depends_on = []
+visibility = [
+    "mindroom.history.compaction",
+    "mindroom.tool_system.plugins",
+]
+
+[[modules]]
 path = "mindroom.dynamic_workflows"
 depends_on = []
 
@@ -836,6 +844,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.logging_config",
     "mindroom.timing",
+    "mindroom.tool_schema_cache",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",
 ]
@@ -2275,6 +2284,7 @@ path = "mindroom.tool_system.plugins"
 depends_on = [
     "mindroom.constants",
     "mindroom.hooks",
+    "mindroom.tool_schema_cache",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.skills",

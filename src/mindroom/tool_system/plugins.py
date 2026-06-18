@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.hooks import HookRegistry, iter_module_hooks
 from mindroom.logging_config import get_logger
+from mindroom.tool_schema_cache import clear_tool_schema_cache
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.registry_state import (
     capture_tool_registry_snapshot,
@@ -327,6 +328,7 @@ def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
 
 def _clear_plugin_reload_caches() -> None:
     """Drop cached plugin manifests and imported plugin modules before one rebuild."""
+    clear_tool_schema_cache()
     _clear_configured_plugin_roots_cache()
     plugin_imports._PLUGIN_CACHE.clear()
     plugin_imports._MODULE_IMPORT_CACHE.clear()
