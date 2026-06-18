@@ -449,7 +449,7 @@ async def drain_deferred_overdue_tasks(
 ) -> int:
     """Start queued overdue one-time tasks after Matrix sync is ready."""
     drained_count = 0
-    matrix_admin = build_hook_matrix_admin(client, runtime_paths, config=config)
+    matrix_admin = build_hook_matrix_admin(client, runtime_paths)
 
     while _deferred_overdue_tasks:
         queued_task = _deferred_overdue_tasks.popleft()
@@ -1568,7 +1568,7 @@ async def restore_scheduled_tasks(  # noqa: C901
         return 0
 
     restored_count = 0
-    matrix_admin = build_hook_matrix_admin(client, runtime_paths, config=config)
+    matrix_admin = build_hook_matrix_admin(client, runtime_paths)
     for task in _parse_task_records_from_state(room_id, response, include_non_pending=False):
         task_id = task.task_id
         workflow = task.workflow
