@@ -4413,6 +4413,35 @@ async def test_refresh_scheduler_runs_independent_per_binding_tasks(
     await scheduler.shutdown()
 
 
+def test_refresh_scheduler_reads_env_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The background refresh limit can be tuned from the deployment environment."""
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY", "3")
+
+    scheduler = KnowledgeRefreshScheduler()
+
+    assert scheduler.max_concurrent_refreshes == 3
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "match"),
+    [
+        ("not-an-int", "must be an integer"),
+        ("0", "must be at least 1"),
+        ("-2", "must be at least 1"),
+    ],
+)
+def test_refresh_scheduler_env_concurrency_fails_fast(
+    raw_value: str,
+    match: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed refresh concurrency env values fail startup instead of hiding typos."""
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY", raw_value)
+
+    with pytest.raises(ValueError, match=match):
+        KnowledgeRefreshScheduler()
+
+
 @pytest.mark.asyncio
 async def test_refresh_scheduler_coalesces_duplicate_schedule_while_active(
     tmp_path: Path,

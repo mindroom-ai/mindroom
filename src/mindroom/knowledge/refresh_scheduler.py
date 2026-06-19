@@ -35,15 +35,14 @@ def _default_max_concurrent_refreshes() -> int:
     if raw_value is None:
         return _DEFAULT_MAX_CONCURRENT_REFRESHES
     try:
-        return max(int(raw_value), 1)
-    except ValueError:
-        logger.warning(
-            "Invalid knowledge refresh concurrency; using default",
-            env_var=_MAX_CONCURRENT_REFRESHES_ENV,
-            value=raw_value,
-            default=_DEFAULT_MAX_CONCURRENT_REFRESHES,
-        )
-        return _DEFAULT_MAX_CONCURRENT_REFRESHES
+        value = int(raw_value)
+    except ValueError as exc:
+        msg = f"{_MAX_CONCURRENT_REFRESHES_ENV} must be an integer, got {raw_value!r}"
+        raise ValueError(msg) from exc
+    if value < 1:
+        msg = f"{_MAX_CONCURRENT_REFRESHES_ENV} must be at least 1, got {value}"
+        raise ValueError(msg)
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +55,7 @@ class _ScheduledRefresh:
 
 @dataclass(slots=True)
 class KnowledgeRefreshScheduler:
-    """Run at most one best-effort background refresh per binding."""
+    """Deduplicate per-binding refreshes and limit global background refresh concurrency."""
 
     max_concurrent_refreshes: int = field(default_factory=_default_max_concurrent_refreshes)
     _tasks: dict[KnowledgeRefreshTarget, asyncio.Task[None]] = field(default_factory=dict, init=False)
