@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -25,6 +26,24 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+_DEFAULT_MAX_CONCURRENT_REFRESHES = 1
+_MAX_CONCURRENT_REFRESHES_ENV = "MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY"
+
+
+def _default_max_concurrent_refreshes() -> int:
+    raw_value = os.getenv(_MAX_CONCURRENT_REFRESHES_ENV)
+    if raw_value is None:
+        return _DEFAULT_MAX_CONCURRENT_REFRESHES
+    try:
+        return max(int(raw_value), 1)
+    except ValueError:
+        logger.warning(
+            "Invalid knowledge refresh concurrency; using default",
+            env_var=_MAX_CONCURRENT_REFRESHES_ENV,
+            value=raw_value,
+            default=_DEFAULT_MAX_CONCURRENT_REFRESHES,
+        )
+        return _DEFAULT_MAX_CONCURRENT_REFRESHES
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,9 +58,11 @@ class _ScheduledRefresh:
 class KnowledgeRefreshScheduler:
     """Run at most one best-effort background refresh per binding."""
 
+    max_concurrent_refreshes: int = field(default_factory=_default_max_concurrent_refreshes)
     _tasks: dict[KnowledgeRefreshTarget, asyncio.Task[None]] = field(default_factory=dict, init=False)
     _pending: dict[KnowledgeRefreshTarget, _ScheduledRefresh] = field(default_factory=dict, init=False)
     _shutting_down: bool = field(default=False, init=False)
+    _refresh_slots: asyncio.Semaphore | None = field(default=None, init=False)
 
     def schedule_refresh(
         self,
@@ -182,12 +203,18 @@ class KnowledgeRefreshScheduler:
             self._start_task(key, pending_request)
 
     async def _run_refresh(self, key: KnowledgeRefreshTarget, request: _ScheduledRefresh) -> None:
-        await refresh_knowledge_binding_in_subprocess(
-            key.base_id,
-            config=request.config,
-            runtime_paths=request.runtime_paths,
-            execution_identity=request.execution_identity,
-        )
+        async with self._refresh_semaphore():
+            await refresh_knowledge_binding_in_subprocess(
+                key.base_id,
+                config=request.config,
+                runtime_paths=request.runtime_paths,
+                execution_identity=request.execution_identity,
+            )
+
+    def _refresh_semaphore(self) -> asyncio.Semaphore:
+        if self._refresh_slots is None:
+            self._refresh_slots = asyncio.Semaphore(max(self.max_concurrent_refreshes, 1))
+        return self._refresh_slots
 
 
 def _running_loop_for_schedule(base_id: str) -> asyncio.AbstractEventLoop | None:

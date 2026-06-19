@@ -219,6 +219,13 @@ class KnowledgeSourceWatcher:
     ) -> None:
         try:
             while not stop_event.is_set():
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=target.poll_interval_seconds)
+                    continue
+                except TimeoutError:
+                    pass
+                if stop_event.is_set():
+                    break
                 self._refresh_scheduler.schedule_refresh(
                     target.base_id,
                     config=config,
@@ -229,10 +236,6 @@ class KnowledgeSourceWatcher:
                     base_id=target.base_id,
                     poll_interval_seconds=target.poll_interval_seconds,
                 )
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=target.poll_interval_seconds)
-                except TimeoutError:
-                    continue
         except asyncio.CancelledError:
             raise
         except Exception:

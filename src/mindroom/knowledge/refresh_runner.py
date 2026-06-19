@@ -94,6 +94,14 @@ _active_refresh_counts: dict[KnowledgeRefreshTarget, int] = {}
 _active_refresh_counts_guard = Lock()
 _MAX_REFRESH_LOCKS = 512
 _REFRESH_FILE_LOCK_POLL_SECONDS = 0.1
+_REFRESH_SUBPROCESS_THREAD_ENV = {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+}
 
 
 @dataclass
@@ -227,6 +235,7 @@ async def refresh_knowledge_binding_in_subprocess(
         force_reindex=force_reindex,
     )
     env = dict(runtime_env_values(runtime_paths))
+    env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
     env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
     process = await asyncio.create_subprocess_exec(
         sys.executable,

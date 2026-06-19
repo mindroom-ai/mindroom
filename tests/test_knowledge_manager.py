@@ -968,8 +968,8 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
 
 
 @pytest.mark.asyncio
-async def test_git_knowledge_polling_schedules_background_refresh_on_startup(tmp_path: Path) -> None:
-    """Shared Git bases should schedule their first refresh as soon as runtime support starts."""
+async def test_git_knowledge_polling_waits_before_startup_refresh(tmp_path: Path) -> None:
+    """Shared Git bases should not burst refresh work immediately when runtime support starts."""
     docs_path = tmp_path / "docs"
     git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", poll_interval_seconds=5)
     config = _config(
@@ -985,17 +985,11 @@ async def test_git_knowledge_polling_schedules_background_refresh_on_startup(tmp
 
     await source_watcher.sync(config=config, runtime_paths=runtime_paths)
     try:
-        for _attempt in range(50):
-            if refresh_scheduler.schedule_refresh.called:
-                break
-            await asyncio.sleep(0)
-        else:
-            pytest.fail("Git poller did not schedule startup refresh")
+        await asyncio.sleep(0)
     finally:
         await source_watcher.shutdown()
 
-    refresh_scheduler.schedule_refresh.assert_called_once()
-    assert refresh_scheduler.schedule_refresh.call_args.args == ("docs",)
+    refresh_scheduler.schedule_refresh.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1028,7 +1022,7 @@ async def test_git_knowledge_polling_repeats_after_poll_interval(
         nonlocal wait_calls
         assert kwargs == {"timeout": 5.0}
         wait_calls += 1
-        if wait_calls == 1:
+        if wait_calls <= 2:
             awaitable.close()
             raise TimeoutError
         return await awaitable
@@ -1048,6 +1042,7 @@ async def test_git_knowledge_polling_repeats_after_poll_interval(
         await source_watcher.shutdown()
 
     assert refresh_scheduler.schedule_refresh.call_count == 2
+    assert wait_calls >= 2
     assert [call.args for call in refresh_scheduler.schedule_refresh.call_args_list] == [("docs",), ("docs",)]
 
 
@@ -2420,6 +2415,11 @@ def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
     assert IndexingSettings.from_metadata(key.indexing_settings.to_metadata()) == key.indexing_settings
     changed_repo_identity = replace(key.indexing_settings, repo_identity="https://example.com/other/repo.git")
     assert not knowledge_registry.published_index_settings_compatible(key.indexing_settings, changed_repo_identity)
+
+
+def test_knowledge_file_indexing_parallelism_default_is_conservative() -> None:
+    """One refresh subprocess should not fan out into dozens of concurrent file embeds by default."""
+    assert knowledge_manager_module._MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES == 4
 
 
 def test_indexing_settings_filter_keys_are_order_insensitive(tmp_path: Path) -> None:
@@ -4385,7 +4385,7 @@ async def test_refresh_scheduler_runs_independent_per_binding_tasks(
     docs_b = tmp_path / "docs-b"
     config = _config(tmp_path, bases={"a": docs_a, "b": docs_b}, agent_bases=["a", "b"])
     runtime_paths = runtime_paths_for(config)
-    scheduler = KnowledgeRefreshScheduler()
+    scheduler = KnowledgeRefreshScheduler(max_concurrent_refreshes=2)
     started: list[str] = []
     release: dict[str, asyncio.Event] = {"a": asyncio.Event(), "b": asyncio.Event()}
 
@@ -4882,6 +4882,57 @@ async def test_failed_subprocess_refresh_reconciles_running_state_after_newer_pu
 
 
 @pytest.mark.asyncio
+async def test_refresh_subprocess_receives_conservative_thread_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refresh child processes should not inherit unbounded math/tokenizer thread settings."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    captured_env: dict[str, str] = {}
+
+    class _Stdin:
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    class _Process:
+        returncode = 0
+        stdin = _Stdin()
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*_args: object, **kwargs: object) -> _Process:
+        captured_env.update(kwargs["env"])
+        return _Process()
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert captured_env["OMP_NUM_THREADS"] == "1"
+    assert captured_env["OPENBLAS_NUM_THREADS"] == "1"
+    assert captured_env["MKL_NUM_THREADS"] == "1"
+    assert captured_env["NUMEXPR_NUM_THREADS"] == "1"
+    assert captured_env["VECLIB_MAXIMUM_THREADS"] == "1"
+    assert captured_env["TOKENIZERS_PARALLELISM"] == "false"
+
+
+@pytest.mark.asyncio
 async def test_refresh_scheduler_shutdown_suppresses_completed_refresh_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4966,6 +5017,64 @@ async def test_refresh_status_is_visible_across_scheduler_instances(
         release.set()
         await matrix_scheduler.shutdown()
         await api_scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_refresh_scheduler_limits_concurrent_subprocess_refreshes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Queued refreshes should not start more child refresh workers than the configured global limit."""
+    docs_path = tmp_path / "docs"
+    api_path = tmp_path / "api"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path, "api": api_path},
+        agent_bases=["docs", "api"],
+    )
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler(max_concurrent_refreshes=1)
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+    started_base_ids: list[str] = []
+    active_refreshes = 0
+    max_active_refreshes = 0
+
+    async def _blocked_refresh(base_id: str, **_kwargs: object) -> object:
+        nonlocal active_refreshes, max_active_refreshes
+        started_base_ids.append(base_id)
+        active_refreshes += 1
+        max_active_refreshes = max(max_active_refreshes, active_refreshes)
+        try:
+            if len(started_base_ids) == 1:
+                first_started.set()
+                await release_first.wait()
+            else:
+                second_started.set()
+            return object()
+        finally:
+            active_refreshes -= 1
+
+    monkeypatch.setattr(
+        "mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess",
+        _blocked_refresh,
+    )
+
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    scheduler.schedule_refresh("api", config=config, runtime_paths=runtime_paths)
+    await first_started.wait()
+    await asyncio.sleep(0)
+
+    assert started_base_ids == ["docs"]
+    assert second_started.is_set() is False
+
+    release_first.set()
+    await second_started.wait()
+    await scheduler.shutdown()
+
+    assert started_base_ids == ["docs", "api"]
+    assert max_active_refreshes == 1
 
 
 def test_index_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
