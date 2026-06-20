@@ -24,7 +24,7 @@ Open **MindRoom** from `/Applications` or Spotlight.
 
 Use **Install MindRoom Runtime** to install the CLI runtime with bundled `uv`.
 Use **Initialize Hosted Config** for the default `chat.mindroom.chat` profile.
-Open `https://chat.mindroom.chat`, generate a local MindRoom pair code, and use **Pair Hosted MindRoom...** in the menu.
+Open `https://chat.mindroom.chat`, click the Local MindRoom icon on the left to generate a local MindRoom pair code, and use **Pair Hosted MindRoom...** in the menu.
 Use **Install/Ensure Service** to run `mindroom service install --no-confirm`.
 Use **Open Dashboard** to open `http://localhost:8765`.
 
