@@ -104,6 +104,22 @@ async def disconnect_mcp_oauth_request_session(
         await manager.disconnect_request_session(server_id, worker_target=worker_target)
 
 
+async def start_mcp_oauth_request_refresh_loop(
+    mcp_servers: dict[str, MCPServerConfig],
+    provider_id: str,
+    *,
+    worker_target: ResolvedWorkerTarget | None,
+) -> None:
+    """Start proactive OAuth-token refresh for one connected MCP OAuth scope."""
+    server_id = _mcp_oauth_server_id_for_provider_id(mcp_servers, provider_id)
+    if server_id is None:
+        return
+
+    manager = require_mcp_server_manager()
+    if manager is not None:
+        await manager.start_request_oauth_refresh_loop(server_id, worker_target=worker_target)
+
+
 def _display_name(server_id: str, auth_config: MCPOAuthConfig) -> str:
     if auth_config.display_name:
         return auth_config.display_name

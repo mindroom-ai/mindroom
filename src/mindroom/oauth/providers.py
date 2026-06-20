@@ -634,9 +634,11 @@ class OAuthProvider:
         self,
         token_data: Mapping[str, Any],
         runtime_paths: RuntimePaths,
+        *,
+        force: bool = False,
     ) -> dict[str, Any] | None:
         """Refresh expiring token data and return updated credentials, or None."""
-        if not _token_data_needs_refresh(token_data):
+        if not force and not _token_data_needs_refresh(token_data):
             return None
         refresh_token = cast("str", token_data["refresh_token"])
 
