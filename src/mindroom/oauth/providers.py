@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
-from httpx import HTTPError
+from httpx import HTTPError, HTTPStatusError
 
 from mindroom.credential_policy import is_oauth_client_config_service
 from mindroom.credentials import get_runtime_credentials_manager, validate_service_name
@@ -47,6 +47,10 @@ class OAuthProviderError(RuntimeError):
     """Base error for provider configuration and OAuth flow failures."""
 
 
+class OAuthRefreshRejectedError(OAuthProviderError):
+    """Raised when a provider rejects a refresh-token grant."""
+
+
 class _OAuthProviderNotConfiguredError(OAuthProviderError):
     """Raised when a provider has no usable OAuth client configuration."""
 
@@ -64,20 +68,25 @@ class OAuthConnectionRequired(OAuthProviderError):  # noqa: N818
         *,
         provider_id: str | None = None,
         connect_url: str | None = None,
+        reason: str | None = None,
     ) -> None:
         super().__init__(message)
         self.provider_id = provider_id
         self.connect_url = connect_url
+        self.reason = reason
 
 
 def oauth_connection_required_payload(exc: OAuthConnectionRequired) -> dict[str, object]:
     """Return the structured tool payload for one OAuth connection prompt."""
-    return {
+    payload: dict[str, object] = {
         "error": str(exc),
         "oauth_connection_required": True,
         "provider": exc.provider_id,
         "connect_url": exc.connect_url,
     }
+    if exc.reason is not None:
+        payload["reason"] = exc.reason
+    return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +288,43 @@ def _token_data_needs_refresh(
     if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
         return False
     return float(expires_at) <= (now if now is not None else time.time()) + _DEFAULT_REFRESH_SKEW_SECONDS
+
+
+def _oauth_error_fields(error: object, description: object) -> tuple[str | None, str | None]:
+    """Return safe OAuth error code and detail from standard non-secret response fields."""
+    error_code = error.strip() if isinstance(error, str) and error.strip() else None
+    parts = [value.strip() for value in (error, description) if isinstance(value, str) and value.strip()]
+    return error_code, ": ".join(parts) if parts else None
+
+
+def _http_status_oauth_error_fields(exc: HTTPStatusError) -> tuple[str | None, str | None]:
+    """Return OAuth error detail from an HTTP error response body, if present."""
+    try:
+        payload = exc.response.json()
+    except ValueError:
+        return None, None
+    if not isinstance(payload, Mapping):
+        return None, None
+    return _oauth_error_fields(payload.get("error"), payload.get("error_description"))
+
+
+def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError) -> OAuthProviderError:
+    """Build a safe refresh failure with provider OAuth reason fields when available."""
+    error_code: str | None = None
+    detail: str | None = None
+    if isinstance(exc, AuthlibBaseError):
+        error_code, detail = _oauth_error_fields(exc.error, exc.description)
+    elif isinstance(exc, HTTPStatusError):
+        error_code, detail = _http_status_oauth_error_fields(exc)
+
+    msg = "OAuth token refresh failed"
+    if detail is not None:
+        if error_code == "invalid_grant":
+            return OAuthRefreshRejectedError(f"{msg}: {detail}")
+        return OAuthProviderError(f"{msg}: {detail}")
+    if error_code == "invalid_grant":
+        return OAuthRefreshRejectedError(f"{msg}: {error_code}")
+    return OAuthProviderError(msg)
 
 
 def _generate_pkce_code_verifier() -> str:
@@ -610,8 +656,7 @@ class OAuthProvider:
                     **self.extra_token_params,
                 )
             except (AuthlibBaseError, HTTPError) as exc:
-                msg = "OAuth token refresh failed"
-                raise OAuthProviderError(msg) from exc
+                raise _oauth_refresh_error(exc) from exc
         if not isinstance(token_response, Mapping):
             msg = "OAuth token refresh failed"
             raise OAuthProviderError(msg)

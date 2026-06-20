@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from httpx import HTTPError
+from httpx import HTTPError, HTTPStatusError, Request, Response
 
 from mindroom import constants
 from mindroom.api import auth, main
@@ -29,7 +29,12 @@ from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
-from mindroom.oauth.providers import OAuthClientConfig, OAuthTokenResult, _OAuthClaimValidationContext
+from mindroom.oauth.providers import (
+    OAuthClientConfig,
+    OAuthRefreshRejectedError,
+    OAuthTokenResult,
+    _OAuthClaimValidationContext,
+)
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_credentials_satisfy_identity_policy
 from mindroom.tool_system import plugin_imports
@@ -896,6 +901,66 @@ def test_provider_refresh_token_data_skips_unexpired_access_token(
 
     assert refreshed is None
     assert "created" not in seen
+
+
+def test_provider_refresh_token_data_surfaces_oauth_error_body_without_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = _fake_provider()
+
+    class FakeOAuth2Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeOAuth2Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def refresh_token(self, url: str, **_kwargs: object) -> dict[str, Any]:
+            request = Request("POST", url)
+            response = Response(
+                400,
+                json={
+                    "error": "invalid_grant",
+                    "error_description": "refresh grant rejected",
+                    "access_token": "provider-leaked-access-token",
+                    "refresh_token": "provider-leaked-refresh-token",
+                },
+                request=request,
+            )
+            msg = "Bad Request"
+            raise HTTPStatusError(msg, request=request, response=response)
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
+
+    with pytest.raises(OAuthRefreshRejectedError) as exc_info:
+        asyncio.run(
+            provider.refresh_token_data(
+                {
+                    "token": "stored-access-token-secret",
+                    "refresh_token": "stored-refresh-token-secret",
+                    "client_id": "client-id",
+                    "scopes": ["scope.read"],
+                    "expires_at": 900.0,
+                },
+                runtime_paths,
+            ),
+        )
+
+    message = str(exc_info.value)
+    assert message == "OAuth token refresh failed: invalid_grant: refresh grant rejected"
+    assert "stored-access-token-secret" not in message
+    assert "stored-refresh-token-secret" not in message
+    assert "provider-leaked-access-token" not in message
+    assert "provider-leaked-refresh-token" not in message
 
 
 @pytest.mark.parametrize("returned_refresh_token", [None, ""], ids=["null", "empty"])

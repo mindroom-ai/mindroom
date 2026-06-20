@@ -322,6 +322,17 @@ def build_oauth_connect_instruction(
     )
 
 
+def build_oauth_reconnect_instruction(
+    provider: OAuthProvider,
+    connect_url: str,
+) -> str:
+    """Return a concise instruction for an expired or invalid OAuth session."""
+    return (
+        f"{provider.display_name} session for this agent expired or is no longer valid. "
+        f"Reconnect it with this MindRoom link, then retry the request: {connect_url}"
+    )
+
+
 def sanitized_oauth_token_result(provider: OAuthProvider, result: OAuthTokenResult) -> OAuthTokenResult:
     """Return a token result with only safe claim metadata persisted."""
     return provider.token_result_with_safe_claims(result)
