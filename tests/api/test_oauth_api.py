@@ -24,6 +24,7 @@ from mindroom.api import auth, main
 from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.mcp.oauth import load_mcp_oauth_refresh_scopes
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
@@ -1914,8 +1915,10 @@ def test_generated_mcp_oauth_routes_store_status_and_disconnect_scoped_credentia
             f"/api/oauth/mcp_demo/callback?code=test-code&state={state}",
             follow_redirects=False,
         )
+        indexed_scopes_after_callback = load_mcp_oauth_refresh_scopes(runtime_paths)
         status_response = client.get("/api/oauth/mcp_demo/status?agent_name=general")
         disconnect_response = client.post("/api/oauth/mcp_demo/disconnect?agent_name=general")
+        indexed_scopes_after_disconnect = load_mcp_oauth_refresh_scopes(runtime_paths)
         disconnected_status_response = client.get("/api/oauth/mcp_demo/status?agent_name=general")
 
     assert connect_response.status_code == 200
@@ -1931,7 +1934,19 @@ def test_generated_mcp_oauth_routes_store_status_and_disconnect_scoped_credentia
     assert fetch_kwargs["code_verifier"]
     assert status_response.status_code == 200
     assert status_response.json()["connected"] is True
+    assert len(indexed_scopes_after_callback) == 1
+    assert indexed_scopes_after_callback[0].server_id == "demo"
+    assert indexed_scopes_after_callback[0].provider_id == "mcp_demo"
+    assert indexed_scopes_after_callback[0].worker_scope == "user_agent"
+    assert indexed_scopes_after_callback[0].requester_id == "@alice:example.org"
+    assert indexed_scopes_after_callback[0].agent_name == "general"
+    index_payload = (
+        runtime_paths.storage_root / "mcp_oauth_refresh_scopes" / "mcp_oauth_refresh_scopes.json"
+    ).read_text(encoding="utf-8")
+    assert "mcp-access-token" not in index_payload
+    assert "mcp-refresh-token" not in index_payload
     assert disconnect_response.status_code == 200
+    assert indexed_scopes_after_disconnect == ()
     assert disconnected_status_response.status_code == 200
     assert disconnected_status_response.json()["connected"] is False
     scoped_credentials = manager.for_primary_runtime_scope("@alice:example.org", "general").load_credentials(

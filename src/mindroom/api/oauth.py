@@ -397,6 +397,7 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
                     config.mcp_servers,
                     provider.id,
                     worker_target=worker_target,
+                    runtime_paths=runtime_paths,
                 )
             except Exception as exc:
                 logger.warning(
@@ -493,7 +494,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
 async def disconnect(provider_id: str, request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Remove scoped OAuth credentials for one provider while preserving tool settings."""
     await _require_oauth_api_user(request)
-    provider, _runtime_paths = _load_provider(request, provider_id)
+    provider, runtime_paths = _load_provider(request, provider_id)
     target = resolve_request_credentials_target(
         request,
         agent_name=agent_name,
@@ -513,5 +514,6 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
             config.mcp_servers,
             provider.id,
             worker_target=worker_target,
+            runtime_paths=runtime_paths,
         )
     return {"status": "disconnected", "provider": provider.id}
