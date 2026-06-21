@@ -62,6 +62,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
+from mindroom.history.warm_prefix import WarmPrefixSummaryContext
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens
@@ -447,6 +448,7 @@ async def prepare_scope_history(  # noqa: C901
             runtime_paths=runtime_paths,
             timing_scope=timing_scope,
             compaction_lifecycle=compaction_lifecycle,
+            warm_prefix=_warm_prefix_summary_context(agent=agent, resolved_inputs=resolved_inputs, config=config),
         )
         outcome = compaction_result.outcome
         compaction_reply_outcome = compaction_result.reply_outcome
@@ -490,6 +492,7 @@ async def _run_scope_compaction_with_lifecycle(
     runtime_paths: RuntimePaths,
     timing_scope: str | None,
     compaction_lifecycle: CompactionLifecycle | None,
+    warm_prefix: WarmPrefixSummaryContext | None,
 ) -> _ScopeCompactionLifecycleResult:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
@@ -521,6 +524,7 @@ async def _run_scope_compaction_with_lifecycle(
             timing_scope=timing_scope,
             lifecycle_notice_event_id=notice_event_id,
             progress_callback=_compaction_progress_callback(visible_compaction_lifecycle, compaction_start),
+            warm_prefix=warm_prefix,
         )
     except asyncio.CancelledError as error:
         duration_ms = _elapsed_ms(compaction_start)
@@ -617,6 +621,7 @@ async def _run_scope_compaction(
     timing_scope: str | None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    warm_prefix: WarmPrefixSummaryContext | None = None,
 ) -> CompactionOutcome | None:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
@@ -643,8 +648,24 @@ async def _run_scope_compaction(
         timing_scope=timing_scope,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
+        warm_prefix=warm_prefix,
     )
     return outcome
+
+
+def _warm_prefix_summary_context(
+    *,
+    agent: Agent,
+    resolved_inputs: _ResolvedPreparationInputs,
+    config: Config,
+) -> WarmPrefixSummaryContext | None:
+    """Warm-prefix summary requests apply only when compaction uses the active reply model."""
+    if resolved_inputs.execution_plan.compaction_model_name != resolved_inputs.active_model_name:
+        return None
+    return WarmPrefixSummaryContext(
+        agent=agent,
+        instruction=config.get_prompt("COMPACTION_WARM_SUMMARY_INSTRUCTION"),
+    )
 
 
 def _estimated_context_tokens(

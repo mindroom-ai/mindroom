@@ -45,6 +45,7 @@ from mindroom.history.types import (
     HistoryScopeState,
     ResolvedHistorySettings,
 )
+from mindroom.history.warm_prefix import WarmPrefixSummaryContext, build_warm_prefix_summary_request
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed, timed_block
@@ -234,6 +235,7 @@ async def compact_scope_history(
     timing_scope: str | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    warm_prefix: WarmPrefixSummaryContext | None = None,
 ) -> tuple[HistoryScopeState, CompactionOutcome | None]:
     """Compact one scope by rewriting session.summary and session.runs."""
     visible_runs = runs_for_scope(completed_top_level_runs(session), scope)
@@ -295,6 +297,7 @@ async def compact_scope_history(
         collect_compaction_hook_messages=collect_compaction_hook_messages,
         before_persist_callback=emit_before_persist,
         timing_scope=timing_scope,
+        warm_prefix=warm_prefix,
     )
     if rewrite_result is None:
         cleared_state = _persist_cleared_force_state_if_needed(
@@ -390,6 +393,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     summary_prompt: str,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
     timing_scope: str | None = None,
+    warm_prefix: WarmPrefixSummaryContext | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     total_compacted_run_count = 0
@@ -469,6 +473,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             history_settings=history_settings,
             summary_prompt=summary_prompt,
             timing_scope=timing_scope,
+            warm_prefix=warm_prefix if isinstance(working_session, AgentSession) else None,
+            working_session=working_session,
         )
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
@@ -931,6 +937,8 @@ async def _generate_compaction_summary_with_retry(
     history_settings: ResolvedHistorySettings,
     summary_prompt: str,
     timing_scope: str | None = None,
+    warm_prefix: WarmPrefixSummaryContext | None = None,
+    working_session: AgentSession | TeamSession | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, shrinking the input per the retry policy when safe."""
     summary_input = initial_summary_input
@@ -938,6 +946,9 @@ async def _generate_compaction_summary_with_retry(
     budget = summary_input_budget
     retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
     attempt = 1
+    warm_instruction: str | None = None
+    if warm_prefix is not None and isinstance(working_session, AgentSession):
+        warm_instruction = _warm_summary_instruction(warm_prefix.instruction, previous_summary)
     while True:
         estimated_input_tokens = estimate_text_tokens(summary_input)
         started = asyncio.get_running_loop().time()
@@ -951,13 +962,24 @@ async def _generate_compaction_summary_with_retry(
             estimated_input_tokens=estimated_input_tokens,
             summary_input_budget=budget,
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+            warm_prefix=warm_instruction is not None,
         )
         try:
+            provider_request = None
+            if warm_prefix is not None and warm_instruction is not None and isinstance(working_session, AgentSession):
+                agent_runs = [run for run in included_runs if isinstance(run, RunOutput)]
+                provider_request = await build_warm_prefix_summary_request(
+                    agent=warm_prefix.agent,
+                    working_session=working_session,
+                    prefix_runs=agent_runs,
+                    final_instruction=warm_instruction,
+                )
             summary = await generate_compaction_summary(
                 model=model,
                 summary_input=summary_input,
                 summary_prompt=summary_prompt,
                 timing_scope=timing_scope,
+                provider_request=provider_request,
             )
         except Exception as exc:
             duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
@@ -1007,6 +1029,14 @@ async def _generate_compaction_summary_with_retry(
             duration_ms=duration_ms,
         )
         return _GeneratedSummaryChunk(summary=summary, included_runs=included_runs)
+
+
+def _warm_summary_instruction(instruction: str, previous_summary: str | None) -> str:
+    """Return the final warm-prefix user turn, embedding the previous summary when present."""
+    if previous_summary is None or not previous_summary.strip():
+        return instruction
+    escaped_summary = _escape_xml_content(previous_summary)
+    return f"{instruction}\n\n<previous_summary>\n{escaped_summary}\n</previous_summary>"
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.summary_input_build")
