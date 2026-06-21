@@ -376,18 +376,6 @@ class MCPServerManager:
                 worker_target=worker_target,
             )
             credentials = refresh_result.credentials
-        except OAuthRefreshRejectedError as exc:
-            failed_credentials = load_scoped_credentials(
-                provider.credential_service,
-                credentials_manager=manager,
-                worker_target=worker_target,
-            )
-            self._log_oauth_refresh_failure(state, provider.id, failed_credentials or {}, exc)
-            raise self._oauth_connection_required(
-                state,
-                worker_target,
-                reason=_OAUTH_REFRESH_REJECTED_REASON,
-            ) from exc
         except OAuthProviderError as exc:
             failed_credentials = load_scoped_credentials(
                 provider.credential_service,
@@ -395,7 +383,12 @@ class MCPServerManager:
                 worker_target=worker_target,
             )
             self._log_oauth_refresh_failure(state, provider.id, failed_credentials or {}, exc)
-            raise self._oauth_connection_required(state, worker_target) from exc
+            reason = _OAUTH_REFRESH_REJECTED_REASON if isinstance(exc, OAuthRefreshRejectedError) else None
+            raise self._oauth_connection_required(
+                state,
+                worker_target,
+                reason=reason,
+            ) from exc
         if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
             raise self._oauth_connection_required(state, worker_target)
         assert credentials is not None
