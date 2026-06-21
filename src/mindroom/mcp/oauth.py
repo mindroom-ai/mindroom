@@ -4,27 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import threading
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import ParseResult, urlparse, urlunparse
-from uuid import uuid4
 
 import httpx
 
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.file_locks import advisory_file_lock
 from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints
 from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
-    from pathlib import Path
+    from collections.abc import Awaitable, Callable, Iterable
 
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.config import MCPOAuthConfig, MCPServerConfig
@@ -35,10 +28,7 @@ _DISCOVERY_CACHE_TTL_SECONDS = 3600.0
 _JSON_CONTENT_TYPE = "application/json"
 _DYNAMIC_CLIENT_SOURCE = "oauth_dynamic_client_registration"
 _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD = "none"  # noqa: S105
-_REFRESH_SCOPE_DIR_NAME = "mcp_oauth_refresh_scopes"
-_REFRESH_SCOPE_FILE_NAME = "mcp_oauth_refresh_scopes.json"
 _TokenEndpointAuthMethod = Literal["none", "client_secret_post", "client_secret_basic"]
-_refresh_scope_lock = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,219 +49,8 @@ class _CachedDiscovery:
     expires_at: float
 
 
-@dataclass(frozen=True, slots=True)
-class _MCPOAuthRefreshScope:
-    """Non-secret persisted routing metadata for one proactive MCP OAuth refresh loop."""
-
-    server_id: str
-    provider_id: str
-    worker_scope: WorkerScope | None
-    requester_id: str | None
-    agent_name: str | None
-    tenant_id: str | None
-    account_id: str | None
-
-
 _DISCOVERY_CACHE: dict[tuple[object, ...], _CachedDiscovery] = {}
 _DYNAMIC_CLIENT_REGISTRATION_LOCKS: dict[str, asyncio.Lock] = {}
-
-
-def _refresh_scope_file(runtime_paths: RuntimePaths) -> Path:
-    return runtime_paths.storage_root / _REFRESH_SCOPE_DIR_NAME / _REFRESH_SCOPE_FILE_NAME
-
-
-def _refresh_scope_lock_file(runtime_paths: RuntimePaths) -> Path:
-    return runtime_paths.storage_root / _REFRESH_SCOPE_DIR_NAME / f"{_REFRESH_SCOPE_FILE_NAME}.lock"
-
-
-def _refresh_scope_payload(scope: _MCPOAuthRefreshScope) -> dict[str, str | None]:
-    return {
-        "server_id": scope.server_id,
-        "provider_id": scope.provider_id,
-        "worker_scope": scope.worker_scope,
-        "requester_id": scope.requester_id,
-        "agent_name": scope.agent_name,
-        "tenant_id": scope.tenant_id,
-        "account_id": scope.account_id,
-    }
-
-
-def _refresh_scope_key(scope: _MCPOAuthRefreshScope) -> str:
-    return json.dumps(_refresh_scope_payload(scope), sort_keys=True, separators=(",", ":"))
-
-
-def _optional_str(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
-
-
-def _refresh_scope_from_payload(payload: object) -> _MCPOAuthRefreshScope | None:
-    if not isinstance(payload, dict):
-        return None
-    raw = cast("Mapping[str, object]", payload)
-    server_id = _optional_str(raw.get("server_id"))
-    provider_id = _optional_str(raw.get("provider_id"))
-    if server_id is None or provider_id is None:
-        return None
-    worker_scope = raw.get("worker_scope")
-    if worker_scope is not None and worker_scope not in {"shared", "user", "user_agent"}:
-        return None
-    return _MCPOAuthRefreshScope(
-        server_id=server_id,
-        provider_id=provider_id,
-        worker_scope=cast("WorkerScope | None", worker_scope),
-        requester_id=_optional_str(raw.get("requester_id")),
-        agent_name=_optional_str(raw.get("agent_name")),
-        tenant_id=_optional_str(raw.get("tenant_id")),
-        account_id=_optional_str(raw.get("account_id")),
-    )
-
-
-def _load_refresh_scope_store(runtime_paths: RuntimePaths) -> dict[str, _MCPOAuthRefreshScope]:
-    path = _refresh_scope_file(runtime_paths)
-    if not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    raw_scopes = raw.get("scopes")
-    if not isinstance(raw_scopes, list):
-        return {}
-    scopes: dict[str, _MCPOAuthRefreshScope] = {}
-    for raw_scope in raw_scopes:
-        scope = _refresh_scope_from_payload(raw_scope)
-        if scope is not None:
-            scopes[_refresh_scope_key(scope)] = scope
-    return scopes
-
-
-def _save_refresh_scope_store(runtime_paths: RuntimePaths, scopes: Mapping[str, _MCPOAuthRefreshScope]) -> None:
-    path = _refresh_scope_file(runtime_paths)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "scopes": [
-            _refresh_scope_payload(scope)
-            for scope in sorted(scopes.values(), key=lambda current_scope: _refresh_scope_key(current_scope))
-        ],
-    }
-    tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{uuid4().hex}")
-    tmp_path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
-    tmp_path.replace(path)
-
-
-@contextmanager
-def _locked_refresh_scope_store(runtime_paths: RuntimePaths) -> Iterator[dict[str, _MCPOAuthRefreshScope]]:
-    with _refresh_scope_lock, advisory_file_lock(_refresh_scope_lock_file(runtime_paths)):
-        scopes = _load_refresh_scope_store(runtime_paths)
-        yield scopes
-        _save_refresh_scope_store(runtime_paths, scopes)
-
-
-def _refresh_scope_from_worker_target(
-    *,
-    server_id: str,
-    provider_id: str,
-    worker_target: ResolvedWorkerTarget | None,
-) -> _MCPOAuthRefreshScope | None:
-    if worker_target is None or worker_target.worker_scope is None:
-        return _MCPOAuthRefreshScope(
-            server_id=server_id,
-            provider_id=provider_id,
-            worker_scope=None,
-            requester_id=None,
-            agent_name=None,
-            tenant_id=None,
-            account_id=None,
-        )
-    identity = worker_target.execution_identity
-    requester_id = identity.requester_id if identity is not None else None
-    if worker_target.worker_scope in {"user", "user_agent"} and requester_id is None:
-        return None
-    return _MCPOAuthRefreshScope(
-        server_id=server_id,
-        provider_id=provider_id,
-        worker_scope=worker_target.worker_scope,
-        requester_id=requester_id,
-        agent_name=worker_target.routing_agent_name,
-        tenant_id=worker_target.tenant_id or (identity.tenant_id if identity is not None else None),
-        account_id=worker_target.account_id or (identity.account_id if identity is not None else None),
-    )
-
-
-def remember_mcp_oauth_refresh_scope(
-    runtime_paths: RuntimePaths,
-    *,
-    server_id: str,
-    provider_id: str,
-    worker_target: ResolvedWorkerTarget | None,
-) -> None:
-    """Persist non-secret scope metadata needed to restart proactive MCP OAuth refresh."""
-    scope = _refresh_scope_from_worker_target(
-        server_id=server_id,
-        provider_id=provider_id,
-        worker_target=worker_target,
-    )
-    if scope is None:
-        return
-    with _locked_refresh_scope_store(runtime_paths) as scopes:
-        scopes[_refresh_scope_key(scope)] = scope
-
-
-def forget_mcp_oauth_refresh_scope(
-    runtime_paths: RuntimePaths,
-    *,
-    server_id: str,
-    provider_id: str,
-    worker_target: ResolvedWorkerTarget | None,
-) -> None:
-    """Remove one remembered MCP OAuth refresh scope."""
-    scope = _refresh_scope_from_worker_target(
-        server_id=server_id,
-        provider_id=provider_id,
-        worker_target=worker_target,
-    )
-    if scope is None:
-        return
-    with _locked_refresh_scope_store(runtime_paths) as scopes:
-        scopes.pop(_refresh_scope_key(scope), None)
-
-
-def forget_mcp_oauth_refresh_scope_record(runtime_paths: RuntimePaths, scope: _MCPOAuthRefreshScope) -> None:
-    """Remove one remembered MCP OAuth refresh scope record."""
-    with _locked_refresh_scope_store(runtime_paths) as scopes:
-        scopes.pop(_refresh_scope_key(scope), None)
-
-
-def load_mcp_oauth_refresh_scopes(runtime_paths: RuntimePaths) -> tuple[_MCPOAuthRefreshScope, ...]:
-    """Return persisted MCP OAuth refresh scopes."""
-    return tuple(_load_refresh_scope_store(runtime_paths).values())
-
-
-def worker_target_for_mcp_oauth_refresh_scope(scope: _MCPOAuthRefreshScope) -> ResolvedWorkerTarget | None:
-    """Reconstruct a worker target from persisted non-secret MCP OAuth refresh metadata."""
-    if scope.worker_scope is None:
-        return None
-    if scope.worker_scope in {"user", "user_agent"} and scope.requester_id is None:
-        return None
-    agent_name = scope.agent_name or "_oauth"
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name=agent_name,
-        requester_id=scope.requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-        tenant_id=scope.tenant_id,
-        account_id=scope.account_id,
-    )
-    return resolve_worker_target(
-        scope.worker_scope,
-        scope.agent_name,
-        execution_identity=identity,
-    )
 
 
 def mcp_oauth_provider_id(server_id: str, auth_config: MCPOAuthConfig | None) -> str:
@@ -314,7 +93,6 @@ async def disconnect_mcp_oauth_request_session(
     provider_id: str,
     *,
     worker_target: ResolvedWorkerTarget | None,
-    runtime_paths: RuntimePaths | None = None,
 ) -> None:
     """Close the active requester-scoped MCP OAuth session for one generated provider."""
     server_id = _mcp_oauth_server_id_for_provider_id(mcp_servers, provider_id)
@@ -322,40 +100,8 @@ async def disconnect_mcp_oauth_request_session(
         return
 
     manager = require_mcp_server_manager()
-    resolved_runtime_paths = runtime_paths or (manager.runtime_paths if manager is not None else None)
-    if resolved_runtime_paths is not None:
-        forget_mcp_oauth_refresh_scope(
-            resolved_runtime_paths,
-            server_id=server_id,
-            provider_id=provider_id,
-            worker_target=worker_target,
-        )
     if manager is not None:
         await manager.disconnect_request_session(server_id, worker_target=worker_target)
-
-
-async def start_mcp_oauth_request_refresh_loop(
-    mcp_servers: dict[str, MCPServerConfig],
-    provider_id: str,
-    *,
-    worker_target: ResolvedWorkerTarget | None,
-    runtime_paths: RuntimePaths | None = None,
-) -> None:
-    """Start proactive OAuth-token refresh for one connected MCP OAuth scope."""
-    server_id = _mcp_oauth_server_id_for_provider_id(mcp_servers, provider_id)
-    if server_id is None:
-        return
-
-    if runtime_paths is not None:
-        remember_mcp_oauth_refresh_scope(
-            runtime_paths,
-            server_id=server_id,
-            provider_id=provider_id,
-            worker_target=worker_target,
-        )
-    manager = require_mcp_server_manager()
-    if manager is not None:
-        await manager.start_request_oauth_refresh_loop(server_id, worker_target=worker_target)
 
 
 def _display_name(server_id: str, auth_config: MCPOAuthConfig) -> str:

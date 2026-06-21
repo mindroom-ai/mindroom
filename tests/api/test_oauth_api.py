@@ -24,7 +24,6 @@ from mindroom.api import auth, main
 from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.mcp.oauth import load_mcp_oauth_refresh_scopes
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
@@ -959,6 +958,8 @@ def test_provider_refresh_token_data_surfaces_oauth_error_body_without_tokens(
 
     message = str(exc_info.value)
     assert message == "OAuth token refresh failed: invalid_grant: refresh grant rejected"
+    assert exc_info.value.oauth_error == "invalid_grant"
+    assert exc_info.value.oauth_error_description == "refresh grant rejected"
     assert "stored-access-token-secret" not in message
     assert "stored-refresh-token-secret" not in message
     assert "provider-leaked-access-token" not in message
@@ -1779,51 +1780,6 @@ def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
     assert manager.for_worker(_worker_key_for_standalone_user()).load_credentials(provider.credential_service) is None
 
 
-def test_callback_ignores_mcp_refresh_loop_start_failure_after_saving_credentials(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        {
-            "TEST_OAUTH_CLIENT_ID": "client-id",
-            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
-            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
-        },
-    )
-    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider(
-        provider_id="google_drive",
-        credential_service="google_drive_oauth",
-        tool_config_service="google_drive",
-    )
-    manager = get_runtime_credentials_manager(runtime_paths)
-
-    with (
-        patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}),
-        patch("mindroom.api.oauth.start_mcp_oauth_request_refresh_loop", side_effect=RuntimeError("scheduler down")),
-        patch("mindroom.api.oauth.logger") as mock_logger,
-    ):
-        with TestClient(api_app) as client:
-            _login(client)
-            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
-            state = _state_from_auth_url(connect_response.json()["auth_url"])
-            callback_response = client.get(
-                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
-                follow_redirects=False,
-            )
-
-    assert callback_response.status_code == 307
-    assert urlparse(callback_response.headers["location"]).path == f"/api/oauth/{provider.id}/success"
-    scoped_credentials = manager.for_primary_runtime_scope("@alice:example.org", "general").load_credentials(
-        provider.credential_service,
-    )
-    assert scoped_credentials is not None
-    assert scoped_credentials["token"] == "google_drive-access-token"
-    mock_logger.warning.assert_called_once_with(
-        "oauth_callback_mcp_refresh_loop_start_failed",
-        provider_id=provider.id,
-        error_type="RuntimeError",
-    )
-
-
 def test_callback_uses_stored_oauth_client_config(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -1915,10 +1871,8 @@ def test_generated_mcp_oauth_routes_store_status_and_disconnect_scoped_credentia
             f"/api/oauth/mcp_demo/callback?code=test-code&state={state}",
             follow_redirects=False,
         )
-        indexed_scopes_after_callback = load_mcp_oauth_refresh_scopes(runtime_paths)
         status_response = client.get("/api/oauth/mcp_demo/status?agent_name=general")
         disconnect_response = client.post("/api/oauth/mcp_demo/disconnect?agent_name=general")
-        indexed_scopes_after_disconnect = load_mcp_oauth_refresh_scopes(runtime_paths)
         disconnected_status_response = client.get("/api/oauth/mcp_demo/status?agent_name=general")
 
     assert connect_response.status_code == 200
@@ -1934,19 +1888,7 @@ def test_generated_mcp_oauth_routes_store_status_and_disconnect_scoped_credentia
     assert fetch_kwargs["code_verifier"]
     assert status_response.status_code == 200
     assert status_response.json()["connected"] is True
-    assert len(indexed_scopes_after_callback) == 1
-    assert indexed_scopes_after_callback[0].server_id == "demo"
-    assert indexed_scopes_after_callback[0].provider_id == "mcp_demo"
-    assert indexed_scopes_after_callback[0].worker_scope == "user_agent"
-    assert indexed_scopes_after_callback[0].requester_id == "@alice:example.org"
-    assert indexed_scopes_after_callback[0].agent_name == "general"
-    index_payload = (
-        runtime_paths.storage_root / "mcp_oauth_refresh_scopes" / "mcp_oauth_refresh_scopes.json"
-    ).read_text(encoding="utf-8")
-    assert "mcp-access-token" not in index_payload
-    assert "mcp-refresh-token" not in index_payload
     assert disconnect_response.status_code == 200
-    assert indexed_scopes_after_disconnect == ()
     assert disconnected_status_response.status_code == 200
     assert disconnected_status_response.json()["connected"] is False
     scoped_credentials = manager.for_primary_runtime_scope("@alice:example.org", "general").load_credentials(

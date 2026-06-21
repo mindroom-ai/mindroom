@@ -46,6 +46,17 @@ _SUPPORTED_PKCE_CODE_CHALLENGE_METHODS = frozenset({None, "S256"})
 class OAuthProviderError(RuntimeError):
     """Base error for provider configuration and OAuth flow failures."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        oauth_error: str | None = None,
+        oauth_error_description: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.oauth_error = oauth_error
+        self.oauth_error_description = oauth_error_description
+
 
 class OAuthRefreshRejectedError(OAuthProviderError):
     """Raised when a provider rejects a refresh-token grant."""
@@ -290,40 +301,54 @@ def _token_data_needs_refresh(
     return float(expires_at) <= (now if now is not None else time.time()) + _DEFAULT_REFRESH_SKEW_SECONDS
 
 
-def _oauth_error_fields(error: object, description: object) -> tuple[str | None, str | None]:
+def _oauth_error_fields(error: object, description: object) -> tuple[str | None, str | None, str | None]:
     """Return safe OAuth error code and detail from standard non-secret response fields."""
     error_code = error.strip() if isinstance(error, str) and error.strip() else None
+    error_description = description.strip() if isinstance(description, str) and description.strip() else None
     parts = [value.strip() for value in (error, description) if isinstance(value, str) and value.strip()]
-    return error_code, ": ".join(parts) if parts else None
+    return error_code, error_description, ": ".join(parts) if parts else None
 
 
-def _http_status_oauth_error_fields(exc: HTTPStatusError) -> tuple[str | None, str | None]:
+def _http_status_oauth_error_fields(exc: HTTPStatusError) -> tuple[str | None, str | None, str | None]:
     """Return OAuth error detail from an HTTP error response body, if present."""
     try:
         payload = exc.response.json()
     except (ValueError, UnicodeDecodeError):
-        return None, None
+        return None, None, None
     if not isinstance(payload, Mapping):
-        return None, None
+        return None, None, None
     return _oauth_error_fields(payload.get("error"), payload.get("error_description"))
 
 
 def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError) -> OAuthProviderError:
     """Build a safe refresh failure with provider OAuth reason fields when available."""
     error_code: str | None = None
+    error_description: str | None = None
     detail: str | None = None
     if isinstance(exc, AuthlibBaseError):
-        error_code, detail = _oauth_error_fields(exc.error, exc.description)
+        error_code, error_description, detail = _oauth_error_fields(exc.error, exc.description)
     elif isinstance(exc, HTTPStatusError):
-        error_code, detail = _http_status_oauth_error_fields(exc)
+        error_code, error_description, detail = _http_status_oauth_error_fields(exc)
 
     msg = "OAuth token refresh failed"
     if detail is not None:
         if error_code == "invalid_grant":
-            return OAuthRefreshRejectedError(f"{msg}: {detail}")
-        return OAuthProviderError(f"{msg}: {detail}")
+            return OAuthRefreshRejectedError(
+                f"{msg}: {detail}",
+                oauth_error=error_code,
+                oauth_error_description=error_description,
+            )
+        return OAuthProviderError(
+            f"{msg}: {detail}",
+            oauth_error=error_code,
+            oauth_error_description=error_description,
+        )
     if error_code == "invalid_grant":
-        return OAuthRefreshRejectedError(f"{msg}: {error_code}")
+        return OAuthRefreshRejectedError(
+            f"{msg}: {error_code}",
+            oauth_error=error_code,
+            oauth_error_description=error_description,
+        )
     return OAuthProviderError(msg)
 
 
@@ -634,11 +659,9 @@ class OAuthProvider:
         self,
         token_data: Mapping[str, Any],
         runtime_paths: RuntimePaths,
-        *,
-        force: bool = False,
     ) -> dict[str, Any] | None:
         """Refresh expiring token data and return updated credentials, or None."""
-        if not force and not _token_data_needs_refresh(token_data):
+        if not _token_data_needs_refresh(token_data):
             return None
         refresh_token = cast("str", token_data["refresh_token"])
 

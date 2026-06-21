@@ -18,7 +18,7 @@ from mindroom.api.credentials_target import resolve_request_credentials_target, 
 from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
 from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
 from mindroom.logging_config import get_logger
-from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session, start_mcp_oauth_request_refresh_loop
+from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider, OAuthProviderError
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import (
@@ -389,22 +389,6 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
             credentials_manager=credentials_manager,
             worker_target=worker_target,
         )
-        snapshot = config_lifecycle.bind_current_request_snapshot(request)
-        config = snapshot.runtime_config
-        if config is not None:
-            try:
-                await start_mcp_oauth_request_refresh_loop(
-                    config.mcp_servers,
-                    provider.id,
-                    worker_target=worker_target,
-                    runtime_paths=runtime_paths,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "oauth_callback_mcp_refresh_loop_start_failed",
-                    provider_id=provider.id,
-                    error_type=type(exc).__name__,
-                )
     except OAuthClaimValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OAuthProviderError as exc:
@@ -494,7 +478,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
 async def disconnect(provider_id: str, request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Remove scoped OAuth credentials for one provider while preserving tool settings."""
     await _require_oauth_api_user(request)
-    provider, runtime_paths = _load_provider(request, provider_id)
+    provider, _runtime_paths = _load_provider(request, provider_id)
     target = resolve_request_credentials_target(
         request,
         agent_name=agent_name,
@@ -514,6 +498,5 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
             config.mcp_servers,
             provider.id,
             worker_target=worker_target,
-            runtime_paths=runtime_paths,
         )
     return {"status": "disconnected", "provider": provider.id}

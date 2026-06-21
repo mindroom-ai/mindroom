@@ -21,9 +21,7 @@ from mindroom.mcp.oauth import (
     _resolve_mcp_oauth_metadata,
     mcp_oauth_provider,
     mcp_oauth_provider_id,
-    start_mcp_oauth_request_refresh_loop,
 )
-from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -545,42 +543,3 @@ def test_mcp_oauth_credentials_are_primary_runtime_scoped_for_user_agents(tmp_pa
 
     assert manager.load_credentials("mcp_demo_oauth") is None
     assert manager.for_worker(worker_target.worker_key).load_credentials("mcp_demo_oauth") is None
-
-
-@pytest.mark.asyncio
-async def test_start_mcp_oauth_request_refresh_loop_delegates_to_active_manager() -> None:
-    """The OAuth callback hook should start the request-scope MCP token loop when possible."""
-    calls: list[tuple[str, object | None]] = []
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="code",
-        requester_id="@alice:example.test",
-        room_id="!room:example.test",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id=None,
-        tenant_id="tenant",
-        account_id=None,
-    )
-    worker_target = resolve_worker_target("user_agent", "code", identity)
-
-    class FakeManager:
-        async def start_request_oauth_refresh_loop(self, server_id: str, **kwargs: object) -> None:
-            calls.append((server_id, kwargs.get("worker_target")))
-
-    bind_mcp_server_manager(FakeManager())  # type: ignore[arg-type]
-    try:
-        await start_mcp_oauth_request_refresh_loop(
-            {"demo": _oauth_mcp_server_config()},
-            "mcp_demo",
-            worker_target=worker_target,
-        )
-        await start_mcp_oauth_request_refresh_loop(
-            {"demo": _oauth_mcp_server_config()},
-            "mcp_other",
-            worker_target=worker_target,
-        )
-    finally:
-        bind_mcp_server_manager(None)
-
-    assert calls == [("demo", worker_target)]

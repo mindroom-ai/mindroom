@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import math
-import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import timedelta
@@ -26,14 +24,7 @@ from mindroom.mcp.config import (
     validate_mcp_function_name,
 )
 from mindroom.mcp.errors import MCPConnectionError, MCPError, MCPProtocolError, MCPTimeoutError, MCPToolCallError
-from mindroom.mcp.oauth import (
-    forget_mcp_oauth_refresh_scope,
-    forget_mcp_oauth_refresh_scope_record,
-    load_mcp_oauth_refresh_scopes,
-    mcp_oauth_provider,
-    remember_mcp_oauth_refresh_scope,
-    worker_target_for_mcp_oauth_refresh_scope,
-)
+from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
 from mindroom.mcp.results import tool_result_from_call_result
 from mindroom.mcp.transports import build_transport_handle
@@ -66,8 +57,6 @@ logger = get_logger(__name__)
 # unblocks its dependent agents no slower than the bot-start retry loop did.
 _DISCOVERY_RETRY_INITIAL_DELAY_SECONDS = 5.0
 _DISCOVERY_RETRY_MAX_DELAY_SECONDS = 60.0
-_OAUTH_PROACTIVE_REFRESH_SKEW_SECONDS = 60.0
-_OAUTH_REFRESH_REJECTION_TTL_SECONDS = 300.0
 _OAUTH_REFRESH_REJECTED_REASON = "oauth_refresh_rejected"
 
 
@@ -81,11 +70,6 @@ def _discovery_retry_delay_seconds(consecutive_failures: int) -> float:
     )
 
 
-async def _oauth_refresh_sleep(delay_seconds: float) -> None:
-    """Sleep before a scheduled OAuth token refresh."""
-    await asyncio.sleep(delay_seconds)
-
-
 @dataclass(frozen=True)
 class _MCPSessionKey:
     """Requester-scoped MCP session cache key."""
@@ -93,9 +77,6 @@ class _MCPSessionKey:
     server_id: str
     worker_scope: str
     worker_key: str
-
-
-type _OAuthRefreshFailureKey = tuple[str, str, str, str, str, str, float | None]
 
 
 class MCPServerManager:
@@ -110,7 +91,6 @@ class MCPServerManager:
         self.runtime_paths = runtime_paths
         self._states: dict[str, MCPServerState] = {}
         self._scoped_states: dict[_MCPSessionKey, MCPServerState] = {}
-        self._oauth_refresh_rejections: dict[_OAuthRefreshFailureKey, float] = {}
         self._catalog_validation_lock = asyncio.Lock()
         self._on_catalog_change = on_catalog_change
         self._config: Config | None = None
@@ -172,7 +152,6 @@ class MCPServerManager:
 
             if server_config.auth is not None:
                 state.stale = False
-                await self._start_remembered_oauth_refresh_loops(state)
                 continue
 
             retry_pending = state.refresh_task is not None and not state.refresh_task.done()
@@ -307,49 +286,6 @@ class MCPServerManager:
         await self._cancel_refresh_task(state)
         await self._disconnect_state_when_idle(state)
 
-    async def start_request_oauth_refresh_loop(
-        self,
-        server_id: str,
-        *,
-        credentials_manager: CredentialsManager | None = None,
-        worker_target: ResolvedWorkerTarget | None,
-        replace_existing: bool = True,
-    ) -> bool:
-        """Start proactive token refresh for an already-connected OAuth MCP scope."""
-        base_state = self._states.get(server_id)
-        if base_state is None or base_state.config.auth is None:
-            return False
-        provider = mcp_oauth_provider(base_state.server_id, base_state.config)
-        manager = credentials_manager or get_runtime_credentials_manager(self.runtime_paths)
-        credentials = load_scoped_credentials(
-            provider.credential_service,
-            credentials_manager=manager,
-            worker_target=worker_target,
-        )
-        if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
-            return False
-        assert credentials is not None
-        if self._oauth_refresh_delay_seconds(credentials) is None:
-            return False
-
-        key = self._request_session_key(base_state, worker_target)
-        state = self._scoped_states.get(key)
-        if state is None:
-            state = MCPServerState(server_id=server_id, config=base_state.config)
-            self._scoped_states[key] = state
-        elif replace_existing:
-            await self._cancel_refresh_task(state)
-        elif state.refresh_task is not None and not state.refresh_task.done():
-            return True
-        self._forget_oauth_refresh_rejections_for_scope(base_state, provider.id, worker_target)
-        self._schedule_oauth_refresh_task(
-            base_state,
-            state,
-            credentials_manager=manager,
-            worker_target=worker_target,
-        )
-        return True
-
     def _oauth_connection_required(
         self,
         state: MCPServerState,
@@ -385,77 +321,6 @@ class MCPServerManager:
             worker_key=worker_key or "global",
         )
 
-    def _oauth_refresh_failure_key(
-        self,
-        state: MCPServerState,
-        provider_id: str,
-        credentials: Mapping[str, object],
-        worker_target: ResolvedWorkerTarget | None,
-    ) -> _OAuthRefreshFailureKey | None:
-        refresh_token = credentials.get("refresh_token")
-        if not isinstance(refresh_token, str) or not refresh_token:
-            return None
-        access_token = credentials.get("token") or credentials.get("access_token")
-        access_token_hash = (
-            hashlib.sha256(access_token.encode("utf-8")).hexdigest()
-            if isinstance(access_token, str) and access_token
-            else ""
-        )
-        worker_scope = worker_target.worker_scope if worker_target is not None else None
-        worker_key = worker_target.worker_key if worker_target is not None else None
-        expires_at = self._oauth_refreshed_expires_at(credentials)
-        return (
-            state.server_id,
-            provider_id,
-            worker_scope or "unscoped",
-            worker_key or "global",
-            hashlib.sha256(refresh_token.encode("utf-8")).hexdigest(),
-            access_token_hash,
-            expires_at,
-        )
-
-    def _oauth_refresh_rejection_active(self, key: _OAuthRefreshFailureKey) -> bool:
-        expires_at = self._oauth_refresh_rejections.get(key)
-        if expires_at is None:
-            return False
-        if expires_at <= time.monotonic():
-            self._oauth_refresh_rejections.pop(key, None)
-            return False
-        return True
-
-    def _prune_oauth_refresh_rejections(self, *, now: float | None = None) -> None:
-        current = time.monotonic() if now is None else now
-        expired_keys = [key for key, expires_at in self._oauth_refresh_rejections.items() if expires_at <= current]
-        for expired_key in expired_keys:
-            self._oauth_refresh_rejections.pop(expired_key, None)
-
-    def _remember_oauth_refresh_rejection(self, key: _OAuthRefreshFailureKey) -> None:
-        now = time.monotonic()
-        self._prune_oauth_refresh_rejections(now=now)
-        self._oauth_refresh_rejections[key] = now + _OAUTH_REFRESH_REJECTION_TTL_SECONDS
-
-    def _forget_oauth_refresh_rejection(self, key: _OAuthRefreshFailureKey | None) -> None:
-        if key is not None:
-            self._oauth_refresh_rejections.pop(key, None)
-
-    def _forget_oauth_refresh_rejections_for_scope(
-        self,
-        state: MCPServerState,
-        provider_id: str,
-        worker_target: ResolvedWorkerTarget | None,
-    ) -> None:
-        worker_scope = worker_target.worker_scope if worker_target is not None else None
-        worker_key = worker_target.worker_key if worker_target is not None else None
-        prefix = (
-            state.server_id,
-            provider_id,
-            worker_scope or "unscoped",
-            worker_key or "global",
-        )
-        for key in list(self._oauth_refresh_rejections):
-            if key[:4] == prefix:
-                self._oauth_refresh_rejections.pop(key, None)
-
     def _log_oauth_refresh_failure(
         self,
         state: MCPServerState,
@@ -480,6 +345,8 @@ class MCPServerManager:
             expires_at=expires_at,
             error_type=type(exc).__name__,
             error=str(exc),
+            oauth_error=exc.oauth_error,
+            error_description=exc.oauth_error_description,
             cause_type=type(cause).__name__ if safe_cause else None,
             cause=str(cause) if safe_cause else None,
         )
@@ -487,31 +354,9 @@ class MCPServerManager:
     @staticmethod
     def _oauth_refreshed_expires_at(credentials: Mapping[str, object]) -> float | None:
         expires_at = credentials.get("expires_at")
-        if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
+        if isinstance(expires_at, bool) or not isinstance(expires_at, int | float):
             return None
         return float(expires_at)
-
-    @staticmethod
-    def _oauth_refresh_delay_seconds(credentials: Mapping[str, object], *, now: float | None = None) -> float | None:
-        refresh_token = credentials.get("refresh_token")
-        if not isinstance(refresh_token, str) or not refresh_token:
-            return None
-        expires_at = MCPServerManager._oauth_refreshed_expires_at(credentials)
-        if expires_at is None:
-            return None
-
-        # Refresh halfway through the remaining lifetime, but never later than
-        # the existing 60-second OAuth expiry skew before expires_at.
-        remaining_seconds = expires_at - (now if now is not None else time.time())
-        if remaining_seconds <= 0:
-            return 0.0
-        return max(
-            0.0,
-            min(
-                remaining_seconds / 2,
-                remaining_seconds - _OAUTH_PROACTIVE_REFRESH_SKEW_SECONDS,
-            ),
-        )
 
     async def _oauth_access_token(
         self,
@@ -519,7 +364,6 @@ class MCPServerManager:
         *,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
-        force_refresh: bool = False,
     ) -> str:
         provider = mcp_oauth_provider(state.server_id, state.config)
         manager = credentials_manager or get_runtime_credentials_manager(self.runtime_paths)
@@ -531,29 +375,10 @@ class MCPServerManager:
         if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
             raise self._oauth_connection_required(state, worker_target)
         assert credentials is not None
-        refresh_failure_key = self._oauth_refresh_failure_key(state, provider.id, credentials, worker_target)
-        if refresh_failure_key is not None and self._oauth_refresh_rejection_active(refresh_failure_key):
-            raise self._oauth_connection_required(
-                state,
-                worker_target,
-                reason=_OAUTH_REFRESH_REJECTED_REASON,
-            )
         try:
-            refreshed_credentials = await provider.refresh_token_data(
-                credentials,
-                self.runtime_paths,
-                force=force_refresh,
-            )
+            refreshed_credentials = await provider.refresh_token_data(credentials, self.runtime_paths)
         except OAuthRefreshRejectedError as exc:
             self._log_oauth_refresh_failure(state, provider.id, credentials, exc)
-            if refresh_failure_key is not None:
-                self._remember_oauth_refresh_rejection(refresh_failure_key)
-                forget_mcp_oauth_refresh_scope(
-                    self.runtime_paths,
-                    server_id=state.server_id,
-                    provider_id=provider.id,
-                    worker_target=worker_target,
-                )
             raise self._oauth_connection_required(
                 state,
                 worker_target,
@@ -569,7 +394,6 @@ class MCPServerManager:
                 credentials_manager=manager,
                 worker_target=worker_target,
             )
-            self._forget_oauth_refresh_rejection(refresh_failure_key)
             logger.info(
                 "MCP OAuth token refreshed",
                 provider_id=provider.id,
@@ -601,11 +425,10 @@ class MCPServerManager:
             state = MCPServerState(server_id=server_id, config=base_state.config)
             self._scoped_states[key] = state
 
-        manager = credentials_manager or get_runtime_credentials_manager(self.runtime_paths)
         async with state.lock:
             access_token = await self._oauth_access_token(
                 base_state,
-                credentials_manager=manager,
+                credentials_manager=credentials_manager,
                 worker_target=worker_target,
             )
             token_hash = hashlib.sha256(access_token.encode("utf-8")).hexdigest()
@@ -616,12 +439,6 @@ class MCPServerManager:
                     state.last_error = None
                     state.stale = True
                     state.oauth_access_token_hash = token_hash
-        self._schedule_oauth_refresh_task(
-            base_state,
-            state,
-            credentials_manager=manager,
-            worker_target=worker_target,
-        )
         return state, {"Authorization": f"Bearer {access_token}"}
 
     async def _call_tool_once_or_reconnect(
@@ -913,167 +730,6 @@ class MCPServerManager:
                 self._schedule_refresh_task(state)
 
         return cast("MessageHandlerFnT", handle_message)
-
-    def _schedule_oauth_refresh_task(
-        self,
-        base_state: MCPServerState,
-        state: MCPServerState,
-        *,
-        credentials_manager: CredentialsManager,
-        worker_target: ResolvedWorkerTarget | None,
-    ) -> None:
-        if self._shutdown or base_state.config.auth is None:
-            return
-        provider = mcp_oauth_provider(base_state.server_id, base_state.config)
-        delay_seconds = self._oauth_refresh_task_delay(
-            base_state,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-        if delay_seconds is None:
-            return
-
-        existing_task = state.refresh_task
-        if existing_task is not None and not existing_task.done() and existing_task is not asyncio.current_task():
-            return
-
-        remember_mcp_oauth_refresh_scope(
-            self.runtime_paths,
-            server_id=base_state.server_id,
-            provider_id=provider.id,
-            worker_target=worker_target,
-        )
-        state.refresh_task = asyncio.create_task(
-            self._run_oauth_refresh_task(
-                base_state,
-                state,
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-                delay_seconds=delay_seconds,
-            ),
-            name=f"mcp_oauth_refresh:{base_state.server_id}",
-        )
-
-    def _oauth_refresh_task_delay(
-        self,
-        base_state: MCPServerState,
-        *,
-        credentials_manager: CredentialsManager,
-        worker_target: ResolvedWorkerTarget | None,
-    ) -> float | None:
-        provider = mcp_oauth_provider(base_state.server_id, base_state.config)
-        credentials = load_scoped_credentials(
-            provider.credential_service,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-        if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
-            return None
-        assert credentials is not None
-        return self._oauth_refresh_delay_seconds(credentials)
-
-    async def _run_oauth_refresh_task(
-        self,
-        base_state: MCPServerState,
-        state: MCPServerState,
-        *,
-        credentials_manager: CredentialsManager,
-        worker_target: ResolvedWorkerTarget | None,
-        delay_seconds: float,
-    ) -> None:
-        current_task = asyncio.current_task()
-        should_reschedule = False
-        try:
-            should_reschedule = await self._refresh_oauth_token_after_delay(
-                base_state,
-                state,
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-                delay_seconds=delay_seconds,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            should_reschedule = self._handle_oauth_refresh_task_error(base_state, worker_target, exc)
-        finally:
-            if state.refresh_task is current_task:
-                state.refresh_task = None
-                if should_reschedule:
-                    self._schedule_oauth_refresh_task(
-                        base_state,
-                        state,
-                        credentials_manager=credentials_manager,
-                        worker_target=worker_target,
-                    )
-
-    async def _refresh_oauth_token_after_delay(
-        self,
-        base_state: MCPServerState,
-        state: MCPServerState,
-        *,
-        credentials_manager: CredentialsManager,
-        worker_target: ResolvedWorkerTarget | None,
-        delay_seconds: float,
-    ) -> bool:
-        if delay_seconds > 0:
-            await _oauth_refresh_sleep(delay_seconds)
-        async with state.lock:
-            await self._oauth_access_token(
-                base_state,
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-                force_refresh=True,
-            )
-        return True
-
-    def _handle_oauth_refresh_task_error(
-        self,
-        base_state: MCPServerState,
-        worker_target: ResolvedWorkerTarget | None,
-        exc: Exception,
-    ) -> bool:
-        provider = mcp_oauth_provider(base_state.server_id, base_state.config)
-        if isinstance(exc, OAuthConnectionRequired):
-            if exc.reason == _OAUTH_REFRESH_REJECTED_REASON:
-                forget_mcp_oauth_refresh_scope(
-                    self.runtime_paths,
-                    server_id=base_state.server_id,
-                    provider_id=provider.id,
-                    worker_target=worker_target,
-                )
-                return False
-            if exc.reason != _OAUTH_REFRESH_REJECTED_REASON:
-                logger.warning(
-                    "MCP OAuth background token refresh requires reconnect",
-                    provider_id=provider.id,
-                    server_id=base_state.server_id,
-                    reason=exc.reason,
-                )
-            return False
-        logger.warning(
-            "MCP OAuth background token refresh failed",
-            provider_id=provider.id,
-            server_id=base_state.server_id,
-            error_type=type(exc).__name__,
-        )
-        return False
-
-    async def _start_remembered_oauth_refresh_loops(self, state: MCPServerState) -> None:
-        provider = mcp_oauth_provider(state.server_id, state.config)
-        for scope in load_mcp_oauth_refresh_scopes(self.runtime_paths):
-            if scope.server_id != state.server_id or scope.provider_id != provider.id:
-                continue
-            worker_target = worker_target_for_mcp_oauth_refresh_scope(scope)
-            if scope.worker_scope is not None and worker_target is None:
-                forget_mcp_oauth_refresh_scope_record(self.runtime_paths, scope)
-                continue
-            started = await self.start_request_oauth_refresh_loop(
-                state.server_id,
-                worker_target=worker_target,
-                replace_existing=False,
-            )
-            if not started:
-                forget_mcp_oauth_refresh_scope_record(self.runtime_paths, scope)
 
     def _entities_referencing_server(self, server_id: str) -> set[str]:
         """Return configured entities whose tools reference one MCP server."""
