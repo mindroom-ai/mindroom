@@ -5,14 +5,17 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agno.models.response import ToolExecution
 
+from mindroom.mcp.results import MCPAppToolResult
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from mindroom.mcp.types import MCPAppResource
 
 _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
 _TOOL_TRACE_VERSION = 2
@@ -41,6 +44,9 @@ class ToolTraceEntry:
     args_preview: str | None = None
     result_preview: str | None = None
     truncated: bool = False
+    mcp_app_resources: list[MCPAppResource] = field(default_factory=list)
+    mcp_app_tool_input: dict[str, Any] | None = None
+    mcp_app_tool_result: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -57,6 +63,7 @@ class _PendingStreamingTool:
     tool_name: str
     trace_entry: ToolTraceEntry
     tool_call_id: str | None = None
+    mcp_app_tool_input: dict[str, Any] | None = None
     visible_tool_index: int | None = None
     visible_text: str = ""
 
@@ -78,12 +85,14 @@ class StreamingToolTracker:
         """Record one started tool call and return its visible marker."""
         visible_text, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
         if trace_entry is not None:
+            tool_args = _tool_args_from_execution(tool)
             self.pending_tools.append(
                 _PendingStreamingTool(
                     scope_key=scope_key,
                     tool_name=trace_entry.tool_name,
                     trace_entry=trace_entry,
                     tool_call_id=_streaming_tool_call_id(tool),
+                    mcp_app_tool_input=_mcp_app_tool_input_from_tool_args(tool_args),
                     visible_tool_index=tool_index,
                     visible_text=visible_text,
                 ),
@@ -105,6 +114,13 @@ class StreamingToolTracker:
         pending_pos = self._find_pending_tool_index(scope_key=scope_key, tool=tool)
         pending_tool = self.pending_tools.pop(pending_pos) if pending_pos is not None else None
         _, completed_trace = format_tool_completed_event(tool)
+        if (
+            completed_trace is not None
+            and completed_trace.mcp_app_resources
+            and pending_tool is not None
+            and not _mcp_app_tool_input_has_arguments(completed_trace.mcp_app_tool_input)
+        ):
+            completed_trace.mcp_app_tool_input = pending_tool.mcp_app_tool_input
         if completed_trace is not None:
             self.completed_tools.append(completed_trace)
         return tool_name, result, pending_tool, completed_trace
@@ -124,6 +140,9 @@ class StreamingToolTracker:
         existing_entry.type = "tool_call_completed"
         existing_entry.result_preview = completed_trace.result_preview
         existing_entry.truncated = existing_entry.truncated or completed_trace.truncated
+        existing_entry.mcp_app_resources = list(completed_trace.mcp_app_resources)
+        existing_entry.mcp_app_tool_input = completed_trace.mcp_app_tool_input
+        existing_entry.mcp_app_tool_result = completed_trace.mcp_app_tool_result
         return True
 
     def _find_pending_tool_index(
@@ -157,6 +176,12 @@ def _streaming_tool_call_id(tool: ToolExecution | None) -> str | None:
     if isinstance(tool, ToolExecution) and isinstance(tool.tool_call_id, str):
         return tool.tool_call_id.strip() or None
     return None
+
+
+def _tool_args_from_execution(tool: ToolExecution | None) -> dict[str, object]:
+    if not isinstance(tool, ToolExecution) or not isinstance(tool.tool_args, dict):
+        return {}
+    return {str(k): v for k, v in tool.tool_args.items()}
 
 
 def _to_compact_text(value: object) -> str:
@@ -400,6 +425,41 @@ def _format_tool_result_preview(result: object) -> tuple[str, bool]:
     return _truncate(result_text, _MAX_TOOL_RESULT_DISPLAY_CHARS)
 
 
+def _mcp_app_resources_from_result(result: object) -> list[MCPAppResource]:
+    if not isinstance(result, MCPAppToolResult):
+        return []
+    return list(result.mcp_app_resources)
+
+
+def _mcp_app_tool_result_from_result(result: object) -> dict[str, Any] | None:
+    if not isinstance(result, MCPAppToolResult):
+        return None
+    return dict(result.mcp_app_tool_result)
+
+
+def _mcp_app_tool_input_from_tool_args(tool_args: dict[str, object]) -> dict[str, Any]:
+    return {"arguments": redact_sensitive_data(tool_args)}
+
+
+def _mcp_app_tool_input_has_arguments(payload: dict[str, Any] | None) -> bool:
+    if payload is None:
+        return False
+    arguments = payload.get("arguments")
+    return isinstance(arguments, dict) and bool(arguments)
+
+
+def _mcp_app_tool_input_from_args(result: object, tool_args: dict[str, object]) -> dict[str, Any] | None:
+    if not isinstance(result, MCPAppToolResult):
+        return None
+    return _mcp_app_tool_input_from_tool_args(tool_args)
+
+
+def _tool_result_preview_value(result: object) -> object:
+    if not isinstance(result, MCPAppToolResult):
+        return result
+    return result.content
+
+
 def _neutralize_mentions(text: str) -> str:
     # Avoid accidental mentions being parsed out of tool arguments/results.
     return text.replace("@", "@\u200b")
@@ -500,7 +560,7 @@ def format_tool_combined(
 
     result_display = ""
     if result is not None and result != "":
-        result_display, result_truncated = _format_tool_result_preview(result)
+        result_display, result_truncated = _format_tool_result_preview(_tool_result_preview_value(result))
         truncated = truncated or result_truncated
 
     block = _format_tool_marker(tool_name, tool_index, pending=False)
@@ -511,6 +571,9 @@ def format_tool_combined(
         args_preview=args_preview or None,
         result_preview=result_display or None,
         truncated=truncated,
+        mcp_app_resources=_mcp_app_resources_from_result(result),
+        mcp_app_tool_input=_mcp_app_tool_input_from_args(result, tool_args),
+        mcp_app_tool_result=_mcp_app_tool_result_from_result(result),
     )
     return block, trace
 
@@ -533,7 +596,7 @@ def complete_pending_tool_block(
     result_display = ""
     truncated = False
     if result is not None and result != "":
-        result_display, truncated = _format_tool_result_preview(result)
+        result_display, truncated = _format_tool_result_preview(_tool_result_preview_value(result))
 
     updated = accumulated_text
     pending_line = _tool_marker_line(tool_name, tool_index, pending=True)
@@ -550,6 +613,8 @@ def complete_pending_tool_block(
         tool_name=tool_name,
         result_preview=result_display or None,
         truncated=truncated,
+        mcp_app_resources=_mcp_app_resources_from_result(result),
+        mcp_app_tool_result=_mcp_app_tool_result_from_result(result),
     )
     return updated, trace
 
@@ -562,7 +627,7 @@ def format_tool_started_event(
     if tool is None:
         return "", None
     tool_name = tool.tool_name or "tool"
-    tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
+    tool_args = _tool_args_from_execution(tool)
     text, trace = _format_tool_started(tool_name, tool_args, tool_index=tool_index)
     return text, trace
 
@@ -575,7 +640,7 @@ def format_tool_completed_event(
     if tool is None:
         return "", None
     tool_name = tool.tool_name or "tool"
-    tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
+    tool_args = _tool_args_from_execution(tool)
     text, trace = format_tool_combined(tool_name, tool_args, tool.result, tool_index=tool_index)
     return text, trace
 
@@ -614,6 +679,20 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
         if entry.truncated:
             event["truncated"] = True
             has_truncated_content = True
+        if entry.mcp_app_resources:
+            event["mcp_apps"] = [
+                {
+                    "uri": resource.uri,
+                    "mime_type": resource.mime_type,
+                    "html": resource.html,
+                    **({"meta": resource.meta} if resource.meta is not None else {}),
+                }
+                for resource in entry.mcp_app_resources
+            ]
+            if entry.mcp_app_tool_input is not None:
+                event["mcp_tool_input"] = entry.mcp_app_tool_input
+            if entry.mcp_app_tool_result is not None:
+                event["mcp_tool_result"] = entry.mcp_app_tool_result
         events.append(event)
 
     payload: dict[str, object] = {

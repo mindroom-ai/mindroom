@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agno.media import Audio, Image
 from agno.tools.function import ToolResult
@@ -20,9 +20,17 @@ from mcp.types import (
 )
 
 from mindroom.mcp.errors import MCPToolCallError
+from mindroom.mcp.types import MCPAppResource  # noqa: TC001 - Pydantic needs this at runtime.
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+
+class MCPAppToolResult(ToolResult):
+    """Agno tool result carrying MCP Apps resources for MindRoom metadata."""
+
+    mcp_app_resources: list[MCPAppResource]
+    mcp_app_tool_result: dict[str, Any]
 
 
 def _summarize_embedded_resource(block: EmbeddedResource) -> str:
@@ -101,7 +109,12 @@ def _raise_for_mcp_call_error(server_id: str, result: CallToolResult) -> None:
     raise MCPToolCallError(server_id, message)
 
 
-def tool_result_from_call_result(server_id: str, result: CallToolResult) -> ToolResult:
+def tool_result_from_call_result(
+    server_id: str,
+    result: CallToolResult,
+    *,
+    app_resources: list[MCPAppResource] | None = None,
+) -> ToolResult:
     """Convert one MCP call result into an Agno tool result."""
     _raise_for_mcp_call_error(server_id, result)
     lines = _text_lines_from_blocks(result.content)
@@ -111,4 +124,12 @@ def tool_result_from_call_result(server_id: str, result: CallToolResult) -> Tool
     content = "\n\n".join(line for line in lines if line).strip() or "MCP tool completed successfully."
     images = _image_artifacts_from_blocks(result.content)
     audios = _audio_artifacts_from_blocks(result.content)
+    if app_resources:
+        return MCPAppToolResult(
+            content=content,
+            images=images or None,
+            audios=audios or None,
+            mcp_app_resources=app_resources,
+            mcp_app_tool_result=result.model_dump(by_alias=True, exclude_none=True),
+        )
     return ToolResult(content=content, images=images or None, audios=audios or None)

@@ -12,6 +12,7 @@ from unittest.mock import patch
 import mcp.types as mcp_types
 import pytest
 from agno.models.openai import OpenAIChat
+from agno.tools.function import ToolResult
 from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, ToolListChangedNotification
 
 from mindroom.agents import create_agent
@@ -22,6 +23,7 @@ from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.errors import MCPProtocolError, MCPTimeoutError, MCPToolCallError
 from mindroom.mcp.manager import MCPServerManager, _discovery_retry_delay_seconds
+from mindroom.mcp.results import MCPAppToolResult
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
@@ -61,10 +63,12 @@ class _ConfigStub:
 class _FakeClientSession:
     sessions: ClassVar[list[_FakeClientSession]] = []
     planned_tool_results: ClassVar[list[CallToolResult | Exception]] = []
+    planned_resource_results: ClassVar[list[mcp_types.ReadResourceResult | Exception]] = []
     planned_tool_pages: ClassVar[list[ListToolsResult]] = []
     tool_list: ClassVar[list[Tool]] = []
     listed_cursors: ClassVar[list[str | None]] = []
     call_tool_arguments: ClassVar[list[dict[str, object] | None]] = []
+    read_resource_uris: ClassVar[list[str]] = []
     initialize_delay_seconds: ClassVar[float] = 0.0
     list_tools_delay_seconds: ClassVar[float] = 0.0
     parallel_call_gate: ClassVar[asyncio.Event | None] = None
@@ -155,16 +159,26 @@ class _FakeClientSession:
         assert isinstance(next_result, CallToolResult)
         return next_result
 
+    async def read_resource(self, uri: object) -> mcp_types.ReadResourceResult:
+        """Pop and return the next planned resource result."""
+        _FakeClientSession.read_resource_uris.append(str(uri))
+        next_result = _FakeClientSession.planned_resource_results.pop(0)
+        if isinstance(next_result, Exception):
+            raise next_result
+        return next_result
+
 
 @pytest.fixture(autouse=True)
 def _reset_fake_session_state() -> Generator[None, None, None]:
     dynamic_toolkits_module._loaded_tools.clear()
     _FakeClientSession.sessions = []
     _FakeClientSession.planned_tool_results = []
+    _FakeClientSession.planned_resource_results = []
     _FakeClientSession.planned_tool_pages = []
     _FakeClientSession.tool_list = []
     _FakeClientSession.listed_cursors = []
     _FakeClientSession.call_tool_arguments = []
+    _FakeClientSession.read_resource_uris = []
     _FakeClientSession.initialize_delay_seconds = 0.0
     _FakeClientSession.list_tools_delay_seconds = 0.0
     _FakeClientSession.parallel_call_gate = None
@@ -272,6 +286,87 @@ async def test_mcp_manager_syncs_catalog_and_calls_tool(monkeypatch: pytest.Monk
     assert changed == {"demo"}
     result = await manager.call_tool("demo", "echo", {"value": "ping"})
     assert result.content == "pong"
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_fetches_mcp_app_resource_for_ui_backed_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """UI-backed tools should return their MCP Apps resource alongside normal content."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [
+        Tool.model_validate(
+            {
+                "name": "show_chart",
+                "description": "show chart",
+                "inputSchema": {"type": "object", "properties": {}},
+                "_meta": {"ui": {"resourceUri": "ui://demo/chart"}},
+            },
+        ),
+    ]
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="chart ready")]),
+    ]
+    _FakeClientSession.planned_resource_results = [
+        mcp_types.ReadResourceResult(
+            contents=[
+                mcp_types.TextResourceContents.model_validate(
+                    {
+                        "uri": "ui://demo/chart",
+                        "mimeType": "text/html;profile=mcp-app",
+                        "text": "<html><body>chart</body></html>",
+                        "_meta": {"ui": {"prefersBorder": True}},
+                    },
+                ),
+            ],
+        ),
+    ]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+
+    await manager.sync_servers(config)
+    result = await manager.call_tool("demo", "show_chart", {})
+
+    assert isinstance(result, MCPAppToolResult)
+    assert result.content == "chart ready"
+    assert _FakeClientSession.read_resource_uris == ["ui://demo/chart"]
+    assert result.mcp_app_resources[0].uri == "ui://demo/chart"
+    assert result.mcp_app_resources[0].html == "<html><body>chart</body></html>"
+    assert result.mcp_app_resources[0].meta == {"ui": {"prefersBorder": True}}
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_falls_back_to_text_result_when_mcp_app_resource_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Successful MCP calls should not fail just because optional UI metadata cannot be fetched."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [
+        Tool.model_validate(
+            {
+                "name": "show_chart",
+                "description": "show chart",
+                "inputSchema": {"type": "object", "properties": {}},
+                "_meta": {"ui": {"resourceUri": "ui://demo/chart"}},
+            },
+        ),
+    ]
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="chart ready")]),
+    ]
+    _FakeClientSession.planned_resource_results = [RuntimeError("missing resource")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+
+    await manager.sync_servers(config)
+    result = await manager.call_tool("demo", "show_chart", {})
+
+    assert isinstance(result, ToolResult)
+    assert not isinstance(result, MCPAppToolResult)
+    assert result.content == "chart ready"
+    assert _FakeClientSession.read_resource_uris == ["ui://demo/chart"]
 
 
 @pytest.mark.asyncio
