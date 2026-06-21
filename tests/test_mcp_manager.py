@@ -414,9 +414,28 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
         "expires_at": 900.0,
         "error_type": "OAuthRefreshRejectedError",
         "error": "OAuth token refresh failed: invalid_grant: refresh grant rejected",
+        "cause_type": "OAuthError",
+        "cause": "invalid_grant: refresh grant rejected",
     }
     assert "expired-access-token-secret" not in str(warning_call)
     assert "stored-refresh-token-secret" not in str(warning_call)
+
+
+def test_mcp_manager_prunes_expired_oauth_refresh_rejections(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Recording a new rejected refresh should bound stale rejection-cache entries."""
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    expired_key = ("demo", "mcp_demo", "user_agent", "alice", "refresh-a", "access-a", 900.0)
+    active_key = ("demo", "mcp_demo", "user_agent", "bob", "refresh-b", "access-b", 900.0)
+    new_key = ("demo", "mcp_demo", "user_agent", "carol", "refresh-c", "access-c", 900.0)
+    manager._oauth_refresh_rejections[expired_key] = 999.0
+    manager._oauth_refresh_rejections[active_key] = 1001.0
+    monkeypatch.setattr("mindroom.mcp.manager.time.monotonic", lambda: 1000.0)
+
+    manager._remember_oauth_refresh_rejection(new_key)
+
+    assert expired_key not in manager._oauth_refresh_rejections
+    assert manager._oauth_refresh_rejections[active_key] == 1001.0
+    assert manager._oauth_refresh_rejections[new_key] == 1300.0
 
 
 @pytest.mark.asyncio

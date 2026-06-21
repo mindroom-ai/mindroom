@@ -392,11 +392,18 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
         snapshot = config_lifecycle.bind_current_request_snapshot(request)
         config = snapshot.runtime_config
         if config is not None:
-            await start_mcp_oauth_request_refresh_loop(
-                config.mcp_servers,
-                provider.id,
-                worker_target=worker_target,
-            )
+            try:
+                await start_mcp_oauth_request_refresh_loop(
+                    config.mcp_servers,
+                    provider.id,
+                    worker_target=worker_target,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "oauth_callback_mcp_refresh_loop_start_failed",
+                    provider_id=provider.id,
+                    error_type=type(exc).__name__,
+                )
     except OAuthClaimValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OAuthProviderError as exc:

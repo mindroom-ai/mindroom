@@ -301,7 +301,7 @@ def _http_status_oauth_error_fields(exc: HTTPStatusError) -> tuple[str | None, s
     """Return OAuth error detail from an HTTP error response body, if present."""
     try:
         payload = exc.response.json()
-    except ValueError:
+    except (ValueError, UnicodeDecodeError):
         return None, None
     if not isinstance(payload, Mapping):
         return None, None

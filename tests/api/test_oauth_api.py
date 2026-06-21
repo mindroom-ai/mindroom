@@ -31,6 +31,7 @@ from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.providers import (
     OAuthClientConfig,
+    OAuthProviderError,
     OAuthRefreshRejectedError,
     OAuthTokenResult,
     _OAuthClaimValidationContext,
@@ -963,6 +964,53 @@ def test_provider_refresh_token_data_surfaces_oauth_error_body_without_tokens(
     assert "provider-leaked-refresh-token" not in message
 
 
+def test_provider_refresh_token_data_handles_non_utf8_oauth_error_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = _fake_provider()
+
+    class FakeOAuth2Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeOAuth2Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def refresh_token(self, url: str, **_kwargs: object) -> dict[str, Any]:
+            request = Request("POST", url)
+            response = Response(400, content=b"\xff", request=request)
+            msg = "Bad Request"
+            raise HTTPStatusError(msg, request=request, response=response)
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
+
+    with pytest.raises(OAuthProviderError) as exc_info:
+        asyncio.run(
+            provider.refresh_token_data(
+                {
+                    "token": "stored-access-token-secret",
+                    "refresh_token": "stored-refresh-token-secret",
+                    "client_id": "client-id",
+                    "scopes": ["scope.read"],
+                    "expires_at": 900.0,
+                },
+                runtime_paths,
+            ),
+        )
+
+    assert str(exc_info.value) == "OAuth token refresh failed"
+    assert type(exc_info.value.__cause__).__name__ == "HTTPStatusError"
+
+
 @pytest.mark.parametrize("returned_refresh_token", [None, ""], ids=["null", "empty"])
 def test_provider_refresh_token_data_preserves_existing_refresh_token_when_response_value_is_unusable(
     tmp_path: Path,
@@ -1728,6 +1776,51 @@ def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
     }
     assert manager.for_worker(owner_worker_key).load_credentials("google_drive") is None
     assert manager.for_worker(_worker_key_for_standalone_user()).load_credentials(provider.credential_service) is None
+
+
+def test_callback_ignores_mcp_refresh_loop_start_failure_after_saving_credentials(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+
+    with (
+        patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}),
+        patch("mindroom.api.oauth.start_mcp_oauth_request_refresh_loop", side_effect=RuntimeError("scheduler down")),
+        patch("mindroom.api.oauth.logger") as mock_logger,
+    ):
+        with TestClient(api_app) as client:
+            _login(client)
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+            state = _state_from_auth_url(connect_response.json()["auth_url"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 307
+    assert urlparse(callback_response.headers["location"]).path == f"/api/oauth/{provider.id}/success"
+    scoped_credentials = manager.for_primary_runtime_scope("@alice:example.org", "general").load_credentials(
+        provider.credential_service,
+    )
+    assert scoped_credentials is not None
+    assert scoped_credentials["token"] == "google_drive-access-token"
+    mock_logger.warning.assert_called_once_with(
+        "oauth_callback_mcp_refresh_loop_start_failed",
+        provider_id=provider.id,
+        error_type="RuntimeError",
+    )
 
 
 def test_callback_uses_stored_oauth_client_config(tmp_path: Path) -> None:

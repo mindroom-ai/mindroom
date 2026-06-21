@@ -13,6 +13,8 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
 import mcp.types as mcp_types
+from authlib.common.errors import AuthlibBaseError
+from httpx import HTTPError
 from mcp import ClientSession
 
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
@@ -409,8 +411,16 @@ class MCPServerManager:
             return False
         return True
 
+    def _prune_oauth_refresh_rejections(self, *, now: float | None = None) -> None:
+        current = time.monotonic() if now is None else now
+        expired_keys = [key for key, expires_at in self._oauth_refresh_rejections.items() if expires_at <= current]
+        for expired_key in expired_keys:
+            self._oauth_refresh_rejections.pop(expired_key, None)
+
     def _remember_oauth_refresh_rejection(self, key: _OAuthRefreshFailureKey) -> None:
-        self._oauth_refresh_rejections[key] = time.monotonic() + _OAUTH_REFRESH_REJECTION_TTL_SECONDS
+        now = time.monotonic()
+        self._prune_oauth_refresh_rejections(now=now)
+        self._oauth_refresh_rejections[key] = now + _OAUTH_REFRESH_REJECTION_TTL_SECONDS
 
     def _forget_oauth_refresh_rejection(self, key: _OAuthRefreshFailureKey | None) -> None:
         if key is not None:
@@ -448,6 +458,8 @@ class MCPServerManager:
             if not isinstance(raw_expires_at, bool) and isinstance(raw_expires_at, int | float)
             else None
         )
+        cause = exc.__cause__
+        safe_cause = isinstance(cause, AuthlibBaseError | HTTPError)
         logger.warning(
             "MCP OAuth token refresh failed",
             provider_id=provider_id,
@@ -456,6 +468,8 @@ class MCPServerManager:
             expires_at=expires_at,
             error_type=type(exc).__name__,
             error=str(exc),
+            cause_type=type(cause).__name__ if safe_cause else None,
+            cause=str(cause) if safe_cause else None,
         )
 
     @staticmethod
@@ -1003,7 +1017,6 @@ class MCPServerManager:
             provider_id=provider.id,
             server_id=base_state.server_id,
             error_type=type(exc).__name__,
-            error=str(exc),
         )
         return False
 
