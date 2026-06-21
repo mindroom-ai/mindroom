@@ -534,6 +534,50 @@ class TestCredentialsManager:
         assert shared_credentials is None
         assert worker_credentials == {"token": "worker-token", "_source": "ui"}
 
+    @pytest.mark.parametrize("worker_scope", [None, "shared", "user", "user_agent"])
+    def test_scoped_credentials_path_matches_save_and_delete_target(
+        self,
+        temp_credentials_dir: Path,
+        worker_scope: str | None,
+    ) -> None:
+        """Scoped path resolution should be the write-path source of truth."""
+        manager = CredentialsManager(temp_credentials_dir)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        worker_target = _worker_target(worker_scope, "general", execution_identity)
+        credentials_path = credentials_module.scoped_credentials_path(
+            "mcp_demo_oauth",
+            credentials_manager=manager,
+            worker_target=worker_target,
+        )
+
+        save_scoped_credentials(
+            "mcp_demo_oauth",
+            {"token": "scoped-token", "_source": "oauth"},
+            credentials_manager=manager,
+            worker_target=worker_target,
+        )
+
+        assert credentials_path.exists()
+        assert credentials_path.read_text(encoding="utf-8")
+
+        credentials_module.delete_scoped_credentials(
+            "mcp_demo_oauth",
+            credentials_manager=manager,
+            worker_target=worker_target,
+        )
+
+        assert not credentials_path.exists()
+
     def test_load_scoped_credentials_shared_scope_inherits_shared_ui_credentials(
         self,
         temp_credentials_dir: Path,

@@ -49,6 +49,7 @@ __all__ = [
     "load_worker_grantable_shared_credentials",
     "runtime_credentials_manager_key",
     "save_scoped_credentials",
+    "scoped_credentials_path",
     "sync_shared_credentials_to_worker",
     "validate_service_name",
 ]
@@ -672,6 +673,49 @@ def _primary_runtime_scoped_credentials_manager(
     return manager.for_primary_runtime_scope(identity.requester_id, agent_name)
 
 
+def _scoped_credentials_target_manager(
+    service: str,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> CredentialsManager:
+    manager = credentials_manager
+    if worker_target is None or worker_target.worker_scope is None:
+        return manager if manager.shared_base_path != manager.base_path else manager.shared_manager()
+
+    if credential_service_policy(service, worker_target.worker_scope).uses_local_shared_credentials:
+        return manager.shared_manager()
+
+    primary_runtime_manager = _primary_runtime_scoped_credentials_manager(
+        service,
+        manager=manager,
+        worker_target=worker_target,
+    )
+    if primary_runtime_manager is not None:
+        return primary_runtime_manager
+
+    worker_manager = _resolve_worker_credentials_manager(
+        credentials_manager=manager,
+        worker_target=worker_target,
+    )
+    return worker_manager or manager.shared_manager()
+
+
+def scoped_credentials_path(
+    service: str,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> Path:
+    """Return the file path that scoped credential writes target for one service."""
+    normalized_service = validate_service_name(service)
+    return _scoped_credentials_target_manager(
+        normalized_service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    ).get_credentials_path(normalized_service)
+
+
 def load_scoped_credentials(
     service: str,
     *,
@@ -738,31 +782,13 @@ def save_scoped_credentials(
     worker_target: ResolvedWorkerTarget | None,
 ) -> None:
     """Save credentials for a service to the current worker scope when available."""
-    manager = credentials_manager
-    if worker_target is None or worker_target.worker_scope is None:
-        target_manager = manager if manager.shared_base_path != manager.base_path else manager.shared_manager()
-        target_manager.save_credentials(service, credentials)
-        return
-
-    if credential_service_policy(service, worker_target.worker_scope).uses_local_shared_credentials:
-        manager.shared_manager().save_credentials(service, credentials)
-        return
-
-    primary_runtime_manager = _primary_runtime_scoped_credentials_manager(
-        service,
-        manager=manager,
+    normalized_service = validate_service_name(service)
+    target_manager = _scoped_credentials_target_manager(
+        normalized_service,
+        credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    if primary_runtime_manager is not None:
-        primary_runtime_manager.save_credentials(service, credentials)
-        return
-
-    worker_manager = _resolve_worker_credentials_manager(
-        credentials_manager=manager,
-        worker_target=worker_target,
-    )
-    target_manager = worker_manager or manager.shared_manager()
-    target_manager.save_credentials(service, credentials)
+    target_manager.save_credentials(normalized_service, credentials)
 
 
 def delete_scoped_credentials(
@@ -772,28 +798,10 @@ def delete_scoped_credentials(
     worker_target: ResolvedWorkerTarget | None,
 ) -> None:
     """Delete credentials for a service from the current worker scope when available."""
-    manager = credentials_manager
-    if worker_target is None or worker_target.worker_scope is None:
-        target_manager = manager if manager.shared_base_path != manager.base_path else manager.shared_manager()
-        target_manager.delete_credentials(service)
-        return
-
-    if credential_service_policy(service, worker_target.worker_scope).uses_local_shared_credentials:
-        manager.shared_manager().delete_credentials(service)
-        return
-
-    primary_runtime_manager = _primary_runtime_scoped_credentials_manager(
-        service,
-        manager=manager,
+    normalized_service = validate_service_name(service)
+    target_manager = _scoped_credentials_target_manager(
+        normalized_service,
+        credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    if primary_runtime_manager is not None:
-        primary_runtime_manager.delete_credentials(service)
-        return
-
-    worker_manager = _resolve_worker_credentials_manager(
-        credentials_manager=manager,
-        worker_target=worker_target,
-    )
-    target_manager = worker_manager or manager.shared_manager()
-    target_manager.delete_credentials(service)
+    target_manager.delete_credentials(normalized_service)

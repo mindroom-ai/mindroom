@@ -29,6 +29,7 @@ from mindroom.oauth.service import (
     oauth_credentials_usable,
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
+    refresh_scoped_oauth_credentials,
     sanitized_oauth_token_result,
 )
 
@@ -431,7 +432,13 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
     credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
     if credentials_usable and has_client_config and not has_service_account_config:
         try:
-            refreshed_credentials = await provider.refresh_token_data(credentials, runtime_paths)
+            refreshed_credentials = await refresh_scoped_oauth_credentials(
+                provider,
+                runtime_paths,
+                credentials_manager=target.base_manager,
+                worker_target=worker_target,
+                allowed_shared_services=target.allowed_shared_services,
+            )
         except OAuthProviderError as exc:
             logger.warning(
                 "oauth_token_refresh_failed",
@@ -439,15 +446,8 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
                 error_type=type(exc).__name__,
             )
         else:
-            if refreshed_credentials is not None:
-                save_scoped_credentials(
-                    provider.credential_service,
-                    refreshed_credentials,
-                    credentials_manager=target.base_manager,
-                    worker_target=worker_target,
-                )
-                credentials = refreshed_credentials
-                credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
+            credentials = refreshed_credentials or {}
+            credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
     connected = has_service_account_config or credentials_usable
     if client_config_resolution is not None:
         client_config_service = client_config_resolution.service

@@ -15,7 +15,7 @@ from authlib.common.errors import AuthlibBaseError
 from httpx import HTTPError
 from mcp import ClientSession
 
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.mcp.config import (
     MCPServerConfig,
@@ -35,6 +35,7 @@ from mindroom.oauth.service import (
     build_oauth_reconnect_instruction,
     oauth_connect_url,
     oauth_credentials_usable,
+    refresh_scoped_oauth_credentials_with_result,
 )
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -367,40 +368,37 @@ class MCPServerManager:
     ) -> str:
         provider = mcp_oauth_provider(state.server_id, state.config)
         manager = credentials_manager or get_runtime_credentials_manager(self.runtime_paths)
-        credentials = load_scoped_credentials(
-            provider.credential_service,
-            credentials_manager=manager,
-            worker_target=worker_target,
-        )
-        if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
-            raise self._oauth_connection_required(state, worker_target)
-        assert credentials is not None
         try:
-            refreshed_credentials = await provider.refresh_token_data(credentials, self.runtime_paths)
-        except OAuthRefreshRejectedError as exc:
-            self._log_oauth_refresh_failure(state, provider.id, credentials, exc)
-            raise self._oauth_connection_required(
-                state,
-                worker_target,
-                reason=_OAUTH_REFRESH_REJECTED_REASON,
-            ) from exc
-        except OAuthProviderError as exc:
-            self._log_oauth_refresh_failure(state, provider.id, credentials, exc)
-            raise self._oauth_connection_required(state, worker_target) from exc
-        if refreshed_credentials is not None:
-            save_scoped_credentials(
-                provider.credential_service,
-                refreshed_credentials,
+            refresh_result = await refresh_scoped_oauth_credentials_with_result(
+                provider,
+                self.runtime_paths,
                 credentials_manager=manager,
                 worker_target=worker_target,
             )
+            credentials = refresh_result.credentials
+        except OAuthProviderError as exc:
+            failed_credentials = load_scoped_credentials(
+                provider.credential_service,
+                credentials_manager=manager,
+                worker_target=worker_target,
+            )
+            self._log_oauth_refresh_failure(state, provider.id, failed_credentials or {}, exc)
+            reason = _OAUTH_REFRESH_REJECTED_REASON if isinstance(exc, OAuthRefreshRejectedError) else None
+            raise self._oauth_connection_required(
+                state,
+                worker_target,
+                reason=reason,
+            ) from exc
+        if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
+            raise self._oauth_connection_required(state, worker_target)
+        assert credentials is not None
+        if refresh_result.refreshed:
             logger.info(
                 "MCP OAuth token refreshed",
                 provider_id=provider.id,
                 server_id=state.server_id,
-                expires_at=self._oauth_refreshed_expires_at(refreshed_credentials),
+                expires_at=self._oauth_refreshed_expires_at(credentials),
             )
-            credentials = refreshed_credentials
         token = credentials.get("token") or credentials.get("access_token")
         if not isinstance(token, str) or not token:
             raise self._oauth_connection_required(state, worker_target)
