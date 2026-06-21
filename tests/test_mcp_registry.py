@@ -22,7 +22,14 @@ from mindroom.mcp.registry import (
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.types import MCPServerState
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, SetupType, ToolStatus, get_tool_by_name
+from mindroom.tool_system.metadata import (
+    TOOL_METADATA,
+    TOOL_REGISTRY,
+    SetupType,
+    ToolManagedInitArg,
+    ToolStatus,
+    get_tool_by_name,
+)
 from mindroom.tool_system.worker_routing import supports_tool_name_for_worker_scope
 
 if TYPE_CHECKING:
@@ -388,6 +395,17 @@ def test_mcp_tool_registry_fails_when_required_server_unavailable(tmp_path: Path
 
     with pytest.raises(MCPTimeoutError, match="startup timed out"):
         get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
+
+
+def test_non_oauth_mcp_toolkit_declares_constructor_managed_init_args(tmp_path: Path) -> None:
+    """Non-OAuth MCP tools still expose the shared MCP toolkit constructor contract."""
+    sync_mcp_tool_registry(_config(tmp_path))
+
+    assert TOOL_METADATA["mcp_demo"].managed_init_args == (
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+    )
 
 
 def test_mcp_tool_names_are_shared_only(tmp_path: Path) -> None:

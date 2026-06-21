@@ -40,6 +40,8 @@ _MCP_TOOL_PREFIX = "mcp_"
 _MCP_TOOL_NAMES: set[str] = set()
 _MCP_OAUTH_TOOL_NAMES: set[str] = set()
 _MCP_TOOL_FACTORY_MARKER = "__mindroom_mcp_tool_factory__"
+# MindRoomMCPToolkit declares these constructor args for every MCP tool; metadata
+# mirrors that contract even though credentials are used only by OAuth-backed servers.
 _MCP_MANAGED_INIT_ARGS = (
     ToolManagedInitArg.RUNTIME_PATHS,
     ToolManagedInitArg.CREDENTIALS_MANAGER,

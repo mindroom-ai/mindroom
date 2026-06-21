@@ -594,6 +594,33 @@ async def test_mcp_manager_logs_successful_oauth_refresh_and_persists_credential
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_does_not_eagerly_load_oauth_credentials_for_success_logging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Successful OAuth resolution should not do a second load just for failure diagnostics."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _shared_worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, ACCESS_0, expires_at=time.time() + 3600)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    def fail_eager_diagnostic_load(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        pytest.fail("manager should not eagerly load credentials only for failure logging")
+
+    monkeypatch.setattr("mindroom.mcp.manager.load_scoped_credentials", fail_eager_diagnostic_load)
+
+    access_token = await manager._oauth_access_token(
+        manager._require_state("demo"),
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    assert access_token == ACCESS_0
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_serializes_oauth_refresh_read_modify_write_per_scope(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

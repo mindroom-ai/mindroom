@@ -4,13 +4,9 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode, urlparse
-
-from authlib.common.errors import AuthlibBaseError
-from httpx import HTTPStatusError
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials, scoped_credentials_path
 from mindroom.file_locks import async_exclusive_file_lock
@@ -18,6 +14,7 @@ from mindroom.oauth.providers import OAuthClaimValidationError, OAuthProviderErr
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -226,41 +223,12 @@ def _refresh_token_value(credentials: Mapping[str, Any] | None) -> str | None:
 
 
 def _is_recoverable_stale_refresh_rejection(exc: OAuthProviderError) -> bool:
-    error_code = _oauth_error_code(exc)
+    error_code = _normalized_oauth_error_code(exc.oauth_error)
     return error_code in _RECOVERABLE_REFRESH_ERROR_CODES
-
-
-def _oauth_error_code(exc: BaseException) -> str | None:
-    current: BaseException | None = exc
-    while current is not None:
-        if isinstance(current, OAuthProviderError):
-            error_code = _normalized_oauth_error_code(current.oauth_error)
-            if error_code is not None:
-                return error_code
-        if isinstance(current, AuthlibBaseError):
-            error_code = _normalized_oauth_error_code(current.error)
-            if error_code is not None:
-                return error_code
-        if isinstance(current, HTTPStatusError):
-            error_code = _oauth_error_response_code(current)
-            if error_code is not None:
-                return error_code
-        current = current.__cause__ if isinstance(current.__cause__, BaseException) else None
-    return None
 
 
 def _normalized_oauth_error_code(value: object) -> str | None:
     return value.strip().lower() if isinstance(value, str) and value.strip() else None
-
-
-def _oauth_error_response_code(exc: HTTPStatusError) -> str | None:
-    try:
-        payload = exc.response.json()
-    except (ValueError, UnicodeDecodeError):
-        return None
-    if not isinstance(payload, Mapping):
-        return None
-    return _normalized_oauth_error_code(payload.get("error"))
 
 
 def oauth_credential_target_payload(

@@ -281,6 +281,8 @@ class ScopedOAuthClientMixin:
             if self.creds.expired and self.creds.refresh_token:
                 self.creds.refresh(google_requests.Request())
                 refreshed = dict(token_data)
+                # Google auth refresh updates access-token state and preserves the
+                # stored refresh token, unlike rotating MCP provider refreshes.
                 refreshed["token"] = self.creds.token
                 refreshed_expires_at = self._expires_at_from_credentials(self.creds)
                 if refreshed_expires_at is not None:
