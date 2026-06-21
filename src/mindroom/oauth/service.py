@@ -8,17 +8,25 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode, urlparse
 
+from mindroom.credential_policy import credential_service_policy
+from mindroom.credentials import load_scoped_credentials, save_scoped_credentials, validate_service_name
+from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.oauth.providers import OAuthClaimValidationError, OAuthProviderError, OAuthTokenResult
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from pathlib import Path
+
     from mindroom.constants import RuntimePaths
+    from mindroom.credentials import CredentialsManager
     from mindroom.oauth.providers import OAuthClientConfig, OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = 600
 _OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
 _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
+_RECOVERABLE_REFRESH_ERROR_CODES = frozenset({"invalid_grant", "invalid_refresh_token"})
 _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
     {
         "google_calendar",
@@ -45,6 +53,25 @@ _SCOPE_IMPLICATIONS = {
     ),
 }
 
+__all__ = [
+    "OAuthConnectTarget",
+    "build_oauth_connect_instruction",
+    "build_oauth_reconnect_instruction",
+    "consume_oauth_connect_token",
+    "lookup_oauth_connect_token",
+    "oauth_connect_url",
+    "oauth_credential_target_payload",
+    "oauth_credentials_have_required_scopes",
+    "oauth_credentials_match_client_id",
+    "oauth_credentials_satisfy_identity_policy",
+    "oauth_credentials_usable",
+    "oauth_provider_service_account_configured",
+    "oauth_success_redirect_url",
+    "refresh_scoped_oauth_credentials",
+    "sanitized_oauth_token_result",
+    "scoped_oauth_credentials_refresh_lock_path",
+]
+
 
 @dataclass(frozen=True)
 class OAuthConnectTarget:
@@ -56,6 +83,190 @@ class OAuthConnectTarget:
     worker_scope: str
     worker_key: str
     requester_id: str | None
+
+
+def scoped_oauth_credentials_refresh_lock_path(
+    service: str,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> Path:
+    """Return the per-scope lock file for one OAuth credential refresh."""
+    credentials_path = _scoped_oauth_credentials_path(
+        service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    return credentials_path.with_name(f"{credentials_path.name}.oauth-refresh.lock")
+
+
+async def refresh_scoped_oauth_credentials(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    allowed_shared_services: frozenset[str] | None = None,
+) -> dict[str, Any] | None:
+    """Refresh one scoped OAuth credential under a per-scope advisory file lock."""
+    lock_path = scoped_oauth_credentials_refresh_lock_path(
+        provider.credential_service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    async with async_exclusive_file_lock(lock_path):
+        credentials = load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
+        )
+        if credentials is None:
+            return None
+        if not oauth_credentials_usable(provider, runtime_paths, credentials):
+            return credentials
+        return await _refresh_scoped_oauth_credentials_locked(
+            provider,
+            runtime_paths,
+            credentials=credentials,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
+        )
+
+
+def _scoped_oauth_credentials_path(
+    service: str,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> Path:
+    normalized_service = validate_service_name(service)
+    if worker_target is None or worker_target.worker_scope is None:
+        target_manager = (
+            credentials_manager
+            if credentials_manager.shared_base_path != credentials_manager.base_path
+            else credentials_manager.shared_manager()
+        )
+        return target_manager.get_credentials_path(normalized_service)
+
+    policy = credential_service_policy(normalized_service, worker_target.worker_scope)
+    if policy.uses_local_shared_credentials:
+        return credentials_manager.shared_manager().get_credentials_path(normalized_service)
+
+    if policy.uses_primary_runtime_scoped_credentials:
+        identity = worker_target.execution_identity
+        if identity is None or identity.requester_id is None:
+            msg = f"Primary-runtime scoped credentials for {normalized_service} require a requester identity"
+            raise ValueError(msg)
+        agent_name = worker_target.routing_agent_name if worker_target.worker_scope == "user_agent" else None
+        return credentials_manager.for_primary_runtime_scope(identity.requester_id, agent_name).get_credentials_path(
+            normalized_service,
+        )
+
+    if worker_target.worker_key is None:
+        return credentials_manager.shared_manager().get_credentials_path(normalized_service)
+    return credentials_manager.for_worker(worker_target.worker_key).get_credentials_path(normalized_service)
+
+
+async def _refresh_scoped_oauth_credentials_locked(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    credentials: dict[str, Any],
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    allowed_shared_services: frozenset[str] | None,
+) -> dict[str, Any]:
+    attempted_refresh_token = _refresh_token_value(credentials)
+    try:
+        refreshed_credentials = await provider.refresh_token_data(credentials, runtime_paths)
+    except OAuthProviderError as exc:
+        if attempted_refresh_token is None or not _is_recoverable_stale_refresh_rejection(exc):
+            raise
+        latest_credentials = load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
+        )
+        latest_refresh_token = _refresh_token_value(latest_credentials)
+        if (
+            latest_credentials is None
+            or latest_refresh_token is None
+            or latest_refresh_token == attempted_refresh_token
+            or not oauth_credentials_usable(provider, runtime_paths, latest_credentials)
+        ):
+            raise
+        refreshed_credentials = await provider.refresh_token_data(latest_credentials, runtime_paths)
+        if refreshed_credentials is None:
+            return latest_credentials
+        save_scoped_credentials(
+            provider.credential_service,
+            refreshed_credentials,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        return refreshed_credentials
+
+    if refreshed_credentials is None:
+        return credentials
+    save_scoped_credentials(
+        provider.credential_service,
+        refreshed_credentials,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    return refreshed_credentials
+
+
+def _refresh_token_value(credentials: Mapping[str, Any] | None) -> str | None:
+    if credentials is None:
+        return None
+    refresh_token = credentials.get("refresh_token")
+    return refresh_token if isinstance(refresh_token, str) and refresh_token else None
+
+
+def _is_recoverable_stale_refresh_rejection(exc: OAuthProviderError) -> bool:
+    for value in _oauth_error_values(exc):
+        if any(code in value.lower() for code in _RECOVERABLE_REFRESH_ERROR_CODES):
+            return True
+    return False
+
+
+def _oauth_error_values(exc: BaseException) -> tuple[str, ...]:
+    values: list[str] = []
+    current: BaseException | None = exc
+    while current is not None:
+        values.append(str(current))
+        for attribute_name in ("error", "error_code", "code", "description"):
+            value = getattr(current, attribute_name, None)
+            if isinstance(value, str):
+                values.append(value)
+        response = getattr(current, "response", None)
+        if response is not None:
+            values.extend(_oauth_error_response_values(response))
+        current = current.__cause__ if isinstance(current.__cause__, BaseException) else None
+    return tuple(value for value in values if value)
+
+
+def _oauth_error_response_values(response: object) -> tuple[str, ...]:
+    status_code = getattr(response, "status_code", None)
+    values = [str(status_code)] if isinstance(status_code, int) else []
+    json_method = getattr(response, "json", None)
+    if not callable(json_method):
+        return tuple(values)
+    try:
+        payload = json_method()
+    except ValueError:
+        return tuple(values)
+    if not isinstance(payload, dict):
+        return tuple(values)
+    for key in ("error", "error_description", "message"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            values.append(value)
+    return tuple(values)
 
 
 def oauth_credential_target_payload(
