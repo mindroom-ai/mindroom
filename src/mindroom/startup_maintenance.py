@@ -29,6 +29,7 @@ type _AutoResume = Callable[[list[InterruptedThread], Config], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
 type _RunningBots = Callable[[], list[_StartupBot]]
+type _AfterRoomsAndMemberships = Callable[[Config], Awaitable[None]]
 
 
 @dataclass
@@ -40,6 +41,7 @@ class StartupMaintenanceController:
     auto_resume: _AutoResume
     sync_runtime_support: _SyncRuntimeSupport
     mark_runtime_support_ready: _MarkRuntimeSupportReady
+    after_rooms_and_memberships: _AfterRoomsAndMemberships | None = None
     task: asyncio.Task[None] | None = field(default=None, init=False)
     startup_cutoff_ms: int | None = field(default=None, init=False)
 
@@ -75,7 +77,7 @@ class StartupMaintenanceController:
         self.start(bots, config, startup_cutoff_ms=self.startup_cutoff_ms)
 
     async def _run(self, bots: list[_StartupBot], config: Config, startup_cutoff_ms: int) -> None:
-        await self._run_phase(
+        rooms_ready = await self._run_phase(
             "startup_maintenance.rooms_and_memberships",
             lambda: self.setup_rooms_and_memberships(bots),
             failure_message="Startup room and membership maintenance failed",
@@ -97,6 +99,13 @@ class StartupMaintenanceController:
         )
         if runtime_support_ready:
             await self.mark_runtime_support_ready()
+        after_rooms_and_memberships = self.after_rooms_and_memberships
+        if rooms_ready and after_rooms_and_memberships is not None:
+            await self._run_phase(
+                "startup_maintenance.after_rooms_and_memberships",
+                lambda: after_rooms_and_memberships(config),
+                failure_message="Startup post-room maintenance failed",
+            )
 
     async def _run_phase(
         self,

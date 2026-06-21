@@ -572,6 +572,28 @@ Without that URL, explicitly selected worker-routed tools fail closed unless `MI
 If `worker_tools` is omitted and no static proxy URL is configured, simple local installs run those tools in the primary MindRoom process.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
 
+## Workspace automation shell checks
+
+[Workspace automations](https://docs.mindroom.chat/workspace-automations/) run their scheduler and service loop in the primary MindRoom runtime.
+There is one central scheduler, not one platform-native scheduler per automation.
+Worker runtimes execute shell checks on demand when the central scheduler reaches a due time.
+Their `check.type: shell` checks use the same worker-routed `shell` tool path as normal shell calls.
+The primary runtime resolves the agent runtime, builds the same shell toolkit route, and sends the check to the configured worker backend when shell is worker-routed.
+The shell command runs from the owning agent workspace and receives the same workspace home contract, worker env filtering, and credential lease behavior as other shell tool calls.
+Shell checks honor effective shell tool config, but they run unattended.
+They fail closed when shell tool approval would be required or when any `tool:before_call` or `tool:after_call` hook is registered instead of waiting on live interactive gates.
+
+Dedicated workers are demand-driven for workspace automations.
+If a worker has scaled down or been cleaned up between cron runs, the next due automation run re-ensures or recreates that worker before executing the check.
+Agent workspace data and worker caches follow the same persistence rules described above for the selected backend.
+MindRoom does not create platform-native cron resources for workspace automations.
+MindRoom also does not keep dedicated workers alive just because an automation exists.
+On Kubernetes, this means MindRoom does not create CronJobs or keep-alive worker pods for workspace automations.
+Dedicated workers can therefore scale to zero between runs and come back on the next due run.
+
+The automation scheduler itself remains in the primary runtime, so primary runtime uptime controls whether cron checks are evaluated.
+Automation state is written under `mindroom_data/workspace_automations/state.json`.
+
 ## Worker Scope
 
 `worker_tools` controls which tools run in the sandbox proxy.

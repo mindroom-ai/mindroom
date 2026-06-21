@@ -8,6 +8,10 @@ Schedule agents or teams to perform tasks at specific times or intervals using n
 
 Tasks run in the thread where they were created.
 
+Matrix scheduling is different from [Workspace Automations](workspace-automations.md).
+`!schedule` persists Matrix scheduled tasks that are interpreted by agents and LLMs.
+Workspace automations are workspace-local deterministic checks that can run shell predicates on a cron schedule without invoking an LLM unless a matching action asks for one.
+
 ## Commands
 
 ### Schedule a Task

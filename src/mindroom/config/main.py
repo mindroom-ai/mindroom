@@ -49,6 +49,8 @@ from mindroom.config.models import (
     ModelConfig,
     RouterConfig,
     ToolConfigEntry,
+    WorkspaceAutomationActionName,
+    WorkspaceAutomationPolicyConfig,
 )
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.runtime_overlays import (
@@ -1161,6 +1163,29 @@ class Config(BaseModel):
             msg = f"Unknown entity: {entity_name}"
             raise ValueError(msg)
         return self.defaults.compaction is not None or override is not None
+
+    def get_agent_workspace_automation_policy(
+        self,
+        agent_name: str,
+    ) -> WorkspaceAutomationPolicyConfig:
+        """Return the effective workspace-authored automation policy for one agent."""
+        agent_config = self.get_agent(agent_name)
+        default_policy = self.defaults.workspace_automations
+        allowed_actions: list[WorkspaceAutomationActionName] = list(default_policy.allowed_actions)
+        merged: dict[str, object] = {
+            "enabled": default_policy.enabled,
+            "min_interval_seconds": default_policy.min_interval_seconds,
+            "max_timeout_seconds": default_policy.max_timeout_seconds,
+            "max_output_bytes": default_policy.max_output_bytes,
+            "allowed_actions": allowed_actions,
+        }
+        if agent_config.workspace_automations is not None:
+            merged.update(
+                agent_config.workspace_automations.model_dump(
+                    include=agent_config.workspace_automations.model_fields_set,
+                ),
+            )
+        return WorkspaceAutomationPolicyConfig.model_validate(merged)
 
     def get_model_context_window(self, model_name: str) -> int | None:
         """Return the configured context window for one model name, when known."""

@@ -105,7 +105,7 @@ class TestScheduledTaskRestoration:
                 config,
                 runtime_paths_for(config),
                 router_bot.event_cache,
-                router_bot._conversation_cache,
+                router_bot.conversation_cache,
             )
 
     @pytest.mark.asyncio
@@ -202,7 +202,7 @@ class TestScheduledTaskRestoration:
             config,
             runtime_paths_for(config),
             router_bot.event_cache,
-            router_bot._conversation_cache,
+            router_bot.conversation_cache,
         )
         mock_restore_configs.assert_awaited_once_with(router_bot.client, "lobby")
         mock_welcome.assert_awaited_once_with("lobby")
@@ -246,7 +246,7 @@ class TestScheduledTaskRestoration:
                 config,
                 runtime_paths_for(config),
                 router_bot.event_cache,
-                router_bot._conversation_cache,
+                router_bot.conversation_cache,
             )
 
             await router_bot._on_sync_response(MagicMock())

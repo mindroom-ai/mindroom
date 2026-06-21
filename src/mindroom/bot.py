@@ -284,7 +284,7 @@ class AgentBot:
     _turn_policy: TurnPolicy
     _conversation_resolver: ConversationResolver
     _conversation_state_writer: ConversationStateWriter
-    _conversation_cache: MatrixConversationCache
+    conversation_cache: MatrixConversationCache
     _delivery_gateway: DeliveryGateway
     _response_runner: ResponseRunner
     _turn_store: TurnStore
@@ -396,7 +396,7 @@ class AgentBot:
             runtime=self._runtime_view,
             runtime_paths=self.runtime_paths,
         )
-        self._conversation_cache = MatrixConversationCache(
+        self.conversation_cache = MatrixConversationCache(
             logger=self.logger,
             runtime=self._runtime_view,
         )
@@ -415,7 +415,7 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
-                conversation_cache=self._conversation_cache,
+                conversation_cache=self.conversation_cache,
             ),
         )
         self._inbound_turn_normalizer = InboundTurnNormalizer(
@@ -463,7 +463,7 @@ class AgentBot:
             logger=self.logger,
             runtime_paths=self.runtime_paths,
             delivery_gateway=self._delivery_gateway,
-            conversation_cache=self._conversation_cache,
+            conversation_cache=self.conversation_cache,
         )
         self._ingress_hook_runner = IngressHookRunner(
             hook_context=self._hook_context_support,
@@ -529,7 +529,7 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
-                conversation_cache=self._conversation_cache,
+                conversation_cache=self.conversation_cache,
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
                 turn_policy=self._turn_policy,
@@ -670,7 +670,7 @@ class AgentBot:
         caller_label: str = "agent_bot_latest_thread_event_lookup",
     ) -> str | None:
         """Return the latest event id for one Matrix thread when the cache knows it."""
-        return await self._conversation_cache.get_latest_thread_event_id_if_needed(
+        return await self.conversation_cache.get_latest_thread_event_id_if_needed(
             room_id,
             thread_id,
             caller_label=caller_label,
@@ -746,7 +746,7 @@ class AgentBot:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._conversation_cache.logger.warning(
+            self.conversation_cache.logger.warning(
                 "startup_thread_prewarm_joined_rooms_failed",
                 error=str(exc),
             )
@@ -758,7 +758,7 @@ class AgentBot:
         completed = False
         try:
             async with self.startup_thread_prewarm_registry.room_slot():
-                completed = await self._conversation_cache.prewarm_recent_room_threads(
+                completed = await self.conversation_cache.prewarm_recent_room_threads(
                     room_id,
                     is_shutting_down=lambda: self._sync_shutting_down,
                 )
@@ -917,7 +917,7 @@ class AgentBot:
             self.config,
             self.runtime_paths,
             self.event_cache,
-            self._conversation_cache,
+            self.conversation_cache,
         )
         if restored_tasks > 0:
             self.logger.info("restored_scheduled_tasks", room_id=room_id, restored_task_count=restored_tasks)
@@ -1078,7 +1078,7 @@ class AgentBot:
 
     async def _sync_cache_result_for_certification(self, response: nio.SyncResponse) -> SyncCacheWriteResult:
         """Return the durable cache write result for one sync response."""
-        return await self._conversation_cache.cache_sync_timeline_for_certification(response)
+        return await self.conversation_cache.cache_sync_timeline_for_certification(response)
 
     def _sync_certification_decision(
         self,
@@ -1481,7 +1481,7 @@ class AgentBot:
                 self.config,
                 self.runtime_paths,
                 self.event_cache,
-                self._conversation_cache,
+                self.conversation_cache,
             )
             if drained_count > 0:
                 self.logger.info("Started deferred overdue scheduled tasks", count=drained_count)
@@ -1630,7 +1630,7 @@ class AgentBot:
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Keep cached thread history consistent when Matrix redactions arrive."""
-        await self._conversation_cache.apply_redaction(room.room_id, event)
+        await self.conversation_cache.apply_redaction(room.room_id, event)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
@@ -1792,7 +1792,7 @@ class AgentBot:
                     await self.stop_manager.remove_stop_button(
                         self.client,
                         event.reacts_to,
-                        notify_outbound_redaction=self._conversation_cache.notify_outbound_redaction,
+                        notify_outbound_redaction=self.conversation_cache.notify_outbound_redaction,
                     )
                     await self._send_response(
                         target=tracked_target,
@@ -2004,7 +2004,7 @@ class AgentBot:
             source_hook,
             extra_content,
             trigger_dispatch=trigger_dispatch,
-            conversation_cache=self._conversation_cache,
+            conversation_cache=self.conversation_cache,
         )
         if event_id:
             self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)
@@ -2080,7 +2080,7 @@ class AgentBot:
         if isinstance(response, nio.RoomRedactError):
             self.logger.error("Failed to redact message", event_id=event_id, error=str(response))
             return False
-        self._conversation_cache.notify_outbound_redaction(room_id, event_id)
+        self.conversation_cache.notify_outbound_redaction(room_id, event_id)
         return True
 
 

@@ -1039,7 +1039,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     controller_field_names = set(controller.deps.__dataclass_fields__)
     rebuilt_changes = {name: value for name, value in changes.items() if name in controller_field_names}
     default_collaborators = {
-        "conversation_cache": "_conversation_cache",
+        "conversation_cache": "conversation_cache",
         "resolver": "_conversation_resolver",
         "normalizer": "_inbound_turn_normalizer",
         "turn_policy": "_turn_policy",

@@ -3346,7 +3346,7 @@ async def test_coalesced_room_plain_reply_target_uses_prompt_thread_not_reply_th
         body="room-level follow-up",
         server_timestamp=1001,
     )
-    bot._conversation_cache.get_thread_id_for_event = AsyncMock(
+    bot.conversation_cache.get_thread_id_for_event = AsyncMock(
         side_effect=lambda _room_id, event_id: "$thread-root" if event_id == "$old-reply" else None,
     )
     batch = build_coalesced_batch(
@@ -4635,7 +4635,7 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
         },
     }
     bot.event_cache.get_recent_room_events.return_value = [newer_event_source]
-    bot._conversation_cache.get_thread_id_for_event = AsyncMock(
+    bot.conversation_cache.get_thread_id_for_event = AsyncMock(
         side_effect=lambda _room_id, event_id: "$thread" if event_id == "$m2" else None,
     )
 
@@ -4653,7 +4653,7 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
-    bot._conversation_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$m2")
+    bot.conversation_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$m2")
     action_mock.assert_not_awaited()
     assert bot._turn_store.is_handled("$m1")
 
@@ -6637,7 +6637,7 @@ async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) 
             },
         ),
     )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+    bot.conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
         return_value=ThreadHistoryResult([], is_full_history=False),
     )
 
@@ -6649,7 +6649,7 @@ async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) 
     )
 
     assert should_skip is False
-    bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+    bot.conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
         room.room_id,
         "$thread",
         caller_label="router_pre_ingress_skip",
@@ -6677,7 +6677,7 @@ async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path
             },
         ),
     )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
+    bot.conversation_cache.get_dispatch_thread_snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
 
     should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
         room,
@@ -6687,7 +6687,7 @@ async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path
     )
 
     assert should_skip is False
-    bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+    bot.conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
         room.room_id,
         "$maybe-root",
         caller_label="router_pre_ingress_skip",

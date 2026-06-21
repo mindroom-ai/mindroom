@@ -5729,7 +5729,8 @@
       "function_names": [
         "check_shell_command",
         "kill_shell_command",
-        "run_shell_command"
+        "run_shell_command",
+        "run_shell_command_structured"
       ],
       "helper_text": null,
       "icon": "Terminal",
@@ -8469,6 +8470,31 @@
       "name": "todoist",
       "setup_type": "api_key",
       "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Validate, list, and reload workspace-authored automations",
+      "display_name": "Workspace Automation",
+      "docs_url": "https://docs.mindroom.chat/workspace-automations/",
+      "function_names": [
+        "list_automations",
+        "reload_automations",
+        "validate_automations"
+      ],
+      "helper_text": null,
+      "icon": "Workflow",
+      "icon_color": "text-indigo-500",
+      "name": "workspace_automation",
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "agent_override_fields": null,

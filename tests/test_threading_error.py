@@ -2123,7 +2123,7 @@ class TestThreadingBehavior:
         sync_response = self._sync_response({})
 
         with patch.object(
-            bot._conversation_cache,
+            bot.conversation_cache,
             "cache_sync_timeline_for_certification",
             AsyncMock(side_effect=delayed_cache_result),
         ):
@@ -2190,7 +2190,7 @@ class TestThreadingBehavior:
         failed_result = SyncCacheWriteResult(complete=True, errors=(RuntimeError("cache failed"),))
 
         with patch.object(
-            bot._conversation_cache,
+            bot.conversation_cache,
             "cache_sync_timeline_for_certification",
             AsyncMock(return_value=failed_result),
         ):
@@ -2200,7 +2200,7 @@ class TestThreadingBehavior:
 
         bot.client.next_batch = "s_after_recovery"
         with patch.object(
-            bot._conversation_cache,
+            bot.conversation_cache,
             "cache_sync_timeline_for_certification",
             AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
         ):
@@ -2240,7 +2240,7 @@ class TestThreadingBehavior:
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
 
-        result = await bot._conversation_cache.cache_sync_timeline_for_certification(self._sync_response({}))
+        result = await bot.conversation_cache.cache_sync_timeline_for_certification(self._sync_response({}))
 
         assert result.complete is True
         assert result.task_count == 1
@@ -2254,7 +2254,7 @@ class TestThreadingBehavior:
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
 
-        result = await bot._conversation_cache.cache_sync_timeline_for_certification(self._sync_response({}))
+        result = await bot.conversation_cache.cache_sync_timeline_for_certification(self._sync_response({}))
 
         assert result.complete is False
         assert result.task_count == 1
@@ -2279,7 +2279,7 @@ class TestThreadingBehavior:
             },
         )
 
-        result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+        result = await bot.conversation_cache.cache_sync_timeline_for_certification(
             self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=False))}),
         )
 
@@ -2321,7 +2321,7 @@ class TestThreadingBehavior:
             },
         )
 
-        result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+        result = await bot.conversation_cache.cache_sync_timeline_for_certification(
             self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=False))}),
         )
 
@@ -2393,7 +2393,7 @@ class TestThreadingBehavior:
             "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
         }
 
-        bot._conversation_cache.cache_sync_timeline(sync_response)
+        bot.conversation_cache.cache_sync_timeline(sync_response)
         await asyncio.wait_for(store_started.wait(), timeout=1.0)
 
         allow_store_finish.set()
@@ -2434,7 +2434,7 @@ class TestThreadingBehavior:
             "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
         }
 
-        bot._conversation_cache.cache_sync_timeline(sync_response)
+        bot.conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.append_event.assert_awaited_once()
@@ -2479,7 +2479,7 @@ class TestThreadingBehavior:
             "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event])),
         }
 
-        bot._conversation_cache.cache_sync_timeline(sync_response)
+        bot.conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.append_event.assert_awaited_once()
@@ -2546,7 +2546,7 @@ class TestThreadingBehavior:
                 "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event])),
             }
 
-            bot._conversation_cache.cache_sync_timeline(sync_response)
+            bot.conversation_cache.cache_sync_timeline(sync_response)
             await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
             cached_thread_events = await bot.event_cache.get_thread_events(
@@ -2598,7 +2598,7 @@ class TestThreadingBehavior:
             "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
         }
 
-        bot._conversation_cache.cache_sync_timeline(sync_response)
+        bot.conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.append_event.assert_not_awaited()
@@ -2651,7 +2651,7 @@ class TestThreadingBehavior:
             "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event])),
         }
 
-        bot._conversation_cache.cache_sync_timeline(sync_response)
+        bot.conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$room_msg:localhost")
@@ -2701,7 +2701,7 @@ class TestThreadingBehavior:
             "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event])),
         }
 
-        bot._conversation_cache.cache_sync_timeline(sync_response)
+        bot.conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
@@ -2747,7 +2747,7 @@ class TestThreadingBehavior:
             "!test:localhost": MagicMock(timeline=MagicMock(events=[redaction_event])),
         }
 
-        bot._conversation_cache.cache_sync_timeline(sync_response)
+        bot.conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.redact_event.assert_awaited_once_with("!test:localhost", "$reaction:localhost")
@@ -2812,7 +2812,7 @@ class TestThreadingBehavior:
             "!test:localhost": MagicMock(timeline=MagicMock(events=[first_edit_event, second_edit_event])),
         }
 
-        bot._conversation_cache.cache_sync_timeline(sync_response)
+        bot.conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.mark_room_threads_stale.assert_awaited_once_with(
@@ -2871,7 +2871,7 @@ class TestThreadingBehavior:
             ),
         }
 
-        bot._conversation_cache.cache_sync_timeline(sync_response)
+        bot.conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         assert event_cache.redact_event.await_args_list == [
@@ -2950,10 +2950,10 @@ class TestThreadingBehavior:
             "!test:localhost": MagicMock(timeline=MagicMock(events=[redaction_event])),
         }
 
-        bot._conversation_cache.cache_sync_timeline(first_sync_response)
+        bot.conversation_cache.cache_sync_timeline(first_sync_response)
         await asyncio.wait_for(store_started.wait(), timeout=1.0)
 
-        bot._conversation_cache.cache_sync_timeline(second_sync_response)
+        bot.conversation_cache.cache_sync_timeline(second_sync_response)
         await asyncio.sleep(0)
         event_cache.redact_event.assert_not_awaited()
 
@@ -3007,7 +3007,7 @@ class TestThreadingBehavior:
             "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event, redaction_event])),
         }
 
-        bot._conversation_cache.cache_sync_timeline(sync_response)
+        bot.conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.append_event.assert_awaited_once()
@@ -3060,12 +3060,12 @@ class TestThreadingBehavior:
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
 
-        bot._conversation_cache.cache_sync_timeline(
+        bot.conversation_cache.cache_sync_timeline(
             sync_response_for("!room-a:localhost", "$room_a_msg:localhost"),
         )
         await asyncio.wait_for(room_a_started.wait(), timeout=1.0)
 
-        bot._conversation_cache.cache_sync_timeline(
+        bot.conversation_cache.cache_sync_timeline(
             sync_response_for("!room-b:localhost", "$room_b_msg:localhost"),
         )
         await asyncio.wait_for(room_b_finished.wait(), timeout=1.0)
@@ -3177,7 +3177,7 @@ class TestThreadingBehavior:
                 "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event, redaction_event])),
             }
 
-            bot._conversation_cache.cache_sync_timeline(sync_response)
+            bot.conversation_cache.cache_sync_timeline(sync_response)
             await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
             cached_event = await bot.event_cache.get_event("!test:localhost", "$thread_msg:localhost")
             cached_thread_events = await bot.event_cache.get_thread_events(
@@ -3236,7 +3236,7 @@ class TestThreadingBehavior:
             "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event, redaction_event])),
         }
 
-        bot._conversation_cache.cache_sync_timeline(sync_response)
+        bot.conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.store_events_batch.assert_awaited_once()
@@ -3360,7 +3360,7 @@ class TestThreadingBehavior:
             },
         )
 
-        await bot._conversation_cache.append_live_event(
+        await bot.conversation_cache.append_live_event(
             "!test:localhost",
             edit_event,
             event_info=EventInfo.from_event(edit_event.source),
@@ -3406,7 +3406,7 @@ class TestThreadingBehavior:
             },
         )
 
-        await bot._conversation_cache.append_live_event(
+        await bot.conversation_cache.append_live_event(
             "!test:localhost",
             edit_event,
             event_info=EventInfo.from_event(edit_event.source),
@@ -3449,7 +3449,7 @@ class TestThreadingBehavior:
             },
         )
 
-        await bot._conversation_cache.append_live_event(
+        await bot.conversation_cache.append_live_event(
             "!test:localhost",
             edit_event,
             event_info=EventInfo.from_event(edit_event.source),
@@ -3961,7 +3961,7 @@ class TestThreadingBehavior:
                 },
             )
 
-            await bot._conversation_cache.append_live_event(
+            await bot.conversation_cache.append_live_event(
                 room_id,
                 plain_reply_event,
                 event_info=EventInfo.from_event(plain_reply_event.source),
@@ -4043,7 +4043,7 @@ class TestThreadingBehavior:
                 },
             )
 
-            await bot._conversation_cache.append_live_event(
+            await bot.conversation_cache.append_live_event(
                 room_id,
                 second_plain_reply_event,
                 event_info=EventInfo.from_event(second_plain_reply_event.source),
@@ -4909,7 +4909,7 @@ class TestThreadingBehavior:
                     "type": "m.room.message",
                 },
             )
-            await bot._conversation_cache.append_live_event(
+            await bot.conversation_cache.append_live_event(
                 room_id,
                 plain_reply_event,
                 event_info=EventInfo.from_event(plain_reply_event.source),
@@ -4935,7 +4935,7 @@ class TestThreadingBehavior:
                 },
             )
 
-            await bot._conversation_cache.append_live_event(
+            await bot.conversation_cache.append_live_event(
                 room_id,
                 edit_event,
                 event_info=EventInfo.from_event(edit_event.source),
@@ -4995,7 +4995,7 @@ class TestThreadingBehavior:
                 room_id="!test:localhost",
             ),
         )
-        bot._conversation_cache.notify_outbound_redaction = Mock()
+        bot.conversation_cache.notify_outbound_redaction = Mock()
 
         result = await bot._redact_message_event(
             room_id="!test:localhost",
@@ -5009,7 +5009,7 @@ class TestThreadingBehavior:
             "$target:localhost",
             reason="cleanup",
         )
-        bot._conversation_cache.notify_outbound_redaction.assert_called_once_with(
+        bot.conversation_cache.notify_outbound_redaction.assert_called_once_with(
             "!test:localhost",
             "$target:localhost",
         )
@@ -5858,7 +5858,7 @@ class TestThreadingBehavior:
         try:
             bot.client.room_messages = AsyncMock(side_effect=room_messages)
             prewarm_task = asyncio.create_task(
-                bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm(
+                bot.conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm(
                     room_id,
                     thread_id,
                 ),
@@ -5868,7 +5868,7 @@ class TestThreadingBehavior:
             allow_prewarm_fetch_finish.set()
             prewarm_history = await asyncio.wait_for(prewarm_task, timeout=1.0)
 
-            history = await bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id)
+            history = await bot.conversation_cache.get_dispatch_thread_history(room_id, thread_id)
         finally:
             allow_prewarm_fetch_finish.set()
             await _close_bound_runtime_support(bot, support)
@@ -5940,14 +5940,14 @@ class TestThreadingBehavior:
         try:
             bot.client.room_messages = AsyncMock(side_effect=room_messages)
             dispatch_task = asyncio.create_task(
-                bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id),
+                bot.conversation_cache.get_dispatch_thread_history(room_id, thread_id),
             )
             await asyncio.wait_for(dispatch_fetch_started.wait(), timeout=1.0)
 
             allow_dispatch_fetch_finish.set()
             dispatch_history = await asyncio.wait_for(dispatch_task, timeout=1.0)
 
-            history = await bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id)
+            history = await bot.conversation_cache.get_dispatch_thread_history(room_id, thread_id)
         finally:
             allow_dispatch_fetch_finish.set()
             await _close_bound_runtime_support(bot, support)
@@ -6026,7 +6026,7 @@ class TestThreadingBehavior:
             page.end = None
             bot.client.room_messages = AsyncMock(return_value=page)
 
-            history = await bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id)
+            history = await bot.conversation_cache.get_dispatch_thread_history(room_id, thread_id)
         finally:
             allow_write_commit.set()
             await _close_bound_runtime_support(bot, support)
@@ -7665,12 +7665,12 @@ class TestThreadingBehavior:
                 AsyncMock(return_value="latest_thread_event"),
             ),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_dispatch_thread_snapshot",
                 AsyncMock(return_value=thread_history_result([], is_full_history=False)),
             ),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_dispatch_thread_history",
                 AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
@@ -7680,7 +7680,7 @@ class TestThreadingBehavior:
                 AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_strict_thread_history",
                 AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
@@ -7730,7 +7730,7 @@ class TestThreadingBehavior:
             _message(event_id="$thread_msg:localhost", body="Original"),
         ]
         with patch.object(
-            bot._conversation_cache,
+            bot.conversation_cache,
             "get_thread_history",
             AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
@@ -7788,7 +7788,7 @@ class TestThreadingBehavior:
             _message(event_id="$thread_msg:localhost", body="Thread message"),
         ]
         with patch.object(
-            bot._conversation_cache,
+            bot.conversation_cache,
             "get_thread_history",
             AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
@@ -7842,7 +7842,7 @@ class TestThreadingBehavior:
         )
 
         with patch.object(
-            bot._conversation_cache,
+            bot.conversation_cache,
             "get_thread_history",
             AsyncMock(
                 return_value=thread_history_result(
@@ -7891,12 +7891,12 @@ class TestThreadingBehavior:
         ]
         with (
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_id_for_event",
                 AsyncMock(return_value="$thread_root:localhost"),
             ) as mock_lookup,
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_history",
                 AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
             ) as mock_fetch,
@@ -7955,7 +7955,7 @@ class TestThreadingBehavior:
             _message(event_id="$thread_reply:localhost", body="Thread reply"),
         ]
         with patch.object(
-            bot._conversation_cache,
+            bot.conversation_cache,
             "get_thread_history",
             AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
@@ -8029,12 +8029,12 @@ class TestThreadingBehavior:
 
         with (
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_id_for_event",
                 AsyncMock(return_value=None),
             ) as mock_lookup,
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_history",
                 AsyncMock(
                     return_value=thread_history_result(
@@ -8110,12 +8110,12 @@ class TestThreadingBehavior:
 
         with (
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_id_for_event",
                 AsyncMock(return_value="$thread_root:localhost"),
             ) as mock_lookup,
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_history",
                 AsyncMock(
                     return_value=thread_history_result(
@@ -8201,7 +8201,7 @@ class TestThreadingBehavior:
                 _message(event_id="$reply:localhost", body="Reply"),
             ]
             with patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_history",
                 AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
             ) as mock_fetch:
@@ -8265,7 +8265,7 @@ class TestThreadingBehavior:
             _message(event_id="$reply:localhost", body="Reply"),
         ]
         with patch.object(
-            bot._conversation_cache,
+            bot.conversation_cache,
             "get_thread_history",
             AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_history:
@@ -8348,7 +8348,7 @@ class TestThreadingBehavior:
             _message(event_id="$plain-reply:localhost", body="Bridged plain reply"),
         ]
         with patch.object(
-            bot._conversation_cache,
+            bot.conversation_cache,
             "get_thread_history",
             AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
@@ -8407,7 +8407,7 @@ class TestThreadingBehavior:
         bot.event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
 
         with patch.object(
-            bot._conversation_cache,
+            bot.conversation_cache,
             "get_thread_history",
             AsyncMock(
                 return_value=ThreadHistoryResult(
@@ -8471,7 +8471,7 @@ class TestThreadingBehavior:
         bot.event_cache.get_thread_id_for_event = AsyncMock(side_effect=RuntimeError("sqlite boom"))
 
         with patch.object(
-            bot._conversation_cache,
+            bot.conversation_cache,
             "get_thread_history",
             AsyncMock(
                 return_value=thread_history_result(
@@ -8572,7 +8572,7 @@ class TestThreadingBehavior:
             _message(event_id="$plain2:localhost", body="Second plain reply"),
         ]
         with patch.object(
-            bot._conversation_cache,
+            bot.conversation_cache,
             "get_thread_history",
             AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
@@ -8696,17 +8696,17 @@ class TestThreadingBehavior:
         )
         with (
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_id_for_event",
                 AsyncMock(return_value="$thread_root:localhost"),
             ) as mock_lookup,
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_dispatch_thread_history",
                 new=AsyncMock(return_value=dispatch_history),
             ) as mock_history,
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_history",
                 AsyncMock(),
             ) as mock_fetch,
@@ -8760,12 +8760,12 @@ class TestThreadingBehavior:
 
         with (
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_id_for_event",
                 AsyncMock(return_value="$thread_root:localhost"),
             ),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_dispatch_thread_history",
                 AsyncMock(return_value=dispatch_history),
             ) as mock_read,
@@ -8825,17 +8825,17 @@ class TestThreadingBehavior:
 
         with (
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_id_for_event",
                 AsyncMock(return_value=None),
             ) as mock_lookup,
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_event",
                 AsyncMock(return_value=root_response),
             ) as mock_get_event,
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_dispatch_thread_history",
                 AsyncMock(return_value=degraded_history),
             ) as mock_read,
@@ -8895,10 +8895,10 @@ class TestThreadingBehavior:
         )
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
-            patch.object(bot._conversation_cache, "get_event", AsyncMock(return_value=root_response)),
+            patch.object(bot.conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot.conversation_cache, "get_event", AsyncMock(return_value=root_response)),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_dispatch_thread_history",
                 AsyncMock(side_effect=TimeoutError("dispatch read timed out")),
             ) as mock_read,
@@ -8943,9 +8943,9 @@ class TestThreadingBehavior:
         )
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
-            patch.object(bot._conversation_cache, "get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock()) as mock_read,
+            patch.object(bot.conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot.conversation_cache, "get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
+            patch.object(bot.conversation_cache, "get_dispatch_thread_history", AsyncMock()) as mock_read,
         ):
             context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
 
@@ -8981,13 +8981,13 @@ class TestThreadingBehavior:
         )
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot.conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_event",
                 AsyncMock(return_value=nio.RoomGetEventError("missing", status_code="M_NOT_FOUND")),
             ),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock()) as mock_read,
+            patch.object(bot.conversation_cache, "get_dispatch_thread_history", AsyncMock()) as mock_read,
         ):
             context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
 
@@ -9023,13 +9023,13 @@ class TestThreadingBehavior:
         )
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot.conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_event",
                 AsyncMock(return_value=nio.RoomGetEventError("missing", status_code="M_NOT_FOUND")),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock()) as mock_read,
+            patch.object(bot.conversation_cache, "get_thread_history", AsyncMock()) as mock_read,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -9112,17 +9112,17 @@ class TestThreadingBehavior:
 
         with (
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_id_for_event",
                 AsyncMock(return_value=None),
             ),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_event",
                 AsyncMock(return_value=plain_response),
             ),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_dispatch_thread_history",
                 AsyncMock(return_value=empty_history),
             ),
@@ -9186,15 +9186,15 @@ class TestThreadingBehavior:
 
         bot.event_cache.get_recent_room_events = AsyncMock(return_value=[])
         with (
-            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
-            patch.object(bot._conversation_cache, "get_event", AsyncMock(return_value=root_response)),
+            patch.object(bot.conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot.conversation_cache, "get_event", AsyncMock(return_value=root_response)),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_dispatch_thread_history",
                 AsyncMock(return_value=degraded_history),
             ),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_strict_thread_history",
                 AsyncMock(side_effect=AssertionError("dispatch finalization must remain bounded")),
             ) as mock_strict_history,
@@ -9257,12 +9257,12 @@ class TestThreadingBehavior:
 
         with (
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_dispatch_thread_history",
                 AsyncMock(return_value=degraded_history),
             ) as mock_dispatch_history,
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_strict_thread_history",
                 AsyncMock(return_value=full_history),
             ) as mock_strict_history,
@@ -9450,8 +9450,8 @@ class TestThreadingBehavior:
         resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
-            patch.object(bot._conversation_cache, "get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
+            patch.object(bot.conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot.conversation_cache, "get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
             pytest.raises(RuntimeError, match="Could not resolve canonical coalescing thread"),
         ):
             await resolver.coalescing_thread_id(room, event)
@@ -9488,12 +9488,12 @@ class TestThreadingBehavior:
 
         with (
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_id_for_event",
                 AsyncMock(return_value=None),
             ) as mock_lookup,
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_event",
                 AsyncMock(
                     return_value=nio.RoomGetEventResponse.from_dict(
@@ -9512,7 +9512,7 @@ class TestThreadingBehavior:
                 ),
             ) as mock_get_event,
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_thread_history",
                 AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
             ) as mock_history,

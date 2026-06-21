@@ -559,6 +559,21 @@ class ScheduleFiredContext(HookContext):
 
 
 @dataclass(slots=True)
+class AutomationTriggeredContext(HookContext):
+    """Context for automation:triggered hooks."""
+
+    agent_name: str
+    automation_id: str
+    requester_id: str | None
+    workspace_root: str
+    room_id: str | None
+    thread_id: str | None
+    check_result: dict[str, Any]
+    trigger_payload: dict[str, Any]
+    action_payload: dict[str, Any]
+
+
+@dataclass(slots=True)
 class ReactionReceivedContext(HookContext):
     """Context for reaction:received hooks."""
 
@@ -812,6 +827,8 @@ def _requester_id_for_hook_send(
         requester_id = envelope.requester_id
     elif isinstance(context, ScheduleFiredContext):
         requester_id = context.created_by
+    elif isinstance(context, AutomationTriggeredContext):
+        requester_id = context.requester_id if trigger_dispatch else None
     elif isinstance(context, ReactionReceivedContext | CustomEventContext):
         requester_id = context.sender_id
     else:

@@ -334,6 +334,14 @@ def _private_root_name(agent_name: str, config: Config) -> str:
     return agent_config.private.root
 
 
+def _agent_requires_workspace(agent_name: str, config: Config) -> bool:
+    """Return whether a shared agent needs a canonical workspace root."""
+    return (
+        config.get_agent_memory_backend(agent_name) == "file"
+        or config.get_agent_workspace_automation_policy(agent_name).enabled
+    )
+
+
 def _effective_workspace(
     agent_name: str,
     config: Config,
@@ -379,8 +387,9 @@ def _resolve_workspace(
         return None
 
     if agent_config.private is None:
-        if config.get_agent_memory_backend(agent_name) != "file":
+        if not _agent_requires_workspace(agent_name, config):
             return None
+        file_memory_enabled = config.get_agent_memory_backend(agent_name) == "file"
         root = resolve_workspace_relative_path(
             state_storage_path,
             "workspace",
@@ -391,7 +400,7 @@ def _resolve_workspace(
         return ResolvedAgentWorkspace(
             root=root,
             context_files=(),
-            file_memory_path=root,
+            file_memory_path=root if file_memory_enabled else None,
         )
 
     workspace = _effective_workspace(agent_name, config, runtime_paths=runtime_paths)

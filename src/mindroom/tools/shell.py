@@ -74,7 +74,7 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
 _STALE_RECORD_SECONDS = 600  # 10 minutes
 _MAX_BACKGROUNDED = 16
 _MAX_OUTPUT_LINES = 10_000
-_MAX_OUTPUT_BYTES = 50 * 1024
+_MAX_OUTPUT_BYTES = 64 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
@@ -399,7 +399,12 @@ class _ProcessRecord:
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=[],
     docs_url="https://docs.agno.com/tools/toolkits/local/shell",
-    function_names=("check_shell_command", "kill_shell_command", "run_shell_command"),
+    function_names=(
+        "check_shell_command",
+        "kill_shell_command",
+        "run_shell_command",
+        "run_shell_command_structured",
+    ),
 )
 def shell_tools() -> type[Toolkit]:  # noqa: C901
     """Return shell tools for command execution."""
@@ -422,15 +427,21 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
             tools: list[object] = []
             if all or enable_run_shell_command:
-                tools.extend([self.run_shell_command, self.check_shell_command, self.kill_shell_command])
+                tools.extend(
+                    [
+                        self.run_shell_command,
+                        self.run_shell_command_structured,
+                        self.check_shell_command,
+                        self.kill_shell_command,
+                    ],
+                )
 
             super().__init__(name="shell_tools", tools=tools, **kwargs)  # ty: ignore[invalid-argument-type]
-            run_shell_command_function = self.async_functions.get("run_shell_command")
-            if run_shell_command_function is not None:
-                effective_strict = (
-                    False if run_shell_command_function.strict is None else run_shell_command_function.strict
-                )
-                run_shell_command_function.process_entrypoint(strict=effective_strict)
+            for function_name in ("run_shell_command", "run_shell_command_structured"):
+                shell_function = self.async_functions.get(function_name)
+                if shell_function is not None:
+                    effective_strict = False if shell_function.strict is None else shell_function.strict
+                    shell_function.process_entrypoint(strict=effective_strict)
 
             self._runtime_env = dict(
                 shell_execution_runtime_env_values(
@@ -555,6 +566,105 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 return f"Error: {stderr_buf.render()}"
             return stdout_buf.render(tail=tail)
 
+        async def run_shell_command_structured(
+            self,
+            args: list[str] | str,
+            tail: int = 100,
+            timeout: int = 120,  # noqa: ASYNC109
+            max_output_bytes: int = _MAX_OUTPUT_BYTES,
+        ) -> dict[str, object]:
+            """Run a shell command and return a JSON-safe structured result."""
+            self._sweep_stale_records()
+            if max_output_bytes < 1 or max_output_bytes > _MAX_OUTPUT_BYTES:
+                return _structured_shell_result(
+                    ok=False,
+                    exit_code=None,
+                    stdout="",
+                    stderr="",
+                    raw_output="",
+                    timed_out=False,
+                    error=f"max_output_bytes must be between 1 and {_MAX_OUTPUT_BYTES}.",
+                )
+
+            try:
+                command_args = _normalize_shell_args(args)
+                subprocess_env = _shell_subprocess_env(
+                    self._runtime_env,
+                    base_process_env=self._base_process_env,
+                    shell_path_prepend=self._shell_path_prepend,
+                )
+                process = await asyncio.create_subprocess_exec(
+                    *_shell_subprocess_args(command_args, subprocess_env),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(self.base_dir) if self.base_dir else None,
+                    env=subprocess_env,
+                    start_new_session=True,
+                )
+            except Exception as exc:
+                return _structured_shell_result(
+                    ok=False,
+                    exit_code=None,
+                    stdout="",
+                    stderr="",
+                    raw_output="",
+                    timed_out=False,
+                    error=str(exc),
+                )
+
+            stdout_buf = _OutputBuffer(max_bytes=max_output_bytes)
+            stderr_buf = _OutputBuffer(max_bytes=max_output_bytes)
+            stdout_reader = asyncio.create_task(_read_stream(process.stdout, stdout_buf))
+            stderr_reader = asyncio.create_task(_read_stream(process.stderr, stderr_buf))
+            timed_out = False
+
+            try:
+                try:
+                    await _await_foreground_process_exit(process, timeout_seconds=timeout)
+                except TimeoutError:
+                    timed_out = True
+                    await _terminate_process_group(process)
+
+                await _await_reader_tasks_with_grace(
+                    stdout_reader,
+                    stderr_reader,
+                    grace_seconds=_POST_EXIT_READER_GRACE_SECONDS,
+                )
+            except asyncio.CancelledError:
+                if process.returncode is None:
+                    await _terminate_process_group(process)
+                await _cancel_pending_tasks(stdout_reader, stderr_reader)
+                raise
+
+            stdout, stderr, raw_output = _structured_output_from_buffers(
+                stdout_buf,
+                stderr_buf,
+                tail=tail,
+                max_output_bytes=max_output_bytes,
+            )
+            if timed_out:
+                return _structured_shell_result(
+                    ok=False,
+                    exit_code=None,
+                    stdout=stdout,
+                    stderr=stderr,
+                    raw_output=raw_output,
+                    timed_out=True,
+                    error=f"Command timed out after {timeout}s.",
+                )
+
+            exit_code = process.returncode
+            ok = exit_code == 0
+            return _structured_shell_result(
+                ok=ok,
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
+                raw_output=raw_output,
+                timed_out=False,
+                error=None,
+            )
+
         def check_shell_command(self, handle: str) -> str:
             """Poll the status of a backgrounded shell command.
 
@@ -632,6 +742,62 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 self._processes.pop(h, None)
 
     return MindRoomShellTools
+
+
+def _structured_shell_result(
+    *,
+    ok: bool,
+    exit_code: int | None,
+    stdout: str,
+    stderr: str,
+    raw_output: str,
+    timed_out: bool,
+    error: str | None,
+) -> dict[str, object]:
+    """Return the JSON-safe structured shell result shape."""
+    return {
+        "ok": ok,
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "raw_output": raw_output,
+        "timed_out": timed_out,
+        "error": error,
+    }
+
+
+def _structured_output_from_buffers(
+    stdout_buf: _OutputBuffer,
+    stderr_buf: _OutputBuffer,
+    *,
+    tail: int,
+    max_output_bytes: int,
+) -> tuple[str, str, str]:
+    stdout = _truncate_utf8_tail(_tail_output_lines(stdout_buf._rendered_text(), tail), max_output_bytes)
+    stderr = _truncate_utf8_tail(_tail_output_lines(stderr_buf._rendered_text(), tail), max_output_bytes)
+    raw_output = _truncate_utf8_tail(_combined_raw_output(stdout, stderr), max_output_bytes)
+    return stdout, stderr, raw_output
+
+
+def _tail_output_lines(text: str, tail: int) -> str:
+    if not text:
+        return text
+    if tail <= 0:
+        return ""
+    return "\n".join(text.split("\n")[-tail:])
+
+
+def _truncate_utf8_tail(text: str, max_bytes: int) -> str:
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[-max_bytes:].decode("utf-8", errors="ignore")
+
+
+def _combined_raw_output(stdout: str, stderr: str) -> str:
+    if stdout and stderr:
+        return f"{stdout}\n{stderr}"
+    return stdout or stderr
 
 
 async def _read_stream(stream: asyncio.StreamReader | None, buf: _OutputBuffer) -> None:

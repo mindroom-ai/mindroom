@@ -21,6 +21,7 @@ from mindroom.config.models import (
     AgentLearningMode,
     CompactionOverrideConfig,
     ToolConfigEntry,
+    WorkspaceAutomationPolicyConfig,
     validate_unique_tool_entries,
 )
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
@@ -212,6 +213,12 @@ class AgentConfig(BaseModel):
     compaction: CompactionOverrideConfig | None = Field(
         default=None,
         description="Per-agent required-compaction overrides",
+    )
+    workspace_automations: WorkspaceAutomationPolicyConfig | None = Field(
+        default=None,
+        description=(
+            "Per-agent gates for workspace-authored unattended automation; does not affect normal scheduled tasks"
+        ),
     )
     private: AgentPrivateConfig | None = Field(
         default=None,

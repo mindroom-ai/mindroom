@@ -18,6 +18,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_execution_scope,
     resolve_worker_key,
 )
+from mindroom.workspace_instances import WorkspaceInstanceRecord, record_workspace_instance
 from mindroom.workspaces import (
     ResolvedAgentWorkspace,
     ensure_workspace_knowledge_links,
@@ -245,7 +246,7 @@ def resolve_agent_runtime(
         )
     tool_base_dir = workspace.root if workspace is not None else None
     file_memory_root = workspace.file_memory_path if workspace is not None else None
-    return ResolvedAgentRuntime(
+    runtime = ResolvedAgentRuntime(
         agent_name=agent_name,
         policy=resolved_execution.policy,
         execution_scope=resolved_execution.execution_scope,
@@ -256,6 +257,20 @@ def resolve_agent_runtime(
         tool_base_dir=tool_base_dir,
         file_memory_root=file_memory_root,
     )
+    if runtime.is_private and workspace is not None and workspace.root.exists():
+        record_workspace_instance(
+            runtime_paths,
+            WorkspaceInstanceRecord(
+                agent_name=runtime.agent_name,
+                workspace_root=workspace.root,
+                state_root=runtime.state_root,
+                execution_scope=runtime.execution_scope,
+                execution_identity=runtime.execution_identity,
+                worker_key=runtime.worker_key,
+                is_private=runtime.is_private,
+            ),
+        )
+    return runtime
 
 
 def resolve_knowledge_binding(

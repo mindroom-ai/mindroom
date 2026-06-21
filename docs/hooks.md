@@ -157,6 +157,7 @@ async def block_secret_reads(ctx):
 | `compaction:before` | Observer | `CompactionHookContext` | After the compacted message set is prepared and before the compacted session is persisted | None (frozen) |
 | `compaction:after` | Observer | `CompactionHookContext` | After compaction is persisted, with before/after token counts and the generated summary | None (frozen) |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
+| `automation:triggered` | Observer | `AutomationTriggeredContext` | After a workspace automation shell check matches its trigger and before or instead of any configured hook-side effect | None |
 | `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
 | `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router bot after a live human `m.room.member` join, excluding initial sync history, configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
@@ -188,6 +189,7 @@ This makes it suitable for lobby-based onboarding hooks that should create or in
 | `reaction:received` | 500 |
 | `room:member_joined` | 3000 |
 | `schedule:fired` | 1000 |
+| `automation:triggered` | 1000 |
 | `agent:started` | 5000 |
 | `agent:stopped` | 5000 |
 | `bot:ready` | 5000 |
@@ -637,6 +639,18 @@ RoomMemberJoinedContext(
     avatar_url: str | None,
     membership: str,
     prev_membership: str | None,
+)
+
+AutomationTriggeredContext(
+    agent_name: str,
+    automation_id: str,
+    requester_id: str | None,
+    workspace_root: str,
+    room_id: str | None,  # resolved Matrix room ID when a hook action has a configured or inferred room
+    thread_id: str | None,
+    check_result: dict[str, Any],
+    trigger_payload: dict[str, Any],
+    action_payload: dict[str, Any],
 )
 
 ToolBeforeCallContext(

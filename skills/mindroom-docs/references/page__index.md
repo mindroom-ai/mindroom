@@ -156,6 +156,7 @@ mindroom run
 - [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure semantic indexing or files-only knowledge access
 - [Memory System](https://docs.mindroom.chat/memory/) - How agent memory works
 - [Scheduling](https://docs.mindroom.chat/scheduling/) - Schedule tasks with cron or natural language
+- [Workspace Automations](https://docs.mindroom.chat/workspace-automations/) - Run deterministic workspace-local checks on cron schedules
 - [Voice Messages](https://docs.mindroom.chat/voice/) - Voice message transcription
 - [Image Messages](https://docs.mindroom.chat/images/) - Image analysis with vision models
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Context-scoped file and video handling

@@ -122,13 +122,13 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
         bot.client = mock_client
         install_runtime_cache_support(bot)
-        bot._conversation_cache.get_thread_history = AsyncMock(
+        bot.conversation_cache.get_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
         )
-        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
+        bot.conversation_cache.get_dispatch_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
         )
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        bot.conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
         bot.running = True
@@ -355,9 +355,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         room.members_synced = True
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
-            patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
+            patch.object(bot.conversation_cache, "get_thread_history") as mock_fetch,
+            patch.object(bot.conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
+            patch.object(bot.conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
             patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
@@ -415,9 +415,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         message_event_2.sender = test_user_id
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
-            patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
+            patch.object(bot.conversation_cache, "get_thread_history") as mock_fetch,
+            patch.object(bot.conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
+            patch.object(bot.conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
             patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
@@ -496,9 +496,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         message_event_with_mention.sender = test_user_id
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
-            patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
+            patch.object(bot.conversation_cache, "get_thread_history") as mock_fetch,
+            patch.object(bot.conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
+            patch.object(bot.conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
             patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_refresh_history,
             patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),

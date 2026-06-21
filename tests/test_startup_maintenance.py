@@ -45,18 +45,23 @@ async def test_startup_maintenance_runs_phases_in_order_and_passes_cutoff() -> N
     async def mark_runtime_support_ready() -> None:
         call_order.append("approval_ready")
 
+    async def after_rooms_and_memberships(startup_config: object) -> None:
+        assert startup_config is config
+        call_order.append("automations")
+
     controller = StartupMaintenanceController(
         setup_rooms_and_memberships=setup_rooms,
         cleanup_stale_streams=cleanup_stale,
         auto_resume=auto_resume,
         sync_runtime_support=sync_runtime_support,
         mark_runtime_support_ready=mark_runtime_support_ready,
+        after_rooms_and_memberships=after_rooms_and_memberships,
     )
 
     controller.start(bots, config, startup_cutoff_ms=123456)
     await _wait_for_controller(controller)
 
-    assert call_order == ["setup", "cleanup", "resume", "support", "approval_ready"]
+    assert call_order == ["setup", "cleanup", "resume", "support", "approval_ready", "automations"]
 
 
 @pytest.mark.asyncio
@@ -82,12 +87,16 @@ async def test_startup_maintenance_continues_after_failed_room_setup() -> None:
     async def mark_runtime_support_ready() -> None:
         call_order.append("approval_ready")
 
+    async def after_rooms_and_memberships(_: object) -> None:
+        call_order.append("automations")
+
     controller = StartupMaintenanceController(
         setup_rooms_and_memberships=setup_rooms,
         cleanup_stale_streams=cleanup_stale,
         auto_resume=auto_resume,
         sync_runtime_support=sync_runtime_support,
         mark_runtime_support_ready=mark_runtime_support_ready,
+        after_rooms_and_memberships=after_rooms_and_memberships,
     )
 
     controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)

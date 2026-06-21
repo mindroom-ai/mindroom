@@ -588,7 +588,7 @@ async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrat
     )
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
-    bot._conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
+    bot.conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
     _record_handled_turn(bot._turn_store, ["$original:example.com"], response_event_id="$response:example.com")
@@ -4276,13 +4276,13 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
-        bot._conversation_cache.get_thread_history = AsyncMock(
+        bot.conversation_cache.get_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
         )
-        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
+        bot.conversation_cache.get_dispatch_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
         )
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        bot.conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
@@ -4392,13 +4392,13 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
-        bot._conversation_cache.get_thread_history = AsyncMock(
+        bot.conversation_cache.get_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
         )
-        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
+        bot.conversation_cache.get_dispatch_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
         )
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        bot.conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")

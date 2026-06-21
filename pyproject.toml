@@ -379,6 +379,7 @@ unsplash = []
 visualization = [
   "matplotlib",
 ]
+workspace_automation = []
 web_browser_tools = []
 webex = [
   "webexpythonsdk",

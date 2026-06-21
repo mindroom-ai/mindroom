@@ -2530,8 +2530,8 @@ class TestAgentBot:
         history = ThreadHistoryResult([], is_full_history=True)
 
         with (
-            patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot", AsyncMock(return_value=snapshot)),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
+            patch.object(bot.conversation_cache, "get_dispatch_thread_snapshot", AsyncMock(return_value=snapshot)),
+            patch.object(bot.conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
         ):
             await bot._on_message(mock_room, mock_event)
             await drain_coalescing(bot)
@@ -3812,7 +3812,7 @@ class TestAgentBot:
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new=AsyncMock(return_value="$latest:localhost"),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
+            patch.object(bot.conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
             patch(
                 "mindroom.delivery_gateway.edit_message_result",
@@ -5299,7 +5299,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
         _install_runtime_cache_support(bot)
-        bot._conversation_cache.get_thread_id_for_event = AsyncMock(
+        bot.conversation_cache.get_thread_id_for_event = AsyncMock(
             side_effect=lambda room_id, event_id: (
                 "$thread-root" if (room_id, event_id) == ("!test:localhost", "$thread-reply") else None
             ),
@@ -5394,7 +5394,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
         _install_runtime_cache_support(bot)
-        bot._conversation_cache.get_thread_id_for_event = AsyncMock(
+        bot.conversation_cache.get_thread_id_for_event = AsyncMock(
             side_effect=lambda room_id, event_id: (
                 "$thread-root" if (room_id, event_id) == ("!test:localhost", "$thread-reply") else None
             ),
@@ -5935,7 +5935,7 @@ class TestAgentBot:
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_strict_thread_history",
                 new=AsyncMock(side_effect=cached_history_refresh),
             ) as mock_get_thread_history,
@@ -6171,7 +6171,7 @@ class TestAgentBot:
             thread_id="$thread",
             config=config,
             runtime_paths=bot.runtime_paths,
-            conversation_cache=bot._conversation_cache,
+            conversation_cache=bot.conversation_cache,
             message_count_hint=5,
             entity_name=bot.agent_name,
         )
@@ -6283,7 +6283,7 @@ class TestAgentBot:
             thread_id=root_event_id,
             config=config,
             runtime_paths=bot.runtime_paths,
-            conversation_cache=bot._conversation_cache,
+            conversation_cache=bot.conversation_cache,
             message_count_hint=1,
             entity_name=bot.agent_name,
         )
@@ -6443,7 +6443,7 @@ class TestAgentBot:
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
+            patch.object(bot.conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.response_lifecycle.apply_post_response_effects",
                 new=AsyncMock(side_effect=fake_post_effects),
@@ -6540,7 +6540,7 @@ class TestAgentBot:
             ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
             patch.object(bot, "_generate_team_response_helper", new=AsyncMock(side_effect=fail_helper)),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
+            patch.object(bot.conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             pytest.raises(RuntimeError, match="boom"),
@@ -6646,7 +6646,7 @@ class TestAgentBot:
                 new=AsyncMock(return_value="$response"),
             ),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_dispatch_thread_history",
                 AsyncMock(return_value=refreshed_history),
             ),
@@ -6755,7 +6755,7 @@ class TestAgentBot:
                 return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
             ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
+            patch.object(bot.conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(
@@ -6869,7 +6869,7 @@ class TestAgentBot:
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
+            patch.object(bot.conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(
@@ -6942,7 +6942,7 @@ class TestAgentBot:
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
+            patch.object(bot.conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(
@@ -7007,7 +7007,7 @@ class TestAgentBot:
                 typing_indicator=_noop_typing_indicator,
                 team_response=AsyncMock(return_value="Team handled"),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
+            patch.object(bot.conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
         ):
             resolution = await bot._generate_team_response_helper(
                 payload=DispatchPayload(prompt="Continue"),
@@ -7563,7 +7563,7 @@ class TestAgentBot:
         room.room_id = "!test:localhost"
         event = self._make_handler_event("image", sender="@user:localhost", event_id="$img_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
-        bot._conversation_cache.append_live_event = AsyncMock()
+        bot.conversation_cache.append_live_event = AsyncMock()
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value=None)
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
@@ -7571,8 +7571,8 @@ class TestAgentBot:
 
         await bot._turn_controller._handle_media_message_inner(room, event)
 
-        bot._conversation_cache.append_live_event.assert_awaited_once()
-        append_args = bot._conversation_cache.append_live_event.await_args
+        bot.conversation_cache.append_live_event.assert_awaited_once()
+        append_args = bot.conversation_cache.append_live_event.await_args
         assert append_args.args == ("!test:localhost", event)
         assert append_args.kwargs["event_info"].is_edit is False
         bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(room, event)
@@ -7634,7 +7634,7 @@ class TestAgentBot:
             call_order.append("normalize")
             await release_stt.wait()
 
-        bot._conversation_cache.append_live_event = AsyncMock(side_effect=record_append)
+        bot.conversation_cache.append_live_event = AsyncMock(side_effect=record_append)
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_thread_id)
         bot._turn_controller._precheck_dispatch_event = MagicMock(
             return_value=SimpleNamespace(event=event, requester_user_id="@user:localhost"),
@@ -7659,7 +7659,7 @@ class TestAgentBot:
         await asyncio.wait_for(admitted_slot.settled.wait(), timeout=1.0)
         _assert_ready_voice_text_fallback(ready_event)
         assert call_order == ["reserve", "append", "coalescing_thread", "admit", "normalize"]
-        bot._conversation_cache.append_live_event.assert_awaited_once()
+        bot.conversation_cache.append_live_event.assert_awaited_once()
         bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(
             room,
             event,
@@ -10795,7 +10795,7 @@ class TestAgentBot:
         event = self._make_handler_event("message", sender="@user:localhost", event_id="$event")
         event.body = "continue"
         event.source = {"content": {"body": "continue"}}
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        bot.conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
             return_value=ThreadHistoryResult(
                 [
                     ResolvedVisibleMessage(
@@ -11444,8 +11444,8 @@ class TestAgentBot:
         mock_dispatch_history = AsyncMock(return_value=history)
 
         with (
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", new=mock_dispatch_history),
-            patch.object(bot._conversation_cache, "get_thread_history", new=mock_advisory_history),
+            patch.object(bot.conversation_cache, "get_dispatch_thread_history", new=mock_dispatch_history),
+            patch.object(bot.conversation_cache, "get_thread_history", new=mock_advisory_history),
         ):
             context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
             context = context_result.context
@@ -11885,12 +11885,12 @@ class TestAgentBot:
                 new=AsyncMock(return_value=event),
             ),
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_dispatch_thread_history",
                 new=AsyncMock(side_effect=AssertionError("command used full dispatch history")),
             ) as mock_full_history,
             patch.object(
-                bot._conversation_cache,
+                bot.conversation_cache,
                 "get_dispatch_thread_snapshot",
                 new=AsyncMock(return_value=snapshot_history),
             ) as mock_snapshot,

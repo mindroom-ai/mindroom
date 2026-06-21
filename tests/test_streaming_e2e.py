@@ -384,12 +384,12 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         calc_bot = orchestrator.agent_bots["calculator"]
         empty_thread_history = thread_history_result([], is_full_history=True)
         empty_thread_snapshot = thread_history_result([], is_full_history=False)
-        helper_bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=empty_thread_history)
-        helper_bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
-        helper_bot._conversation_cache.get_thread_history = AsyncMock(return_value=empty_thread_history)
-        calc_bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=empty_thread_history)
-        calc_bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
-        calc_bot._conversation_cache.get_thread_history = AsyncMock(return_value=empty_thread_history)
+        helper_bot.conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=empty_thread_history)
+        helper_bot.conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
+        helper_bot.conversation_cache.get_thread_history = AsyncMock(return_value=empty_thread_history)
+        calc_bot.conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=empty_thread_history)
+        calc_bot.conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
+        calc_bot.conversation_cache.get_thread_history = AsyncMock(return_value=empty_thread_history)
 
         # Ensure calculator bot has streaming disabled for this test
         calc_bot.enable_streaming = False

@@ -135,6 +135,7 @@ from mindroom.tools.webex import webex_tools
 from mindroom.tools.website import website_tools
 from mindroom.tools.whatsapp import whatsapp_tools
 from mindroom.tools.wikipedia import wikipedia_tools
+from mindroom.tools.workspace_automation import workspace_automation_tools
 from mindroom.tools.x import x_tools
 from mindroom.tools.yfinance import yfinance_tools
 from mindroom.tools.youtube import youtube_tools
@@ -257,6 +258,7 @@ __all__ = [
     "website_tools",
     "whatsapp_tools",
     "wikipedia_tools",
+    "workspace_automation_tools",
     "x_tools",
     "yfinance_tools",
     "youtube_tools",

@@ -992,7 +992,7 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
 
 
 @pytest.mark.asyncio
-async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tmp_path: Path) -> None:
+async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tmp_path: Path) -> None:  # noqa: PLR0915
     """Initial sync loops must not wait for room reconciliation or restart maintenance."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
@@ -1022,6 +1022,7 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
         "router": asyncio.Event(),
         "general": asyncio.Event(),
     }
+    automations_started = asyncio.Event()
     call_order: list[str] = []
 
     async def blocked_setup(_: list[object]) -> None:
@@ -1033,6 +1034,10 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
     def start_sync_task(entity_name: str, _bot: object) -> None:
         call_order.append(f"sync_started:{entity_name}")
         sync_started_by_entity[entity_name].set()
+
+    async def start_workspace_automations(_: object) -> None:
+        call_order.append("automations_started")
+        automations_started.set()
 
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
@@ -1046,6 +1051,7 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
         patch.object(orchestrator, "_cleanup_stale_streams_after_restart", new=AsyncMock(return_value=[])),
         patch.object(orchestrator, "_auto_resume_after_restart", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator, "_start_workspace_automation_service", side_effect=start_workspace_automations),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
     ):
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
@@ -1057,9 +1063,14 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
             )
 
             assert "setup_finished" not in call_order
+            assert "automations_started" not in call_order
             assert {"sync_started:router", "sync_started:general"} <= set(call_order)
         finally:
             setup_can_finish.set()
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(automations_started.wait(), timeout=1.0)
+            if automations_started.is_set():
+                assert call_order.index("setup_finished") < call_order.index("automations_started")
             await orchestrator.stop()
             if not runtime_task.done():
                 runtime_task.cancel()

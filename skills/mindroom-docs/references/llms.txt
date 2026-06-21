@@ -47,6 +47,7 @@
 - [Interactive Q&A](https://docs.mindroom.chat/interactive/)
 - [Streaming](https://docs.mindroom.chat/streaming/)
 - [Scheduling](https://docs.mindroom.chat/scheduling/)
+- [Workspace Automations](https://docs.mindroom.chat/workspace-automations/)
 - [Authorization](https://docs.mindroom.chat/authorization/)
 - [Matrix Space](https://docs.mindroom.chat/matrix-space/)
 - [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/)
