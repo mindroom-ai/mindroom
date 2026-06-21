@@ -35,7 +35,7 @@ from mindroom.oauth.service import (
     build_oauth_reconnect_instruction,
     oauth_connect_url,
     oauth_credentials_usable,
-    refresh_scoped_oauth_credentials,
+    refresh_scoped_oauth_credentials_with_result,
 )
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -374,12 +374,13 @@ class MCPServerManager:
             worker_target=worker_target,
         )
         try:
-            credentials = await refresh_scoped_oauth_credentials(
+            refresh_result = await refresh_scoped_oauth_credentials_with_result(
                 provider,
                 self.runtime_paths,
                 credentials_manager=manager,
                 worker_target=worker_target,
             )
+            credentials = refresh_result.credentials
         except OAuthRefreshRejectedError as exc:
             self._log_oauth_refresh_failure(state, provider.id, previous_credentials or {}, exc)
             raise self._oauth_connection_required(
@@ -393,7 +394,7 @@ class MCPServerManager:
         if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
             raise self._oauth_connection_required(state, worker_target)
         assert credentials is not None
-        if previous_credentials is not None and credentials != previous_credentials:
+        if refresh_result.refreshed:
             logger.info(
                 "MCP OAuth token refreshed",
                 provider_id=provider.id,

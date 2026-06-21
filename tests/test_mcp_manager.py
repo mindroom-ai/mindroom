@@ -635,10 +635,11 @@ async def test_mcp_manager_serializes_oauth_refresh_read_modify_write_per_scope(
     monkeypatch.setattr("mindroom.mcp.manager.mcp_oauth_provider", lambda *_args: provider)
     state = manager._require_state("demo")
 
-    first_token, second_token = await asyncio.gather(
-        manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=worker_target),
-        manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=worker_target),
-    )
+    with patch("mindroom.mcp.manager.logger") as mock_logger:
+        first_token, second_token = await asyncio.gather(
+            manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=worker_target),
+            manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=worker_target),
+        )
 
     stored_credentials = load_scoped_credentials(
         "mcp_demo_oauth",
@@ -652,6 +653,10 @@ async def test_mcp_manager_serializes_oauth_refresh_read_modify_write_per_scope(
     assert _rotation_index(CHAIN_1) - _rotation_index(stored_credentials["refresh_token"]) < 2
     assert seen_refresh_tokens == [CHAIN_0]
     assert max_active_refreshes == 1
+    refresh_log_calls = [
+        call for call in mock_logger.info.call_args_list if call.args == ("MCP OAuth token refreshed",)
+    ]
+    assert len(refresh_log_calls) == 1
 
 
 @pytest.mark.asyncio
