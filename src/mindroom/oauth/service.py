@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode, urlparse
+
+from authlib.common.errors import AuthlibBaseError
+from httpx import HTTPStatusError
 
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials, validate_service_name
@@ -15,7 +19,6 @@ from mindroom.oauth.providers import OAuthClaimValidationError, OAuthProviderErr
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -228,45 +231,41 @@ def _refresh_token_value(credentials: Mapping[str, Any] | None) -> str | None:
 
 
 def _is_recoverable_stale_refresh_rejection(exc: OAuthProviderError) -> bool:
-    for value in _oauth_error_values(exc):
-        if any(code in value.lower() for code in _RECOVERABLE_REFRESH_ERROR_CODES):
-            return True
-    return False
+    error_code = _oauth_error_code(exc)
+    return error_code in _RECOVERABLE_REFRESH_ERROR_CODES
 
 
-def _oauth_error_values(exc: BaseException) -> tuple[str, ...]:
-    values: list[str] = []
+def _oauth_error_code(exc: BaseException) -> str | None:
     current: BaseException | None = exc
     while current is not None:
-        values.append(str(current))
-        for attribute_name in ("error", "error_code", "code", "description"):
-            value = getattr(current, attribute_name, None)
-            if isinstance(value, str):
-                values.append(value)
-        response = getattr(current, "response", None)
-        if response is not None:
-            values.extend(_oauth_error_response_values(response))
+        if isinstance(current, OAuthProviderError):
+            error_code = _normalized_oauth_error_code(current.oauth_error)
+            if error_code is not None:
+                return error_code
+        if isinstance(current, AuthlibBaseError):
+            error_code = _normalized_oauth_error_code(current.error)
+            if error_code is not None:
+                return error_code
+        if isinstance(current, HTTPStatusError):
+            error_code = _oauth_error_response_code(current)
+            if error_code is not None:
+                return error_code
         current = current.__cause__ if isinstance(current.__cause__, BaseException) else None
-    return tuple(value for value in values if value)
+    return None
 
 
-def _oauth_error_response_values(response: object) -> tuple[str, ...]:
-    status_code = getattr(response, "status_code", None)
-    values = [str(status_code)] if isinstance(status_code, int) else []
-    json_method = getattr(response, "json", None)
-    if not callable(json_method):
-        return tuple(values)
+def _normalized_oauth_error_code(value: object) -> str | None:
+    return value.strip().lower() if isinstance(value, str) and value.strip() else None
+
+
+def _oauth_error_response_code(exc: HTTPStatusError) -> str | None:
     try:
-        payload = json_method()
-    except ValueError:
-        return tuple(values)
-    if not isinstance(payload, dict):
-        return tuple(values)
-    for key in ("error", "error_description", "message"):
-        value = payload.get(key)
-        if isinstance(value, str):
-            values.append(value)
-    return tuple(values)
+        payload = exc.response.json()
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    return _normalized_oauth_error_code(payload.get("error"))
 
 
 def oauth_credential_target_payload(
