@@ -37,7 +37,7 @@ from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.agents import create_agent
 from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
@@ -76,6 +76,7 @@ from mindroom.history.policy import (
     resolve_history_execution_plan,
 )
 from mindroom.history.runtime import (
+    ScopeSessionContext,
     _plan_replay_that_fits,
     apply_replay_plan,
     estimate_preparation_static_tokens_for_team,
@@ -123,6 +124,7 @@ from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
     FakeModel,
     bind_runtime_paths,
@@ -4165,6 +4167,105 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
         estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
     )
     assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == expected_static_prompt_tokens
+
+
+def test_private_ad_hoc_bound_team_scope_is_requester_partitioned(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "private_worker": AgentConfig(
+                    display_name="Private Worker",
+                    private=AgentPrivateConfig(per="user", root="private_worker_data"),
+                ),
+                "shared": AgentConfig(display_name="Shared"),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    agents = [
+        Agent(id="private_worker", name="Private Worker"),
+        Agent(id="shared", name="Shared"),
+    ]
+
+    def identity_for(requester_id: str) -> ToolExecutionIdentity:
+        return ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="router",
+            requester_id=requester_id,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+
+    with (
+        open_bound_scope_session_context(
+            agents=agents,
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=identity_for("@alice:localhost"),
+        ) as alice_scope,
+        open_bound_scope_session_context(
+            agents=agents,
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=identity_for("@bob:localhost"),
+        ) as bob_scope,
+    ):
+        assert alice_scope is not None
+        assert bob_scope is not None
+        assert alice_scope.scope.scope_id.startswith("team_private_worker+shared_requester_")
+        assert bob_scope.scope.scope_id.startswith("team_private_worker+shared_requester_")
+        assert alice_scope.scope != bob_scope.scope
+
+
+@pytest.mark.asyncio
+async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "private_worker": AgentConfig(
+                    display_name="Private Worker",
+                    private=AgentPrivateConfig(per="user", root="private_worker_data"),
+                ),
+                "shared": AgentConfig(display_name="Shared"),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    owner_agent = Agent(id="private_worker", name="Private Worker")
+    peer_agent = Agent(id="shared", name="Shared")
+    opened_scope = HistoryScope(kind="team", scope_id="team_private_worker+shared_requester_alice")
+    scope_context = ScopeSessionContext(
+        scope=opened_scope,
+        storage=MagicMock(),
+        session=None,
+        session_id="session-1",
+    )
+    team = Team(name="Ad hoc team", members=[owner_agent, peer_agent])
+
+    with patch(
+        "mindroom.history.runtime.prepare_scope_history",
+        new=AsyncMock(return_value=MagicMock()),
+    ) as mock_prepare:
+        await prepare_bound_scope_history(
+            agents=[owner_agent, peer_agent],
+            team=team,
+            full_prompt="Current prompt",
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=scope_context,
+            static_prompt_tokens=1,
+        )
+
+    assert mock_prepare.await_count == 1
+    assert mock_prepare.await_args.kwargs["scope"] == opened_scope
 
 
 def test_estimate_preparation_static_tokens_for_team_includes_agentic_state_tool() -> None:

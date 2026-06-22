@@ -891,11 +891,23 @@ async def prepare_bound_scope_history(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedScopeHistory:
     """Prepare one team-owned scope by compacting its persisted session before the run."""
-    bound_scope = resolve_bound_team_scope_context(
-        agents=agents,
-        config=config,
-        team_name=team_name,
-    )
+    if scope_context is not None:
+        owner_agent, owner_agent_name = _resolve_bound_history_owner(agents)
+        bound_scope = (
+            _BoundTeamScopeContext(
+                owner_agent=owner_agent,
+                owner_agent_name=owner_agent_name,
+                scope=scope_context.scope,
+            )
+            if owner_agent is not None and owner_agent_name is not None
+            else None
+        )
+    else:
+        bound_scope = resolve_bound_team_scope_context(
+            agents=agents,
+            config=config,
+            team_name=team_name,
+        )
     if bound_scope is None:
         resolved_static_prompt_tokens = (
             static_prompt_tokens
@@ -984,13 +996,22 @@ def resolve_bound_team_scope_context(
     agents: list[Agent],
     config: Config,
     team_name: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> _BoundTeamScopeContext | None:
     """Resolve the stable owner and scope backing one live team run."""
     owner_agent, owner_agent_name = _resolve_bound_history_owner(agents)
     if owner_agent is None or owner_agent_name is None:
         return None
 
-    team_scope_id = team_name if team_name is not None and team_name in config.teams else _ad_hoc_team_scope_id(agents)
+    if team_name is not None and team_name in config.teams:
+        team_scope_id = team_name
+    else:
+        team_scope_id = _ad_hoc_team_scope_id(agents)
+        if team_scope_id is not None and _ad_hoc_team_has_private_member(agents, config):
+            requester_user_id = execution_identity.requester_id if execution_identity is not None else None
+            if requester_user_id:
+                requester_digest = hashlib.sha256(requester_user_id.encode()).hexdigest()[:12]
+                team_scope_id = f"{team_scope_id}_requester_{requester_digest}"
     if team_scope_id is None:
         return None
     scope = HistoryScope(kind="team", scope_id=team_scope_id)
@@ -1179,6 +1200,7 @@ def open_bound_scope_session_context(
         agents=agents,
         config=config,
         team_name=team_name,
+        execution_identity=execution_identity,
     )
     if bound_scope is None:
         yield None
@@ -1293,6 +1315,14 @@ def _ad_hoc_team_scope_id(agents: list[Agent]) -> str | None:
     if not agent_names:
         return None
     return f"team_{'+'.join(sorted(agent_names))}"
+
+
+def _ad_hoc_team_has_private_member(agents: list[Agent], config: Config) -> bool:
+    agent_names = [agent_id for agent in agents if isinstance((agent_id := agent.id), str) and agent_id]
+    return any(
+        (agent_config := config.agents.get(agent_name)) is not None and agent_config.private is not None
+        for agent_name in agent_names
+    )
 
 
 def _history_settings_from_agent(agent: Agent) -> ResolvedHistorySettings:
