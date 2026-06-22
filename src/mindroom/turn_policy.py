@@ -352,34 +352,51 @@ class TurnPolicy:
         if form_team.outcome is TeamOutcome.NONE:
             return None
 
-        responder_pool_ids = {responder.full_id for responder in responder_pool}
-        requires_shared_owner = self._requires_shared_owner_for_explicit_private_resolution(form_team)
-        shared_agent_responders = self._live_shared_agent_responders(responder_pool) if requires_shared_owner else []
-        if requires_shared_owner:
-            shared_responder_ids = {responder.full_id for responder in shared_agent_responders}
-            response_owners = [
-                member for member in form_team.eligible_members if member.full_id in shared_responder_ids
-            ]
-        else:
-            response_owners = [member for member in form_team.eligible_members if member.full_id in responder_pool_ids]
-        if (
-            not response_owners
-            and form_team.intent is TeamIntent.EXPLICIT_MEMBERS
-            and form_team.outcome is TeamOutcome.TEAM
-        ):
-            response_owners = shared_agent_responders or self._live_shared_agent_responders(responder_pool)
-        if (
-            not response_owners
-            and form_team.intent is TeamIntent.EXPLICIT_MEMBERS
-            and form_team.outcome is TeamOutcome.REJECT
-        ):
-            response_owners = shared_agent_responders if requires_shared_owner else responder_pool
-        if not response_owners and form_team.outcome is not TeamOutcome.TEAM and not requires_shared_owner:
-            response_owners = form_team.eligible_members
+        if self._requires_shared_owner_for_explicit_private_resolution(form_team):
+            return self._shared_owner_for_explicit_private_resolution(form_team, responder_pool)
 
+        response_owner = self._select_response_owner(
+            self._eligible_responder_owners(form_team, responder_pool),
+        )
+        if response_owner is not None:
+            return response_owner
+
+        if form_team.intent is TeamIntent.EXPLICIT_MEMBERS and form_team.outcome is TeamOutcome.REJECT:
+            # A reject can be visible even when no requested member is eligible;
+            # explicit configured-team rejects rely on this when the team bot is
+            # the only live responder.
+            return self._select_response_owner(responder_pool)
+
+        return None
+
+    @staticmethod
+    def _select_response_owner(response_owners: list[MatrixID]) -> MatrixID | None:
+        """Return the stable visible owner from one candidate set."""
         if not response_owners:
             return None
         return min(response_owners, key=lambda value: value.full_id)
+
+    @staticmethod
+    def _eligible_responder_owners(
+        form_team: TeamResolution,
+        responder_pool: list[MatrixID],
+    ) -> list[MatrixID]:
+        """Return eligible team members that are present in the live responder pool."""
+        responder_pool_ids = {responder.full_id for responder in responder_pool}
+        return [member for member in form_team.eligible_members if member.full_id in responder_pool_ids]
+
+    def _shared_owner_for_explicit_private_resolution(
+        self,
+        form_team: TeamResolution,
+        responder_pool: list[MatrixID],
+    ) -> MatrixID | None:
+        """Return a live shared-agent owner for a private explicit team or reject."""
+        shared_agent_responders = self._live_shared_agent_responders(responder_pool)
+        shared_responder_ids = {responder.full_id for responder in shared_agent_responders}
+        shared_eligible_owners = [
+            member for member in form_team.eligible_members if member.full_id in shared_responder_ids
+        ]
+        return self._select_response_owner(shared_eligible_owners or shared_agent_responders)
 
     def _requires_shared_owner_for_explicit_private_resolution(self, form_team: TeamResolution) -> bool:
         """Return whether a private ad hoc team resolution needs a shared visible owner."""
