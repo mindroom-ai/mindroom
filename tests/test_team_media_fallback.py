@@ -3814,6 +3814,34 @@ async def test_team_response_materializes_private_agent_with_execution_identity(
 
 
 @pytest.mark.asyncio
+async def test_team_response_rejects_private_agent_with_non_matrix_execution_identity() -> None:
+    """Direct private members are only supported for Matrix ad hoc teams."""
+    _, orchestrator = _build_private_team_orchestrator(include_private_member=False)
+    identity = ToolExecutionIdentity(
+        channel="openai_compat",
+        agent_name="calculator",
+        requester_id="@alice:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-123",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
+        await team_response(
+            agent_names=["general", "calculator"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=identity,
+        )
+
+
+@pytest.mark.asyncio
 async def test_team_response_rejects_private_agents_even_when_private_member_is_unavailable() -> None:
     """Direct team helpers should reject requested private members before availability filtering."""
     _, orchestrator = _build_private_team_orchestrator(include_private_member=False)
@@ -3898,8 +3926,9 @@ async def test_team_response_stream_materializes_private_agent_with_execution_id
             )
         ]
 
-    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "Streamed team response" in rendered
+    assert len(chunks) == 1
+    assert isinstance(chunks[0], str)
+    assert "Streamed team response" in chunks[0]
     assert [call.args[0] for call in mock_create_agent.call_args_list] == ["general", "calculator"]
     assert all(call.kwargs["execution_identity"] is identity for call in mock_create_agent.call_args_list)
 

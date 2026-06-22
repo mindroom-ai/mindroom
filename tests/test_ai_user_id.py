@@ -111,6 +111,7 @@ from mindroom.response_runner import (
     prepare_memory_and_model_context,
 )
 from mindroom.streaming import StreamingDeliveryError, strip_visible_tool_markers
+from mindroom.team_scope import requester_scoped_team_scope_id
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -458,17 +459,22 @@ def _build_response_runner(
         *,
         requester_user_id: str | None = None,
     ) -> HistoryScope:
+        if bot.agent_name in config.teams:
+            return HistoryScope(kind="team", scope_id=bot.agent_name)
         member_names = [_entity_alias_for_test(config, runtime_paths, mid) for mid in team_agents]
         has_private_member = any(
             (agent_config := config.agents.get(member_name)) is not None and agent_config.private is not None
             for member_name in member_names
         )
-        requester_suffix = f"_requester_{requester_user_id}" if has_private_member and requester_user_id else ""
+        base_scope_id = f"team_{'+'.join(sorted(member_names))}"
+        if has_private_member:
+            if requester_user_id is None:
+                msg = "Private ad hoc team history scope requires requester_user_id"
+                raise ValueError(msg)
+            base_scope_id = requester_scoped_team_scope_id(base_scope_id, requester_user_id)
         return HistoryScope(
             kind="team",
-            scope_id=bot.agent_name
-            if bot.agent_name in config.teams
-            else f"team_{'+'.join(sorted(member_names))}{requester_suffix}",
+            scope_id=base_scope_id,
         )
 
     bot._conversation_state_writer.team_history_scope = MagicMock(side_effect=_team_history_scope_for_test)

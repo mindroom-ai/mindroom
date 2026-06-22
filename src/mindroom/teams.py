@@ -1268,6 +1268,7 @@ def _materialize_team_members(
     execution_identity: ToolExecutionIdentity | None,
     *,
     session_id: str | None = None,
+    configured_team_name: str | None = None,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
     reason_prefix: str = "Team request",
 ) -> ResolvedExactTeamMembers:
@@ -1277,7 +1278,10 @@ def _materialize_team_members(
     materializable_agent_names = resolve_team_materializable_agent_names(
         orchestrator.config,
         resolve_live_shared_agent_names(orchestrator),
-        allow_direct_private_agents=execution_identity is not None,
+        allow_direct_private_agents=_allow_direct_private_team_agents(
+            execution_identity,
+            configured_team_name=configured_team_name,
+        ),
     )
 
     return materialize_exact_team_members(
@@ -1291,6 +1295,15 @@ def _materialize_team_members(
         refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
         reason_prefix=reason_prefix,
     )
+
+
+def _allow_direct_private_team_agents(
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    configured_team_name: str | None,
+) -> bool:
+    """Return whether direct private members may join this team request."""
+    return configured_team_name is None and execution_identity is not None and execution_identity.channel == "matrix"
 
 
 def _resolve_team_instance_id(
@@ -1580,9 +1593,13 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     """Create a team and execute response."""
     assert orchestrator.config is not None
     requested_agent_names = _requested_team_agent_names(agent_names)
+    allow_direct_private_agents = _allow_direct_private_team_agents(
+        execution_identity,
+        configured_team_name=configured_team_name,
+    )
     orchestrator.config.assert_team_agents_supported(
         requested_agent_names,
-        allow_direct_private_agents=execution_identity is not None,
+        allow_direct_private_agents=allow_direct_private_agents,
     )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     room_id = execution_identity.room_id if execution_identity is not None else None
@@ -1608,6 +1625,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             session_id=session_id,
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
+            configured_team_name=configured_team_name,
         )
     except ValueError as exc:
         return str(exc)
@@ -2004,9 +2022,13 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     requested_agent_names = _requested_team_agent_names(
         [_team_member_name(mid, orchestrator.config, orchestrator.runtime_paths) for mid in agent_ids],
     )
+    allow_direct_private_agents = _allow_direct_private_team_agents(
+        execution_identity,
+        configured_team_name=configured_team_name,
+    )
     orchestrator.config.assert_team_agents_supported(
         requested_agent_names,
-        allow_direct_private_agents=execution_identity is not None,
+        allow_direct_private_agents=allow_direct_private_agents,
     )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     room_id = execution_identity.room_id if execution_identity is not None else None
@@ -2032,6 +2054,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             session_id=session_id,
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
+            configured_team_name=configured_team_name,
         )
     except ValueError as exc:
         yield str(exc)

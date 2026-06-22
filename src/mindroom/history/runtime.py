@@ -903,6 +903,8 @@ async def prepare_bound_scope_history(
             if owner_agent is not None and owner_agent_name is not None
             else None
         )
+    elif team_name is None and _ad_hoc_team_has_private_member(agents, config):
+        bound_scope = None
     else:
         bound_scope = resolve_bound_team_scope_context(
             agents=agents,
@@ -1010,8 +1012,10 @@ def resolve_bound_team_scope_context(
         team_scope_id = _ad_hoc_team_scope_id(agents)
         if team_scope_id is not None and _ad_hoc_team_has_private_member(agents, config):
             requester_user_id = execution_identity.requester_id if execution_identity is not None else None
-            if requester_user_id:
-                team_scope_id = requester_scoped_team_scope_id(team_scope_id, requester_user_id)
+            if not requester_user_id:
+                msg = "Private ad hoc team history scope requires requester identity"
+                raise ValueError(msg)
+            team_scope_id = requester_scoped_team_scope_id(team_scope_id, requester_user_id)
     if team_scope_id is None:
         return None
     scope = HistoryScope(kind="team", scope_id=team_scope_id)
