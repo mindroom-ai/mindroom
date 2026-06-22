@@ -1293,6 +1293,29 @@ def _materialize_team_members(
     )
 
 
+def _resolve_team_instance_id(
+    *,
+    agents: list[Agent],
+    config: Config,
+    team_display_name: str,
+    configured_team_name: str | None,
+    scope_context: ScopeSessionContext | None,
+    execution_identity: ToolExecutionIdentity | None,
+) -> str:
+    """Return the Team.id for scoped and no-session team runs."""
+    if scope_context is not None:
+        return scope_context.scope.scope_id
+    bound_scope = resolve_bound_team_scope_context(
+        agents=agents,
+        config=config,
+        team_name=configured_team_name,
+        execution_identity=execution_identity,
+    )
+    if bound_scope is not None:
+        return bound_scope.scope.scope_id
+    return team_display_name
+
+
 def _create_team_instance(
     *,
     agents: list[Agent],
@@ -1300,12 +1323,10 @@ def _create_team_instance(
     config: Config,
     runtime_paths: RuntimePaths,
     team_display_name: str,
-    fallback_team_id: str,
+    scope_context: ScopeSessionContext | None,
     execution_identity: ToolExecutionIdentity | None,
     model_name: str | None = None,
     configured_team_name: str | None = None,
-    history_storage: BaseDb | None = None,
-    team_scope_id: str | None = None,
 ) -> Team:
     """Create a configured Team instance.
 
@@ -1315,14 +1336,12 @@ def _create_team_instance(
         config: Active runtime configuration
         runtime_paths: Active runtime paths
         team_display_name: Human-readable Team name passed to Agno
-        fallback_team_id: Stable fallback id when no team scope storage is available
+        scope_context: Already-open team history scope, when persisted history
+            is available for this request.
         execution_identity: Request execution identity used for provider-specific
             model behavior such as codex prompt-cache keying
         model_name: Optional model name override
         configured_team_name: Optional configured team id for stable team-scope history
-        history_storage: Optional already-open shared team history storage
-            owned by the caller for this request.
-        team_scope_id: Optional already-open team history scope id.
 
     Returns:
         Configured Team instance
@@ -1344,16 +1363,14 @@ def _create_team_instance(
         history_settings = config.get_entity_history_settings(configured_team_name)
     else:
         history_settings = config.get_default_history_settings()
-    if team_scope_id is not None:
-        team_id = team_scope_id
-    else:
-        scope_context = resolve_bound_team_scope_context(
-            agents=agents,
-            config=config,
-            team_name=configured_team_name,
-            execution_identity=execution_identity,
-        )
-        team_id = scope_context.scope.scope_id if scope_context is not None else fallback_team_id
+    team_id = _resolve_team_instance_id(
+        agents=agents,
+        config=config,
+        team_display_name=team_display_name,
+        configured_team_name=configured_team_name,
+        scope_context=scope_context,
+        execution_identity=execution_identity,
+    )
 
     for agent in agents:
         # Team-owned replay should come from the shared TeamSession, not from
@@ -1367,7 +1384,7 @@ def _create_team_instance(
         id=team_id,
         name=team_display_name,
         model=model,
-        db=history_storage,
+        db=scope_context.storage if scope_context is not None else None,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
         add_history_to_context=True,
         add_session_summary_to_context=True,
@@ -1447,12 +1464,10 @@ def build_materialized_team_instance(
         config=config,
         runtime_paths=runtime_paths,
         team_display_name=team_label,
-        fallback_team_id=team_label,
+        scope_context=scope_context,
         execution_identity=execution_identity,
         model_name=resolved_team_model_name,
         configured_team_name=configured_team_name,
-        history_storage=scope_context.storage if scope_context is not None else None,
-        team_scope_id=scope_context.scope.scope_id if scope_context is not None else None,
     )
 
 

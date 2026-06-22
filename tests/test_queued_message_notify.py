@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.agent import Agent as AgnoAgent
 from agno.db.base import SessionType
 from agno.media import Image
 from agno.models.message import Message
@@ -51,6 +52,7 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
@@ -3147,19 +3149,28 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     model = _FakeModel()
+    agent = AgnoAgent(id="general", name="General", model="openai:test-model")
 
     with (
+        open_bound_scope_session_context(
+            agents=[agent],
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+        ) as scope_context,
         patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.teams.Team", side_effect=lambda **kwargs: SimpleNamespace(model=kwargs["model"])),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
+        assert scope_context is not None
         team = _create_team_instance(
-            agents=[],
+            agents=[agent],
             mode=TeamMode.COORDINATE,
             config=config,
             runtime_paths=runtime_paths,
             team_display_name="Queued Notice Team",
-            fallback_team_id="queued-notice-team",
+            scope_context=scope_context,
             execution_identity=None,
         )
         messages = [Message(role="user", content="hello")]

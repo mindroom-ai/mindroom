@@ -4523,12 +4523,23 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team(
-                "collab_team",
-                collaborate_config,
-                _runtime_paths_for_config(collaborate_config),
+            runtime_paths = _runtime_paths_for_config(collaborate_config)
+            with open_bound_scope_session_context(
+                agents=[],
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=collaborate_config,
                 execution_identity=None,
-            )
+                team_name="collab_team",
+            ) as scope_context:
+                assert scope_context is not None
+                _build_team(
+                    "collab_team",
+                    collaborate_config,
+                    runtime_paths,
+                    execution_identity=None,
+                    scope_context=scope_context,
+                )
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is True
@@ -4558,7 +4569,23 @@ class TestTeamCompletion:
                     ),
                 },
             )
-            _build_team("coord_team", config, _runtime_paths_for_config(config), execution_identity=None)
+            runtime_paths = _runtime_paths_for_config(config)
+            with open_bound_scope_session_context(
+                agents=[],
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+                team_name="coord_team",
+            ) as scope_context:
+                assert scope_context is not None
+                _build_team(
+                    "coord_team",
+                    config,
+                    runtime_paths,
+                    execution_identity=None,
+                    scope_context=scope_context,
+                )
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is False
@@ -4632,12 +4659,23 @@ class TestTeamCompletion:
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _agents, team, _mode = _build_team(
-                "coord_team",
-                config,
-                _runtime_paths_for_config(config),
+            runtime_paths = _runtime_paths_for_config(config)
+            with open_bound_scope_session_context(
+                agents=[],
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
                 execution_identity=None,
-            )
+                team_name="coord_team",
+            ) as scope_context:
+                assert scope_context is not None
+                _agents, team, _mode = _build_team(
+                    "coord_team",
+                    config,
+                    runtime_paths,
+                    execution_identity=None,
+                    scope_context=scope_context,
+                )
 
         assert team.num_history_runs is None
         assert team.num_history_messages is None
@@ -4665,12 +4703,24 @@ class TestTeamCompletion:
 
         agents: list[AgnoAgent] | None = None
         team: AgnoTeam | None = None
-        with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+        with (
+            open_bound_scope_session_context(
+                agents=[],
+                session_id="openai-team-session",
+                runtime_paths=runtime_paths,
+                config=team_config,
+                execution_identity=execution_identity,
+                team_name="super_team",
+            ) as scope_context,
+            patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
+        ):
+            assert scope_context is not None
             agents, team, mode = openai_compat._build_team(
                 "super_team",
                 team_config,
                 runtime_paths,
                 execution_identity=execution_identity,
+                scope_context=scope_context,
                 session_id="openai-team-session",
             )
 
@@ -4702,32 +4752,47 @@ class TestTeamCompletion:
             },
         )
         built_agent = _make_test_agent("GeneralAgent")
+        runtime_paths = _runtime_paths()
 
-        with (
-            patch(
-                "mindroom.api.openai_compat.materialize_exact_team_members",
-                return_value=ResolvedExactTeamMembers(
-                    requested_agent_names=["general"],
-                    agents=[built_agent],
-                    display_names=["GeneralAgent"],
-                    materialized_agent_names={"general"},
-                    failed_agent_names=[],
+        with open_bound_scope_session_context(
+            agents=[],
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            team_name="coord_team",
+        ) as scope_context:
+            assert scope_context is not None
+            with (
+                patch(
+                    "mindroom.api.openai_compat.materialize_exact_team_members",
+                    return_value=ResolvedExactTeamMembers(
+                        requested_agent_names=["general"],
+                        agents=[built_agent],
+                        display_names=["GeneralAgent"],
+                        materialized_agent_names={"general"},
+                        failed_agent_names=[],
+                    ),
                 ),
-            ),
-            patch(
-                "mindroom.api.openai_compat.build_materialized_team_instance",
-                side_effect=RuntimeError("team build failed"),
-            ),
-            patch("mindroom.api.openai_compat.close_team_runtime_state_dbs") as mock_close,
-            pytest.raises(RuntimeError, match="team build failed"),
-        ):
-            openai_compat._build_team("coord_team", config, _runtime_paths(), execution_identity=None)
-
-        mock_close.assert_called_once_with(
-            agents=[built_agent],
-            team_db=None,
-            shared_scope_storage=None,
-        )
+                patch(
+                    "mindroom.api.openai_compat.build_materialized_team_instance",
+                    side_effect=RuntimeError("team build failed"),
+                ),
+                patch("mindroom.api.openai_compat.close_team_runtime_state_dbs") as mock_close,
+                pytest.raises(RuntimeError, match="team build failed"),
+            ):
+                openai_compat._build_team(
+                    "coord_team",
+                    config,
+                    runtime_paths,
+                    execution_identity=None,
+                    scope_context=scope_context,
+                )
+            mock_close.assert_called_once_with(
+                agents=[built_agent],
+                team_db=None,
+                shared_scope_storage=scope_context.storage,
+            )
 
     def test_build_team_passes_knowledge_to_member_agents(self) -> None:
         """Team member creation resolves and passes configured knowledge."""
@@ -4768,7 +4833,23 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team("team_with_kb", config, _runtime_paths_for_config(config), execution_identity=None)
+            runtime_paths = _runtime_paths_for_config(config)
+            with open_bound_scope_session_context(
+                agents=[],
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+                team_name="team_with_kb",
+            ) as scope_context:
+                assert scope_context is not None
+                _build_team(
+                    "team_with_kb",
+                    config,
+                    runtime_paths,
+                    execution_identity=None,
+                    scope_context=scope_context,
+                )
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
             assert "include_default_tools" not in mock_create.call_args.kwargs

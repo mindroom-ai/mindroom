@@ -27,6 +27,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_SYSTEM_ENRICH,
@@ -408,25 +409,33 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
         )
 
     with (
+        open_bound_scope_session_context(
+            agents=team_members.agents,
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+        ) as scope_context,
         patch("mindroom.teams._create_team_instance", return_value=prepared_team),
         patch(
             "mindroom.teams.prepare_bound_team_run_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
+        assert scope_context is not None
         team = build_materialized_team_instance(
             requested_agent_names=team_members.requested_agent_names,
             agents=team_members.agents,
             mode=TeamMode.COORDINATE,
             config=config,
             runtime_paths=runtime_paths,
-            scope_context=None,
+            scope_context=scope_context,
             model_name=None,
             configured_team_name=None,
             execution_identity=None,
         )
         await prepare_materialized_team_execution(
-            scope_context=None,
+            scope_context=scope_context,
             agents=team_members.agents,
             team=team,
             message="Coordinate",
@@ -488,25 +497,33 @@ async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_pa
     assert "PreparedMaterializedTeamExecution" not in teams_module.__all__
 
     with (
+        open_bound_scope_session_context(
+            agents=team_members.agents,
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+        ) as scope_context,
         patch("mindroom.teams._create_team_instance", return_value=prepared_team),
         patch(
             "mindroom.teams.prepare_bound_team_run_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
+        assert scope_context is not None
         team = build_materialized_team_instance(
             requested_agent_names=team_members.requested_agent_names,
             agents=team_members.agents,
             mode=TeamMode.COORDINATE,
             config=config,
             runtime_paths=runtime_paths,
-            scope_context=None,
+            scope_context=scope_context,
             model_name=None,
             configured_team_name=None,
             execution_identity=None,
         )
         prepared_execution = await prepare_materialized_team_execution(
-            scope_context=None,
+            scope_context=scope_context,
             agents=team_members.agents,
             team=team,
             message="Coordinate",

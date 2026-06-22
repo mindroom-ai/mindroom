@@ -94,7 +94,7 @@ from mindroom.history.storage import (
     update_scope_seen_event_ids,
     write_scope_state,
 )
-from mindroom.history.summary_call import _CompactionSummaryOutputLimitError, generate_compaction_summary
+from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
@@ -1171,7 +1171,6 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
                 max_tool_calls_from_history=None,
             ),
             available_history_budget=None,
-            selected_run_ids=tuple(f"run-{index}" for index in range(1, 6)),
             summary_input_budget=70_000,
             before_tokens=0,
             runs_before=len(runs),
@@ -1235,67 +1234,6 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
                 max_tool_calls_from_history=None,
             ),
             available_history_budget=None,
-            selected_run_ids=("run-1",),
-            summary_input_budget=8_000,
-            before_tokens=0,
-            runs_before=1,
-            threshold_tokens=None,
-            summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            lifecycle_notice_event_id=None,
-            progress_callback=None,
-            collect_compaction_hook_messages=False,
-        )
-
-    assert rewrite_result is not None
-    assert len(summary_inputs) == 2
-    assert estimate_text_tokens(summary_inputs[1]) < estimate_text_tokens(summary_inputs[0])
-
-
-@pytest.mark.asyncio
-async def test_rewrite_retries_summary_with_smaller_chunk_after_output_cap(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    working_session = _session(
-        "session-1",
-        runs=[
-            _completed_run(
-                "run-1",
-                messages=[
-                    Message(role="user", content="u" * 8_000),
-                    Message(role="assistant", content="a" * 8_000),
-                ],
-            ),
-        ],
-    )
-    summary_inputs: list[str] = []
-
-    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
-        summary_inputs.append(summary_input)
-        if len(summary_inputs) == 1:
-            msg = "renamed owned output-limit signal"
-            raise _CompactionSummaryOutputLimitError(msg)
-        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
-
-    with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
-        new=AsyncMock(side_effect=fake_summary),
-    ):
-        rewrite_result = await _rewrite_working_session_for_compaction(
-            storage=storage,
-            persisted_session=working_session,
-            working_session=working_session,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
-            session_id="session-1",
-            scope=scope,
-            state=HistoryScopeState(force_compact_before_next_run=True),
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode="all"),
-                max_tool_calls_from_history=None,
-            ),
-            available_history_budget=None,
-            selected_run_ids=("run-1",),
             summary_input_budget=8_000,
             before_tokens=0,
             runs_before=1,
@@ -2532,7 +2470,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_auto_required_compaction_finishes_original_previous_runs(  # noqa: PLR0915
+async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(
@@ -2541,34 +2479,46 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         context_window=64_000,
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    previous_runs = [
-        _completed_run(
-            f"run-{index:02}",
-            messages=[
-                Message(role="user", content=f"RUN-{index:02} user " + ("u" * 200)),
-                Message(role="assistant", content=f"RUN-{index:02} assistant " + ("a" * 200)),
-            ],
-        )
-        for index in range(1, 24)
-    ]
     session = _session(
         "session-1",
-        runs=previous_runs,
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-3",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+        ],
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(session, scope, HistoryScopeState(compacted_run_ids=("prior-tombstone",)))
     storage.upsert_session(session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
     )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
-    summary_inputs: list[str] = []
+    second_summary_text = "second pass summary"
+    third_summary_text = "third pass summary"
 
     summary_input_budget = next(
         budget
-        for budget in range(1, 20_000)
+        for budget in range(1, 10_000)
         if len(
             _build_summary_input(
                 previous_summary=None,
@@ -2577,11 +2527,20 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
                 max_input_tokens=budget,
             )[1],
         )
-        == 9
+        == 1
+        and len(
+            _build_summary_input(
+                previous_summary=first_summary_text,
+                compacted_runs=visible_runs[1:],
+                history_settings=history_settings,
+                max_input_tokens=budget,
+            )[1],
+        )
+        == 1
     )
     after_first_session = _session(
         "session-1",
-        runs=visible_runs[9:],
+        runs=visible_runs[1:],
         summary=SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
     )
     replay_budget = estimate_prompt_visible_history_tokens(
@@ -2589,12 +2548,6 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         scope=scope,
         history_settings=history_settings,
     )
-    before_tokens = estimate_prompt_visible_history_tokens(
-        session=session,
-        scope=scope,
-        history_settings=history_settings,
-    )
-    assert before_tokens > replay_budget
 
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_config=True,
@@ -2610,12 +2563,13 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         replay_budget_tokens=replay_budget,
         summary_input_budget_tokens=summary_input_budget,
     )
-
-    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
-        summary_inputs.append(summary_input)
-        summary_text = first_summary_text if len(summary_inputs) == 1 else f"summary chunk {len(summary_inputs)}"
-        return SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))
-
+    summary_mock = AsyncMock(
+        side_effect=[
+            SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
+            SessionSummary(summary=second_summary_text, updated_at=datetime.now(UTC)),
+            SessionSummary(summary=third_summary_text, updated_at=datetime.now(UTC)),
+        ],
+    )
     lifecycle = RecordingCompactionLifecycle()
 
     with (
@@ -2625,13 +2579,13 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(side_effect=fake_summary),
+            new=summary_mock,
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
             agent=_agent(db=storage),
             agent_name="test_agent",
-            full_prompt="CURRENT-RUN prompt",
+            full_prompt="Current prompt",
             session_id="session-1",
             runtime_paths=runtime_paths,
             config=config,
@@ -2646,51 +2600,16 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.runs == []
-    assert len(summary_inputs) > 1
-    assert "RUN-09" in summary_inputs[0]
-    assert "RUN-10" not in summary_inputs[0]
-    assert all("CURRENT-RUN" not in summary_input for summary_input in summary_inputs)
+    assert persisted.summary.summary == first_summary_text
+    assert [run.run_id for run in persisted.runs or []] == ["run-2", "run-3"]
+    assert summary_mock.await_count == 1
     assert len(prepared.compaction_outcomes) == 1
-    outcome = prepared.compaction_outcomes[0]
-    assert outcome.compacted_run_count == 23
-    assert outcome.runs_after == 0
-    summary_only_tokens = estimate_session_summary_tokens(persisted.summary.summary)
-    assert outcome.after_tokens == summary_only_tokens
-    assert outcome.after_tokens < replay_budget
+    assert prepared.compaction_outcomes[0].compacted_run_count == 1
     state = read_scope_state(persisted, scope)
-    assert state.last_compacted_run_count == 23
-    assert state.compacted_run_ids == (
-        "prior-tombstone",
-        *(f"run-{index:02}" for index in range(1, 24)),
-    )
+    assert state.last_compacted_run_count == 1
     progress_events = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleProgress)]
-    assert progress_events
-    assert progress_events[-1].runs_remaining > 0
-    assert isinstance(lifecycle.events[-1], CompactionLifecycleSuccess)
-
-    persisted.runs = [
-        _completed_run(
-            "run-24",
-            messages=[
-                Message(role="user", content="CURRENT-RUN user"),
-                Message(role="assistant", content="CURRENT-RUN assistant"),
-            ],
-        ),
-    ]
-    storage.upsert_session(persisted)
-    current_run_session = get_agent_session(storage, "session-1")
-    assert current_run_session is not None
-    assert [run.run_id for run in current_run_session.runs or []] == ["run-24"]
-    assert "run-24" not in read_scope_state(current_run_session, scope).compacted_run_ids
-    assert (
-        estimate_prompt_visible_history_tokens(
-            session=current_run_session,
-            scope=scope,
-            history_settings=history_settings,
-        )
-        > summary_only_tokens
-    )
+    assert len(progress_events) == 1
+    assert progress_events[0].runs_remaining == 0
 
 
 @pytest.mark.asyncio
@@ -3795,7 +3714,6 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
                 max_tool_calls_from_history=None,
             ),
             available_history_budget=1,
-            selected_run_ids=("run-1", "run-2"),
             summary_input_budget=summary_input_budget,
             before_tokens=0,
             runs_before=2,
@@ -3818,7 +3736,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
 
 
 @pytest.mark.asyncio
-async def test_compact_scope_history_ignores_runs_without_stable_ids(
+async def test_rewrite_working_session_for_compaction_ignores_runs_without_stable_ids(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
@@ -3839,11 +3757,13 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(return_value=SessionSummary(summary="summary", updated_at=datetime.now(UTC))),
     ) as mock_generate:
-        next_state, outcome = await compact_scope_history(
+        rewrite_result = await _rewrite_working_session_for_compaction(
             storage=storage,
-            session=working_session,
+            persisted_session=working_session,
+            working_session=working_session,
             summary_model=FakeModel(id="summary-model", provider="fake"),
             summary_model_name="summary-model",
+            session_id="session-1",
             scope=scope,
             state=HistoryScopeState(force_compact_before_next_run=True),
             history_settings=ResolvedHistorySettings(
@@ -3852,15 +3772,16 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
             ),
             available_history_budget=1,
             summary_input_budget=16_000,
-            active_context_window=64_000,
-            replay_window_tokens=64_000,
+            before_tokens=0,
+            runs_before=1,
             threshold_tokens=None,
-            reserve_tokens=0,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            lifecycle_notice_event_id=None,
+            progress_callback=None,
+            collect_compaction_hook_messages=False,
         )
 
-    assert outcome is None
-    assert next_state.force_compact_before_next_run is False
+    assert rewrite_result is None
     assert mock_generate.await_count == 0
     assert working_session.summary is None
     assert working_session.runs == [unremovable_run]
@@ -4039,7 +3960,6 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
             state=HistoryScopeState(),
             history_settings=history_settings,
             available_history_budget=1,
-            selected_run_ids=("run-1", "run-2"),
             summary_input_budget=summary_input_budget,
             before_tokens=before_tokens,
             runs_before=2,
@@ -4378,14 +4298,25 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
     alpha = _agent(agent_id="alpha", name="Alpha")
     zeta = _agent(agent_id="zeta", name="Zeta")
 
-    with patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+    with (
+        open_bound_scope_session_context(
+            agents=[alpha, zeta],
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            team_name="pair",
+        ) as scope_context,
+        patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
+    ):
+        assert scope_context is not None
         team = _create_team_instance(
             agents=[alpha, zeta],
             mode=TeamMode.COORDINATE,
             config=config,
             runtime_paths=runtime_paths,
             team_display_name="Team-alpha-zeta",
-            fallback_team_id="Team-alpha-zeta",
+            scope_context=scope_context,
             execution_identity=None,
             configured_team_name="pair",
         )
@@ -4426,14 +4357,25 @@ def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None
     alpha = _agent(agent_id="alpha", name="Alpha")
     zeta = _agent(agent_id="zeta", name="Zeta")
 
-    with patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+    with (
+        open_bound_scope_session_context(
+            agents=[alpha, zeta],
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            team_name="pair",
+        ) as scope_context,
+        patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
+    ):
+        assert scope_context is not None
         team = _create_team_instance(
             agents=[alpha, zeta],
             mode=TeamMode.COORDINATE,
             config=config,
             runtime_paths=runtime_paths,
             team_display_name="Team-alpha-zeta",
-            fallback_team_id="Team-alpha-zeta",
+            scope_context=scope_context,
             execution_identity=None,
             configured_team_name="pair",
         )

@@ -118,6 +118,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
 # Per-session completion locks keep same-session /v1 completions from
