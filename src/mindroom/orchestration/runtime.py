@@ -549,6 +549,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
     while bot.running and (max_retries < 0 or retry_count < max_retries):
         iteration: _SyncIteration | None = None
         stalled_restart = False
+        retry_after_cleanup = False
         try:
             logger.info("starting_sync_loop", agent=bot.agent_name)
             iteration = _SyncIteration.start(bot)
@@ -557,6 +558,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
                 # sync_forever returned normally after an intentional stop.
                 break
             retry_count += 1
+            retry_after_cleanup = True
             logger.warning(
                 "sync_loop_returned_while_bot_running",
                 agent=bot.agent_name,
@@ -569,14 +571,17 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
         except _MatrixSyncStalledError:
             retry_count += 1
             stalled_restart = True
+            retry_after_cleanup = True
             logger.warning("restarting_stalled_sync_loop", agent=bot.agent_name, retry_count=retry_count)
         except Exception:
             retry_count += 1
+            retry_after_cleanup = True
             logger.exception("sync_loop_failed", agent=bot.agent_name, retry_count=retry_count)
         finally:
             if iteration is not None:
                 await iteration.cancel()
-                await _prepare_for_sync_shutdown(bot, sync_restart=stalled_restart)
+                will_retry = retry_after_cleanup and bot.running and (max_retries < 0 or retry_count < max_retries)
+                await _prepare_for_sync_shutdown(bot, sync_restart=will_retry)
 
         if not bot.running:
             break

@@ -262,6 +262,7 @@ async def test_failed_restart_does_not_add_jitter(monkeypatch: pytest.MonkeyPatc
     await sync_forever_with_restart(bot, max_retries=2)
 
     assert jitter_calls == []
+    assert bot.prepare_for_sync_shutdown_cancel_messages == [SYNC_RESTART_CANCEL_MSG, None]
 
 
 def test_stalled_restart_jitter_spreads_restarts() -> None:
@@ -497,7 +498,7 @@ async def test_sync_forever_with_restart_cancels_deferred_work_before_retry_back
             raise RuntimeError(msg)
         bot.running = False
 
-    async def prepare_for_sync_shutdown() -> None:
+    async def prepare_for_sync_shutdown(**_kwargs: object) -> None:
         bot.prepare_for_sync_shutdown_calls += 1
         call_order.append("prepare")
 
@@ -1560,6 +1561,7 @@ async def test_clean_sync_return_while_running_restarts(monkeypatch: pytest.Monk
 
     assert bot.sync_calls == 2
     assert bot.prepare_for_sync_shutdown_calls == 2
+    assert bot.prepare_for_sync_shutdown_cancel_messages == [SYNC_RESTART_CANCEL_MSG, None]
     assert retry_attempts == [1]
 
 
