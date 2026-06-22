@@ -492,8 +492,11 @@ def _collect_stream_tool_completed(
     show_tool_calls: bool,
 ) -> None:
     """Track a tool completion while collecting a silent stream."""
+    if not show_tool_calls:
+        return
+
     completion = state.tool_tracker.complete(event.tool)
-    if completion is None or not show_tool_calls:
+    if completion is None:
         return
 
     tool_name, result, pending_tool, completed_trace = completion
@@ -1477,7 +1480,7 @@ async def ai_response(  # noqa: C901, PLR0915
 
     """
     logger.info("AI request", agent=agent_name, room_id=room_id)
-    if collect_streamed_response and show_tool_calls:
+    if collect_streamed_response:
         return await _collect_streamed_response_content(
             stream_agent_response(
                 agent_name=agent_name,
