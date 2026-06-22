@@ -121,10 +121,20 @@ def _record_proxy_exception_for_worker(
     if _is_request_level_proxy_http_error(exc):
         worker_manager.touch_worker(worker_handle.worker_key)
         return
-    if isinstance(exc, httpx.TransportError):
+    if _is_request_level_proxy_transport_error(exc):
         worker_manager.touch_worker(worker_handle.worker_key)
         return
     worker_manager.record_failure(worker_handle.worker_key, str(exc))
+
+
+def _is_request_level_proxy_transport_error(exc: Exception) -> bool:
+    """Return whether one transport failure should not mark the worker failed."""
+    if isinstance(exc, httpx.TimeoutException):
+        return True
+    if isinstance(exc, httpx.ConnectError):
+        message = str(exc).casefold()
+        return "timed out" in message or "timeout" in message
+    return False
 
 
 def _is_request_level_proxy_http_error(exc: Exception) -> bool:

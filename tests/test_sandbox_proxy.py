@@ -441,17 +441,9 @@ def test_worker_proxy_client_records_worker_success() -> None:
     assert manager.failures == []
 
 
-@pytest.mark.parametrize(
-    "exception_factory",
-    [
-        lambda request: httpx.ConnectError("[Errno 110] Connection timed out", request=request),
-        lambda request: httpx.ReadTimeout("timed out", request=request),
-    ],
-)
-def test_worker_proxy_transport_timeout_keeps_ready_worker_alive(
+def _run_worker_proxy_request_with_exception(
     exception_factory: Callable[[httpx.Request], Exception],
-) -> None:
-    """A transient proxy transport timeout must not evict the shared worker for sibling streams."""
+) -> _TrackingWorkerManager:
     manager = _TrackingWorkerManager()
     handle = WorkerHandle(
         worker_id="worker-1",
@@ -498,8 +490,57 @@ def test_worker_proxy_transport_timeout_keeps_ready_worker_alive(
             client_factory=_TimeoutClient,
         )
 
+    return manager
+
+
+@pytest.mark.parametrize(
+    "exception_factory",
+    [
+        lambda request: httpx.ConnectError("[Errno 110] Connection timed out", request=request),
+        lambda request: httpx.ReadTimeout("timed out", request=request),
+        lambda request: httpx.WriteTimeout("timed out", request=request),
+    ],
+)
+def test_worker_proxy_transport_timeout_keeps_ready_worker_alive(
+    exception_factory: Callable[[httpx.Request], Exception],
+) -> None:
+    """A transient proxy transport timeout must not evict the shared worker for sibling streams."""
+    manager = _run_worker_proxy_request_with_exception(exception_factory)
+
     assert manager.touched == ["agent:test"]
     assert manager.failures == []
+
+
+@pytest.mark.parametrize(
+    ("exception_factory", "failure_reason"),
+    [
+        (
+            lambda request: httpx.ConnectError("connection refused", request=request),
+            "connection refused",
+        ),
+        (
+            lambda request: httpx.RemoteProtocolError("malformed worker response", request=request),
+            "malformed worker response",
+        ),
+        (
+            lambda request: httpx.ReadError("worker read failed", request=request),
+            "worker read failed",
+        ),
+        (
+            lambda request: httpx.WriteError("worker write failed", request=request),
+            "worker write failed",
+        ),
+    ],
+)
+def test_worker_proxy_malformed_transport_errors_record_worker_failure(
+    exception_factory: Callable[[httpx.Request], Exception],
+    failure_reason: str,
+) -> None:
+    """Malformed proxy transport failures must evict the broken shared worker."""
+    manager = _run_worker_proxy_request_with_exception(exception_factory)
+
+    assert manager.touched == []
+    assert manager.failures == [("agent:test", failure_reason)]
 
 
 class _MinimalModel(Model):
