@@ -172,7 +172,7 @@ def test_worker_tool_validation_snapshot_reads_from_startup_manifest(monkeypatch
     snapshot = serialize_tool_validation_snapshot(
         resolved_tool_validation_snapshot_for_runtime(runtime_paths, config),
     )
-    snapshot["agentspace_slack_search"] = {
+    snapshot["search_tool"] = {
         "config_fields": [],
         "agent_override_fields": [],
         "authored_override_validator": "default",
@@ -183,10 +183,10 @@ def test_worker_tool_validation_snapshot_reads_from_startup_manifest(monkeypatch
 
     loaded_snapshot = sandbox_runner_module._upstream_tool_validation_snapshot(runtime_paths)
 
-    assert "agentspace_slack_search" in loaded_snapshot
-    assert loaded_snapshot["agentspace_slack_search"].runtime_loadable is True
-    assert loaded_snapshot["agentspace_slack_search"].config_fields == ()
-    assert loaded_snapshot["agentspace_slack_search"].agent_override_fields == ()
+    assert "search_tool" in loaded_snapshot
+    assert loaded_snapshot["search_tool"].runtime_loadable is True
+    assert loaded_snapshot["search_tool"].config_fields == ()
+    assert loaded_snapshot["search_tool"].agent_override_fields == ()
 
 
 def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config]:
@@ -237,12 +237,12 @@ def _missing_plugin_path_config_path(tmp_path: Path) -> Path:
         "    include_default_tools: false\n"
         "    tools:\n"
         "      - shell\n"
-        "  saguaro:\n"
-        "    display_name: Saguaro\n"
+        "  helper:\n"
+        "    display_name: Helper\n"
         "    model: default\n"
         "    include_default_tools: false\n"
         "    tools:\n"
-        "      - agentspace_slack_search\n"
+        "      - search_tool\n"
         "router:\n"
         "  model: default\n"
         "plugins:\n"
@@ -266,7 +266,7 @@ def _missing_plugin_path_with_invalid_tool_config_path(tmp_path: Path) -> Path:
         "    model: default\n"
         "    include_default_tools: false\n"
         "    tools:\n"
-        "      - agentspace_slack_search\n"
+        "      - search_tool\n"
         "  invalid:\n"
         "    display_name: Invalid\n"
         "    model: default\n"
@@ -2139,7 +2139,7 @@ def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
-    _set_worker_tool_validation_snapshot("agentspace_slack_search")
+    _set_worker_tool_validation_snapshot("search_tool")
     _set_sandbox_token(monkeypatch)
 
     runtime_paths, config = _refresh_runner_app_from_env()
@@ -2175,7 +2175,7 @@ def test_sandbox_runner_shared_startup_still_rejects_missing_plugins(
     config_path = _missing_plugin_path_config_path(tmp_path)
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
-    _set_worker_tool_validation_snapshot("agentspace_slack_search")
+    _set_worker_tool_validation_snapshot("search_tool")
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
 
     with pytest.raises(ConfigRuntimeValidationError, match="Configured plugin path does not exist"):
@@ -2191,7 +2191,7 @@ def test_sandbox_runner_defers_unavailable_authored_tools_for_worker_runtime(
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
-    _set_worker_tool_validation_snapshot("agentspace_slack_search")
+    _set_worker_tool_validation_snapshot("search_tool")
     _set_sandbox_token(monkeypatch)
 
     runtime_paths, config = _refresh_runner_app_from_env()
