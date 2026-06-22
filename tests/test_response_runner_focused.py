@@ -26,6 +26,7 @@ from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import ThreadHistoryResult
@@ -676,38 +677,50 @@ async def test_streaming_midstream_failure_persists_partial_off_event_loop(
 
 
 @pytest.mark.asyncio
-async def test_forced_compaction_check_runs_off_event_loop(
+async def test_cancelled_interrupted_persistence_offload_keeps_running(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Session inspection for placeholder compaction checks should be offloaded."""
+    """A second cancellation should not cancel the in-flight persistence worker."""
     bot = _bot(tmp_path)
     coordinator = replace_response_runner_deps(bot)
-    in_worker = False
+    started = asyncio.Event()
+    release = asyncio.Event()
+    persisted: list[str] = []
 
     async def fake_to_thread(function: object, *args: object, **kwargs: object) -> object:
-        nonlocal in_worker
-        in_worker = True
-        try:
-            return function(*args, **kwargs)  # type: ignore[misc]
-        finally:
-            in_worker = False
+        started.set()
+        await release.wait()
+        return function(*args, **kwargs)  # type: ignore[misc]
 
-    def guarded_check(**_kwargs: object) -> bool:
-        assert in_worker
-        return False
+    def persist(**kwargs: object) -> None:
+        persisted.append(str(kwargs["session_id"]))
 
     monkeypatch.setattr(response_runner.asyncio, "to_thread", fake_to_thread)
-    monkeypatch.setattr(coordinator, "_has_queued_forced_compaction", guarded_check)
+    monkeypatch.setattr(coordinator, "_persist_interrupted_recorder", persist)
 
-    assert (
-        await coordinator._has_queued_forced_compaction_off_loop(
+    task = asyncio.create_task(
+        coordinator._persist_interrupted_recorder_off_loop(
+            recorder=TurnRecorder(user_message="hello"),
+            session_scope=coordinator.deps.state_writer.history_scope(),
             session_id="session",
-            scope=coordinator.deps.state_writer.history_scope(),
             execution_identity=None,
-        )
-        is False
+            run_id="run",
+            is_team=False,
+            response_event_id="$response",
+        ),
     )
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert persisted == ["session"]
 
 
 # ---------------------------------------------------------------------------

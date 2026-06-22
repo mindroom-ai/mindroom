@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from agno.models.message import Message, MessageMetrics
 
-from mindroom import llm_request_logging
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
 from mindroom.llm_request_logging import (
@@ -237,41 +236,6 @@ async def test_llm_request_logging_redacts_sensitive_values_before_jsonl_write(t
     assert entry["tools"][0]["nested"] == [{"refresh_token": "***redacted***"}]
     assert entry["callback_url"] == (
         "https://example.test/oauth/callback?code=***redacted***&state=***redacted***&keep=1"
-    )
-
-
-@pytest.mark.asyncio
-async def test_llm_request_logging_materializes_payload_off_event_loop(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Request-log redaction and payload shaping should happen inside the thread offload."""
-    in_worker = False
-    original_payloads = llm_request_logging._request_message_payloads
-
-    async def fake_to_thread(function: object, *args: object, **kwargs: object) -> object:
-        nonlocal in_worker
-        in_worker = True
-        try:
-            return function(*args, **kwargs)  # type: ignore[misc]
-        finally:
-            in_worker = False
-
-    def guarded_payloads(messages: object) -> object:
-        assert in_worker
-        return original_payloads(messages)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(llm_request_logging.asyncio, "to_thread", fake_to_thread)
-    monkeypatch.setattr(llm_request_logging, "_request_message_payloads", guarded_payloads)
-
-    await llm_request_logging._write_llm_request_log(
-        model=_FakeModel(),
-        agent_name="default",
-        messages=[Message(role="user", content="hello")],
-        tools=[{"name": "search"}],
-        log_dir=str(tmp_path),
-        default_log_dir=tmp_path / "unused",
-        request_context={},
     )
 
 

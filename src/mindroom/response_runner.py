@@ -524,16 +524,19 @@ class ResponseRunner:
         response_event_id: str | None = None,
     ) -> None:
         """Persist interrupted replay state without blocking the event loop."""
-        await asyncio.to_thread(
-            self._persist_interrupted_recorder,
-            recorder=recorder,
-            session_scope=session_scope,
-            session_id=session_id,
-            execution_identity=execution_identity,
-            run_id=run_id,
-            is_team=is_team,
-            response_event_id=response_event_id,
+        offload = asyncio.create_task(
+            asyncio.to_thread(
+                self._persist_interrupted_recorder,
+                recorder=recorder,
+                session_scope=session_scope,
+                session_id=session_id,
+                execution_identity=execution_identity,
+                run_id=run_id,
+                is_team=is_team,
+                response_event_id=response_event_id,
+            ),
         )
+        await asyncio.shield(offload)
 
     def _record_stream_delivery_error(
         self,
@@ -743,21 +746,6 @@ class ResponseRunner:
                         scope=scope.key,
                         exception_type=error.__class__.__name__,
                     )
-
-    async def _has_queued_forced_compaction_off_loop(
-        self,
-        *,
-        session_id: str,
-        scope: HistoryScope,
-        execution_identity: ToolExecutionIdentity | None,
-    ) -> bool:
-        """Check queued forced compaction without blocking response dispatch."""
-        return await asyncio.to_thread(
-            self._has_queued_forced_compaction,
-            session_id=session_id,
-            scope=scope,
-            execution_identity=execution_identity,
-        )
 
     async def _refresh_model_history_after_lock(
         self,
@@ -1300,7 +1288,7 @@ class ResponseRunner:
                     request.pipeline_timing.mark("response_complete")
 
         thinking_msg = None
-        if not request.existing_event_id and not await self._has_queued_forced_compaction_off_loop(
+        if not request.existing_event_id and not self._has_queued_forced_compaction(
             session_id=session_id,
             scope=session_scope,
             execution_identity=tool_dispatch.execution_identity,
@@ -2287,7 +2275,7 @@ class ResponseRunner:
                 )
 
         thinking_msg = None
-        if not request.existing_event_id and not await self._has_queued_forced_compaction_off_loop(
+        if not request.existing_event_id and not self._has_queued_forced_compaction(
             session_id=session_id,
             scope=self.deps.state_writer.history_scope(),
             execution_identity=execution_identity,
