@@ -1597,6 +1597,7 @@ class ResponseRunner:
             attempt_run_id_collector.append(current_run_id)
 
         async def build_response_text() -> str:
+            show_tool_calls = self._show_tool_calls()
             knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
                 self.deps.agent_name,
                 execution_identity=runtime.tool_dispatch.execution_identity,
@@ -1624,7 +1625,8 @@ class ResponseRunner:
                 reply_to_event_id=request.reply_to_event_id,
                 correlation_id=self._correlation_id_for_request(request),
                 active_event_ids=active_event_ids,
-                show_tool_calls=self._show_tool_calls(),
+                show_tool_calls=show_tool_calls,
+                collect_streamed_response=show_tool_calls,
                 tool_trace_collector=tool_trace,
                 run_metadata_collector=run_metadata_content,
                 execution_identity=runtime.tool_dispatch.execution_identity,

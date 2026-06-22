@@ -2581,6 +2581,7 @@ class TestAgentBot:
             assert ai_kwargs["media"] == MediaInputs()
             assert ai_kwargs["reply_to_event_id"] == "event123"
             assert ai_kwargs["show_tool_calls"] is True
+            assert ai_kwargs["collect_streamed_response"] is True
             assert ai_kwargs["tool_trace_collector"] == []
             assert ai_kwargs["run_metadata_collector"] == {}
             assert ai_kwargs["compaction_outcomes_collector"] == []
