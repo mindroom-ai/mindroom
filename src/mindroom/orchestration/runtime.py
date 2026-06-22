@@ -516,30 +516,37 @@ async def _prepare_for_sync_shutdown(
 
 
 async def stop_entities(
-    entities_to_restart: set[str],
+    entities_to_stop: set[str],
     agent_bots: dict[str, AgentBot | TeamBot],
     sync_tasks: dict[str, asyncio.Task],
+    *,
+    restart_entities: set[str] | None = None,
 ) -> None:
     """Stop a set of entities and remove them from runtime maps."""
+    restart_entities = set() if restart_entities is None else restart_entities
     # Stop sync loops before certifying callback drains; otherwise fresh callbacks can
     # appear after the checkpoint decision.
-    for entity_name in entities_to_restart:
-        await cancel_sync_task(entity_name, sync_tasks, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+    for entity_name in entities_to_stop:
+        cancel_msg = SYNC_RESTART_CANCEL_MSG if entity_name in restart_entities else None
+        await cancel_sync_task(entity_name, sync_tasks, cancel_msg=cancel_msg)
 
-    for entity_name in entities_to_restart:
+    for entity_name in entities_to_stop:
         bot = agent_bots.get(entity_name)
         if bot is not None:
-            await _prepare_for_sync_shutdown(bot, sync_restart=True)
+            await _prepare_for_sync_shutdown(bot, sync_restart=entity_name in restart_entities)
 
     stop_tasks = [
-        agent_bots[entity_name].stop(reason="restart", cancel_msg=SYNC_RESTART_CANCEL_MSG)
-        for entity_name in entities_to_restart
+        agent_bots[entity_name].stop(
+            reason="restart" if entity_name in restart_entities else "entity_removed",
+            cancel_msg=SYNC_RESTART_CANCEL_MSG if entity_name in restart_entities else None,
+        )
+        for entity_name in entities_to_stop
         if entity_name in agent_bots
     ]
     if stop_tasks:
         await asyncio.gather(*stop_tasks)
 
-    for entity_name in entities_to_restart:
+    for entity_name in entities_to_stop:
         agent_bots.pop(entity_name, None)
 
 

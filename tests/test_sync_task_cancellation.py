@@ -752,7 +752,7 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
     }
 
     entities_to_restart = {"agent1", "agent2"}
-    await stop_entities(entities_to_restart, agent_bots, sync_tasks)
+    await stop_entities(entities_to_restart, agent_bots, sync_tasks, restart_entities=entities_to_restart)
 
     assert task1.cancelled()
     assert task2.cancelled()
@@ -773,6 +773,46 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
 
     task3.cancel()
     await asyncio.gather(task3, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_entities_uses_generic_shutdown_for_removed_entities() -> None:
+    """Removed entities must not enqueue sync-restart resume work."""
+    restart_bot = AsyncMock()
+    restart_bot.prepare_for_sync_shutdown = AsyncMock()
+    restart_bot.stop = AsyncMock()
+    removed_bot = AsyncMock()
+    removed_bot.prepare_for_sync_shutdown = AsyncMock()
+    removed_bot.stop = AsyncMock()
+    agent_bots = {"restart": restart_bot, "removed": removed_bot}
+    sync_tasks = {
+        "restart": asyncio.create_task(asyncio.sleep(60)),
+        "removed": asyncio.create_task(asyncio.sleep(60)),
+    }
+    cancel_messages: list[tuple[str, str | None]] = []
+
+    async def fake_cancel_sync_task(
+        entity_name: str,
+        _sync_tasks: dict[str, asyncio.Task],
+        *,
+        cancel_msg: str | None = None,
+    ) -> None:
+        cancel_messages.append((entity_name, cancel_msg))
+        task = _sync_tasks.pop(entity_name)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    with patch("mindroom.orchestration.runtime.cancel_sync_task", side_effect=fake_cancel_sync_task):
+        await stop_entities({"restart", "removed"}, agent_bots, sync_tasks, restart_entities={"restart"})
+
+    assert sorted(cancel_messages) == [
+        ("removed", None),
+        ("restart", SYNC_RESTART_CANCEL_MSG),
+    ]
+    removed_bot.prepare_for_sync_shutdown.assert_awaited_once_with()
+    removed_bot.stop.assert_awaited_once_with(reason="entity_removed", cancel_msg=None)
+    restart_bot.prepare_for_sync_shutdown.assert_awaited_once_with(cancel_msg=SYNC_RESTART_CANCEL_MSG)
+    restart_bot.stop.assert_awaited_once_with(reason="restart", cancel_msg=SYNC_RESTART_CANCEL_MSG)
 
 
 @pytest.mark.asyncio
@@ -824,7 +864,12 @@ async def test_stop_entities_completes_with_real_supervisor_task(monkeypatch: py
 
     started_at = time.monotonic()
     await asyncio.wait_for(
-        stop_entities({"agent1"}, {"agent1": bot}, {"agent1": supervisor_task}),
+        stop_entities(
+            {"agent1"},
+            {"agent1": bot},
+            {"agent1": supervisor_task},
+            restart_entities={"agent1"},
+        ),
         timeout=2.0,
     )
     elapsed = time.monotonic() - started_at
@@ -879,7 +924,7 @@ async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> 
         await asyncio.gather(task, return_exceptions=True)
 
     with patch("mindroom.orchestration.runtime.cancel_sync_task", side_effect=fake_cancel_sync_task):
-        await stop_entities({"agent1", "agent2"}, agent_bots, sync_tasks)
+        await stop_entities({"agent1", "agent2"}, agent_bots, sync_tasks, restart_entities={"agent1", "agent2"})
 
     prepare_indexes = [index for index, item in enumerate(call_order) if item[0] == "prepare"]
     cancel_indexes = [index for index, item in enumerate(call_order) if item[0] == "cancel"]

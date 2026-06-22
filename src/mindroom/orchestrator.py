@@ -1184,7 +1184,12 @@ class _MultiAgentOrchestrator:
 
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
-        await stop_entities(affected_entities, self.agent_bots, self._sync_tasks)
+        await stop_entities(
+            affected_entities,
+            self.agent_bots,
+            self._sync_tasks,
+            restart_entities=affected_entities & set(configured_entity_names(new_config)),
+        )
         return affected_entities
 
     async def _restart_changed_entities(
@@ -1198,7 +1203,12 @@ class _MultiAgentOrchestrator:
         if entities_to_stop:
             for entity_name in entities_to_stop:
                 await self._cancel_bot_start_task(entity_name)
-            await stop_entities(entities_to_stop, self.agent_bots, self._sync_tasks)
+            await stop_entities(
+                entities_to_stop,
+                self.agent_bots,
+                self._sync_tasks,
+                restart_entities=entities_to_stop & plan.configured_entities,
+            )
 
         entities_to_recreate = plan.entities_to_restart & plan.configured_entities
         changed_entities = entities_to_recreate | plan.new_entities
@@ -1231,7 +1241,12 @@ class _MultiAgentOrchestrator:
             )
             for entity_name in changed_entities:
                 await self._cancel_bot_start_task(entity_name)
-            await stop_entities(changed_entities, self.agent_bots, self._sync_tasks)
+            await stop_entities(
+                changed_entities,
+                self.agent_bots,
+                self._sync_tasks,
+                restart_entities=changed_entities,
+            )
             start_results = await self._create_and_start_entities(
                 changed_entities,
                 self.config,
