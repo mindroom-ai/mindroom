@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING, NoReturn
+
+if TYPE_CHECKING:
+    import pytest
 
 from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -97,6 +101,23 @@ class TestMentionParsing:
 
         assert processed == "Hey @actual_calculator:localhost can you help with this?"
         assert mentions == ["@actual_calculator:localhost"]
+
+    def test_parse_without_at_skips_regex_scanners(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Plain text without @ cannot contain mentions, so skip regex scanner work."""
+        config = _make_config(_default_runtime_paths())
+
+        def fail_scan(*_args: object, **_kwargs: object) -> NoReturn:
+            msg = "mention regex scanner should not run without @"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("mindroom.matrix.mentions._scan_explicit_matrix_id_tokens", fail_scan)
+        monkeypatch.setattr("mindroom.matrix.mentions._scan_entity_alias_tokens", fail_scan)
+
+        processed, mentions, markdown = _parse_mentions_in_text("plain **markdown** text", config)
+
+        assert processed == "plain **markdown** text"
+        assert markdown == "plain **markdown** text"
+        assert mentions == []
 
     def test_parse_multiple_mentions(self) -> None:
         """Test parsing multiple agent mentions."""

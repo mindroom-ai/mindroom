@@ -114,6 +114,9 @@ def _mentioned_user_ids_from_replacements(replacements: list[_MentionReplacement
 
 def _scan_mention_tokens(text: str) -> list[_MentionToken]:
     """Return ordered mention tokens from one message body."""
+    if "@" not in text:
+        return []
+
     tokens = _scan_explicit_matrix_id_tokens(text)
     tokens.extend(
         _scan_entity_alias_tokens(

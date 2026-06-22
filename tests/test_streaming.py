@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -19,6 +20,7 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
+from mindroom import streaming as streaming_mod
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -36,9 +38,10 @@ from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
     StreamingDeliveryError,
+    StreamingResponse,
     send_streaming_response,
 )
-from mindroom.tool_system.events import _TOOL_TRACE_KEY
+from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 from tests.conftest import (
     bind_runtime_paths,
     make_matrix_client_mock,
@@ -203,6 +206,69 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
     assert outcome.visible_body_state == "visible_body"
     assert outcome.visible_event_id == "$stream_1"
     assert outcome.visible_body_text == final.display_text
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config) -> None:
+    """Markdown and mention formatting should not block the stream owner's event loop."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = "Hello **world**"
+
+    loop_thread_id = threading.get_ident()
+    format_thread_ids: list[int] = []
+    delivered_content: dict[str, Any] = {}
+    original_format = streaming_mod.format_message_with_mentions
+
+    def recording_format(
+        config: Config,
+        runtime_paths: object,
+        text: str,
+        thread_event_id: str | None = None,
+        reply_to_event_id: str | None = None,
+        latest_thread_event_id: str | None = None,
+        tool_trace: list[ToolTraceEntry] | None = None,
+        extra_content: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
+        format_thread_ids.append(threading.get_ident())
+        return original_format(
+            config,
+            runtime_paths,
+            text,
+            thread_event_id=thread_event_id,
+            reply_to_event_id=reply_to_event_id,
+            latest_thread_event_id=latest_thread_event_id,
+            tool_trace=tool_trace,
+            extra_content=extra_content,
+        )
+
+    async def fake_send(
+        _client: object,
+        _room_id: str,
+        content: dict[str, Any],
+        *,
+        config: Config,
+    ) -> DeliveredMatrixEvent:
+        assert isinstance(config, Config)
+        delivered_content.update(content)
+        return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
+
+    with (
+        patch("mindroom.streaming.format_message_with_mentions", new=recording_format),
+        patch("mindroom.streaming.send_message_result", new=fake_send),
+    ):
+        sent = await streaming._send_or_edit_message(
+            make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
+        )
+
+    assert sent is True
+    assert format_thread_ids
+    assert all(thread_id != loop_thread_id for thread_id in format_thread_ids)
+    assert delivered_content["body"] == "Hello **world**"
+    assert "<strong>world</strong>" in delivered_content["formatted_body"]
 
 
 @pytest.mark.asyncio
