@@ -2524,6 +2524,7 @@ async def test_generate_response_preserves_model_prompt_in_persisted_session(
     """Persisted model prompts should stay intact so later turns can reuse provider cache prefixes."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
+    config.agents["general"].show_tool_calls = False
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     storage = _SessionStorage()
 
@@ -2680,6 +2681,7 @@ async def test_generate_response_preserves_retry_model_prompt(tmp_path: Path) ->
     """Retry runs should keep the model-facing prompt that Agno persisted."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
+    config.agents["general"].show_tool_calls = False
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     storage = _SessionStorage()
     seen_run_ids: list[str | None] = []

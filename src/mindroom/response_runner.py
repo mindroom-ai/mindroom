@@ -1596,6 +1596,8 @@ class ResponseRunner:
             turn_recorder.set_run_id(current_run_id)
             attempt_run_id_collector.append(current_run_id)
 
+        show_tool_calls = self._show_tool_calls()
+
         async def build_response_text() -> str:
             show_tool_calls = self._show_tool_calls()
             knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
