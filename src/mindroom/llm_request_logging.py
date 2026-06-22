@@ -258,6 +258,41 @@ def stream_with_llm_request_log_context[StreamEventT](
     )
 
 
+def _write_llm_request_log_sync(
+    *,
+    model: Model,
+    agent_name: str,
+    messages: Sequence[Message],
+    tools: list[dict[str, _JSONValue]] | None,
+    log_dir: str | None,
+    default_log_dir: Path,
+    request_context: dict[str, _JSONValue] | None = None,
+) -> None:
+    """Build and persist one request record for an LLM invocation."""
+    now = datetime.now().astimezone()
+    resolved_request_context = request_context or {}
+    payload: dict[str, _JSONValue] = {
+        "timestamp": now.isoformat(),
+        "agent_id": agent_name,
+    }
+    payload.update(resolved_request_context)
+    payload.update(
+        {
+            "model_id": model.id,
+            "system_prompt": _system_prompt(messages, model),
+            "messages": _json_safe(_request_message_payloads(messages)),
+            "message_count": len(messages),
+            "tools": _json_safe(tools),
+            "tool_count": len(tools or []),
+            "model_params": _json_safe(model_params_payload(model)),
+        },
+    )
+    _write_jsonl_line(
+        _daily_log_path(log_dir, default_log_dir, now),
+        payload,
+    )
+
+
 async def _write_llm_request_log(
     *,
     model: Model,
@@ -269,23 +304,16 @@ async def _write_llm_request_log(
     request_context: dict[str, _JSONValue] | None = None,
 ) -> None:
     """Persist one request record for an LLM invocation."""
-    now = datetime.now().astimezone()
     resolved_request_context = request_context if request_context is not None else _snapshot_request_log_context()
     await asyncio.to_thread(
-        _write_jsonl_line,
-        _daily_log_path(log_dir, default_log_dir, now),
-        {
-            "timestamp": now.isoformat(),
-            "agent_id": agent_name,
-            **resolved_request_context,
-            "model_id": model.id,
-            "system_prompt": _system_prompt(messages, model),
-            "messages": _request_message_payloads(messages),
-            "message_count": len(messages),
-            "tools": _json_safe(tools),
-            "tool_count": len(tools or []),
-            "model_params": model_params_payload(model),
-        },
+        _write_llm_request_log_sync,
+        model=model,
+        agent_name=agent_name,
+        messages=messages,
+        tools=tools,
+        log_dir=log_dir,
+        default_log_dir=default_log_dir,
+        request_context=resolved_request_context,
     )
 
 

@@ -512,6 +512,29 @@ class ResponseRunner:
             response_event_id=response_event_id,
         )
 
+    async def _persist_interrupted_recorder_off_loop(
+        self,
+        *,
+        recorder: TurnRecorder,
+        session_scope: HistoryScope,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+        run_id: str | None,
+        is_team: bool,
+        response_event_id: str | None = None,
+    ) -> None:
+        """Persist interrupted replay state without blocking the event loop."""
+        await asyncio.to_thread(
+            self._persist_interrupted_recorder,
+            recorder=recorder,
+            session_scope=session_scope,
+            session_id=session_id,
+            execution_identity=execution_identity,
+            run_id=run_id,
+            is_team=is_team,
+            response_event_id=response_event_id,
+        )
+
     def _record_stream_delivery_error(
         self,
         *,
@@ -720,6 +743,21 @@ class ResponseRunner:
                         scope=scope.key,
                         exception_type=error.__class__.__name__,
                     )
+
+    async def _has_queued_forced_compaction_off_loop(
+        self,
+        *,
+        session_id: str,
+        scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> bool:
+        """Check queued forced compaction without blocking response dispatch."""
+        return await asyncio.to_thread(
+            self._has_queued_forced_compaction,
+            session_id=session_id,
+            scope=scope,
+            execution_identity=execution_identity,
+        )
 
     async def _refresh_model_history_after_lock(
         self,
@@ -1108,7 +1146,7 @@ class ResponseRunner:
                         if event_id:
                             tracked_event_id = event_id
                     except asyncio.CancelledError:
-                        self._persist_interrupted_recorder(
+                        await self._persist_interrupted_recorder_off_loop(
                             recorder=team_turn_recorder,
                             session_scope=session_scope,
                             session_id=session_id,
@@ -1185,7 +1223,7 @@ class ResponseRunner:
                                     operation=build_response_text,
                                 )
                             except asyncio.CancelledError:
-                                self._persist_interrupted_recorder(
+                                await self._persist_interrupted_recorder_off_loop(
                                     recorder=team_turn_recorder,
                                     session_scope=session_scope,
                                     session_id=session_id,
@@ -1247,7 +1285,7 @@ class ResponseRunner:
                         ),
                     )
                 except asyncio.CancelledError:
-                    self._persist_interrupted_recorder(
+                    await self._persist_interrupted_recorder_off_loop(
                         recorder=team_turn_recorder,
                         session_scope=session_scope,
                         session_id=session_id,
@@ -1262,7 +1300,7 @@ class ResponseRunner:
                     request.pipeline_timing.mark("response_complete")
 
         thinking_msg = None
-        if not request.existing_event_id and not self._has_queued_forced_compaction(
+        if not request.existing_event_id and not await self._has_queued_forced_compaction_off_loop(
             session_id=session_id,
             scope=session_scope,
             execution_identity=tool_dispatch.execution_identity,
@@ -1311,7 +1349,7 @@ class ResponseRunner:
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
             ):
-                self._persist_interrupted_recorder(
+                await self._persist_interrupted_recorder_off_loop(
                     recorder=team_turn_recorder,
                     session_scope=session_scope,
                     session_id=session_id,
@@ -1604,7 +1642,7 @@ class ResponseRunner:
                     operation=build_response_text,
                 )
         except asyncio.CancelledError:
-            self._persist_interrupted_recorder(
+            await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
                 session_id=runtime.session_id,
@@ -1715,7 +1753,7 @@ class ResponseRunner:
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("streaming_complete")
                 if turn_recorder.outcome == "interrupted":
-                    self._persist_interrupted_recorder(
+                    await self._persist_interrupted_recorder_off_loop(
                         recorder=turn_recorder,
                         session_scope=self.deps.state_writer.history_scope(),
                         session_id=runtime.session_id,
@@ -1726,7 +1764,7 @@ class ResponseRunner:
                     )
                 return transport_outcome
         except asyncio.CancelledError:
-            self._persist_interrupted_recorder(
+            await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
                 session_id=runtime.session_id,
@@ -1856,7 +1894,7 @@ class ResponseRunner:
                 ),
             )
         except asyncio.CancelledError:
-            self._persist_interrupted_recorder(
+            await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=session_scope,
                 session_id=runtime.session_id,
@@ -1964,7 +2002,7 @@ class ResponseRunner:
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
             ):
-                self._persist_interrupted_recorder(
+                await self._persist_interrupted_recorder_off_loop(
                     recorder=turn_recorder,
                     session_scope=session_scope,
                     session_id=runtime.session_id,
@@ -2249,7 +2287,7 @@ class ResponseRunner:
                 )
 
         thinking_msg = None
-        if not request.existing_event_id and not self._has_queued_forced_compaction(
+        if not request.existing_event_id and not await self._has_queued_forced_compaction_off_loop(
             session_id=session_id,
             scope=self.deps.state_writer.history_scope(),
             execution_identity=execution_identity,
