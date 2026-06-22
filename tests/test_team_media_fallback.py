@@ -35,6 +35,7 @@ from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
     _prepare_bound_team_execution_context,
     _PreparedExecutionContext,
+    prepare_bound_team_run_context,
 )
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
 from mindroom.history.runtime import open_bound_scope_session_context
@@ -54,6 +55,7 @@ from mindroom.teams import (
     TeamMode,
     _materialize_team_members,
     _team_response_stream_raw,
+    build_materialized_team_instance,
     materialize_exact_team_members,
     prepare_materialized_team_execution,
     team_response,
@@ -3627,6 +3629,151 @@ def _build_private_team_orchestrator(*, include_private_member: bool) -> tuple[C
     if include_private_member:
         orchestrator.agent_bots["general"] = _DirectTeamAgentBot("general", config)
     return config, orchestrator
+
+
+def test_materialized_private_ad_hoc_team_uses_opened_scope_id() -> None:
+    """Team.id should match the requester-scoped storage scope for private ad hoc teams."""
+    config, _orchestrator = _build_private_team_orchestrator(include_private_member=False)
+    runtime_paths = runtime_paths_for(config)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="calculator",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-123",
+    )
+    agents = [
+        AgnoAgent(id="general", name="GeneralAgent", model=_TEST_MODEL),
+        AgnoAgent(id="calculator", name="CalculatorAgent", model=_TEST_MODEL),
+    ]
+
+    with (
+        open_bound_scope_session_context(
+            agents=agents,
+            session_id="session-123",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=identity,
+        ) as scope_context,
+        patch("mindroom.model_loading.get_model_instance", return_value=_TEST_MODEL),
+    ):
+        assert scope_context is not None
+        team = build_materialized_team_instance(
+            requested_agent_names=["general", "calculator"],
+            agents=agents,
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            scope_context=scope_context,
+            model_name=None,
+            configured_team_name=None,
+            execution_identity=identity,
+        )
+
+    assert scope_context.scope.scope_id.startswith("team_calculator+general_requester_")
+    assert team.id == scope_context.scope.scope_id
+
+
+@pytest.mark.asyncio
+async def test_private_ad_hoc_team_second_turn_replays_first_scoped_run() -> None:
+    """Private ad hoc team replay should read runs written under its requester-scoped Team.id."""
+    config, _orchestrator = _build_private_team_orchestrator(include_private_member=False)
+    runtime_paths = runtime_paths_for(config)
+    session_id = "session-private-team-history"
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="calculator",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=session_id,
+    )
+    agents = [
+        AgnoAgent(id="general", name="GeneralAgent", model=_TEST_MODEL),
+        AgnoAgent(id="calculator", name="CalculatorAgent", model=_TEST_MODEL),
+    ]
+
+    with (
+        open_bound_scope_session_context(
+            agents=agents,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=identity,
+            create_session_if_missing=True,
+        ) as scope_context,
+        patch("mindroom.model_loading.get_model_instance", return_value=_TEST_MODEL),
+    ):
+        assert scope_context is not None
+        assert scope_context.session is not None
+        first_team = build_materialized_team_instance(
+            requested_agent_names=["general", "calculator"],
+            agents=agents,
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            scope_context=scope_context,
+            model_name=None,
+            configured_team_name=None,
+            execution_identity=identity,
+        )
+        first_team.db = scope_context.storage
+        _cleanup_and_store(
+            first_team,
+            TeamRunOutput(
+                run_id="run-1",
+                team_id=first_team.id,
+                team_name=first_team.name,
+                session_id=session_id,
+                messages=[
+                    Message(role="user", content="first question"),
+                    Message(role="assistant", content="first answer"),
+                ],
+                status=RunStatus.completed,
+            ),
+            scope_context.session,
+        )
+
+    with (
+        open_bound_scope_session_context(
+            agents=agents,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=identity,
+        ) as scope_context,
+        patch("mindroom.model_loading.get_model_instance", return_value=_TEST_MODEL),
+    ):
+        assert scope_context is not None
+        second_team = build_materialized_team_instance(
+            requested_agent_names=["general", "calculator"],
+            agents=agents,
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            scope_context=scope_context,
+            model_name=None,
+            configured_team_name=None,
+            execution_identity=identity,
+        )
+        prepared = await prepare_bound_team_run_context(
+            scope_context=scope_context,
+            agents=agents,
+            team=second_team,
+            prompt="second question",
+            thread_history=[],
+            runtime_paths=runtime_paths,
+            config=config,
+            entity_name=None,
+            active_model_name=None,
+            active_context_window=None,
+        )
+
+    assert second_team.id == scope_context.scope.scope_id
+    assert prepared.replays_persisted_history is True
 
 
 @pytest.mark.asyncio

@@ -1305,6 +1305,7 @@ def _create_team_instance(
     model_name: str | None = None,
     configured_team_name: str | None = None,
     history_storage: BaseDb | None = None,
+    team_scope_id: str | None = None,
 ) -> Team:
     """Create a configured Team instance.
 
@@ -1321,6 +1322,7 @@ def _create_team_instance(
         configured_team_name: Optional configured team id for stable team-scope history
         history_storage: Optional already-open shared team history storage
             owned by the caller for this request.
+        team_scope_id: Optional already-open team history scope id.
 
     Returns:
         Configured Team instance
@@ -1342,12 +1344,16 @@ def _create_team_instance(
         history_settings = config.get_entity_history_settings(configured_team_name)
     else:
         history_settings = config.get_default_history_settings()
-    scope_context = resolve_bound_team_scope_context(
-        agents=agents,
-        config=config,
-        team_name=configured_team_name,
-    )
-    team_id = scope_context.scope.scope_id if scope_context is not None else fallback_team_id
+    if team_scope_id is not None:
+        team_id = team_scope_id
+    else:
+        scope_context = resolve_bound_team_scope_context(
+            agents=agents,
+            config=config,
+            team_name=configured_team_name,
+            execution_identity=execution_identity,
+        )
+        team_id = scope_context.scope.scope_id if scope_context is not None else fallback_team_id
 
     for agent in agents:
         # Team-owned replay should come from the shared TeamSession, not from
@@ -1446,6 +1452,7 @@ def build_materialized_team_instance(
         model_name=resolved_team_model_name,
         configured_team_name=configured_team_name,
         history_storage=scope_context.storage if scope_context is not None else None,
+        team_scope_id=scope_context.scope.scope_id if scope_context is not None else None,
     )
 
 
