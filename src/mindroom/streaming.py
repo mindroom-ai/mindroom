@@ -351,7 +351,7 @@ class _StreamingDeliverySnapshot:
     latest_thread_event_id: str | None
     room_mode: bool
     show_tool_calls: bool
-    tool_trace: list[ToolTraceEntry]
+    tool_trace: tuple[ToolTraceEntry, ...]
     extra_content: dict[str, Any] | None
     warmup_suffix_lines: tuple[Any, ...]
     stream_status: str
@@ -369,6 +369,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
     )
     extra_content = dict(snapshot.extra_content or {})
     extra_content[STREAM_STATUS_KEY] = snapshot.stream_status
+    tool_trace = list(snapshot.tool_trace)
 
     content = format_message_with_mentions(
         config=snapshot.config,
@@ -377,7 +378,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         thread_event_id=snapshot.effective_thread_id,
         reply_to_event_id=snapshot.reply_to_event_id,
         latest_thread_event_id=latest_for_message,
-        tool_trace=snapshot.tool_trace if snapshot.show_tool_calls else None,
+        tool_trace=tool_trace if snapshot.show_tool_calls else None,
         extra_content=extra_content,
     )
     canonical_visible_body = content["body"]
@@ -395,7 +396,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         display_text=display_text,
         committed_state=_CommittedDeliveryState(
             accumulated_text=_normalize_stream_accumulated_text(snapshot.accumulated_text),
-            tool_trace=deepcopy(snapshot.tool_trace),
+            tool_trace=tool_trace,
             placeholder_progress_sent=not snapshot.accumulated_text.strip(),
             rendered_body=canonical_visible_body,
             visible_body_state=(
@@ -952,7 +953,7 @@ class StreamingResponse:
             latest_thread_event_id=self.latest_thread_event_id,
             room_mode=self.room_mode,
             show_tool_calls=self.show_tool_calls,
-            tool_trace=deepcopy(self.tool_trace),
+            tool_trace=tuple(deepcopy(self.tool_trace)),
             extra_content=deepcopy(self.extra_content) if self.extra_content is not None else None,
             warmup_suffix_lines=tuple(warmup_suffix_lines),
             stream_status=self._resolve_stream_status(is_final=is_final, stream_status=stream_status),
