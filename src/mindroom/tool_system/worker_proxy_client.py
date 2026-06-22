@@ -121,6 +121,9 @@ def _record_proxy_exception_for_worker(
     if _is_request_level_proxy_http_error(exc):
         worker_manager.touch_worker(worker_handle.worker_key)
         return
+    if isinstance(exc, httpx.TransportError):
+        worker_manager.touch_worker(worker_handle.worker_key)
+        return
     worker_manager.record_failure(worker_handle.worker_key, str(exc))
 
 

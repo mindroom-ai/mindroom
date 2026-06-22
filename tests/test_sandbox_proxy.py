@@ -441,6 +441,67 @@ def test_worker_proxy_client_records_worker_success() -> None:
     assert manager.failures == []
 
 
+@pytest.mark.parametrize(
+    "exception_factory",
+    [
+        lambda request: httpx.ConnectError("[Errno 110] Connection timed out", request=request),
+        lambda request: httpx.ReadTimeout("timed out", request=request),
+    ],
+)
+def test_worker_proxy_transport_timeout_keeps_ready_worker_alive(
+    exception_factory: Callable[[httpx.Request], Exception],
+) -> None:
+    """A transient proxy transport timeout must not evict the shared worker for sibling streams."""
+    manager = _TrackingWorkerManager()
+    handle = WorkerHandle(
+        worker_id="worker-1",
+        worker_key="agent:test",
+        endpoint="http://worker/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="ready",
+        backend_name="kubernetes",
+        last_used_at=0.0,
+        created_at=0.0,
+    )
+
+    class _TimeoutClient:
+        def __init__(self, *, timeout: float) -> None:
+            _ = timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            _ = json, headers
+            request = httpx.Request("POST", url)
+            raise exception_factory(request)
+
+    with pytest.raises(httpx.TransportError):
+        execute_worker_proxy_request(
+            config=WorkerProxyClientConfig(
+                proxy_url=None,
+                proxy_token=None,
+                proxy_timeout_seconds=7.0,
+                credential_lease_ttl_seconds=60,
+                credential_policy={},
+            ),
+            payload={"tool_name": "shell", "function_name": "run_shell_command"},
+            credentials_manager=None,
+            tool_name="shell",
+            function_name="run_shell_command",
+            worker_target=None,
+            worker_handle=handle,
+            worker_manager=manager,
+            client_factory=_TimeoutClient,
+        )
+
+    assert manager.touched == ["agent:test"]
+    assert manager.failures == []
+
+
 class _MinimalModel(Model):
     """Minimal model surface for exercising Agno's async tool execution path."""
 
