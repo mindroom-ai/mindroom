@@ -2468,7 +2468,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
+async def test_prepare_history_for_run_auto_required_compaction_finishes_original_previous_runs(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(
@@ -2477,46 +2477,34 @@ async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
         context_window=64_000,
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    previous_runs = [
+        _completed_run(
+            f"run-{index:02}",
+            messages=[
+                Message(role="user", content=f"RUN-{index:02} user " + ("u" * 200)),
+                Message(role="assistant", content=f"RUN-{index:02} assistant " + ("a" * 200)),
+            ],
+        )
+        for index in range(1, 24)
+    ]
     session = _session(
         "session-1",
-        runs=[
-            _completed_run(
-                "run-1",
-                messages=[
-                    Message(role="user", content="u" * 200),
-                    Message(role="assistant", content="a" * 200),
-                ],
-            ),
-            _completed_run(
-                "run-2",
-                messages=[
-                    Message(role="user", content="u" * 200),
-                    Message(role="assistant", content="a" * 200),
-                ],
-            ),
-            _completed_run(
-                "run-3",
-                messages=[
-                    Message(role="user", content="u" * 200),
-                    Message(role="assistant", content="a" * 200),
-                ],
-            ),
-        ],
+        runs=previous_runs,
     )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(compacted_run_ids=("prior-tombstone",)))
     storage.upsert_session(session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
-    second_summary_text = "second pass summary"
-    third_summary_text = "third pass summary"
+    summary_inputs: list[str] = []
 
     summary_input_budget = next(
         budget
-        for budget in range(1, 10_000)
+        for budget in range(1, 20_000)
         if len(
             _build_summary_input(
                 previous_summary=None,
@@ -2525,20 +2513,11 @@ async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
                 max_input_tokens=budget,
             )[1],
         )
-        == 1
-        and len(
-            _build_summary_input(
-                previous_summary=first_summary_text,
-                compacted_runs=visible_runs[1:],
-                history_settings=history_settings,
-                max_input_tokens=budget,
-            )[1],
-        )
-        == 1
+        == 9
     )
     after_first_session = _session(
         "session-1",
-        runs=visible_runs[1:],
+        runs=visible_runs[9:],
         summary=SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
     )
     replay_budget = estimate_prompt_visible_history_tokens(
@@ -2546,6 +2525,12 @@ async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
         scope=scope,
         history_settings=history_settings,
     )
+    before_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope,
+        history_settings=history_settings,
+    )
+    assert before_tokens > replay_budget
 
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_config=True,
@@ -2561,13 +2546,12 @@ async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
         replay_budget_tokens=replay_budget,
         summary_input_budget_tokens=summary_input_budget,
     )
-    summary_mock = AsyncMock(
-        side_effect=[
-            SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
-            SessionSummary(summary=second_summary_text, updated_at=datetime.now(UTC)),
-            SessionSummary(summary=third_summary_text, updated_at=datetime.now(UTC)),
-        ],
-    )
+
+    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        summary_text = first_summary_text if len(summary_inputs) == 1 else f"summary chunk {len(summary_inputs)}"
+        return SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))
+
     lifecycle = RecordingCompactionLifecycle()
 
     with (
@@ -2577,13 +2561,13 @@ async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
-            new=summary_mock,
+            new=AsyncMock(side_effect=fake_summary),
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
             agent=_agent(db=storage),
             agent_name="test_agent",
-            full_prompt="Current prompt",
+            full_prompt="CURRENT-RUN prompt",
             session_id="session-1",
             runtime_paths=runtime_paths,
             config=config,
@@ -2598,16 +2582,51 @@ async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == first_summary_text
-    assert [run.run_id for run in persisted.runs or []] == ["run-2", "run-3"]
-    assert summary_mock.await_count == 1
+    assert persisted.runs == []
+    assert len(summary_inputs) > 1
+    assert "RUN-09" in summary_inputs[0]
+    assert "RUN-10" not in summary_inputs[0]
+    assert all("CURRENT-RUN" not in summary_input for summary_input in summary_inputs)
     assert len(prepared.compaction_outcomes) == 1
-    assert prepared.compaction_outcomes[0].compacted_run_count == 1
+    outcome = prepared.compaction_outcomes[0]
+    assert outcome.compacted_run_count == 23
+    assert outcome.runs_after == 0
+    summary_only_tokens = estimate_session_summary_tokens(persisted.summary.summary)
+    assert outcome.after_tokens == summary_only_tokens
+    assert outcome.after_tokens < replay_budget
     state = read_scope_state(persisted, scope)
-    assert state.last_compacted_run_count == 1
+    assert state.last_compacted_run_count == 23
+    assert state.compacted_run_ids == (
+        "prior-tombstone",
+        *(f"run-{index:02}" for index in range(1, 24)),
+    )
     progress_events = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleProgress)]
-    assert len(progress_events) == 1
-    assert progress_events[0].runs_remaining == 0
+    assert progress_events
+    assert progress_events[-1].runs_remaining > 0
+    assert isinstance(lifecycle.events[-1], CompactionLifecycleSuccess)
+
+    persisted.runs = [
+        _completed_run(
+            "run-24",
+            messages=[
+                Message(role="user", content="CURRENT-RUN user"),
+                Message(role="assistant", content="CURRENT-RUN assistant"),
+            ],
+        ),
+    ]
+    storage.upsert_session(persisted)
+    current_run_session = get_agent_session(storage, "session-1")
+    assert current_run_session is not None
+    assert [run.run_id for run in current_run_session.runs or []] == ["run-24"]
+    assert "run-24" not in read_scope_state(current_run_session, scope).compacted_run_ids
+    assert (
+        estimate_prompt_visible_history_tokens(
+            session=current_run_session,
+            scope=scope,
+            history_settings=history_settings,
+        )
+        > summary_only_tokens
+    )
 
 
 @pytest.mark.asyncio

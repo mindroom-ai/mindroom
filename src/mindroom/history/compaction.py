@@ -430,11 +430,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
                 )
                 compactable_runs = [run for run in compactable_runs if _has_stable_run_id(run)]
             selected_run_ids = {run.run_id for run in compactable_runs if isinstance(run.run_id, str) and run.run_id}
-            if (
-                selection_state.force_compact_before_next_run
-                and compactable_runs
-                and len(selected_run_ids) == len(compactable_runs)
-            ):
+            if compactable_runs and len(selected_run_ids) == len(compactable_runs):
                 pending_selected_run_ids = selected_run_ids
         if not compactable_runs:
             break
@@ -513,6 +509,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             runs_before=runs_before,
             threshold_tokens=threshold_tokens,
             total_compacted_run_count=total_compacted_run_count,
+            force_remaining_runs=bool(pending_selected_run_ids),
         )
 
         if pending_selected_run_ids:
@@ -556,6 +553,7 @@ async def _emit_lifecycle_progress_after_persist(
     runs_before: int,
     threshold_tokens: int | None,
     total_compacted_run_count: int,
+    force_remaining_runs: bool = False,
 ) -> None:
     """Emit lifecycle progress after a compaction chunk has been durably persisted."""
     remaining_runs = runs_for_scope(completed_top_level_runs(working_session), scope)
@@ -571,6 +569,7 @@ async def _emit_lifecycle_progress_after_persist(
         not state.force_compact_before_next_run
         and available_history_budget is not None
         and after_tokens <= available_history_budget
+        and not force_remaining_runs
     ):
         runs_remaining = 0
     await progress_callback(
