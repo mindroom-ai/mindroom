@@ -532,7 +532,7 @@ async def stop_entities(
             await _prepare_for_sync_shutdown(bot, sync_restart=True)
 
     stop_tasks = [
-        agent_bots[entity_name].stop(reason="restart")
+        agent_bots[entity_name].stop(reason="restart", cancel_msg=SYNC_RESTART_CANCEL_MSG)
         for entity_name in entities_to_restart
         if entity_name in agent_bots
     ]

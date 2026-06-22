@@ -1424,7 +1424,7 @@ class AgentBot:
         # Stop the bot
         await self.stop(reason="entity_removed")
 
-    async def stop(self, *, reason: str | None = None) -> None:
+    async def stop(self, *, reason: str | None = None, cancel_msg: str | None = None) -> None:
         """Stop the agent bot."""
         self.running = False
         self.last_sync_time = None
@@ -1435,7 +1435,7 @@ class AgentBot:
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=reason)
 
-        await self.prepare_for_sync_shutdown()
+        await self.prepare_for_sync_shutdown(cancel_msg=cancel_msg)
 
         if self.agent_name == ROUTER_AGENT_NAME:
             cleared_queued_tasks = clear_deferred_overdue_tasks()

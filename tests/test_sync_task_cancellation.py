@@ -760,8 +760,8 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
 
     mock_bot1.prepare_for_sync_shutdown.assert_awaited_once()
     mock_bot2.prepare_for_sync_shutdown.assert_awaited_once()
-    mock_bot1.stop.assert_called_once()
-    mock_bot2.stop.assert_called_once()
+    mock_bot1.stop.assert_called_once_with(reason="restart", cancel_msg=SYNC_RESTART_CANCEL_MSG)
+    mock_bot2.stop.assert_called_once_with(reason="restart", cancel_msg=SYNC_RESTART_CANCEL_MSG)
 
     assert "agent1" not in agent_bots
     assert "agent2" not in agent_bots
@@ -773,6 +773,34 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
 
     task3.cancel()
     await asyncio.gather(task3, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_bot_stop_preserves_restart_shutdown_cancel_message() -> None:
+    """AgentBot.stop(reason="restart") must keep restart provenance for final drains."""
+    bot = object.__new__(AgentBot)
+    bot.agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:localhost",
+        display_name="Test Agent",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = BotRuntimeState(
+        client=None,
+        config=MagicMock(spec=Config),
+        runtime_paths=_fake_runtime_paths(),
+        enable_streaming=True,
+        orchestrator=None,
+        event_cache=None,
+        event_cache_write_coordinator=None,
+    )
+    bot.logger = MagicMock()
+    bot.prepare_for_sync_shutdown = AsyncMock()
+    bot._emit_agent_lifecycle_event = AsyncMock()
+
+    await AgentBot.stop(bot, reason="restart", cancel_msg=SYNC_RESTART_CANCEL_MSG)
+
+    bot.prepare_for_sync_shutdown.assert_awaited_once_with(cancel_msg=SYNC_RESTART_CANCEL_MSG)
 
 
 @pytest.mark.asyncio
@@ -808,7 +836,7 @@ async def test_stop_entities_completes_with_real_supervisor_task(monkeypatch: py
         SYNC_RESTART_CANCEL_MSG,
         SYNC_RESTART_CANCEL_MSG,
     ]
-    bot.stop.assert_awaited_once_with(reason="restart")
+    bot.stop.assert_awaited_once_with(reason="restart", cancel_msg=SYNC_RESTART_CANCEL_MSG)
 
 
 @pytest.mark.asyncio

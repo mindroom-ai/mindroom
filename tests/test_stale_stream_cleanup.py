@@ -1580,6 +1580,8 @@ async def test_cleanup_returns_restart_marked_terminal_thread_for_auto_resume(tm
     cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
 
     assert cleaned == 0
+    assert len(interrupted) == 1
+    assert interrupted[0].timestamp_ms == NOW_MS - STALE_AGE_MS
     assert interrupted == [
         InterruptedThread(
             room_id=ROOM_ID,
@@ -1660,6 +1662,8 @@ async def test_cleanup_returns_old_terminal_interrupted_thread_for_auto_resume(t
     cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
 
     assert cleaned == 0
+    assert len(interrupted) == 1
+    assert interrupted[0].timestamp_ms == NOW_MS - OLD_STALE_AGE_MS
     assert interrupted == [
         InterruptedThread(
             room_id=ROOM_ID,
