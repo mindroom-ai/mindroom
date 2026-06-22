@@ -93,7 +93,7 @@ from mindroom.history.storage import (
     update_scope_seen_event_ids,
     write_scope_state,
 )
-from mindroom.history.summary_call import generate_compaction_summary
+from mindroom.history.summary_call import _CompactionSummaryOutputLimitError, generate_compaction_summary
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
@@ -1213,6 +1213,66 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
         if len(summary_inputs) == 1:
             msg = f"compaction summary timed out after {MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS}s"
             raise RuntimeError(msg)
+        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=fake_summary),
+    ):
+        rewrite_result = await _rewrite_working_session_for_compaction(
+            storage=storage,
+            persisted_session=working_session,
+            working_session=working_session,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            session_id="session-1",
+            scope=scope,
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="all"),
+                max_tool_calls_from_history=None,
+            ),
+            available_history_budget=None,
+            selected_run_ids=("run-1",),
+            summary_input_budget=8_000,
+            before_tokens=0,
+            runs_before=1,
+            threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            lifecycle_notice_event_id=None,
+            progress_callback=None,
+            collect_compaction_hook_messages=False,
+        )
+
+    assert rewrite_result is not None
+    assert len(summary_inputs) == 2
+    assert estimate_text_tokens(summary_inputs[1]) < estimate_text_tokens(summary_inputs[0])
+
+
+@pytest.mark.asyncio
+async def test_rewrite_retries_summary_with_smaller_chunk_after_output_cap(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    working_session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 8_000),
+                    Message(role="assistant", content="a" * 8_000),
+                ],
+            ),
+        ],
+    )
+    summary_inputs: list[str] = []
+
+    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        if len(summary_inputs) == 1:
+            msg = "renamed owned output-limit signal"
+            raise _CompactionSummaryOutputLimitError(msg)
         return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
 
     with patch(

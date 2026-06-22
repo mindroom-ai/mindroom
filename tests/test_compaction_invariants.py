@@ -48,6 +48,7 @@ from mindroom.history.summary_call import (
     DEFAULT_SUMMARY_RETRY_POLICY,
     SUMMARY_MAX_OUTPUT_TOKENS,
     SummaryRetryPolicy,
+    _CompactionSummaryOutputLimitError,
     build_summary_request_messages,
     configure_summary_model,
     generate_compaction_summary,
@@ -451,7 +452,7 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
 
 @pytest.mark.asyncio
 async def test_generate_compaction_summary_rejects_output_cap_truncation() -> None:
-    with pytest.raises(RuntimeError, match="likely truncated"):
+    with pytest.raises(RuntimeError, match="output token limit"):
         await generate_compaction_summary(
             model=_RecordingClaude(
                 id="claude-sonnet-4-6",
@@ -468,7 +469,7 @@ async def test_generate_compaction_summary_rejects_output_cap_truncation() -> No
 
 @pytest.mark.asyncio
 async def test_generate_compaction_summary_uses_configured_output_cap() -> None:
-    with pytest.raises(RuntimeError, match="likely truncated"):
+    with pytest.raises(RuntimeError, match="output token limit"):
         await generate_compaction_summary(
             model=_RecordingClaude(
                 id="claude-sonnet-4-6",
@@ -529,6 +530,14 @@ def test_retry_policy_shrinks_on_timeout_and_context_length_errors() -> None:
     policy = DEFAULT_SUMMARY_RETRY_POLICY
 
     assert policy.retry_budget(attempt=1, budget=16_000, error=TimeoutError()) == 8_000
+    assert (
+        policy.retry_budget(
+            attempt=1,
+            budget=16_000,
+            error=_CompactionSummaryOutputLimitError("renamed owned output-limit signal"),
+        )
+        == 8_000
+    )
     assert policy.retry_budget(attempt=1, budget=16_000, error=RuntimeError("context_length_exceeded")) == 8_000
     assert policy.retry_budget(attempt=1, budget=16_000, error=RuntimeError("request too large")) == 8_000
     assert (

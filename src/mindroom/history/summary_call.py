@@ -19,6 +19,11 @@ It enforces the call-side half of the compaction invariants
    (timeouts and the named context-length fragments), the shrink schedule
    (halving), and the give-up floor — no inline string matching at call sites.
 
+5. Output-capped summaries use an explicit retry signal.
+   ``generate_compaction_summary`` refuses to return a likely truncated summary,
+   and the retry wrapper can shrink input through ``SummaryRetryPolicy`` without
+   depending on owned error-message text.
+
 ``build_summary_request_messages`` is the single replaceable request builder; a
 future cache-friendly builder that reuses the active provider prefix (PR #861)
 plugs in behind it without another cross-cutting diff.
@@ -67,6 +72,10 @@ _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
 )
 
 
+class _CompactionSummaryOutputLimitError(RuntimeError):
+    """Raised when the summary response reaches the configured output-token cap."""
+
+
 @dataclass(frozen=True)
 class SummaryRetryPolicy:
     """Explicit budget-shrink policy for failed compaction summary calls.
@@ -82,7 +91,7 @@ class SummaryRetryPolicy:
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether a smaller summary input may resolve this provider failure."""
-        if isinstance(error, TimeoutError):
+        if isinstance(error, TimeoutError | _CompactionSummaryOutputLimitError):
             return True
         message = str(error).lower()
         return any(fragment in message for fragment in _RETRYABLE_PROVIDER_ERROR_FRAGMENTS)
@@ -258,8 +267,8 @@ async def generate_compaction_summary(
         msg = "summary generation returned no result"
         raise RuntimeError(msg)
     if _summary_response_likely_truncated(response, output_token_limit=summary_output_limit):
-        msg = "compaction summary likely truncated at max tokens; refusing to persist incomplete summary"
-        raise RuntimeError(msg)
+        msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
+        raise _CompactionSummaryOutputLimitError(msg)
     return SessionSummary(summary=normalized_text, updated_at=datetime.now(UTC))
 
 
