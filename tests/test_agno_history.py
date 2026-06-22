@@ -1169,6 +1169,7 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
                 max_tool_calls_from_history=None,
             ),
             available_history_budget=None,
+            selected_run_ids=tuple(f"run-{index}" for index in range(1, 6)),
             summary_input_budget=70_000,
             before_tokens=0,
             runs_before=len(runs),
@@ -1232,6 +1233,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
                 max_tool_calls_from_history=None,
             ),
             available_history_budget=None,
+            selected_run_ids=("run-1",),
             summary_input_budget=8_000,
             before_tokens=0,
             runs_before=1,
@@ -3731,6 +3733,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
                 max_tool_calls_from_history=None,
             ),
             available_history_budget=1,
+            selected_run_ids=("run-1", "run-2"),
             summary_input_budget=summary_input_budget,
             before_tokens=0,
             runs_before=2,
@@ -3753,7 +3756,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
 
 
 @pytest.mark.asyncio
-async def test_rewrite_working_session_for_compaction_ignores_runs_without_stable_ids(
+async def test_compact_scope_history_ignores_runs_without_stable_ids(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
@@ -3774,13 +3777,11 @@ async def test_rewrite_working_session_for_compaction_ignores_runs_without_stabl
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(return_value=SessionSummary(summary="summary", updated_at=datetime.now(UTC))),
     ) as mock_generate:
-        rewrite_result = await _rewrite_working_session_for_compaction(
+        next_state, outcome = await compact_scope_history(
             storage=storage,
-            persisted_session=working_session,
-            working_session=working_session,
+            session=working_session,
             summary_model=FakeModel(id="summary-model", provider="fake"),
             summary_model_name="summary-model",
-            session_id="session-1",
             scope=scope,
             state=HistoryScopeState(force_compact_before_next_run=True),
             history_settings=ResolvedHistorySettings(
@@ -3789,16 +3790,15 @@ async def test_rewrite_working_session_for_compaction_ignores_runs_without_stabl
             ),
             available_history_budget=1,
             summary_input_budget=16_000,
-            before_tokens=0,
-            runs_before=1,
+            active_context_window=64_000,
+            replay_window_tokens=64_000,
             threshold_tokens=None,
+            reserve_tokens=0,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            lifecycle_notice_event_id=None,
-            progress_callback=None,
-            collect_compaction_hook_messages=False,
         )
 
-    assert rewrite_result is None
+    assert outcome is None
+    assert next_state.force_compact_before_next_run is False
     assert mock_generate.await_count == 0
     assert working_session.summary is None
     assert working_session.runs == [unremovable_run]
@@ -3977,6 +3977,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
             state=HistoryScopeState(),
             history_settings=history_settings,
             available_history_budget=1,
+            selected_run_ids=("run-1", "run-2"),
             summary_input_budget=summary_input_budget,
             before_tokens=before_tokens,
             runs_before=2,

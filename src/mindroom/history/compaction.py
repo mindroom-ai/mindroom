@@ -237,7 +237,7 @@ async def compact_scope_history(
 ) -> tuple[HistoryScopeState, CompactionOutcome | None]:
     """Compact one scope by rewriting session.summary and session.runs."""
     visible_runs = runs_for_scope(completed_top_level_runs(session), scope)
-    compactable_runs = _select_runs_to_compact(
+    compactable_runs = _select_compaction_candidates(
         visible_runs=visible_runs,
         session=session,
         scope=scope,
@@ -246,6 +246,19 @@ async def compact_scope_history(
         available_history_budget=available_history_budget,
     )
     if not compactable_runs:
+        cleared_state = _persist_cleared_force_state_if_needed(
+            storage=storage,
+            session=session,
+            scope=scope,
+            state=state,
+        )
+        return cleared_state, None
+    selected_run_ids = _stable_compaction_run_ids(
+        compactable_runs,
+        session_id=session.session_id,
+        scope=scope,
+    )
+    if not selected_run_ids:
         cleared_state = _persist_cleared_force_state_if_needed(
             storage=storage,
             session=session,
@@ -285,6 +298,7 @@ async def compact_scope_history(
         state=state,
         history_settings=history_settings,
         available_history_budget=available_history_budget,
+        selected_run_ids=selected_run_ids,
         summary_input_budget=summary_input_budget,
         before_tokens=before_tokens,
         runs_before=before_run_count,
@@ -368,7 +382,7 @@ async def compact_scope_history(
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
-async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR0915
+async def _rewrite_working_session_for_compaction(  # noqa: C901
     *,
     storage: BaseDb,
     persisted_session: AgentSession | TeamSession,
@@ -380,6 +394,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     state: HistoryScopeState,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int | None,
+    selected_run_ids: Sequence[str],
     summary_input_budget: int,
     before_tokens: int,
     runs_before: int,
@@ -396,42 +411,15 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     all_compacted_run_ids: list[str] = []
     all_compacted_run_id_set: set[str] = set()
     compacted_messages: list[Message] = []
-    pending_selected_run_ids: set[str] | None = None
+    pending_selected_run_ids = set(selected_run_ids)
 
-    while True:
+    while pending_selected_run_ids:
         working_visible_runs = runs_for_scope(completed_top_level_runs(working_session), scope)
-        if pending_selected_run_ids:
-            # Once a pass selects "all visible runs", keep compacting that original
-            # set even if the remaining raw history now fits the replay budget.
-            compactable_runs = [
-                run
-                for run in working_visible_runs
-                if isinstance(run.run_id, str) and run.run_id in pending_selected_run_ids
-            ]
-        else:
-            selection_state = (
-                state if total_compacted_run_count == 0 else replace(state, force_compact_before_next_run=False)
-            )
-            compactable_runs = _select_runs_to_compact(
-                visible_runs=working_visible_runs,
-                session=working_session,
-                scope=scope,
-                state=selection_state,
-                history_settings=history_settings,
-                available_history_budget=available_history_budget,
-            )
-            unremovable_run_count = sum(1 for run in compactable_runs if not _has_stable_run_id(run))
-            if unremovable_run_count:
-                logger.warning(
-                    "Compaction skipped runs without stable run IDs",
-                    session_id=session_id,
-                    scope=scope.key,
-                    skipped_runs=unremovable_run_count,
-                )
-                compactable_runs = [run for run in compactable_runs if _has_stable_run_id(run)]
-            selected_run_ids = {run.run_id for run in compactable_runs if isinstance(run.run_id, str) and run.run_id}
-            if compactable_runs and len(selected_run_ids) == len(compactable_runs):
-                pending_selected_run_ids = selected_run_ids
+        compactable_runs = [
+            run
+            for run in working_visible_runs
+            if isinstance(run.run_id, str) and run.run_id in pending_selected_run_ids
+        ]
         if not compactable_runs:
             break
 
@@ -484,8 +472,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
                 all_compacted_run_ids.append(run_id)
         if collect_compaction_hook_messages:
             compacted_messages.extend(_messages_for_runs(included_runs, history_settings))
-        if pending_selected_run_ids is not None:
-            pending_selected_run_ids.difference_update(compacted_run_ids)
+        pending_selected_run_ids.difference_update(compacted_run_ids)
 
         record_compaction_chunk(
             storage=storage,
@@ -509,22 +496,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             runs_before=runs_before,
             threshold_tokens=threshold_tokens,
             total_compacted_run_count=total_compacted_run_count,
-            force_remaining_runs=bool(pending_selected_run_ids),
+            selected_runs_remaining=len(pending_selected_run_ids),
         )
-
-        if pending_selected_run_ids:
-            continue
-
-        if available_history_budget is None:
-            break
-
-        after_tokens = estimate_prompt_visible_history_tokens(
-            session=working_session,
-            scope=scope,
-            history_settings=history_settings,
-        )
-        if after_tokens <= available_history_budget:
-            break
 
     if total_compacted_run_count == 0:
         return None
@@ -553,7 +526,7 @@ async def _emit_lifecycle_progress_after_persist(
     runs_before: int,
     threshold_tokens: int | None,
     total_compacted_run_count: int,
-    force_remaining_runs: bool = False,
+    selected_runs_remaining: int,
 ) -> None:
     """Emit lifecycle progress after a compaction chunk has been durably persisted."""
     remaining_runs = runs_for_scope(completed_top_level_runs(working_session), scope)
@@ -564,14 +537,6 @@ async def _emit_lifecycle_progress_after_persist(
         scope=scope,
         history_settings=history_settings,
     )
-    runs_remaining = len(remaining_runs)
-    if (
-        not state.force_compact_before_next_run
-        and available_history_budget is not None
-        and after_tokens <= available_history_budget
-        and not force_remaining_runs
-    ):
-        runs_remaining = 0
     await progress_callback(
         CompactionLifecycleProgress(
             notice_event_id=lifecycle_notice_event_id,
@@ -584,7 +549,7 @@ async def _emit_lifecycle_progress_after_persist(
             history_budget_tokens=available_history_budget,
             runs_before=runs_before,
             compacted_run_count=total_compacted_run_count,
-            runs_remaining=runs_remaining,
+            runs_remaining=selected_runs_remaining,
             threshold_tokens=threshold_tokens,
         ),
     )
@@ -1358,7 +1323,7 @@ def _strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:
     return modified
 
 
-def _select_runs_to_compact(
+def _select_compaction_candidates(
     *,
     visible_runs: list[RunOutput | TeamRunOutput],
     session: AgentSession | TeamSession,
@@ -1379,6 +1344,23 @@ def _select_runs_to_compact(
         history_settings=history_settings,
     )
     return visible_runs if current_tokens > available_history_budget else []
+
+
+def _stable_compaction_run_ids(
+    runs: Sequence[RunOutput | TeamRunOutput],
+    *,
+    session_id: str,
+    scope: HistoryScope,
+) -> tuple[str, ...]:
+    unremovable_run_count = sum(1 for run in runs if not _has_stable_run_id(run))
+    if unremovable_run_count:
+        logger.warning(
+            "Compaction skipped runs without stable run IDs",
+            session_id=session_id,
+            scope=scope.key,
+            skipped_runs=unremovable_run_count,
+        )
+    return tuple(run.run_id for run in runs if isinstance(run.run_id, str) and run.run_id)
 
 
 def _history_messages_for_session(
