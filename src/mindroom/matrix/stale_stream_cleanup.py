@@ -61,9 +61,9 @@ _ROOM_HISTORY_PAGE_SIZE = 100
 # up a message during a long provider/tool stall where no new chunks arrive for
 # a while, so keep a generous recency guard here.
 _STALE_STREAM_RECENCY_GUARD_MS = 10_000
-# Restart cleanup should only touch messages from the current outage window.
-# Older interrupted replies are better left untouched than unexpectedly edited
-# and auto-resumed on some later restart.
+# Restart cleanup should only edit active-looking messages from the current
+# outage window. Explicit terminal interrupted notes may still be auto-resumed
+# later because they are already user-visible interrupted outcomes.
 _STALE_STREAM_LOOKBACK_MS = 6 * 60 * 60 * 1000
 _RATE_LIMIT_DELAY_SECONDS = 0.15
 _STOP_REACTION_KEYS = frozenset({"🛑", "⏹️"})
@@ -280,7 +280,8 @@ async def _cleanup_room_stale_streaming_messages(
 
     for target_event_id, state in candidate_items:
         assert state.latest_body is not None  # guaranteed by filter above
-        if _is_outside_startup_cleanup_window(
+        if _should_skip_for_startup_cleanup_window(
+            state,
             state.latest_timestamp,
             now_ms=current_time_ms,
             startup_cutoff_ms=startup_cutoff_ms,
@@ -1461,24 +1462,21 @@ def _is_cleanup_candidate(state: _MessageState) -> bool:
     return state.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
 
 
-def _is_outside_startup_cleanup_window(
+def _should_skip_for_startup_cleanup_window(
+    state: _MessageState,
     timestamp_ms: int,
     *,
     now_ms: int,
     startup_cutoff_ms: int | None = None,
 ) -> bool:
-    """Return whether startup cleanup should ignore one event by age."""
-    return (
-        _is_at_or_after_startup_cutoff(timestamp_ms, startup_cutoff_ms=startup_cutoff_ms)
-        or _is_recent_timestamp(
-            timestamp_ms,
-            now_ms=now_ms,
-        )
-        or _is_older_than_cleanup_window(
-            timestamp_ms,
-            now_ms=now_ms,
-        )
-    )
+    """Return whether startup cleanup should ignore one candidate by age."""
+    if _is_at_or_after_startup_cutoff(timestamp_ms, startup_cutoff_ms=startup_cutoff_ms):
+        return True
+    if _is_recent_timestamp(timestamp_ms, now_ms=now_ms):
+        return True
+    if _is_older_than_cleanup_window(timestamp_ms, now_ms=now_ms):
+        return not _has_resumable_interrupted_note(state)
+    return False
 
 
 def _is_at_or_after_startup_cutoff(timestamp_ms: int, *, startup_cutoff_ms: int | None) -> bool:
