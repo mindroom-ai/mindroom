@@ -13,6 +13,7 @@ import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, _create_task_wrapper
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
@@ -1092,7 +1093,22 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_undrained_inbox_res
 
     await bot.prepare_for_sync_shutdown()
 
-    bot._response_runner.drain_inbox_responses.assert_awaited_once_with(cancel_after_seconds=5.0)
+    bot._response_runner.drain_inbox_responses.assert_awaited_once_with(cancel_after_seconds=5.0, cancel_msg=None)
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
     assert bot._sync_checkpoint is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_for_sync_shutdown_passes_cancel_message_to_inbox_drain(tmp_path: Path) -> None:
+    """Sync-restart shutdown should preserve provenance for detached inbox responses."""
+    bot = _agent_bot(tmp_path)
+    bot._coalescing_gate.drain_all = AsyncMock(return_value=CoalescingDrainResult(completed=True))
+    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=True)
+
+    await bot.prepare_for_sync_shutdown(cancel_msg=SYNC_RESTART_CANCEL_MSG)
+
+    bot._response_runner.drain_inbox_responses.assert_awaited_once_with(
+        cancel_after_seconds=5.0,
+        cancel_msg=SYNC_RESTART_CANCEL_MSG,
+    )

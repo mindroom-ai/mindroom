@@ -1526,7 +1526,10 @@ class AgentBot:
             cancel_msg=cancel_msg,
         )
         drain_result = await self._coalescing_gate.drain_all(ready_timeout_seconds=5.0)
-        responses_drained = await self._response_runner.drain_inbox_responses(cancel_after_seconds=5.0)
+        responses_drained = await self._response_runner.drain_inbox_responses(
+            cancel_after_seconds=5.0,
+            cancel_msg=cancel_msg,
+        )
         post_drain_background_tasks_completed = await wait_for_background_tasks(
             timeout=5.0,
             owner=self._runtime_view,

@@ -39,6 +39,7 @@ from mindroom.orchestration.runtime import (
     classify_cancel_source,
     log_cancelled_response,
     log_cancelled_response_source,
+    request_task_cancel,
 )
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
@@ -376,7 +377,12 @@ class ResponseRunner:
                 error=str(error),
             )
 
-    async def drain_inbox_responses(self, *, cancel_after_seconds: float | None = None) -> bool:
+    async def drain_inbox_responses(
+        self,
+        *,
+        cancel_after_seconds: float | None = None,
+        cancel_msg: str | None = None,
+    ) -> bool:
         """Settle detached inbox responses: graceful drains await, bounded drains cancel.
 
         Returns False when a bounded drain had to cancel or abandon running work.
@@ -393,7 +399,7 @@ class ResponseRunner:
         if not pending:
             return True
         for task in pending:
-            task.cancel()
+            request_task_cancel(task, cancel_msg=cancel_msg)
         await asyncio.wait(pending, timeout=cancel_after_seconds)
         return False
 

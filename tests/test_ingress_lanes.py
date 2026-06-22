@@ -11,6 +11,7 @@ import nio
 import pytest
 
 from mindroom import inbound_turn_normalizer, interactive
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
@@ -1227,6 +1228,42 @@ async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> Non
     await asyncio.sleep(0)
     assert not runner._inbox_response_tasks
     assert await runner.drain_inbox_responses() is True
+
+
+@pytest.mark.asyncio
+async def test_bounded_inbox_drain_preserves_cancel_message(tmp_path: Path) -> None:
+    """A sync-restart inbox drain preserves cancellation provenance."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    started = asyncio.Event()
+    cancelled_args: list[tuple[object, ...]] = []
+
+    async def stuck_response() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            cancelled_args.append(exc.args)
+            raise
+
+    task = runner.track_inbox_response(stuck_response(), name="test_sync_restart_cancelled_response")
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    try:
+        completed = await runner.drain_inbox_responses(
+            cancel_after_seconds=0.05,
+            cancel_msg=SYNC_RESTART_CANCEL_MSG,
+        )
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert completed is False
+    assert task.cancelled()
+    assert cancelled_args == [(SYNC_RESTART_CANCEL_MSG,)]
+    await asyncio.sleep(0)
+    assert not runner._inbox_response_tasks
 
 
 @pytest.mark.asyncio
