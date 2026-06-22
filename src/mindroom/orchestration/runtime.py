@@ -550,6 +550,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
         iteration: _SyncIteration | None = None
         stalled_restart = False
         retry_after_cleanup = False
+        sync_restart_cancelled = False
         try:
             logger.info("starting_sync_loop", agent=bot.agent_name)
             iteration = _SyncIteration.start(bot)
@@ -564,8 +565,9 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
                 agent=bot.agent_name,
                 retry_count=retry_count,
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             # Task cancellation is part of normal shutdown.
+            sync_restart_cancelled = is_sync_restart_cancel(exc)
             logger.info("sync_task_cancelled", agent=bot.agent_name)
             break
         except _MatrixSyncStalledError:
@@ -581,7 +583,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             if iteration is not None:
                 await iteration.cancel()
                 will_retry = retry_after_cleanup and bot.running and (max_retries < 0 or retry_count < max_retries)
-                await _prepare_for_sync_shutdown(bot, sync_restart=will_retry)
+                await _prepare_for_sync_shutdown(bot, sync_restart=will_retry or sync_restart_cancelled)
 
         if not bot.running:
             break

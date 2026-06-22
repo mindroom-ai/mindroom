@@ -804,6 +804,10 @@ async def test_stop_entities_completes_with_real_supervisor_task(monkeypatch: py
     assert elapsed <= 2.0
     assert supervisor_task.done()
     assert bot.prepare_for_sync_shutdown_calls >= 2
+    assert bot.prepare_for_sync_shutdown_cancel_messages[:2] == [
+        SYNC_RESTART_CANCEL_MSG,
+        SYNC_RESTART_CANCEL_MSG,
+    ]
     bot.stop.assert_awaited_once_with(reason="restart")
 
 
