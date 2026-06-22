@@ -16,7 +16,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom import background_tasks as background_tasks_module
 from mindroom import response_runner
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -712,13 +714,16 @@ async def test_cancelled_interrupted_persistence_offload_keeps_running(
     )
     await started.wait()
 
+    registered_tasks = background_tasks_module._tasks_for_owner(coordinator.deps.runtime)
+    assert len(registered_tasks) == 1
+    assert registered_tasks[0].get_name() == "persist_interrupted_recorder"
+
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
 
     release.set()
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    await wait_for_background_tasks(timeout=1.0, owner=coordinator.deps.runtime)
 
     assert persisted == ["session"]
 

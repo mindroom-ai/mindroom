@@ -524,7 +524,7 @@ class ResponseRunner:
         response_event_id: str | None = None,
     ) -> None:
         """Persist interrupted replay state without blocking the event loop."""
-        offload = asyncio.create_task(
+        offload = create_background_task(
             asyncio.to_thread(
                 self._persist_interrupted_recorder,
                 recorder=recorder,
@@ -535,6 +535,8 @@ class ResponseRunner:
                 is_team=is_team,
                 response_event_id=response_event_id,
             ),
+            name="persist_interrupted_recorder",
+            owner=self.deps.runtime,
         )
         await asyncio.shield(offload)
 
