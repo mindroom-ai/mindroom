@@ -248,6 +248,7 @@ class TestAgentResponseLogic:
             Config(
                 agents={
                     "shared": AgentConfig(display_name="Shared", rooms=["!room:localhost"]),
+                    "ops_member": AgentConfig(display_name="OpsMember", rooms=["!room:localhost"]),
                     "private_one": AgentConfig(
                         display_name="PrivateOne",
                         rooms=["!room:localhost"],
@@ -259,6 +260,7 @@ class TestAgentResponseLogic:
                         private=AgentPrivateConfig(per="user"),
                     ),
                 },
+                teams={"ops": TeamConfig(display_name="Ops", role="Operations", agents=["ops_member"])},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
             runtime_paths,
@@ -279,18 +281,21 @@ class TestAgentResponseLogic:
             ),
         )
 
-        action = policy.team_response_action(
-            TeamResolution(
-                intent=TeamIntent.EXPLICIT_MEMBERS,
-                requested_members=[ids["private_one"], ids["private_two"]],
-                member_statuses=[],
-                eligible_members=[ids["private_one"], ids["private_two"]],
-                outcome=TeamOutcome.TEAM,
-                mode=TeamMode.COORDINATE,
-            ),
-            responder_pool=[ids["shared"]],
+        team_resolution = TeamResolution(
+            intent=TeamIntent.EXPLICIT_MEMBERS,
+            requested_members=[ids["private_one"], ids["private_two"]],
+            member_statuses=[],
+            eligible_members=[ids["private_one"], ids["private_two"]],
+            outcome=TeamOutcome.TEAM,
+            mode=TeamMode.COORDINATE,
         )
+        owner = policy.response_owner_for_team_resolution(
+            team_resolution,
+            responder_pool=[ids["ops"], ids["shared"]],
+        )
+        action = policy.team_response_action(team_resolution, responder_pool=[ids["ops"], ids["shared"]])
 
+        assert owner == ids["shared"]
         assert action is not None
         assert action.kind == "team"
 

@@ -357,7 +357,13 @@ class TurnPolicy:
         if (
             not response_owners
             and form_team.intent is TeamIntent.EXPLICIT_MEMBERS
-            and form_team.outcome in {TeamOutcome.TEAM, TeamOutcome.REJECT}
+            and form_team.outcome is TeamOutcome.TEAM
+        ):
+            response_owners = self._live_shared_agent_responders(responder_pool)
+        if (
+            not response_owners
+            and form_team.intent is TeamIntent.EXPLICIT_MEMBERS
+            and form_team.outcome is TeamOutcome.REJECT
         ):
             response_owners = responder_pool
         if not response_owners and form_team.outcome is not TeamOutcome.TEAM:
@@ -366,6 +372,19 @@ class TurnPolicy:
         if not response_owners:
             return None
         return min(response_owners, key=lambda value: value.full_id)
+
+    def _live_shared_agent_responders(self, responder_pool: list[MatrixID]) -> list[MatrixID]:
+        """Return fallback responders that can execute ad hoc team runs as agents."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        shared_responders: list[MatrixID] = []
+        for responder in responder_pool:
+            entity_name = registry.current_entity_name_for_user_id(responder.full_id)
+            if entity_name is None:
+                continue
+            agent_config = self.deps.runtime.config.agents.get(entity_name)
+            if agent_config is not None and agent_config.private is None:
+                shared_responders.append(responder)
+        return shared_responders
 
     def team_response_action(
         self,
