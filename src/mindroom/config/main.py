@@ -1585,6 +1585,7 @@ class Config(BaseModel):
         agent_names: list[str],
         *,
         closures: dict[str, frozenset[str]] | None = None,
+        allow_direct_private_agents: bool = False,
     ) -> dict[str, tuple[str, ...] | None]:
         """Return unsupported team members keyed by agent name.
 
@@ -1599,6 +1600,7 @@ class Config(BaseModel):
                 default_worker_scope=self.defaults.worker_scope,
             ),
             closures=closures,
+            allow_direct_private_agents=allow_direct_private_agents,
         )
 
     @staticmethod
@@ -1620,11 +1622,16 @@ class Config(BaseModel):
         agent_names: list[str],
         *,
         team_name: str | None = None,
+        allow_direct_private_agents: bool = False,
     ) -> None:
         """Reject unknown or currently unsupported team members."""
         prefix = f"Team '{team_name}'" if team_name is not None else "Team request"
         closure_cache: dict[str, frozenset[str]] = {}
-        unsupported_agents = self.get_unsupported_team_agents(agent_names, closures=closure_cache)
+        unsupported_agents = self.get_unsupported_team_agents(
+            agent_names,
+            closures=closure_cache,
+            allow_direct_private_agents=allow_direct_private_agents,
+        )
         if not unsupported_agents:
             return
         first_unsupported_agent, private_targets = next(iter(unsupported_agents.items()))

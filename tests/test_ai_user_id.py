@@ -50,7 +50,7 @@ from mindroom.ai import (
 from mindroom.ai_run_metadata import _serialize_metrics
 from mindroom.bot import AgentBot
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
@@ -2780,6 +2780,57 @@ async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_pat
 
     assert model_messages
     assert "[Matrix metadata for tool calls]" in model_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_path: Path) -> None:
+    """ResponseRunner preflight should not reject direct private members before team_response."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "private_worker": AgentConfig(
+                    display_name="PrivateWorker",
+                    private=AgentPrivateConfig(per="user", root="private_worker_data"),
+                ),
+                "calculator": AgentConfig(display_name="Calculator"),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="calculator")
+    seen_agent_names: list[list[str]] = []
+
+    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        seen_agent_names.append(cast("list[str]", kwargs["agent_names"]))
+        return "Team answer"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[
+                fixture_entity_matrix_id("private_worker", "localhost", runtime_paths),
+                fixture_entity_matrix_id("calculator", "localhost", runtime_paths),
+            ],
+            team_mode="coordinate",
+        )
+
+    assert seen_agent_names == [["private_worker", "calculator"]]
 
 
 @pytest.mark.asyncio

@@ -569,10 +569,10 @@ class TestRouterTeamFormation:
             Config(
                 agents={
                     "calculator": AgentConfig(display_name="Calculator", role="Math"),
-                    "mind": AgentConfig(
-                        display_name="Mind",
+                    "private_worker": AgentConfig(
+                        display_name="PrivateWorker",
                         role="Private assistant",
-                        private=AgentPrivateConfig(per="user", root="mind_data"),
+                        private=AgentPrivateConfig(per="user", root="private_worker_data"),
                     ),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
@@ -583,7 +583,7 @@ class TestRouterTeamFormation:
             "!dm:localhost",
             [
                 entity_ids(config, runtime_paths_for(config))["calculator"].full_id,
-                entity_ids(config, runtime_paths_for(config))["mind"].full_id,
+                entity_ids(config, runtime_paths_for(config))["private_worker"].full_id,
             ],
         )
 
@@ -904,8 +904,8 @@ class TestRouterTeamFormation:
         )
 
     @pytest.mark.asyncio
-    async def test_tagged_private_agents_reject_the_entire_team_request(self) -> None:
-        """Mixed shared/private mentions should reject the whole ad hoc team request."""
+    async def test_tagged_private_agent_can_join_explicit_ad_hoc_team(self) -> None:
+        """Explicit shared/private mentions should form one ad hoc team."""
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -913,10 +913,10 @@ class TestRouterTeamFormation:
                 agents={
                     "calculator": AgentConfig(display_name="Calculator", role="Math"),
                     "general": AgentConfig(display_name="General", role="General"),
-                    "mind": AgentConfig(
-                        display_name="Mind",
+                    "private_worker": AgentConfig(
+                        display_name="PrivateWorker",
                         role="Private assistant",
-                        private=AgentPrivateConfig(per="user", root="mind_data"),
+                        private=AgentPrivateConfig(per="user", root="private_worker_data"),
                     ),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
@@ -928,23 +928,31 @@ class TestRouterTeamFormation:
             [
                 entity_ids(config, runtime_paths_for(config))["calculator"].full_id,
                 entity_ids(config, runtime_paths_for(config))["general"].full_id,
-                entity_ids(config, runtime_paths_for(config))["mind"].full_id,
+                entity_ids(config, runtime_paths_for(config))["private_worker"].full_id,
             ],
         )
         result = decide_team_formation(
             tagged_agents=[
                 entity_ids(config, runtime_paths_for(config))["calculator"],
                 entity_ids(config, runtime_paths_for(config))["general"],
-                entity_ids(config, runtime_paths_for(config))["mind"],
+                entity_ids(config, runtime_paths_for(config))["private_worker"],
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
             config=config,
             room=room,
+            allow_explicit_private_agents=True,
         )
 
-        assert result.outcome is TeamOutcome.REJECT
+        assert result.outcome is TeamOutcome.TEAM
+        assert result.intent is TeamIntent.EXPLICIT_MEMBERS
+        assert {member.name: member.status for member in result.member_statuses} == {
+            "calculator": TeamMemberStatus.ELIGIBLE,
+            "general": TeamMemberStatus.ELIGIBLE,
+            "private_worker": TeamMemberStatus.ELIGIBLE,
+        }
+        assert _agent_names(result.eligible_members, config) == ["calculator", "general", "private_worker"]
 
     @pytest.mark.asyncio
     async def test_tagged_unsupported_non_materializable_member_keeps_requested_member_statuses(self) -> None:

@@ -3630,19 +3630,40 @@ def _build_private_team_orchestrator(*, include_private_member: bool) -> tuple[C
 
 
 @pytest.mark.asyncio
-async def test_team_response_rejects_private_agents_in_ad_hoc_teams() -> None:
-    """Direct team helpers should reject any team that includes a private agent."""
-    _, orchestrator = _build_private_team_orchestrator(include_private_member=True)
+async def test_team_response_materializes_private_agent_with_execution_identity() -> None:
+    """Direct team helpers should build explicitly requested private members on demand."""
+    _, orchestrator = _build_private_team_orchestrator(include_private_member=False)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="calculator",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-123",
+    )
+    private_agent = _make_test_agent("GeneralAgent")
+    shared_agent = _make_test_agent("CalculatorAgent")
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Team response"))
 
-    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
-        await team_response(
+    with (
+        patch("mindroom.teams.create_agent", side_effect=[private_agent, shared_agent]) as mock_create_agent,
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+    ):
+        response = await team_response(
             agent_names=["general", "calculator"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
-            execution_identity=None,
+            execution_identity=identity,
         )
+
+    assert "Team response" in response
+    assert [call.args[0] for call in mock_create_agent.call_args_list] == ["general", "calculator"]
+    assert all(call.kwargs["execution_identity"] is identity for call in mock_create_agent.call_args_list)
 
 
 @pytest.mark.asyncio
@@ -3681,6 +3702,53 @@ async def test_team_response_stream_rejects_private_agents_even_when_private_mem
                 execution_identity=None,
             )
         ]
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_materializes_private_agent_with_execution_identity() -> None:
+    """Streaming team helpers should build explicitly requested private members on demand."""
+    config, orchestrator = _build_private_team_orchestrator(include_private_member=False)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="calculator",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-123",
+    )
+    private_agent = _make_test_agent("GeneralAgent")
+    shared_agent = _make_test_agent("CalculatorAgent")
+    mock_team = _make_test_team()
+
+    async def fake_stream_raw(**_kwargs: object) -> AsyncIterator[object]:
+        yield TeamRunOutput(content="Streamed team response")
+
+    with (
+        patch("mindroom.teams.create_agent", side_effect=[private_agent, shared_agent]) as mock_create_agent,
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[
+                    entity_ids(config, runtime_paths_for(config))["general"],
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                ],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
+                orchestrator=orchestrator,
+                execution_identity=identity,
+            )
+        ]
+
+    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+    assert "Streamed team response" in rendered
+    assert [call.args[0] for call in mock_create_agent.call_args_list] == ["general", "calculator"]
+    assert all(call.kwargs["execution_identity"] is identity for call in mock_create_agent.call_args_list)
 
 
 @pytest.mark.asyncio

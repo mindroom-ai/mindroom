@@ -352,7 +352,10 @@ class TurnPolicy:
         if form_team.outcome is TeamOutcome.NONE:
             return None
 
-        response_owners = form_team.eligible_members
+        responder_pool_ids = {responder.full_id for responder in responder_pool}
+        response_owners = [member for member in form_team.eligible_members if member.full_id in responder_pool_ids]
+        if not response_owners and form_team.outcome is not TeamOutcome.TEAM:
+            response_owners = form_team.eligible_members
         if (
             not response_owners
             and form_team.outcome is TeamOutcome.REJECT
@@ -495,6 +498,7 @@ class TurnPolicy:
             is_thread=context.is_thread,
             available_responders_in_room=available_responders_in_room,
             materializable_agent_names=availability.materializable_agent_names,
+            allow_explicit_private_agents=True,
         )
 
     async def plan_router_dispatch(

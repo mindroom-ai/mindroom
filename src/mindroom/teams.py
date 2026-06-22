@@ -74,6 +74,7 @@ from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
     materialize_exact_requested_team_members,
     resolve_live_shared_agent_names,
+    resolve_team_materializable_agent_names,
 )
 from mindroom.tool_system.events import (
     StreamingToolTracker,
@@ -617,6 +618,7 @@ def decide_team_formation(
     is_thread: bool = False,
     available_responders_in_room: list[MatrixID] | None = None,
     materializable_agent_names: set[str] | None = None,
+    allow_explicit_private_agents: bool = False,
 ) -> TeamResolution:
     """Determine if a team should form, purely from mention, thread, and room context.
 
@@ -636,6 +638,7 @@ def decide_team_formation(
         is_thread: Whether the current message is in a thread
         available_responders_in_room: Optional pre-filtered room responders for sender-visible availability
         materializable_agent_names: Optional live agent names that can currently produce a response
+        allow_explicit_private_agents: Whether explicitly tagged requester-private agents may join
 
     Returns:
         TeamResolution with explicit intent, member statuses, and final outcome
@@ -655,6 +658,16 @@ def decide_team_formation(
     if team_request.intent is None or not team_request.requested_members:
         return TeamResolution.none()
 
+    allow_direct_private_agents = allow_explicit_private_agents and team_request.intent is TeamIntent.EXPLICIT_MEMBERS
+    materializable_agent_names = (
+        resolve_team_materializable_agent_names(
+            config,
+            materializable_agent_names,
+            allow_direct_private_agents=allow_direct_private_agents,
+        )
+        if config is not None
+        else materializable_agent_names
+    )
     member_statuses = _evaluate_team_members(
         team_request.requested_members,
         config,
@@ -662,6 +675,7 @@ def decide_team_formation(
         room=room,
         sender_visible_responders=available_responders_in_room,
         materializable_agent_names=materializable_agent_names,
+        allow_direct_private_agents=allow_direct_private_agents,
     )
     resolution = _resolve_team_request(
         intent=team_request.intent,
@@ -854,6 +868,7 @@ def _evaluate_team_members(
     room: nio.MatrixRoom | None,
     sender_visible_responders: list[MatrixID] | None,
     materializable_agent_names: set[str] | None,
+    allow_direct_private_agents: bool,
 ) -> list[TeamResolutionMember]:
     """Evaluate one status and response capability for each requested member."""
     room_visible_ids: set[str] | None = None
@@ -877,6 +892,7 @@ def _evaluate_team_members(
     if config is not None:
         unsupported_agents = config.get_unsupported_team_agents(
             [_team_member_name(agent_id, config, runtime_paths) for agent_id in requested_members],
+            allow_direct_private_agents=allow_direct_private_agents,
         )
 
     member_statuses: list[TeamResolutionMember] = []
@@ -1080,6 +1096,7 @@ def resolve_configured_team(
         room=None,
         sender_visible_responders=None,
         materializable_agent_names=materializable_agent_names,
+        allow_direct_private_agents=False,
     )
     return _resolve_team_request(
         intent=TeamIntent.CONFIGURED_TEAM,
@@ -1255,6 +1272,11 @@ def _materialize_team_members(
     """Materialize the exact requested team-member set without silent fallback."""
     requested_agent_names = _requested_team_agent_names(agent_names)
     assert orchestrator.config is not None
+    materializable_agent_names = resolve_team_materializable_agent_names(
+        orchestrator.config,
+        resolve_live_shared_agent_names(orchestrator),
+        allow_direct_private_agents=execution_identity is not None,
+    )
 
     return materialize_exact_team_members(
         requested_agent_names,
@@ -1262,7 +1284,7 @@ def _materialize_team_members(
         runtime_paths=orchestrator.runtime_paths,
         execution_identity=execution_identity,
         session_id=session_id,
-        materializable_agent_names=resolve_live_shared_agent_names(orchestrator),
+        materializable_agent_names=materializable_agent_names,
         unavailable_bases=unavailable_bases,
         refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
         reason_prefix=reason_prefix,
@@ -1534,7 +1556,10 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     """Create a team and execute response."""
     assert orchestrator.config is not None
     requested_agent_names = _requested_team_agent_names(agent_names)
-    orchestrator.config.assert_team_agents_supported(requested_agent_names)
+    orchestrator.config.assert_team_agents_supported(
+        requested_agent_names,
+        allow_direct_private_agents=execution_identity is not None,
+    )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     room_id = execution_identity.room_id if execution_identity is not None else None
     thread_id = (
@@ -1955,7 +1980,10 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     requested_agent_names = _requested_team_agent_names(
         [_team_member_name(mid, orchestrator.config, orchestrator.runtime_paths) for mid in agent_ids],
     )
-    orchestrator.config.assert_team_agents_supported(requested_agent_names)
+    orchestrator.config.assert_team_agents_supported(
+        requested_agent_names,
+        allow_direct_private_agents=execution_identity is not None,
+    )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     room_id = execution_identity.room_id if execution_identity is not None else None
     thread_id = (

@@ -256,6 +256,7 @@ def get_unsupported_team_agents(
     seeds: Mapping[str, AgentPolicySeed],
     *,
     closures: dict[str, frozenset[str]] | None = None,
+    allow_direct_private_agents: bool = False,
 ) -> dict[str, tuple[str, ...] | None]:
     """Return unsupported team members keyed by agent name."""
     closure_cache = closures if closures is not None else {}
@@ -265,6 +266,8 @@ def get_unsupported_team_agents(
             unsupported_agents[agent_name] = None
             continue
         private_targets = get_private_team_targets(agent_name, seeds, closures=closure_cache)
+        if allow_direct_private_agents and agent_name in private_targets:
+            private_targets = tuple(target for target in private_targets if target != agent_name)
         if private_targets:
             unsupported_agents[agent_name] = private_targets
     return unsupported_agents

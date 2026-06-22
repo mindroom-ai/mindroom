@@ -971,9 +971,6 @@ class ResponseRunner:
         agent_names = [
             registry.current_entity_name_for_user_id(mid.full_id) or mid.username for mid in team_request.team_agents
         ]
-        self.deps.runtime.config.assert_team_agents_supported(
-            [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
-        )
         include_matrix_prompt_context = any(
             _agent_has_matrix_messaging_tool(self.deps.runtime.config, name, resolved_target.session_id)
             for name in agent_names
@@ -1013,6 +1010,10 @@ class ResponseRunner:
             attachment_ids=request.attachment_ids,
             correlation_id=resolved_correlation_id,
             source_envelope=request.response_envelope,
+        )
+        self.deps.runtime.config.assert_team_agents_supported(
+            [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
+            allow_direct_private_agents=tool_dispatch.execution_identity is not None,
         )
         session_scope = self.deps.state_writer.team_history_scope(list(team_request.team_agents))
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
