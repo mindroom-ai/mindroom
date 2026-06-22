@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -15,6 +14,7 @@ from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history import HistoryScope, create_scope_session_storage
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
+from mindroom.team_scope import requester_scoped_team_scope_id
 
 if TYPE_CHECKING:
     import structlog
@@ -74,8 +74,7 @@ class ConversationStateWriter:
             if not requester_user_id:
                 msg = "Private ad hoc team history scope requires requester_user_id"
                 raise ValueError(msg)
-            requester_digest = hashlib.sha256(requester_user_id.encode()).hexdigest()[:12]
-            scope_id = f"{scope_id}_requester_{requester_digest}"
+            scope_id = requester_scoped_team_scope_id(scope_id, requester_user_id)
         return HistoryScope(kind="team", scope_id=scope_id)
 
     def create_storage(

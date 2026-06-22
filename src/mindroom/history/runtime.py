@@ -63,6 +63,7 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
 )
 from mindroom.logging_config import get_logger
+from mindroom.team_scope import requester_scoped_team_scope_id
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens
 
@@ -1010,8 +1011,7 @@ def resolve_bound_team_scope_context(
         if team_scope_id is not None and _ad_hoc_team_has_private_member(agents, config):
             requester_user_id = execution_identity.requester_id if execution_identity is not None else None
             if requester_user_id:
-                requester_digest = hashlib.sha256(requester_user_id.encode()).hexdigest()[:12]
-                team_scope_id = f"{team_scope_id}_requester_{requester_digest}"
+                team_scope_id = requester_scoped_team_scope_id(team_scope_id, requester_user_id)
     if team_scope_id is None:
         return None
     scope = HistoryScope(kind="team", scope_id=team_scope_id)
