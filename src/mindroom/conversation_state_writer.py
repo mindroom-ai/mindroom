@@ -14,7 +14,7 @@ from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history import HistoryScope, create_scope_session_storage
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
-from mindroom.team_scope import requester_scoped_team_scope_id
+from mindroom.team_scope import ad_hoc_team_scope_id
 
 if TYPE_CHECKING:
     import structlog
@@ -62,19 +62,19 @@ class ConversationStateWriter:
         if self.deps.agent_name in config.teams:
             return HistoryScope(kind="team", scope_id=self.deps.agent_name)
         registry = entity_identity_registry(config, self.deps.runtime_paths)
-        team_member_names: list[str] = []
-        has_private_member = False
+        member_names: list[str] = []
         for matrix_id in team_agents:
             member_name = registry.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
-            team_member_names.append(member_name)
-            agent_config = config.agents.get(member_name)
-            has_private_member = has_private_member or (agent_config is not None and agent_config.private is not None)
-        scope_id = f"team_{'+'.join(sorted(team_member_names))}"
-        if has_private_member:
-            if not requester_user_id:
-                msg = "Private ad hoc team history scope requires requester_user_id"
-                raise ValueError(msg)
-            scope_id = requester_scoped_team_scope_id(scope_id, requester_user_id)
+            member_names.append(member_name)
+        scope_id = (
+            ad_hoc_team_scope_id(
+                member_names,
+                config.agents,
+                requester_user_id=requester_user_id,
+                missing_requester_message="Private ad hoc team history scope requires requester_user_id",
+            )
+            or "team_"
+        )
         return HistoryScope(kind="team", scope_id=scope_id)
 
     def create_storage(

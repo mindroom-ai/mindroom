@@ -338,7 +338,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.team_scope"
-depends_on = []
+depends_on = ["mindroom.config.agent"]
 
 [[modules]]
 path = "mindroom.custom_tools.memory"
