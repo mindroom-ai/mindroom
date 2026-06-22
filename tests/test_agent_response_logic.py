@@ -225,18 +225,19 @@ class TestAgentResponseLogic:
             ),
         )
 
-        action = policy.team_response_action(
-            TeamResolution(
-                intent=TeamIntent.EXPLICIT_MEMBERS,
-                requested_members=[ids["private_worker"], ids["shared"]],
-                member_statuses=[],
-                eligible_members=[ids["private_worker"]],
-                outcome=TeamOutcome.REJECT,
-                reason="Team request includes unsupported members.",
-            ),
-            responder_pool=[ids["shared"]],
+        team_resolution = TeamResolution(
+            intent=TeamIntent.EXPLICIT_MEMBERS,
+            requested_members=[ids["private_worker"], ids["shared"]],
+            member_statuses=[],
+            eligible_members=[ids["private_worker"]],
+            outcome=TeamOutcome.REJECT,
+            reason="Team request includes unsupported members.",
         )
+        responder_pool = [ids["private_worker"], ids["shared"]]
+        owner = policy.response_owner_for_team_resolution(team_resolution, responder_pool)
+        action = policy.team_response_action(team_resolution, responder_pool)
 
+        assert owner == ids["shared"]
         assert action is not None
         assert action.kind == "reject"
         assert action.rejection_message == "Team request includes unsupported members."
@@ -291,9 +292,12 @@ class TestAgentResponseLogic:
         )
         owner = policy.response_owner_for_team_resolution(
             team_resolution,
-            responder_pool=[ids["ops"], ids["shared"]],
+            responder_pool=[ids["private_one"], ids["ops"], ids["shared"]],
         )
-        action = policy.team_response_action(team_resolution, responder_pool=[ids["ops"], ids["shared"]])
+        action = policy.team_response_action(
+            team_resolution,
+            responder_pool=[ids["private_one"], ids["ops"], ids["shared"]],
+        )
 
         assert owner == ids["shared"]
         assert action is not None

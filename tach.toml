@@ -337,6 +337,10 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.team_scope"
+depends_on = []
+
+[[modules]]
 path = "mindroom.custom_tools.memory"
 depends_on = ["mindroom.memory"]
 
@@ -912,6 +916,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.logging_config",
     "mindroom.model_loading",
+    "mindroom.team_scope",
     "mindroom.timing",
     "mindroom.token_budget",
 ]
@@ -1873,6 +1878,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.history",
     "mindroom.runtime_protocols",
+    "mindroom.team_scope",
 ]
 
 [[modules]]

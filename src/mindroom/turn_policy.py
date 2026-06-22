@@ -353,25 +353,51 @@ class TurnPolicy:
             return None
 
         responder_pool_ids = {responder.full_id for responder in responder_pool}
-        response_owners = [member for member in form_team.eligible_members if member.full_id in responder_pool_ids]
+        requires_shared_owner = self._requires_shared_owner_for_explicit_private_resolution(form_team)
+        shared_agent_responders = self._live_shared_agent_responders(responder_pool) if requires_shared_owner else []
+        if requires_shared_owner:
+            shared_responder_ids = {responder.full_id for responder in shared_agent_responders}
+            response_owners = [
+                member for member in form_team.eligible_members if member.full_id in shared_responder_ids
+            ]
+        else:
+            response_owners = [member for member in form_team.eligible_members if member.full_id in responder_pool_ids]
         if (
             not response_owners
             and form_team.intent is TeamIntent.EXPLICIT_MEMBERS
             and form_team.outcome is TeamOutcome.TEAM
         ):
-            response_owners = self._live_shared_agent_responders(responder_pool)
+            response_owners = shared_agent_responders or self._live_shared_agent_responders(responder_pool)
         if (
             not response_owners
             and form_team.intent is TeamIntent.EXPLICIT_MEMBERS
             and form_team.outcome is TeamOutcome.REJECT
         ):
-            response_owners = responder_pool
-        if not response_owners and form_team.outcome is not TeamOutcome.TEAM:
+            response_owners = shared_agent_responders if requires_shared_owner else responder_pool
+        if not response_owners and form_team.outcome is not TeamOutcome.TEAM and not requires_shared_owner:
             response_owners = form_team.eligible_members
 
         if not response_owners:
             return None
         return min(response_owners, key=lambda value: value.full_id)
+
+    def _requires_shared_owner_for_explicit_private_resolution(self, form_team: TeamResolution) -> bool:
+        """Return whether a private ad hoc team resolution needs a shared visible owner."""
+        if form_team.intent is not TeamIntent.EXPLICIT_MEMBERS:
+            return False
+        if form_team.outcome not in {TeamOutcome.TEAM, TeamOutcome.REJECT}:
+            return False
+
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        members = [*form_team.requested_members, *form_team.eligible_members]
+        for member in members:
+            entity_name = registry.current_entity_name_for_user_id(member.full_id, include_router=False)
+            if entity_name is None:
+                continue
+            agent_config = self.deps.runtime.config.agents.get(entity_name)
+            if agent_config is not None and agent_config.private is not None:
+                return True
+        return False
 
     def _live_shared_agent_responders(self, responder_pool: list[MatrixID]) -> list[MatrixID]:
         """Return fallback responders that can execute ad hoc team runs as agents."""
