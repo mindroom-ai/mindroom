@@ -1015,7 +1015,10 @@ class ResponseRunner:
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
             allow_direct_private_agents=tool_dispatch.execution_identity is not None,
         )
-        session_scope = self.deps.state_writer.team_history_scope(list(team_request.team_agents))
+        session_scope = self.deps.state_writer.team_history_scope(
+            list(team_request.team_agents),
+            requester_user_id=tool_dispatch.execution_identity.requester_id,
+        )
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
         def team_storage_factory() -> BaseDb:

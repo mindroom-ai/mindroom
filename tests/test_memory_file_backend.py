@@ -1174,7 +1174,10 @@ async def test_file_backend_mixed_private_team_conversation_memory_is_rejected(
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
     config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
 
-    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
         await store_conversation_memory(
             "Alice-authored private team memory",
             ["general", "calculator"],
@@ -1239,10 +1242,16 @@ async def test_file_backend_mixed_private_team_member_crud_is_rejected(
     await add_agent_memory("Calculator workspace note", "calculator", storage_path, config)
     memory_id = (await list_all_agent_memories("calculator", storage_path, config))[0]["id"]
 
-    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
         await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
 
-    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
         await update_agent_memory(
             memory_id,
             "Updated calculator workspace note",
@@ -1251,7 +1260,10 @@ async def test_file_backend_mixed_private_team_member_crud_is_rejected(
             config,
         )
 
-    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
         await delete_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
 
     memory_content = (workspace / "MEMORY.md").read_text(encoding="utf-8")

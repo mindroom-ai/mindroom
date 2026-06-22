@@ -141,7 +141,7 @@ describe("TeamEditor", () => {
       scope_source: "unscoped",
       dashboard_credentials_supported: true,
       team_eligibility_reason:
-        "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+        "Delegates to private agent 'mind', so it cannot participate in teams.",
       private_knowledge_base_id: null,
       private_workspace_enabled: false,
       private_agent_knowledge_enabled: false,
@@ -154,7 +154,7 @@ describe("TeamEditor", () => {
       scope_source: "private.per",
       dashboard_credentials_supported: false,
       team_eligibility_reason:
-        "Private agents cannot participate in teams yet.",
+        "Private agents cannot be configured as team members.",
       private_knowledge_base_id: null,
       private_workspace_enabled: true,
       private_agent_knowledge_enabled: false,
@@ -735,7 +735,7 @@ describe("TeamEditor", () => {
     const mindCheckbox = screen.getByRole("checkbox", { name: /Mind Agent/i });
     expect(mindCheckbox).toBeDisabled();
     expect(
-      screen.getByText("Private agents cannot participate in teams yet."),
+      screen.getByText("Private agents cannot be configured as team members."),
     ).toBeInTheDocument();
   });
 
@@ -748,7 +748,7 @@ describe("TeamEditor", () => {
     expect(leaderCheckbox).toBeDisabled();
     expect(
       screen.getByText(
-        "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+        "Delegates to private agent 'mind', so it cannot participate in teams.",
       ),
     ).toBeInTheDocument();
   });

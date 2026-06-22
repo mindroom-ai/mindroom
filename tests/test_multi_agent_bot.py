@@ -9561,7 +9561,7 @@ class TestAgentBot:
                         ],
                         eligible_members=[bot.matrix_id],
                         outcome=TeamOutcome.REJECT,
-                        reason="Team request includes private agent 'mind'; private agents cannot participate in teams yet",
+                        reason="Team request includes private agent 'mind'; private agents are only supported in explicit Matrix ad hoc teams with requester identity",
                     ),
                 ),
             ),
@@ -9578,7 +9578,10 @@ class TestAgentBot:
             )
 
         assert action.kind == "reject"
-        assert "private agents cannot participate in teams yet" in action.rejection_message
+        assert (
+            "private agents are only supported in explicit Matrix ad hoc teams with requester identity"
+            in action.rejection_message
+        )
         mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
@@ -10111,7 +10114,7 @@ class TestAgentBot:
                         ],
                         eligible_members=[entity_ids(config, runtime_paths_for(config))["calculator"]],
                         outcome=TeamOutcome.REJECT,
-                        reason="Team request includes private agent 'alpha'; private agents cannot participate in teams yet",
+                        reason="Team request includes private agent 'alpha'; private agents are only supported in explicit Matrix ad hoc teams with requester identity",
                     ),
                 ),
             ),
@@ -10128,7 +10131,10 @@ class TestAgentBot:
             )
 
         assert action.kind == "reject"
-        assert "private agents cannot participate in teams yet" in action.rejection_message
+        assert (
+            "private agents are only supported in explicit Matrix ad hoc teams with requester identity"
+            in action.rejection_message
+        )
         mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
@@ -11309,7 +11315,7 @@ class TestAgentBot:
         )
         action = ResponseAction(
             kind="reject",
-            rejection_message="Team request includes private agent 'mind'; private agents cannot participate in teams yet",
+            rejection_message="Team request includes private agent 'mind'; private agents are only supported in explicit Matrix ad hoc teams with requester identity",
         )
 
         bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -11329,7 +11335,7 @@ class TestAgentBot:
         send_text.assert_awaited_once()
         delivered_request = send_text.await_args.args[0]
         assert delivered_request.response_text.endswith(
-            "private agents cannot participate in teams yet",
+            "private agents are only supported in explicit Matrix ad hoc teams with requester identity",
         )
         tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(

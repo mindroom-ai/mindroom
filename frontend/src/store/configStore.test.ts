@@ -488,7 +488,7 @@ describe("configStore", () => {
               scope_source: "private.per",
               dashboard_credentials_supported: false,
               team_eligibility_reason:
-                "Private agents cannot participate in teams yet.",
+                "Private agents cannot be configured as team members.",
               private_workspace_enabled: true,
             }),
           },
@@ -1479,7 +1479,7 @@ describe("configStore", () => {
               scope_source: "private.per",
               dashboard_credentials_supported: false,
               team_eligibility_reason:
-                "Private agents cannot participate in teams yet.",
+                "Private agents cannot be configured as team members.",
               private_workspace_enabled: true,
             }),
           },
@@ -1535,7 +1535,7 @@ describe("configStore", () => {
           scope_source: "private.per",
           dashboard_credentials_supported: false,
           team_eligibility_reason:
-            "Private agents cannot participate in teams yet.",
+            "Private agents cannot be configured as team members.",
           private_workspace_enabled: true,
         }),
       });
@@ -3005,7 +3005,7 @@ describe("configStore", () => {
               scope_source: "private.per",
               dashboard_credentials_supported: false,
               team_eligibility_reason:
-                "Private agents cannot participate in teams yet.",
+                "Private agents cannot be configured as team members.",
               private_workspace_enabled: true,
             }),
             helper: makeAgentPolicy("helper"),
@@ -3030,7 +3030,7 @@ describe("configStore", () => {
             scope_source: "private.per",
             dashboard_credentials_supported: false,
             team_eligibility_reason:
-              "Private agents cannot participate in teams yet.",
+              "Private agents cannot be configured as team members.",
             private_workspace_enabled: true,
           }),
           helper: makeAgentPolicy("helper"),
@@ -3189,7 +3189,7 @@ describe("configStore", () => {
             scope_source: "private.per",
             dashboard_credentials_supported: false,
             team_eligibility_reason:
-              "Private agents cannot participate in teams yet.",
+              "Private agents cannot be configured as team members.",
             private_workspace_enabled: true,
           }),
         },
@@ -3201,7 +3201,7 @@ describe("configStore", () => {
           agent_policies: {
             leader: makeAgentPolicy("leader", {
               team_eligibility_reason:
-                "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+                "Delegates to private agent 'mind', so it cannot participate in teams.",
             }),
             helper: makeAgentPolicy("helper"),
             mind: makeAgentPolicy("mind", {
@@ -3211,7 +3211,7 @@ describe("configStore", () => {
               scope_source: "private.per",
               dashboard_credentials_supported: false,
               team_eligibility_reason:
-                "Private agents cannot participate in teams yet.",
+                "Private agents cannot be configured as team members.",
               private_workspace_enabled: true,
             }),
           },
@@ -3230,7 +3230,7 @@ describe("configStore", () => {
         expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
           leader: makeAgentPolicy("leader", {
             team_eligibility_reason:
-              "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+              "Delegates to private agent 'mind', so it cannot participate in teams.",
           }),
           helper: makeAgentPolicy("helper"),
           mind: makeAgentPolicy("mind", {
@@ -3240,7 +3240,7 @@ describe("configStore", () => {
             scope_source: "private.per",
             dashboard_credentials_supported: false,
             team_eligibility_reason:
-              "Private agents cannot participate in teams yet.",
+              "Private agents cannot be configured as team members.",
             private_workspace_enabled: true,
           }),
         });
@@ -3299,7 +3299,7 @@ describe("configStore", () => {
             scope_source: "private.per",
             dashboard_credentials_supported: false,
             team_eligibility_reason:
-              "Private agents cannot participate in teams yet.",
+              "Private agents cannot be configured as team members.",
             private_workspace_enabled: true,
           }),
         },
@@ -3318,7 +3318,7 @@ describe("configStore", () => {
           agent_policies: {
             leader: makeAgentPolicy("leader", {
               team_eligibility_reason:
-                "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+                "Delegates to private agent 'mind', so it cannot participate in teams.",
             }),
             mind: makeAgentPolicy("mind", {
               is_private: true,
@@ -3327,7 +3327,7 @@ describe("configStore", () => {
               scope_source: "private.per",
               dashboard_credentials_supported: false,
               team_eligibility_reason:
-                "Private agents cannot participate in teams yet.",
+                "Private agents cannot be configured as team members.",
               private_workspace_enabled: true,
             }),
           },
@@ -3338,7 +3338,7 @@ describe("configStore", () => {
         expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
           leader: makeAgentPolicy("leader", {
             team_eligibility_reason:
-              "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+              "Delegates to private agent 'mind', so it cannot participate in teams.",
           }),
           mind: makeAgentPolicy("mind", {
             is_private: true,
@@ -3347,7 +3347,7 @@ describe("configStore", () => {
             scope_source: "private.per",
             dashboard_credentials_supported: false,
             team_eligibility_reason:
-              "Private agents cannot participate in teams yet.",
+              "Private agents cannot be configured as team members.",
             private_workspace_enabled: true,
           }),
         });
@@ -3534,7 +3534,7 @@ describe("configStore", () => {
               scope_source: "private.per",
               dashboard_credentials_supported: false,
               team_eligibility_reason:
-                "Private agents cannot participate in teams yet.",
+                "Private agents cannot be configured as team members.",
               private_workspace_enabled: true,
             }),
           },
@@ -3560,7 +3560,7 @@ describe("configStore", () => {
             scope_source: "private.per",
             dashboard_credentials_supported: false,
             team_eligibility_reason:
-              "Private agents cannot participate in teams yet.",
+              "Private agents cannot be configured as team members.",
             private_workspace_enabled: true,
           }),
         });
@@ -3841,7 +3841,7 @@ describe("configStore", () => {
         agentPoliciesByAgent: {
           leader: makeAgentPolicy("leader", {
             team_eligibility_reason:
-              "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+              "Delegates to private agent 'mind', so it cannot participate in teams.",
           }),
           mind: makeAgentPolicy("mind", {
             is_private: true,
@@ -3850,7 +3850,7 @@ describe("configStore", () => {
             scope_source: "private.per",
             dashboard_credentials_supported: false,
             team_eligibility_reason:
-              "Private agents cannot participate in teams yet.",
+              "Private agents cannot be configured as team members.",
             private_workspace_enabled: true,
           }),
         },

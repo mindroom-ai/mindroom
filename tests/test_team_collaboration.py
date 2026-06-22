@@ -1055,7 +1055,7 @@ class TestRouterTeamFormation:
         assert result.outcome is TeamOutcome.REJECT
         assert result.reason == (
             "Team request cannot be satisfied: "
-            "agent 'alpha' is private and cannot participate in teams yet; "
+            "agent 'alpha' is private and can only join explicit Matrix ad hoc teams with requester identity; "
             "agent 'general' could not be materialized for this request"
         )
 

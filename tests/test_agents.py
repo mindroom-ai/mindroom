@@ -3599,7 +3599,7 @@ def test_config_rejects_private_agents_in_teams() -> None:
     """Configured teams must not include private agents."""
     with pytest.raises(
         ValidationError,
-        match="Team 'mixed_team' includes private agent 'mind'; private agents cannot participate in teams yet",
+        match="Team 'mixed_team' includes private agent 'mind'; private agents are only supported in explicit Matrix ad hoc teams with requester identity",
     ):
         Config(
             agents={
@@ -3655,7 +3655,7 @@ def test_config_rejects_teams_with_members_that_delegate_to_private_agents() -> 
         ValidationError,
         match=(
             "Team 'mixed_team' includes agent 'leader' which reaches private agent 'mind' "
-            "via delegation; private agents cannot participate in teams yet"
+            "via delegation; private delegation is not supported for teams"
         ),
     ):
         Config(

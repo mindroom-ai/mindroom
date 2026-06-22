@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
@@ -27,7 +27,7 @@ from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC, THREAD_HISTORY_ERROR_DIAGNOSTIC
 from mindroom.message_target import MessageTarget
-from mindroom.teams import TeamIntent, TeamOutcome, TeamResolution
+from mindroom.teams import TeamIntent, TeamMode, TeamOutcome, TeamResolution
 from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, is_router_only_agent_mention
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps, _ResponderAvailability
 from tests.conftest import (
@@ -191,6 +191,108 @@ class TestAgentResponseLogic:
         assert action is not None
         assert action.kind == "reject"
         assert action.rejection_message == "Team request includes no available members."
+
+    def test_private_eligible_member_does_not_own_explicit_reject(self) -> None:
+        """Explicit team rejections must be surfaced by a live shared responder."""
+        runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+        config = bind_runtime_paths(
+            Config(
+                agents={
+                    "shared": AgentConfig(display_name="Shared", rooms=["!room:localhost"]),
+                    "private_worker": AgentConfig(
+                        display_name="PrivateWorker",
+                        rooms=["!room:localhost"],
+                        private=AgentPrivateConfig(per="user"),
+                    ),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+            runtime_paths,
+        )
+        persist_entity_accounts(config, runtime_paths_for(config))
+        runtime_paths = runtime_paths_for(config)
+        ids = entity_ids(config, runtime_paths)
+        runtime = MagicMock()
+        runtime.config = config
+        runtime.orchestrator = None
+        policy = TurnPolicy(
+            TurnPolicyDeps(
+                runtime=runtime,
+                logger=MagicMock(),
+                runtime_paths=runtime_paths,
+                agent_name="shared",
+                matrix_id=ids["shared"],
+            ),
+        )
+
+        action = policy.team_response_action(
+            TeamResolution(
+                intent=TeamIntent.EXPLICIT_MEMBERS,
+                requested_members=[ids["private_worker"], ids["shared"]],
+                member_statuses=[],
+                eligible_members=[ids["private_worker"]],
+                outcome=TeamOutcome.REJECT,
+                reason="Team request includes unsupported members.",
+            ),
+            responder_pool=[ids["shared"]],
+        )
+
+        assert action is not None
+        assert action.kind == "reject"
+        assert action.rejection_message == "Team request includes unsupported members."
+
+    def test_live_shared_responder_owns_all_private_explicit_team(self) -> None:
+        """A live shared responder must surface explicitly requested all-private teams."""
+        runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+        config = bind_runtime_paths(
+            Config(
+                agents={
+                    "shared": AgentConfig(display_name="Shared", rooms=["!room:localhost"]),
+                    "private_one": AgentConfig(
+                        display_name="PrivateOne",
+                        rooms=["!room:localhost"],
+                        private=AgentPrivateConfig(per="user"),
+                    ),
+                    "private_two": AgentConfig(
+                        display_name="PrivateTwo",
+                        rooms=["!room:localhost"],
+                        private=AgentPrivateConfig(per="user"),
+                    ),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+            runtime_paths,
+        )
+        persist_entity_accounts(config, runtime_paths_for(config))
+        runtime_paths = runtime_paths_for(config)
+        ids = entity_ids(config, runtime_paths)
+        runtime = MagicMock()
+        runtime.config = config
+        runtime.orchestrator = None
+        policy = TurnPolicy(
+            TurnPolicyDeps(
+                runtime=runtime,
+                logger=MagicMock(),
+                runtime_paths=runtime_paths,
+                agent_name="shared",
+                matrix_id=ids["shared"],
+            ),
+        )
+
+        action = policy.team_response_action(
+            TeamResolution(
+                intent=TeamIntent.EXPLICIT_MEMBERS,
+                requested_members=[ids["private_one"], ids["private_two"]],
+                member_statuses=[],
+                eligible_members=[ids["private_one"], ids["private_two"]],
+                outcome=TeamOutcome.TEAM,
+                mode=TeamMode.COORDINATE,
+            ),
+            responder_pool=[ids["shared"]],
+        )
+
+        assert action is not None
+        assert action.kind == "team"
 
     @pytest.mark.asyncio
     async def test_single_visible_responder_replies_when_planning_history_degraded(self) -> None:

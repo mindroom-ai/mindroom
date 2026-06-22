@@ -3671,7 +3671,10 @@ async def test_team_response_rejects_private_agents_even_when_private_member_is_
     """Direct team helpers should reject requested private members before availability filtering."""
     _, orchestrator = _build_private_team_orchestrator(include_private_member=False)
 
-    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
         await team_response(
             agent_names=["general", "calculator"],
             mode=TeamMode.COORDINATE,
@@ -3687,7 +3690,10 @@ async def test_team_response_stream_rejects_private_agents_even_when_private_mem
     """Streaming team helpers should reject requested private members before availability filtering."""
     config, orchestrator = _build_private_team_orchestrator(include_private_member=False)
 
-    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
         [
             chunk
             async for chunk in team_response_stream(
@@ -3780,7 +3786,7 @@ async def test_team_response_rejects_members_that_delegate_to_private_agents() -
 
     with pytest.raises(
         ValueError,
-        match="reaches private agent 'mind' via delegation; private agents cannot participate in teams yet",
+        match="reaches private agent 'mind' via delegation; private delegation is not supported for teams",
     ):
         await team_response(
             agent_names=["leader", "helper"],

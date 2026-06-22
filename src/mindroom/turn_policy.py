@@ -354,14 +354,14 @@ class TurnPolicy:
 
         responder_pool_ids = {responder.full_id for responder in responder_pool}
         response_owners = [member for member in form_team.eligible_members if member.full_id in responder_pool_ids]
-        if not response_owners and form_team.outcome is not TeamOutcome.TEAM:
-            response_owners = form_team.eligible_members
         if (
             not response_owners
-            and form_team.outcome is TeamOutcome.REJECT
             and form_team.intent is TeamIntent.EXPLICIT_MEMBERS
+            and form_team.outcome in {TeamOutcome.TEAM, TeamOutcome.REJECT}
         ):
             response_owners = responder_pool
+        if not response_owners and form_team.outcome is not TeamOutcome.TEAM:
+            response_owners = form_team.eligible_members
 
         if not response_owners:
             return None

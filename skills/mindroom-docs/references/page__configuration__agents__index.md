@@ -144,7 +144,7 @@ agents:
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"`, `"file"`, or `"none"`). Inherits from global `memory.backend` when omitted |
 | `memory_search` | object | `null` | File-memory search override for this agent. Supports `mode`, `include`, and `include_entrypoint`; omitted fields inherit from global `memory.search` |
-| `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` defines which requester boundary gets a separate private instance of the agent's state. Private agents must not set `worker_scope`. Internally, MindRoom reuses that same requester boundary for worker execution, but `private.per` is still a different public config concept from `worker_scope`. `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root without overwriting existing files, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds PrivateAgentKnowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge, and private agents cannot participate in teams yet |
+| `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` defines which requester boundary gets a separate private instance of the agent's state. Private agents must not set `worker_scope`. Internally, MindRoom reuses that same requester boundary for worker execution, but `private.per` is still a different public config concept from `worker_scope`. `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root without overwriting existing files, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds PrivateAgentKnowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge. Private agents cannot be configured as team members or reached through team delegation, but explicit Matrix ad hoc teams can include directly tagged private agents for requester-scoped execution |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
@@ -398,8 +398,9 @@ For more details on storage layout and isolation, see [Sandbox Proxy Isolation](
 Use `private` when one shared agent definition should behave like a template that materializes a separate requester-local instance at runtime.
 The YAML definition stays shared.
 The private root, copied files, file-memory workspace, and private knowledge path do not.
-Private agents cannot participate in teams yet.
-That restriction also applies transitively: a shared team member that reaches a private agent through `delegate_to` is rejected.
+Private agents cannot be configured as team members.
+Explicit Matrix messages that tag a private agent with other agents can form an ad hoc team for that requester.
+That exception is direct only: a shared team member that reaches a private agent through `delegate_to` is still rejected.
 
 `private.per` is not a second spelling of `worker_scope`.
 `private.per` chooses who gets a separate private instance of the agent's state.
@@ -494,8 +495,9 @@ For a `mind` agent with `private.per: user`, different users get different priva
 - `private` does not automatically enable file memory.
 - `private` does not automatically load any context files.
 - `private` does not automatically create a private knowledge base.
-- Private agents cannot participate in teams yet.
-- Shared team members that reach a private agent through `delegate_to` are rejected for the same reason.
+- Private agents cannot be configured as team members.
+- Explicit Matrix ad hoc teams can include directly tagged private agents for requester-scoped execution.
+- Shared team members that reach a private agent through `delegate_to` are rejected.
 - If `private.template_dir` is omitted, MindRoom still creates the private root.
 - Private agents require an active requester-scoped runtime context.
 - MindRoom raises an error instead of silently falling back to a shared config-relative path when that requester scope is missing.

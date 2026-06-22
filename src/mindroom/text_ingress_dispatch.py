@@ -351,7 +351,10 @@ async def _apply_turn_plan(
 
     assert plan.response_action is not None
     response_history_scope = (
-        controller.deps.turn_store.response_history_scope(plan.response_action)
+        controller.deps.turn_store.response_history_scope(
+            plan.response_action,
+            requester_user_id=prepared.dispatch.requester_user_id,
+        )
         if plan.response_action.kind in {"individual", "team"}
         else None
     )

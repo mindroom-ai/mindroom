@@ -128,13 +128,18 @@ class TurnStore:
     def response_history_scope(
         self,
         response_action: ResponseAction,
+        *,
+        requester_user_id: str | None = None,
     ) -> HistoryScope:
         """Return the persisted history scope used by one response action."""
         if response_action.kind == "individual":
             return self.deps.state_writer.history_scope()
         if response_action.kind == "team":
             assert response_action.form_team is not None
-            return self.deps.state_writer.team_history_scope(response_action.form_team.eligible_members)
+            return self.deps.state_writer.team_history_scope(
+                response_action.form_team.eligible_members,
+                requester_user_id=requester_user_id,
+            )
         msg = f"Response history scope is not defined for {response_action.kind!r} actions"
         raise ValueError(msg)
 

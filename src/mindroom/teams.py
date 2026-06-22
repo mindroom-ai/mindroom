@@ -1049,16 +1049,18 @@ def _unsupported_team_member_detail(
     if private_targets is None:
         return f"agent '{member.name}' is unknown"
     if member.name in private_targets:
-        return f"agent '{member.name}' is private and cannot participate in teams yet"
+        return (
+            f"agent '{member.name}' is private and can only join explicit Matrix ad hoc teams with requester identity"
+        )
     if len(private_targets) != 1:
         return (
             f"agent '{member.name}' reaches private agents "
             f"{', '.join(repr(target) for target in private_targets)} via delegation "
-            "and cannot participate in teams yet"
+            "and private delegation is not supported for teams"
         )
     return (
         f"agent '{member.name}' reaches private agent '{private_targets[0]}' via delegation "
-        "and cannot participate in teams yet"
+        "and private delegation is not supported for teams"
     )
 
 

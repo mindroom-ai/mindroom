@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -50,17 +51,32 @@ class ConversationStateWriter:
         """Return the Agno session type used by one persisted history scope."""
         return SessionType.TEAM if scope.kind == "team" else SessionType.AGENT
 
-    def team_history_scope(self, team_agents: list[MatrixID]) -> HistoryScope:
+    def team_history_scope(
+        self,
+        team_agents: list[MatrixID],
+        *,
+        requester_user_id: str | None = None,
+    ) -> HistoryScope:
         """Return the persisted team-history scope for one team response."""
         config = self.deps.runtime.config
         if self.deps.agent_name in config.teams:
             return HistoryScope(kind="team", scope_id=self.deps.agent_name)
         registry = entity_identity_registry(config, self.deps.runtime_paths)
-        team_member_names = [
-            registry.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
-            for matrix_id in team_agents
-        ]
-        return HistoryScope(kind="team", scope_id=f"team_{'+'.join(sorted(team_member_names))}")
+        team_member_names: list[str] = []
+        has_private_member = False
+        for matrix_id in team_agents:
+            member_name = registry.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
+            team_member_names.append(member_name)
+            agent_config = config.agents.get(member_name)
+            has_private_member = has_private_member or (agent_config is not None and agent_config.private is not None)
+        scope_id = f"team_{'+'.join(sorted(team_member_names))}"
+        if has_private_member:
+            if not requester_user_id:
+                msg = "Private ad hoc team history scope requires requester_user_id"
+                raise ValueError(msg)
+            requester_digest = hashlib.sha256(requester_user_id.encode()).hexdigest()[:12]
+            scope_id = f"{scope_id}_requester_{requester_digest}"
+        return HistoryScope(kind="team", scope_id=scope_id)
 
     def create_storage(
         self,

@@ -223,10 +223,13 @@ Expected outcome: Follow-up messages keep the existing team context instead of c
 - [ ] `TEAM-005` Use a DM room that contains multiple agents.
 Expected outcome: Main-timeline DM messages can materialize multi-agent teamwork without losing DM-specific privacy or continuity behavior.
 
-- [ ] `TEAM-006` Include a private agent in a team or in a delegation path that should be unsupported.
+- [ ] `TEAM-006` Explicitly tag one or more direct private agents in an ad-hoc Matrix team.
+Expected outcome: MindRoom materializes the private agents for the requester, a live shared responder owns the visible response, and requester-private history does not leak across users.
+
+- [ ] `TEAM-007` Include a private agent in a configured team or through a delegation path that should be unsupported.
 Expected outcome: The request fails clearly with a materialization or unsupported-member explanation instead of silently misrouting.
 
-- [ ] `TEAM-007` Mention an ad-hoc team where one or more requested members are off-room, private, or otherwise not materializable.
+- [ ] `TEAM-008` Mention an ad-hoc team where one or more requested members are off-room or otherwise not materializable.
 Expected outcome: The exact requested-member set is preserved in the rejection result with member-specific failure statuses and reasons, and MindRoom does not silently shrink the team to only the remaining materializable members.
 
 ## 7. Commands And Interactive Workflows
