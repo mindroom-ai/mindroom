@@ -57,6 +57,7 @@ from mindroom.constants import (
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    TOOL_TRACE_CONTENT_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
     resolve_runtime_paths,
@@ -5544,6 +5545,81 @@ class TestAgentBot:
         assert delivery.event_id == "$response"
         assert mock_ai.call_args.kwargs["show_tool_calls"] is False
         assert "io.mindroom.tool_trace" not in bot.client.room_send.await_args.kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_visible_tool_calls_are_passed_to_ai_response(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Offline/non-streaming runs should let ai_response use the stream-equivalent path."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        show_tool_calls=True,
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot.client.room_send.return_value = _room_send_response("$response")
+        _install_runtime_cache_support(bot)
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            assert kwargs["show_tool_calls"] is True
+            collector = kwargs["tool_trace_collector"]
+            collector.append(
+                ToolTraceEntry(
+                    type="tool_call_completed",
+                    tool_name="run_shell_command",
+                    args_preview="cmd=git status",
+                    result_preview="clean",
+                ),
+            )
+            return "Final answer"
+
+        with patch_response_runner_module(
+            typing_indicator=noop_typing_indicator,
+            ai_response=AsyncMock(side_effect=fake_ai_response),
+        ):
+            delivery = await bot._response_runner.process_and_respond(
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="Check status",
+                    reply_to_event_id="$event",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Check status",
+                        user_id="@user:localhost",
+                    ),
+                ),
+            )
+
+        assert delivery.event_id == "$response"
+        content = bot.client.room_send.await_args.kwargs["content"]
+        assert content["body"] == "Final answer"
+        assert content[TOOL_TRACE_CONTENT_KEY]["events"] == [
+            {
+                "type": "tool_call_completed",
+                "tool_name": "run_shell_command",
+                "args_preview": "cmd=git status",
+                "result_preview": "clean",
+            },
+        ]
 
     @pytest.mark.asyncio
     async def test_generate_response_prefixes_user_turns_with_local_datetime(

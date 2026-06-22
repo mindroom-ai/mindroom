@@ -444,6 +444,103 @@ class _NonStreamingAttemptResult:
     user_error: Exception | None = None
 
 
+@dataclass
+class _CollectedStreamResponseState:
+    """State for collecting stream-shaped output into one final body."""
+
+    full_response: str = ""
+    canonical_final_body_candidate: str | None = None
+    tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker)
+    tool_trace: list[ToolTraceEntry] = field(default_factory=list)
+
+
+def _collect_stream_content_chunk(
+    state: _CollectedStreamResponseState,
+    chunk: str | RunContentEvent | RunCompletedEvent,
+) -> None:
+    """Append regular stream content or remember the final canonical body."""
+    if isinstance(chunk, str):
+        state.full_response += chunk
+    elif isinstance(chunk, RunContentEvent):
+        if chunk.content:
+            state.full_response += str(chunk.content)
+    elif chunk.content is not None:
+        state.canonical_final_body_candidate = str(chunk.content)
+
+
+def _collect_stream_tool_started(
+    state: _CollectedStreamResponseState,
+    event: ToolCallStartedEvent,
+    *,
+    show_tool_calls: bool,
+) -> None:
+    """Track a tool start while collecting a silent stream."""
+    if not show_tool_calls or event.tool is None:
+        return
+
+    tool_index = len(state.tool_trace) + 1
+    text_chunk, trace_entry = state.tool_tracker.start(event.tool, tool_index=tool_index)
+    if trace_entry is not None:
+        state.tool_trace.append(trace_entry)
+    state.full_response += text_chunk
+
+
+def _collect_stream_tool_completed(
+    state: _CollectedStreamResponseState,
+    event: ToolCallCompletedEvent,
+    *,
+    show_tool_calls: bool,
+) -> None:
+    """Track a tool completion while collecting a silent stream."""
+    completion = state.tool_tracker.complete(event.tool)
+    if completion is None or not show_tool_calls:
+        return
+
+    tool_name, result, pending_tool, completed_trace = completion
+    if pending_tool is None or pending_tool.visible_tool_index is None:
+        logger.warning(
+            "Missing pending tool start in collected streaming response; skipping completion marker",
+            tool_name=tool_name,
+        )
+        return
+
+    state.full_response, _ = complete_pending_tool_block(
+        state.full_response,
+        tool_name,
+        result,
+        tool_index=pending_tool.visible_tool_index,
+    )
+    if not state.tool_tracker.update_visible_trace_entry(state.tool_trace, pending_tool, completed_trace):
+        logger.warning(
+            "Missing tool trace slot in collected streaming response for completion",
+            tool_name=tool_name,
+            tool_index=pending_tool.visible_tool_index,
+            trace_len=len(state.tool_trace),
+        )
+
+
+async def _collect_streamed_response_content(
+    response_stream: AsyncIterator[AIStreamChunk],
+    *,
+    show_tool_calls: bool,
+    tool_trace_collector: list[ToolTraceEntry] | None = None,
+) -> str:
+    """Collect a streaming response into one final body without Matrix edits."""
+    state = _CollectedStreamResponseState()
+
+    async for chunk in response_stream:
+        if isinstance(chunk, str | RunContentEvent | RunCompletedEvent):
+            _collect_stream_content_chunk(state, chunk)
+        elif isinstance(chunk, ToolCallStartedEvent):
+            _collect_stream_tool_started(state, chunk, show_tool_calls=show_tool_calls)
+        elif isinstance(chunk, ToolCallCompletedEvent):
+            _collect_stream_tool_completed(state, chunk, show_tool_calls=show_tool_calls)
+
+    if tool_trace_collector is not None:
+        tool_trace_collector.extend(state.tool_trace)
+    return state.full_response or state.canonical_final_body_candidate or ""
+
+
 def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = True) -> str:
     response_parts = []
 
@@ -1377,6 +1474,44 @@ async def ai_response(  # noqa: C901, PLR0915
 
     """
     logger.info("AI request", agent=agent_name, room_id=room_id)
+    if show_tool_calls:
+        return await _collect_streamed_response_content(
+            stream_agent_response(
+                agent_name=agent_name,
+                prompt=prompt,
+                session_id=session_id,
+                runtime_paths=runtime_paths,
+                config=config,
+                thread_history=thread_history,
+                model_prompt=model_prompt,
+                thread_id=thread_id,
+                room_id=room_id,
+                knowledge=knowledge,
+                user_id=user_id,
+                run_id=run_id,
+                run_id_callback=run_id_callback,
+                include_interactive_questions=include_interactive_questions,
+                include_openai_compat_guidance=include_openai_compat_guidance,
+                media=media,
+                reply_to_event_id=reply_to_event_id,
+                correlation_id=correlation_id,
+                active_event_ids=active_event_ids,
+                show_tool_calls=show_tool_calls,
+                run_metadata_collector=run_metadata_collector,
+                execution_identity=execution_identity,
+                compaction_outcomes_collector=compaction_outcomes_collector,
+                compaction_lifecycle=compaction_lifecycle,
+                delegation_depth=delegation_depth,
+                refresh_scheduler=refresh_scheduler,
+                matrix_run_metadata=matrix_run_metadata,
+                system_enrichment_items=system_enrichment_items,
+                turn_recorder=turn_recorder,
+                pipeline_timing=pipeline_timing,
+            ),
+            show_tool_calls=show_tool_calls,
+            tool_trace_collector=tool_trace_collector,
+        )
+
     timing_scope = _build_timing_scope(
         reply_to_event_id=reply_to_event_id,
         run_id=run_id,
