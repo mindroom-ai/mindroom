@@ -1407,6 +1407,7 @@ async def ai_response(  # noqa: C901, PLR0915
     correlation_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
     show_tool_calls: bool = True,
+    collect_streamed_response: bool = False,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -1448,6 +1449,8 @@ async def ai_response(  # noqa: C901, PLR0915
         active_event_ids: Live self-authored Matrix event IDs still tracked as
             actively streaming for this bot in the current room.
         show_tool_calls: Whether to include tool call details inline in the response text.
+        collect_streamed_response: Whether to use stream-shaped execution internally
+            and collect chunks into one final response body.
         tool_trace_collector: Optional list that receives structured tool-trace
             entries from this run.
         run_metadata_collector: Optional mapping that receives versioned
@@ -1474,7 +1477,7 @@ async def ai_response(  # noqa: C901, PLR0915
 
     """
     logger.info("AI request", agent=agent_name, room_id=room_id)
-    if show_tool_calls:
+    if collect_streamed_response and show_tool_calls:
         return await _collect_streamed_response_content(
             stream_agent_response(
                 agent_name=agent_name,

@@ -321,8 +321,9 @@ class TestAIErrorDisplay:
 
     @pytest.mark.asyncio
     async def test_cancelled_run_status_preserves_user_stop_note(self, tmp_path: Path) -> None:
-        """RunStatus.cancelled should keep a user-stop label when the task is already cancelling."""
+        """Legacy non-streaming RunStatus.cancelled should keep a user-stop label."""
         bot = _mock_bot(tmp_path)
+        bot.config.agents["test_agent"].show_tool_calls = False
 
         edited_messages: list[tuple[str, str]] = []
 
