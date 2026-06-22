@@ -16,6 +16,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom import background_tasks as background_tasks_module
+from mindroom import response_runner
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -25,6 +28,7 @@ from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import ThreadHistoryResult
@@ -609,6 +613,119 @@ async def test_streaming_midstream_failure_persists_partial_and_finalizes_error(
     assert snapshot.partial_text == "partial body"
     assert snapshot.response_event_id == "$stream"
     assert persist.call_args.kwargs["is_team"] is False
+
+
+@pytest.mark.asyncio
+async def test_streaming_midstream_failure_persists_partial_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Interrupted replay snapshot persistence should run through the thread offload boundary."""
+    bot = _bot(tmp_path)
+    coordinator = replace_response_runner_deps(bot, logger=MagicMock())
+    error_transport = StreamTransportOutcome(
+        last_physical_stream_event_id="$stream",
+        terminal_status="error",
+        rendered_body="partial body",
+        visible_body_state="visible_body",
+        failure_reason="boom",
+    )
+    error_outcome = FinalDeliveryOutcome(
+        terminal_status="error",
+        event_id="$stream",
+        is_visible_response=True,
+        final_visible_body="partial body",
+        failure_reason="boom",
+    )
+    in_worker = False
+
+    async def fake_to_thread(function: object, *args: object, **kwargs: object) -> object:
+        nonlocal in_worker
+        in_worker = True
+        try:
+            return function(*args, **kwargs)  # type: ignore[misc]
+        finally:
+            in_worker = False
+
+    def persist(**_kwargs: object) -> None:
+        assert in_worker
+
+    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "chunk"
+
+    monkeypatch.setattr(response_runner.asyncio, "to_thread", fake_to_thread)
+    with (
+        patch.object(
+            DeliveryGateway,
+            "deliver_stream",
+            new=AsyncMock(
+                side_effect=StreamingDeliveryError(
+                    RuntimeError("boom"),
+                    event_id="$stream",
+                    accumulated_text="partial body",
+                    tool_trace=[],
+                    transport_outcome=error_transport,
+                ),
+            ),
+        ),
+        patch.object(DeliveryGateway, "finalize_streamed_response", new=AsyncMock(return_value=error_outcome)),
+        patch("mindroom.response_runner.persist_interrupted_replay_snapshot", new=persist),
+        patch_response_runner_module(
+            stream_agent_response=fake_stream,
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await coordinator.process_and_respond_streaming(_plain_request(_target()))
+
+
+@pytest.mark.asyncio
+async def test_cancelled_interrupted_persistence_offload_keeps_running(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A second cancellation should not cancel the in-flight persistence worker."""
+    bot = _bot(tmp_path)
+    coordinator = replace_response_runner_deps(bot)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    persisted: list[str] = []
+
+    async def fake_to_thread(function: object, *args: object, **kwargs: object) -> object:
+        started.set()
+        await release.wait()
+        return function(*args, **kwargs)  # type: ignore[misc]
+
+    def persist(**kwargs: object) -> None:
+        persisted.append(str(kwargs["session_id"]))
+
+    monkeypatch.setattr(response_runner.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(coordinator, "_persist_interrupted_recorder", persist)
+
+    task = asyncio.create_task(
+        coordinator._persist_interrupted_recorder_off_loop(
+            recorder=TurnRecorder(user_message="hello"),
+            session_scope=coordinator.deps.state_writer.history_scope(),
+            session_id="session",
+            execution_identity=None,
+            run_id="run",
+            is_team=False,
+            response_event_id="$response",
+        ),
+    )
+    await started.wait()
+
+    registered_tasks = background_tasks_module._tasks_for_owner(coordinator.deps.runtime)
+    assert len(registered_tasks) == 1
+    assert registered_tasks[0].get_name() == "persist_interrupted_recorder"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    release.set()
+    await wait_for_background_tasks(timeout=1.0, owner=coordinator.deps.runtime)
+
+    assert persisted == ["session"]
 
 
 # ---------------------------------------------------------------------------

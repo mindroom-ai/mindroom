@@ -512,6 +512,34 @@ class ResponseRunner:
             response_event_id=response_event_id,
         )
 
+    async def _persist_interrupted_recorder_off_loop(
+        self,
+        *,
+        recorder: TurnRecorder,
+        session_scope: HistoryScope,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+        run_id: str | None,
+        is_team: bool,
+        response_event_id: str | None = None,
+    ) -> None:
+        """Persist interrupted replay state without blocking the event loop."""
+        offload = create_background_task(
+            asyncio.to_thread(
+                self._persist_interrupted_recorder,
+                recorder=recorder,
+                session_scope=session_scope,
+                session_id=session_id,
+                execution_identity=execution_identity,
+                run_id=run_id,
+                is_team=is_team,
+                response_event_id=response_event_id,
+            ),
+            name="persist_interrupted_recorder",
+            owner=self.deps.runtime,
+        )
+        await asyncio.shield(offload)
+
     def _record_stream_delivery_error(
         self,
         *,
@@ -1108,7 +1136,7 @@ class ResponseRunner:
                         if event_id:
                             tracked_event_id = event_id
                     except asyncio.CancelledError:
-                        self._persist_interrupted_recorder(
+                        await self._persist_interrupted_recorder_off_loop(
                             recorder=team_turn_recorder,
                             session_scope=session_scope,
                             session_id=session_id,
@@ -1185,7 +1213,7 @@ class ResponseRunner:
                                     operation=build_response_text,
                                 )
                             except asyncio.CancelledError:
-                                self._persist_interrupted_recorder(
+                                await self._persist_interrupted_recorder_off_loop(
                                     recorder=team_turn_recorder,
                                     session_scope=session_scope,
                                     session_id=session_id,
@@ -1247,7 +1275,7 @@ class ResponseRunner:
                         ),
                     )
                 except asyncio.CancelledError:
-                    self._persist_interrupted_recorder(
+                    await self._persist_interrupted_recorder_off_loop(
                         recorder=team_turn_recorder,
                         session_scope=session_scope,
                         session_id=session_id,
@@ -1311,7 +1339,7 @@ class ResponseRunner:
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
             ):
-                self._persist_interrupted_recorder(
+                await self._persist_interrupted_recorder_off_loop(
                     recorder=team_turn_recorder,
                     session_scope=session_scope,
                     session_id=session_id,
@@ -1604,7 +1632,7 @@ class ResponseRunner:
                     operation=build_response_text,
                 )
         except asyncio.CancelledError:
-            self._persist_interrupted_recorder(
+            await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
                 session_id=runtime.session_id,
@@ -1715,7 +1743,7 @@ class ResponseRunner:
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("streaming_complete")
                 if turn_recorder.outcome == "interrupted":
-                    self._persist_interrupted_recorder(
+                    await self._persist_interrupted_recorder_off_loop(
                         recorder=turn_recorder,
                         session_scope=self.deps.state_writer.history_scope(),
                         session_id=runtime.session_id,
@@ -1726,7 +1754,7 @@ class ResponseRunner:
                     )
                 return transport_outcome
         except asyncio.CancelledError:
-            self._persist_interrupted_recorder(
+            await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
                 session_id=runtime.session_id,
@@ -1856,7 +1884,7 @@ class ResponseRunner:
                 ),
             )
         except asyncio.CancelledError:
-            self._persist_interrupted_recorder(
+            await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=session_scope,
                 session_id=runtime.session_id,
@@ -1964,7 +1992,7 @@ class ResponseRunner:
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
             ):
-                self._persist_interrupted_recorder(
+                await self._persist_interrupted_recorder_off_loop(
                     recorder=turn_recorder,
                     session_scope=session_scope,
                     session_id=runtime.session_id,
