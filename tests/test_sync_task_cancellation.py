@@ -69,6 +69,7 @@ class _FakeBot:
         self.first_call_cancelled = False
         self.first_call_cancel_args: tuple[object, ...] = ()
         self.prepare_for_sync_shutdown_calls = 0
+        self.prepare_for_sync_shutdown_cancel_messages: list[str | None] = []
         self.runtime_paths = _fake_runtime_paths(**env_overrides)
 
     def mark_sync_loop_started(self) -> None:
@@ -92,9 +93,10 @@ class _FakeBot:
                 self.first_call_cancel_args = exc.args
             raise
 
-    async def prepare_for_sync_shutdown(self) -> None:
+    async def prepare_for_sync_shutdown(self, *, cancel_msg: str | None = None) -> None:
         self._sync_shutting_down = True
         self.prepare_for_sync_shutdown_calls += 1
+        self.prepare_for_sync_shutdown_cancel_messages.append(cancel_msg)
 
 
 @pytest.mark.asyncio
@@ -189,6 +191,7 @@ async def test_sync_forever_with_restart_restarts_stalled_sync(monkeypatch: pyte
     assert bot.first_call_cancel_args == (SYNC_RESTART_CANCEL_MSG,)
     assert bot.sync_calls == 1  # sync_forever called once, then sync_then_stop stopped
     assert bot.prepare_for_sync_shutdown_calls == 2
+    assert bot.prepare_for_sync_shutdown_cancel_messages == [SYNC_RESTART_CANCEL_MSG, None]
 
 
 @pytest.mark.asyncio
@@ -811,13 +814,13 @@ async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> 
 
     mock_bot1 = AsyncMock()
     mock_bot1.prepare_for_sync_shutdown = AsyncMock(
-        side_effect=lambda: call_order.append(("prepare", "agent1")),
+        side_effect=lambda **_kwargs: call_order.append(("prepare", "agent1")),
     )
     mock_bot1.stop = AsyncMock(side_effect=lambda **_: call_order.append(("stop", "agent1")))
 
     mock_bot2 = AsyncMock()
     mock_bot2.prepare_for_sync_shutdown = AsyncMock(
-        side_effect=lambda: call_order.append(("prepare", "agent2")),
+        side_effect=lambda **_kwargs: call_order.append(("prepare", "agent2")),
     )
     mock_bot2.stop = AsyncMock(side_effect=lambda **_: call_order.append(("stop", "agent2")))
 
@@ -855,6 +858,8 @@ async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> 
         ("agent1", SYNC_RESTART_CANCEL_MSG),
         ("agent2", SYNC_RESTART_CANCEL_MSG),
     ]
+    mock_bot1.prepare_for_sync_shutdown.assert_awaited_once_with(cancel_msg=SYNC_RESTART_CANCEL_MSG)
+    mock_bot2.prepare_for_sync_shutdown.assert_awaited_once_with(cancel_msg=SYNC_RESTART_CANCEL_MSG)
 
 
 @pytest.mark.asyncio

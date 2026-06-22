@@ -30,6 +30,7 @@ import mindroom.timing as timing_module
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -3335,6 +3336,33 @@ class TestThreadingBehavior:
         finally:
             allow_respawn = False
             await wait_for_background_tasks(timeout=0.05, owner=owner)
+
+    @pytest.mark.asyncio
+    async def test_wait_for_background_tasks_timeout_preserves_cancel_message(self) -> None:
+        """Timed-out owner task cancellation should preserve explicit cancellation provenance."""
+        owner = object()
+        task_started = asyncio.Event()
+        cancelled_args: list[tuple[object, ...]] = []
+
+        async def never_finishes() -> None:
+            task_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError as exc:
+                cancelled_args.append(exc.args)
+                raise
+
+        create_background_task(never_finishes(), name="sync_restart_cancelled_task", owner=owner)
+        await asyncio.wait_for(task_started.wait(), timeout=1.0)
+
+        completed = await wait_for_background_tasks(
+            timeout=0.0,
+            owner=owner,
+            cancel_msg=SYNC_RESTART_CANCEL_MSG,
+        )
+
+        assert completed is False
+        assert cancelled_args == [(SYNC_RESTART_CANCEL_MSG,)]
 
     @pytest.mark.asyncio
     async def test_live_edit_cache_lookup_failure_does_not_raise(self, bot: AgentBot) -> None:

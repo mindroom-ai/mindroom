@@ -504,6 +504,17 @@ async def cancel_sync_task(
     await cancel_task(task, cancel_msg=cancel_msg)
 
 
+async def _prepare_for_sync_shutdown(
+    bot: AgentBot | TeamBot,
+    *,
+    sync_restart: bool,
+) -> None:
+    if sync_restart:
+        await bot.prepare_for_sync_shutdown(cancel_msg=SYNC_RESTART_CANCEL_MSG)
+        return
+    await bot.prepare_for_sync_shutdown()
+
+
 async def stop_entities(
     entities_to_restart: set[str],
     agent_bots: dict[str, AgentBot | TeamBot],
@@ -518,7 +529,7 @@ async def stop_entities(
     for entity_name in entities_to_restart:
         bot = agent_bots.get(entity_name)
         if bot is not None:
-            await bot.prepare_for_sync_shutdown()
+            await _prepare_for_sync_shutdown(bot, sync_restart=True)
 
     stop_tasks = [
         agent_bots[entity_name].stop(reason="restart")
@@ -565,7 +576,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
         finally:
             if iteration is not None:
                 await iteration.cancel()
-                await bot.prepare_for_sync_shutdown()
+                await _prepare_for_sync_shutdown(bot, sync_restart=stalled_restart)
 
         if not bot.running:
             break

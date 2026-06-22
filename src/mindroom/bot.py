@@ -1514,16 +1514,24 @@ class AgentBot:
 
         await asyncio.gather(prewarm_task, return_exceptions=True)
 
-    async def prepare_for_sync_shutdown(self) -> None:
+    async def prepare_for_sync_shutdown(self, *, cancel_msg: str | None = None) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
         if self.agent_name == ROUTER_AGENT_NAME:
             await self._cancel_deferred_overdue_task_drain()
-        background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
+        background_tasks_completed = await wait_for_background_tasks(
+            timeout=5.0,
+            owner=self._runtime_view,
+            cancel_msg=cancel_msg,
+        )
         drain_result = await self._coalescing_gate.drain_all(ready_timeout_seconds=5.0)
         responses_drained = await self._response_runner.drain_inbox_responses(cancel_after_seconds=5.0)
-        post_drain_background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
+        post_drain_background_tasks_completed = await wait_for_background_tasks(
+            timeout=5.0,
+            owner=self._runtime_view,
+            cancel_msg=cancel_msg,
+        )
         callback_failure_count = self._runtime_view.callback_failure_count
         if (
             background_tasks_completed

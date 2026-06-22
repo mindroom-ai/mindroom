@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+from mindroom.cancellation import request_task_cancel
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -82,13 +83,14 @@ async def _cancel_and_drain_background_tasks(
     tasks: tuple[asyncio.Task[Any], ...],
     *,
     owner: object | None,
+    cancel_msg: str | None,
 ) -> None:
     pending_tasks = tasks
     for _ in range(_MAX_BACKGROUND_TASK_CANCEL_ROUNDS):
         if not pending_tasks:
             return
         for task in pending_tasks:
-            task.cancel()
+            request_task_cancel(task, cancel_msg=cancel_msg)
         await asyncio.gather(*pending_tasks, return_exceptions=True)
         pending_tasks = _tasks_for_owner(owner)
     if pending_tasks:
@@ -103,12 +105,14 @@ async def wait_for_background_tasks(
     timeout: float | None = None,  # noqa: ASYNC109
     *,
     owner: object | None = None,
+    cancel_msg: str | None = None,
 ) -> bool:
     """Wait for all background tasks to complete.
 
     Args:
         timeout: Optional timeout in seconds
         owner: Optional logical owner to scope the wait to one bot
+        cancel_msg: Optional cancellation provenance to preserve when timeout cancellation is needed
 
     Returns:
         True when all tasks completed, False when timeout cancellation was needed.
@@ -128,12 +132,12 @@ async def wait_for_background_tasks(
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 logger.warning("background_tasks_wait_timeout", timeout_seconds=timeout)
-                await _cancel_and_drain_background_tasks(tasks, owner=owner)
+                await _cancel_and_drain_background_tasks(tasks, owner=owner, cancel_msg=cancel_msg)
                 return False
 
         done, pending = await asyncio.wait(tasks, timeout=remaining)
         await asyncio.gather(*done, return_exceptions=True)
         if pending:
             logger.warning("background_tasks_wait_timeout", timeout_seconds=timeout)
-            await _cancel_and_drain_background_tasks(tuple(pending), owner=owner)
+            await _cancel_and_drain_background_tasks(tuple(pending), owner=owner, cancel_msg=cancel_msg)
             return False
