@@ -282,7 +282,6 @@ async def _cleanup_room_stale_streaming_messages(
         assert state.latest_body is not None  # guaranteed by filter above
         if _should_skip_for_startup_cleanup_window(
             state,
-            state.latest_timestamp,
             now_ms=current_time_ms,
             startup_cutoff_ms=startup_cutoff_ms,
         ):
@@ -1464,12 +1463,12 @@ def _is_cleanup_candidate(state: _MessageState) -> bool:
 
 def _should_skip_for_startup_cleanup_window(
     state: _MessageState,
-    timestamp_ms: int,
     *,
     now_ms: int,
     startup_cutoff_ms: int | None = None,
 ) -> bool:
     """Return whether startup cleanup should ignore one candidate by age."""
+    timestamp_ms = state.latest_timestamp
     if _is_at_or_after_startup_cutoff(timestamp_ms, startup_cutoff_ms=startup_cutoff_ms):
         return True
     if _is_recent_timestamp(timestamp_ms, now_ms=now_ms):
