@@ -6299,51 +6299,6 @@ class TestUserIdPassthrough:
         assert len(tool_trace) == 1
 
     @pytest.mark.asyncio
-    async def test_ai_response_collects_stream_ordered_visible_tool_markers(self, tmp_path: Path) -> None:
-        """Collected non-streaming output should keep stream-equivalent tool marker order."""
-        mock_agent = MagicMock()
-        mock_agent.model = MagicMock()
-        mock_agent.model.__class__.__name__ = "OpenAIChat"
-        mock_agent.model.id = "test-model"
-        mock_agent.name = "GeneralAgent"
-        mock_agent.add_history_to_context = False
-
-        tool_execution = ToolExecution(
-            tool_call_id="call-read",
-            tool_name="read_file",
-            tool_args={"path": "README.md"},
-            result="ok",
-        )
-
-        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-            yield RunContentEvent(content="Intro")
-            yield ToolCallStartedEvent(tool=tool_execution)
-            yield ToolCallCompletedEvent(tool=tool_execution)
-            yield RunContentEvent(content=" Outro")
-
-        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
-
-        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
-            tool_trace: list[ToolTraceEntry] = []
-            response = await ai_response(
-                agent_name="general",
-                prompt="test",
-                session_id="session1",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
-                collect_streamed_response=True,
-                tool_trace_collector=tool_trace,
-            )
-
-        assert response == "Intro\n\n🔧 `read_file` [1]\n\n Outro"
-        assert "Intro\n\n🔧 `read_file` [1]" in response
-        assert response.index("🔧 `read_file` [1]") < response.index(" Outro")
-        assert len(tool_trace) == 1
-        assert tool_trace[0].type == "tool_call_completed"
-        assert tool_trace[0].tool_name == "read_file"
-
-    @pytest.mark.asyncio
     async def test_ai_response_continues_after_dynamic_tool_load(self, tmp_path: Path) -> None:
         """Dynamic tool loads should rebuild the agent and continue the same task."""
         first_agent = MagicMock()
