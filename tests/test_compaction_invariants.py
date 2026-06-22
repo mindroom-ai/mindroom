@@ -449,10 +449,10 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
 
 
 @pytest.mark.asyncio
-async def test_generate_compaction_summary_rejects_likely_output_cap_truncation() -> None:
+async def test_generate_compaction_summary_rejects_output_cap_truncation() -> None:
     class _CappedSummaryModel(FakeModel):
         async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            return ModelResponse(content="durable summary ended midwor", output_tokens=SUMMARY_MAX_OUTPUT_TOKENS)
+            return ModelResponse(content="durable summary ended cleanly.", output_tokens=SUMMARY_MAX_OUTPUT_TOKENS)
 
     with pytest.raises(RuntimeError, match="likely truncated"):
         await generate_compaction_summary(
@@ -460,6 +460,21 @@ async def test_generate_compaction_summary_rejects_likely_output_cap_truncation(
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
         )
+
+
+@pytest.mark.asyncio
+async def test_generate_compaction_summary_allows_summary_below_output_cap() -> None:
+    class _UncappedSummaryModel(FakeModel):
+        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            return ModelResponse(content="durable summary ended cleanly.", output_tokens=SUMMARY_MAX_OUTPUT_TOKENS - 1)
+
+    summary = await generate_compaction_summary(
+        model=_UncappedSummaryModel(id="summary-model", provider="fake"),
+        summary_input="conversation payload",
+        summary_prompt="Summarize the conversation.",
+    )
+
+    assert summary.summary == "durable summary ended cleanly."
 
 
 def test_build_summary_request_messages_is_the_single_request_seam() -> None:

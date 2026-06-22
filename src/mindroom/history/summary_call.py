@@ -65,28 +65,6 @@ _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
     "request too large",
     "reduce the length",
 )
-_OUTPUT_LIMIT_FINISH_REASONS = frozenset(
-    {
-        "length",
-        "max_tokens",
-        "max_output_tokens",
-        "model_length",
-        "token_limit",
-        "stop_max_tokens",
-    },
-)
-_OUTPUT_LIMIT_REASON_KEYS = frozenset(
-    {
-        "finish_reason",
-        "finishReason",
-        "finish_message",
-        "finishMessage",
-        "stop_reason",
-        "stopReason",
-        "completion_reason",
-        "completionReason",
-    },
-)
 
 
 @dataclass(frozen=True)
@@ -278,7 +256,7 @@ async def generate_compaction_summary(
     if not normalized_text:
         msg = "summary generation returned no result"
         raise RuntimeError(msg)
-    if _summary_response_likely_truncated(response, normalized_text):
+    if _summary_response_likely_truncated(response):
         msg = "compaction summary likely truncated at max tokens; refusing to persist incomplete summary"
         raise RuntimeError(msg)
     return SessionSummary(summary=normalized_text, updated_at=datetime.now(UTC))
@@ -295,13 +273,9 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
     return normalized
 
 
-def _summary_response_likely_truncated(response: ModelResponse, normalized_text: str) -> bool:
-    if _response_reports_output_limit(response):
-        return True
+def _summary_response_likely_truncated(response: ModelResponse) -> bool:
     output_tokens = _response_output_tokens(response)
-    if output_tokens is None or output_tokens < SUMMARY_MAX_OUTPUT_TOKENS:
-        return False
-    return _summary_ends_mid_token(normalized_text)
+    return output_tokens is not None and output_tokens >= SUMMARY_MAX_OUTPUT_TOKENS
 
 
 def _response_output_tokens(response: ModelResponse) -> int | None:
@@ -310,30 +284,3 @@ def _response_output_tokens(response: ModelResponse) -> int | None:
     if response.response_usage is None:
         return None
     return response.response_usage.output_tokens
-
-
-def _response_reports_output_limit(response: ModelResponse) -> bool:
-    return any(_payload_reports_output_limit(payload) for payload in (response.provider_data, response.extra))
-
-
-def _payload_reports_output_limit(payload: object) -> bool:
-    if isinstance(payload, dict):
-        for key, value in payload.items():
-            if key in _OUTPUT_LIMIT_REASON_KEYS and _is_output_limit_reason(value):
-                return True
-            if _payload_reports_output_limit(value):
-                return True
-    if isinstance(payload, list):
-        return any(_payload_reports_output_limit(item) for item in payload)
-    return False
-
-
-def _is_output_limit_reason(value: object) -> bool:
-    if not isinstance(value, str):
-        return False
-    normalized = value.strip().lower().replace(" ", "_").replace("-", "_")
-    return normalized in _OUTPUT_LIMIT_FINISH_REASONS
-
-
-def _summary_ends_mid_token(text: str) -> bool:
-    return bool(text) and (text[-1].isalnum() or text[-1] in {"/", "_", "-"})
