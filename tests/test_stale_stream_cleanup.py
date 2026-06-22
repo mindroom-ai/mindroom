@@ -1755,6 +1755,48 @@ async def test_cleanup_stops_at_lookback_page_when_auto_resume_disabled(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_cleanup_caps_old_terminal_interruption_scan_when_auto_resume_enabled(tmp_path: Path) -> None:
+    """Auto-resume opt-in may scan past the outage window, but never the whole room history."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    old_pages = [
+        _room_messages_response(
+            _make_message_event(
+                event_id=f"$old-filler-{page_number}",
+                body="Later unrelated chatter",
+                sender=USER_ID,
+                timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - page_number,
+            ),
+            end=f"old-page-{page_number}",
+        )
+        for page_number in range(1, 13)
+    ]
+    client.room_messages = AsyncMock(
+        side_effect=[
+            *old_pages,
+            _room_messages_response(
+                _make_message_event(
+                    event_id="$too-deep-interrupted",
+                    body="Partial answer\n\n**[Response interrupted]**",
+                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - 20_000,
+                    relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED},
+                ),
+            ),
+        ],
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    assert client.room_messages.await_count == 10
+
+
+@pytest.mark.asyncio
 async def test_cleanup_skips_completed_message_ending_with_generic_interrupted_note(tmp_path: Path) -> None:
     """Completed responses that happen to mention the generic note are not restart-resumable."""
     config = _make_config(tmp_path)
@@ -2487,6 +2529,7 @@ async def test_orchestrator_auto_resume_uses_router_client(tmp_path: Path) -> No
     assert mock_auto_resume.await_args.args[1] == interrupted
     assert mock_auto_resume.await_args.kwargs["config"] == config
     assert mock_auto_resume.await_args.kwargs["runtime_paths"] == runtime_paths_for(config)
+    assert mock_auto_resume.await_args.kwargs["max_resumes"] == 10
 
 
 @pytest.mark.asyncio

@@ -43,6 +43,7 @@ from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.rooms import ensure_all_rooms_exist, ensure_root_space, ensure_user_in_rooms
 from mindroom.matrix.stale_stream_cleanup import (
+    MAX_AUTO_RESUME_AFTER_RESTART_THREADS,
     InterruptedThread,
     auto_resume_interrupted_threads,
     cleanup_stale_streaming_messages,
@@ -1013,6 +1014,7 @@ class _MultiAgentOrchestrator:
                 config=config,
                 runtime_paths=self.runtime_paths,
                 conversation_cache=router_bot._conversation_cache,
+                max_resumes=MAX_AUTO_RESUME_AFTER_RESTART_THREADS,
             )
             if resumed_count > 0:
                 logger.info("Queued auto-resume messages after restart", count=resumed_count)

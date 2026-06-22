@@ -68,6 +68,7 @@ _STALE_STREAM_LOOKBACK_MS = 6 * 60 * 60 * 1000
 _RATE_LIMIT_DELAY_SECONDS = 0.15
 _STOP_REACTION_KEYS = frozenset({"🛑", "⏹️"})
 _MAX_REQUESTER_RESOLUTION_DEPTH = 10
+MAX_AUTO_RESUME_AFTER_RESTART_THREADS = 10
 _INTERRUPTED_PARTIAL_TEXT_LIMIT = 280
 _AUTO_RESUME_MESSAGE = (
     "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
@@ -529,6 +530,7 @@ async def _scan_room_message_states(
         bot_user_id=bot_user_id,
         now_ms=now_ms,
         scan_past_cleanup_window=collect_old_interrupted_threads,
+        extra_lookback_pages=MAX_AUTO_RESUME_AFTER_RESTART_THREADS if collect_old_interrupted_threads else 0,
     )
 
     trusted_sender_ids = _cleanup_trusted_sender_ids(
@@ -624,11 +626,13 @@ async def _collect_room_history_events(
     bot_user_id: str,
     now_ms: int,
     scan_past_cleanup_window: bool,
+    extra_lookback_pages: int,
 ) -> tuple[dict[str, _MessageState], list[nio.RoomMessageText]]:
     """Return room history text events plus tracked stop reactions."""
     message_states: dict[str, _MessageState] = {}
     message_events: list[nio.RoomMessageText] = []
     from_token: str | None = None
+    lookback_pages_scanned = 0
 
     while True:
         response = await client.room_messages(
@@ -669,7 +673,14 @@ async def _collect_room_history_events(
 
         if not response.end:
             break
-        if not scan_past_cleanup_window and _chunk_reaches_cleanup_lookback_limit(response.chunk, now_ms=now_ms):
+        lookback_pages_scanned, stop_scan = _lookback_scan_state(
+            response.chunk,
+            now_ms=now_ms,
+            scan_past_cleanup_window=scan_past_cleanup_window,
+            lookback_pages_scanned=lookback_pages_scanned,
+            extra_lookback_pages=extra_lookback_pages,
+        )
+        if stop_scan:
             break
         from_token = response.end
 
@@ -1511,6 +1522,23 @@ def _chunk_reaches_cleanup_lookback_limit(events: list[object], *, now_ms: int) 
         for event in events
         if isinstance(event, nio.Event) and isinstance(event.server_timestamp, int)
     )
+
+
+def _lookback_scan_state(
+    events: list[object],
+    *,
+    now_ms: int,
+    scan_past_cleanup_window: bool,
+    lookback_pages_scanned: int,
+    extra_lookback_pages: int,
+) -> tuple[int, bool]:
+    """Return updated old-page count and whether history pagination should stop."""
+    if not _chunk_reaches_cleanup_lookback_limit(events, now_ms=now_ms):
+        return lookback_pages_scanned, False
+    if not scan_past_cleanup_window:
+        return lookback_pages_scanned, True
+    updated_count = lookback_pages_scanned + 1
+    return updated_count, updated_count >= extra_lookback_pages
 
 
 def _build_auto_resume_content(
