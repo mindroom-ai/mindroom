@@ -261,7 +261,6 @@ async def _cleanup_room_stale_streaming_messages(
         bot_user_ids=bot_user_ids,
         config=config,
         runtime_paths=runtime_paths,
-        now_ms=current_time_ms,
     )
     message_states = scanned_state.message_states
     if not message_states:
@@ -514,14 +513,12 @@ async def _scan_room_message_states(
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
-    now_ms: int,
 ) -> _ScannedRoomMessageStates:
-    """Scan recent room history and return latest state by original event ID."""
+    """Scan room history and return latest state by original event ID."""
     message_states, message_events = await _collect_room_history_events(
         client,
         room_id=room_id,
         bot_user_id=bot_user_id,
-        now_ms=now_ms,
     )
 
     trusted_sender_ids = _cleanup_trusted_sender_ids(
@@ -615,7 +612,6 @@ async def _collect_room_history_events(
     *,
     room_id: str,
     bot_user_id: str,
-    now_ms: int,
 ) -> tuple[dict[str, _MessageState], list[nio.RoomMessageText]]:
     """Return room history text events plus tracked stop reactions."""
     message_states: dict[str, _MessageState] = {}
@@ -660,8 +656,6 @@ async def _collect_room_history_events(
                 )
 
         if not response.end:
-            break
-        if _chunk_reaches_cleanup_lookback_limit(response.chunk, now_ms=now_ms):
             break
         from_token = response.end
 
@@ -1493,19 +1487,6 @@ def _is_older_than_cleanup_window(timestamp_ms: int, *, now_ms: int | None = Non
     """Return whether a timestamp is older than the restart cleanup lookback window."""
     current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
     return current_time_ms - timestamp_ms > _STALE_STREAM_LOOKBACK_MS
-
-
-def _chunk_reaches_cleanup_lookback_limit(events: list[object], *, now_ms: int) -> bool:
-    """Return whether the oldest event in this page is beyond the cleanup lookback window."""
-    oldest_timestamp = min(
-        (
-            event.server_timestamp
-            for event in events
-            if isinstance(event, nio.Event) and isinstance(event.server_timestamp, int)
-        ),
-        default=None,
-    )
-    return oldest_timestamp is not None and _is_older_than_cleanup_window(oldest_timestamp, now_ms=now_ms)
 
 
 def _build_auto_resume_content(
