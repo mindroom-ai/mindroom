@@ -208,7 +208,8 @@ async def generate_compaction_summary(
     """Issue one compaction summary call with tuned provider config and one timeout."""
     del timing_scope
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    configure_summary_model(model, timeout_seconds=resolved_timeout)
+    configured_model = configure_summary_model(model, timeout_seconds=resolved_timeout)
+    summary_output_limit = _summary_output_token_limit(configured_model)
 
     async def _request_summary() -> ModelResponse:
         try:
@@ -256,7 +257,7 @@ async def generate_compaction_summary(
     if not normalized_text:
         msg = "summary generation returned no result"
         raise RuntimeError(msg)
-    if _summary_response_likely_truncated(response):
+    if _summary_response_likely_truncated(response, output_token_limit=summary_output_limit):
         msg = "compaction summary likely truncated at max tokens; refusing to persist incomplete summary"
         raise RuntimeError(msg)
     return SessionSummary(summary=normalized_text, updated_at=datetime.now(UTC))
@@ -273,9 +274,17 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
     return normalized
 
 
-def _summary_response_likely_truncated(response: ModelResponse) -> bool:
+def _summary_output_token_limit(model: Model) -> int | None:
+    if isinstance(model, Claude):
+        return model.max_tokens
+    return None
+
+
+def _summary_response_likely_truncated(response: ModelResponse, *, output_token_limit: int | None) -> bool:
+    if output_token_limit is None:
+        return False
     output_tokens = _response_output_tokens(response)
-    return output_tokens is not None and output_tokens >= SUMMARY_MAX_OUTPUT_TOKENS
+    return output_tokens is not None and output_tokens >= output_token_limit
 
 
 def _response_output_tokens(response: ModelResponse) -> int | None:

@@ -64,15 +64,16 @@ _HISTORY_SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), ma
 class _RecordingClaude(Claude):
     """Claude double that records the request instead of calling Anthropic."""
 
-    def __init__(self, **kwargs: object) -> None:
+    def __init__(self, *, response: ModelResponse | None = None, **kwargs: object) -> None:
         super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.response = response or ModelResponse(content="recorded summary")
         self.seen_messages: list[Message] = []
 
     async def aresponse(self, *_args: object, **kwargs: object) -> ModelResponse:
         messages = kwargs.get("messages")
         if isinstance(messages, list):
             self.seen_messages = list(messages)
-        return ModelResponse(content="recorded summary")
+        return self.response
 
 
 def _make_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
@@ -450,23 +451,58 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
 
 @pytest.mark.asyncio
 async def test_generate_compaction_summary_rejects_output_cap_truncation() -> None:
-    class _CappedSummaryModel(FakeModel):
-        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            return ModelResponse(content="durable summary ended cleanly.", output_tokens=SUMMARY_MAX_OUTPUT_TOKENS)
-
     with pytest.raises(RuntimeError, match="likely truncated"):
         await generate_compaction_summary(
-            model=_CappedSummaryModel(id="summary-model", provider="fake"),
+            model=_RecordingClaude(
+                id="claude-sonnet-4-6",
+                max_tokens=64_000,
+                response=ModelResponse(
+                    content="durable summary ended cleanly.",
+                    output_tokens=SUMMARY_MAX_OUTPUT_TOKENS,
+                ),
+            ),
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
         )
 
 
 @pytest.mark.asyncio
-async def test_generate_compaction_summary_allows_summary_below_output_cap() -> None:
+async def test_generate_compaction_summary_uses_configured_output_cap() -> None:
+    with pytest.raises(RuntimeError, match="likely truncated"):
+        await generate_compaction_summary(
+            model=_RecordingClaude(
+                id="claude-sonnet-4-6",
+                max_tokens=1_024,
+                response=ModelResponse(content="durable summary ended cleanly.", output_tokens=1_024),
+            ),
+            summary_input="conversation payload",
+            summary_prompt="Summarize the conversation.",
+        )
+
+
+@pytest.mark.asyncio
+async def test_generate_compaction_summary_allows_claude_summary_below_output_cap() -> None:
+    summary = await generate_compaction_summary(
+        model=_RecordingClaude(
+            id="claude-sonnet-4-6",
+            max_tokens=64_000,
+            response=ModelResponse(
+                content="durable summary ended cleanly.",
+                output_tokens=SUMMARY_MAX_OUTPUT_TOKENS - 1,
+            ),
+        ),
+        summary_input="conversation payload",
+        summary_prompt="Summarize the conversation.",
+    )
+
+    assert summary.summary == "durable summary ended cleanly."
+
+
+@pytest.mark.asyncio
+async def test_generate_compaction_summary_allows_unknown_provider_without_output_cap() -> None:
     class _UncappedSummaryModel(FakeModel):
         async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            return ModelResponse(content="durable summary ended cleanly.", output_tokens=SUMMARY_MAX_OUTPUT_TOKENS - 1)
+            return ModelResponse(content="durable summary ended cleanly.", output_tokens=SUMMARY_MAX_OUTPUT_TOKENS + 1)
 
     summary = await generate_compaction_summary(
         model=_UncappedSummaryModel(id="summary-model", provider="fake"),
