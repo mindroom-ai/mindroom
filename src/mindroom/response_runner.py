@@ -1012,9 +1012,14 @@ class ResponseRunner:
             source_envelope=request.response_envelope,
         )
         execution_identity = tool_dispatch.execution_identity
+        allow_direct_private_agents = (
+            self.deps.agent_name not in self.deps.runtime.config.teams
+            and execution_identity.channel == "matrix"
+            and bool(execution_identity.requester_id)
+        )
         self.deps.runtime.config.assert_team_agents_supported(
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
-            allow_direct_private_agents=self.deps.agent_name not in self.deps.runtime.config.teams,
+            allow_direct_private_agents=allow_direct_private_agents,
         )
         session_scope = self.deps.state_writer.team_history_scope(
             list(team_request.team_agents),

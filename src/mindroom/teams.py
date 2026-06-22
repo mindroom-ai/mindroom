@@ -1303,7 +1303,12 @@ def _allow_direct_private_team_agents(
     configured_team_name: str | None,
 ) -> bool:
     """Return whether direct private members may join this team request."""
-    return configured_team_name is None and execution_identity is not None and execution_identity.channel == "matrix"
+    return (
+        configured_team_name is None
+        and execution_identity is not None
+        and execution_identity.channel == "matrix"
+        and bool(execution_identity.requester_id)
+    )
 
 
 def _resolve_team_instance_id(

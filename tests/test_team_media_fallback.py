@@ -3842,6 +3842,34 @@ async def test_team_response_rejects_private_agent_with_non_matrix_execution_ide
 
 
 @pytest.mark.asyncio
+async def test_team_response_rejects_private_agent_with_empty_requester_identity() -> None:
+    """Direct private members require a requester for scoped history."""
+    _, orchestrator = _build_private_team_orchestrator(include_private_member=False)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="calculator",
+        requester_id="",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-123",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
+        await team_response(
+            agent_names=["general", "calculator"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=identity,
+        )
+
+
+@pytest.mark.asyncio
 async def test_team_response_rejects_private_agents_even_when_private_member_is_unavailable() -> None:
     """Direct team helpers should reject requested private members before availability filtering."""
     _, orchestrator = _build_private_team_orchestrator(include_private_member=False)
