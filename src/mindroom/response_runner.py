@@ -1011,18 +1011,19 @@ class ResponseRunner:
             correlation_id=resolved_correlation_id,
             source_envelope=request.response_envelope,
         )
+        execution_identity = tool_dispatch.execution_identity
         self.deps.runtime.config.assert_team_agents_supported(
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
-            allow_direct_private_agents=tool_dispatch.execution_identity is not None,
+            allow_direct_private_agents=True,
         )
         session_scope = self.deps.state_writer.team_history_scope(
             list(team_request.team_agents),
-            requester_user_id=tool_dispatch.execution_identity.requester_id,
+            requester_user_id=execution_identity.requester_id,
         )
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
         def team_storage_factory() -> BaseDb:
-            return self.deps.state_writer.create_storage(tool_dispatch.execution_identity, scope=session_scope)
+            return self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(tool_dispatch),
