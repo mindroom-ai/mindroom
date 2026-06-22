@@ -36,7 +36,7 @@ from mindroom.orchestration.runtime import (
     classify_cancel_source,
     log_cancelled_response,
 )
-from mindroom.streaming_warmup import WorkerWarmupState
+from mindroom.streaming_warmup import RenderedWarmupLine, WorkerWarmupState
 from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import (
     StreamingToolTracker,
@@ -328,7 +328,7 @@ def interactive_response_for_visible_body(
     return visible_response
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _PreparedStreamingDelivery:
     """One frozen non-terminal delivery attempt."""
 
@@ -338,7 +338,7 @@ class _PreparedStreamingDelivery:
     had_warmup_suffix: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _StreamingDeliverySnapshot:
     """Immutable state needed to format one outbound streaming payload."""
 
@@ -353,7 +353,7 @@ class _StreamingDeliverySnapshot:
     show_tool_calls: bool
     tool_trace: tuple[ToolTraceEntry, ...]
     extra_content: dict[str, Any] | None
-    warmup_suffix_lines: tuple[Any, ...]
+    warmup_suffix_lines: tuple[RenderedWarmupLine, ...]
     stream_status: str
 
 

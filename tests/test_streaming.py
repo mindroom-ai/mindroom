@@ -271,6 +271,33 @@ async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config
     assert "<strong>world</strong>" in delivered_content["formatted_body"]
 
 
+def test_delivery_snapshot_isolates_tool_trace(config: Config) -> None:
+    """Snapshot formatting should not observe later live tool-trace mutations."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = "Hello"
+    streaming.tool_trace = [ToolTraceEntry(type="tool_call_started", tool_name="search")]
+
+    snapshot = streaming._delivery_snapshot(
+        is_final=False,
+        allow_empty_progress=False,
+        stream_status=None,
+    )
+
+    assert snapshot is not None
+    streaming.tool_trace[0].type = "tool_call_completed"
+    streaming.tool_trace[0].result_preview = "done"
+    streaming.tool_trace.append(ToolTraceEntry(type="tool_call_started", tool_name="other"))
+
+    assert isinstance(snapshot.tool_trace, tuple)
+    assert len(snapshot.tool_trace) == 1
+    assert snapshot.tool_trace[0].type == "tool_call_started"
+    assert snapshot.tool_trace[0].result_preview is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 async def test_cancellation_mid_stream_appends_cancelled_note(config: Config) -> None:
