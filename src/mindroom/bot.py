@@ -1534,7 +1534,10 @@ class AgentBot:
             owner=self._runtime_view,
             cancel_source=shutdown_intent.cancel_source,
         )
-        drain_result = await self._coalescing_gate.drain_all(ready_timeout_seconds=5.0)
+        drain_result = await self._coalescing_gate.drain_all(
+            ready_timeout_seconds=5.0,
+            cancel_source=shutdown_intent.cancel_source,
+        )
         responses_drained = await self._response_runner.drain_inbox_responses(
             cancel_after_seconds=5.0,
             cancel_source=shutdown_intent.cancel_source,

@@ -39,6 +39,7 @@ from .timing import elapsed_ms_since, emit_elapsed_timing, event_timing_scope
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from .cancellation import TaskCancelSource
     from .ingress_lanes import LaneDelivery
 
 __all__ = [
@@ -128,6 +129,7 @@ class _MutableDrainResult:
 class _DrainContext:
     ready_timeout_seconds: float | None
     result: _MutableDrainResult
+    cancel_source: TaskCancelSource | None = None
     cancelled_initial_drain_tasks: bool = False
 
 
@@ -606,11 +608,17 @@ class CoalescingGate:
             flush_outcome="scheduled_drain" if path == "zero_debounce" else None,
         )
 
-    async def drain_all(self, *, ready_timeout_seconds: float | None = None) -> CoalescingDrainResult:
+    async def drain_all(
+        self,
+        *,
+        ready_timeout_seconds: float | None = None,
+        cancel_source: TaskCancelSource | None = None,
+    ) -> CoalescingDrainResult:
         """Flush every active gate and await owned drain tasks."""
         drain_context = _DrainContext(
             ready_timeout_seconds=ready_timeout_seconds,
             result=_MutableDrainResult(),
+            cancel_source=cancel_source,
         )
         return await _CoalescingDrainCoordinator(self, drain_context).run()
 
@@ -1013,9 +1021,7 @@ class _CoalescingDrainCoordinator:
         dropped_ready_count = 0
         for gate in self.gate._gates.values():
             if gate.drain_task is not None and not gate.drain_task.done():
-                # Carry sync-restart provenance so cancelled in-flight responses can
-                # tell stall recovery apart from a user stop or a plain interruption.
-                request_task_cancel(gate.drain_task, cancel_source="sync_restart")
+                request_task_cancel(gate.drain_task, cancel_source=self.context.cancel_source)
                 self.context.result.dispatch_cancelled_count += 1
                 gate.drain_task = None
             admissions = [*gate.claimed_admissions, *gate.queue]

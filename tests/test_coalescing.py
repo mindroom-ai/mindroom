@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import (
     CoalescingGate,
     IngressAdmissionClosedError,
@@ -884,10 +885,15 @@ async def test_bounded_shutdown_times_out_stuck_in_flight_dispatch() -> None:
     """Bounded shutdown must return unsafe instead of hanging on a stuck dispatch."""
     dispatch_started = asyncio.Event()
     release_dispatch = asyncio.Event()
+    cancelled_args: list[tuple[object, ...]] = []
 
     async def dispatch_batch(_batch: CoalescedBatch) -> None:
         dispatch_started.set()
-        await release_dispatch.wait()
+        try:
+            await release_dispatch.wait()
+        except asyncio.CancelledError as exc:
+            cancelled_args.append(exc.args)
+            raise
 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
@@ -911,6 +917,52 @@ async def test_bounded_shutdown_times_out_stuck_in_flight_dispatch() -> None:
 
     assert result.completed is False
     assert result.dispatch_cancelled_count == 1
+    assert cancelled_args == [()]
+
+
+@pytest.mark.asyncio
+async def test_bounded_shutdown_preserves_explicit_drain_cancel_source() -> None:
+    """Bounded sync-restart drains should preserve restart provenance for in-flight dispatch."""
+    dispatch_started = asyncio.Event()
+    release_dispatch = asyncio.Event()
+    cancelled_args: list[tuple[object, ...]] = []
+
+    async def dispatch_batch(_batch: CoalescedBatch) -> None:
+        dispatch_started.set()
+        try:
+            await release_dispatch.wait()
+        except asyncio.CancelledError as exc:
+            cancelled_args.append(exc.args)
+            raise
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "typed", 1_000_000)))
+    await asyncio.wait_for(dispatch_started.wait(), timeout=0.5)
+
+    drain_task = asyncio.create_task(
+        gate.drain_all(
+            ready_timeout_seconds=0.01,
+            cancel_source="sync_restart",
+        ),
+    )
+    try:
+        result = await asyncio.wait_for(asyncio.shield(drain_task), timeout=0.2)
+    except TimeoutError:  # pragma: no cover - documents the failure mode on regression
+        pytest.fail("bounded drain hung behind in-flight dispatch")
+    finally:
+        release_dispatch.set()
+        if not drain_task.done():
+            drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
+
+    assert result.completed is False
+    assert result.dispatch_cancelled_count == 1
+    assert cancelled_args == [(SYNC_RESTART_CANCEL_MSG,)]
 
 
 @pytest.mark.asyncio
