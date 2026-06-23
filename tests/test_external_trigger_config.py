@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from mindroom.config.main import Config
 
@@ -58,11 +59,42 @@ def test_external_trigger_config_parses_minimal_signed_trigger() -> None:
     assert trigger.target.thread_id == "$thread"
     assert trigger.target.agent == "mind"
     assert trigger.target.new_thread is False
-    assert trigger.allowed_kinds == ("campground.availability",)
+    assert trigger.allowed_kinds == ["campground.availability"]
     assert trigger.replay_window_seconds == 300
     assert trigger.max_body_bytes == 65536
     assert config.get_all_configured_rooms() == {"!room:example.org"}
     assert config.get_external_trigger_rooms_for_entity("mind") == ["!room:example.org"]
+
+
+def test_external_trigger_authored_dump_is_safe_yaml_round_trippable() -> None:
+    """Authored external trigger config dumps should not emit Python-specific YAML tags."""
+    config = Config.model_validate(
+        {
+            **_base_config(),
+            "agents": {
+                "mind": {
+                    "display_name": "Mind",
+                    "model": "default",
+                },
+            },
+            "external_triggers": {
+                "campground": {
+                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                    "target": {
+                        "room_id": "!room:example.org",
+                        "agent": "mind",
+                    },
+                    "allowed_kinds": ["campground.availability"],
+                },
+            },
+        },
+    )
+
+    yaml_text = yaml.dump(config.authored_model_dump())
+
+    assert yaml.safe_load(yaml_text)["external_triggers"]["campground"]["allowed_kinds"] == [
+        "campground.availability",
+    ]
 
 
 def test_external_triggers_null_section_uses_empty_mapping() -> None:

@@ -61,7 +61,7 @@ class ExternalTriggerConfig(BaseModel):
     key_id: str = Field(default="default", description="Key identifier expected in trigger signatures")
     public_key: str = Field(description="Base64-encoded Ed25519 public key")
     target: ExternalTriggerTargetConfig = Field(description="Destination for accepted trigger messages")
-    allowed_kinds: tuple[str, ...] = Field(default=(), description="Allowed trigger kind values")
+    allowed_kinds: list[str] = Field(default_factory=list, description="Allowed trigger kind values")
     replay_window_seconds: int = Field(
         default=300,
         ge=30,
