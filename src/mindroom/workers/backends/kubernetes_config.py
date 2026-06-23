@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -21,8 +20,13 @@ from mindroom.workers.backends._config_helpers import (
     read_float_env,
     read_int_env,
     read_json_mapping_env,
+    read_json_object_list_env,
 )
 from mindroom.workers.backends._dedicated_worker_common import stable_signature_json
+from mindroom.workers.backends.kubernetes_pod_names import (
+    RESERVED_EXTRA_CONTAINER_NAMES,
+    RESERVED_EXTRA_VOLUME_NAMES,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -109,42 +113,11 @@ _EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
 )
 _EXTRA_VOLUME_SOURCE_KEYS = frozenset({"secret", "configMap", "emptyDir", "projected"})
 _EXTRA_VOLUME_ALLOWED_KEYS = frozenset({"name", *_EXTRA_VOLUME_SOURCE_KEYS})
-_RESERVED_EXTRA_CONTAINER_NAMES = frozenset({"sandbox-runner", "agent-vault-mint-token"})
-_RESERVED_EXTRA_VOLUME_NAMES = frozenset(
-    {
-        "worker-storage",
-        "worker-config",
-        "agent-vault-token",
-        "agent-vault-bootstrap",
-        "agent-vault-ca",
-    },
-)
 
 
 def is_kubernetes_worker_backend_config_env_name(name: str) -> bool:
     """Return whether an env var configures the primary-side Kubernetes worker backend."""
     return is_worker_backend_config_env_name(name) and name != _WORKER_BACKEND_ENV
-
-
-def _read_json_object_list_env(env: Mapping[str, str], env_name: str) -> tuple[dict[str, object], ...]:
-    raw_value = read_env(env, env_name)
-    if not raw_value:
-        return ()
-    try:
-        parsed = json.loads(raw_value)
-    except json.JSONDecodeError as exc:
-        msg = f"{env_name} must contain a JSON list of objects."
-        raise WorkerBackendError(msg) from exc
-    if not isinstance(parsed, list):
-        msg = f"{env_name} must contain a JSON list of objects."
-        raise WorkerBackendError(msg)
-    items: list[dict[str, object]] = []
-    for index, item in enumerate(parsed):
-        if not isinstance(item, dict):
-            msg = f"{env_name}[{index}] must be a JSON object."
-            raise WorkerBackendError(msg)
-        items.append(cast("dict[str, object]", item))
-    return tuple(items)
 
 
 def _validate_required_string(item: dict[str, object], env_name: str, index: int, field_name: str) -> None:
@@ -172,7 +145,7 @@ def _validate_unique_names(
 
 
 def _read_extra_containers_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
-    containers = _read_json_object_list_env(env, _EXTRA_CONTAINERS_JSON_ENV)
+    containers = read_json_object_list_env(env, _EXTRA_CONTAINERS_JSON_ENV)
     for index, container in enumerate(containers):
         unknown_keys = sorted(set(container) - _EXTRA_CONTAINER_ALLOWED_KEYS)
         if unknown_keys:
@@ -181,12 +154,12 @@ def _read_extra_containers_env(env: Mapping[str, str]) -> tuple[dict[str, object
             raise WorkerBackendError(msg)
         _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "name")
         _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "image")
-    _validate_unique_names(containers, _EXTRA_CONTAINERS_JSON_ENV, _RESERVED_EXTRA_CONTAINER_NAMES)
+    _validate_unique_names(containers, _EXTRA_CONTAINERS_JSON_ENV, RESERVED_EXTRA_CONTAINER_NAMES)
     return containers
 
 
 def _read_extra_volumes_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
-    volumes = _read_json_object_list_env(env, _EXTRA_VOLUMES_JSON_ENV)
+    volumes = read_json_object_list_env(env, _EXTRA_VOLUMES_JSON_ENV)
     for index, volume in enumerate(volumes):
         unknown_keys = sorted(set(volume) - _EXTRA_VOLUME_ALLOWED_KEYS)
         if unknown_keys:
@@ -198,7 +171,7 @@ def _read_extra_volumes_env(env: Mapping[str, str]) -> tuple[dict[str, object], 
         if len(source_keys) != 1:
             msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}] must set exactly one of secret, configMap, emptyDir, projected."
             raise WorkerBackendError(msg)
-    _validate_unique_names(volumes, _EXTRA_VOLUMES_JSON_ENV, _RESERVED_EXTRA_VOLUME_NAMES)
+    _validate_unique_names(volumes, _EXTRA_VOLUMES_JSON_ENV, RESERVED_EXTRA_VOLUME_NAMES)
     return volumes
 
 

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import get_joined_rooms
-from mindroom.matrix.state import resolve_room_aliases
+from mindroom.matrix.state import resolve_room_id
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -24,13 +24,11 @@ class ExternalTriggerRuntimeCoordinator:
 
     runtime_paths: RuntimePaths
     api_enabled: bool = True
-    joined_room_ids: dict[str, frozenset[str]] = field(default_factory=dict)
 
     def _bind_from_started_bots(
         self,
         bots: Iterable[AgentBot | TeamBot],
         *,
-        ready_trigger_ids: frozenset[str],
         is_trigger_ready: Callable[[str], Awaitable[bool]],
     ) -> None:
         """Bind external trigger delivery runtime when the router client is ready."""
@@ -45,38 +43,13 @@ class ExternalTriggerRuntimeCoordinator:
                 api_main.app,
                 client=bot.client,
                 conversation_cache=bot._conversation_cache,
-                ready_trigger_ids=ready_trigger_ids,
                 is_trigger_ready=is_trigger_ready,
             )
             return
 
-    def ready_trigger_ids(
-        self,
-        config: Config,
-        bots: Mapping[str, AgentBot | TeamBot],
-    ) -> frozenset[str]:
-        """Return enabled triggers whose target bot is joined to that trigger room."""
-        ready_trigger_ids = set()
-        router_joined_room_ids = self.joined_room_ids.get(ROUTER_AGENT_NAME, frozenset())
-        for trigger_id, trigger_config in config.external_triggers.items():
-            if not trigger_config.enabled:
-                continue
-            target_bot = bots.get(trigger_config.target.agent)
-            if target_bot is None or not target_bot.running or target_bot.client is None:
-                continue
-            target_room_id = self.resolve_room_id(trigger_config.target.room_id)
-            target_joined_room_ids = self.joined_room_ids.get(
-                trigger_config.target.agent,
-                frozenset(),
-            )
-            if target_room_id in router_joined_room_ids and target_room_id in target_joined_room_ids:
-                ready_trigger_ids.add(trigger_id)
-        return frozenset(ready_trigger_ids)
-
     def resolve_room_id(self, room_id_or_alias: str) -> str:
         """Resolve one configured external trigger room reference when known."""
-        resolved = resolve_room_aliases([room_id_or_alias], runtime_paths=self.runtime_paths)
-        return resolved[0] if resolved else room_id_or_alias
+        return resolve_room_id(room_id_or_alias, runtime_paths=self.runtime_paths)
 
     def bind_if_ready(
         self,
@@ -97,7 +70,6 @@ class ExternalTriggerRuntimeCoordinator:
 
         self._bind_from_started_bots(
             (router_bot,),
-            ready_trigger_ids=self.ready_trigger_ids(config, bots),
             is_trigger_ready=is_trigger_ready,
         )
 
@@ -127,37 +99,7 @@ class ExternalTriggerRuntimeCoordinator:
             for trigger_config in config.external_triggers.values():
                 if trigger_config.enabled and trigger_config.target.agent in affected_entities:
                     self.unbind()
-                    for entity_name in affected_entities:
-                        self.joined_room_ids.pop(entity_name, None)
                     return
-
-    async def refresh_joined_room_ids(
-        self,
-        config: Config | None,
-        bots: Iterable[AgentBot | TeamBot],
-        all_bots: Mapping[str, AgentBot | TeamBot],
-    ) -> None:
-        """Refresh actual Matrix joined-room snapshots for trigger delivery participants."""
-        if config is None:
-            return
-        trigger_target_agents = {
-            trigger_config.target.agent
-            for trigger_config in config.external_triggers.values()
-            if trigger_config.enabled
-        }
-        if not trigger_target_agents:
-            return
-        trigger_participant_agents = {ROUTER_AGENT_NAME, *trigger_target_agents}
-        bots_to_refresh = list(bots)
-        refreshed_entity_names = {bot.agent_name for bot in bots_to_refresh}
-        router_bot = all_bots.get(ROUTER_AGENT_NAME)
-        if ROUTER_AGENT_NAME not in refreshed_entity_names and router_bot is not None:
-            bots_to_refresh.append(router_bot)
-        for bot in bots_to_refresh:
-            if bot.agent_name not in trigger_participant_agents:
-                continue
-            joined_rooms = await get_joined_rooms(bot.client) if bot.client is not None else None
-            self.joined_room_ids[bot.agent_name] = frozenset(joined_rooms or ())
 
     async def is_ready(
         self,
@@ -185,8 +127,6 @@ class ExternalTriggerRuntimeCoordinator:
         trigger_room_id = self.resolve_room_id(trigger_config.target.room_id)
         router_joined_room_ids = frozenset(await get_joined_rooms(router_bot.client) or ())
         target_joined_room_ids = frozenset(await get_joined_rooms(target_bot.client) or ())
-        self.joined_room_ids[ROUTER_AGENT_NAME] = router_joined_room_ids
-        self.joined_room_ids[trigger_config.target.agent] = target_joined_room_ids
         return trigger_room_id in router_joined_room_ids and trigger_room_id in target_joined_room_ids
 
     async def sync_api_config_snapshot(

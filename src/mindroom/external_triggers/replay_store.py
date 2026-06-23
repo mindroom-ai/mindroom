@@ -47,6 +47,9 @@ class _ReplayStoreState:
 
 _STORE_STATES: dict[str, _ReplayStoreState] = {}
 _STORE_STATES_LOCK = threading.Lock()
+# NOTE: The per-path lock is in-process only. Deploy the external trigger API
+# with a single writer process/replica for replay correctness until this store
+# moves to a database or another cross-process atomic backend.
 
 
 def _shared_store_state(store_path: Path) -> _ReplayStoreState:

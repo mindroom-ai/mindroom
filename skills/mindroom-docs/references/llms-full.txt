@@ -13526,6 +13526,10 @@ An in-progress event claim expires after one day to recover from process crashes
 
 After delivery succeeds, the `event_id` stays recorded for one day so duplicate retries do not post another Matrix message.
 
+Replay protection is atomic only inside one MindRoom API process because the JSON replay store uses an in-process lock.
+
+Deploy external trigger ingress with one writer process or replica until replay storage moves to a cross-process atomic backend.
+
 If `--event-id` is omitted, the CLI generates a random event ID, so repeated sends are not idempotent.
 
 ## Watcher Behavior

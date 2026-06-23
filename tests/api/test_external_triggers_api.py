@@ -21,7 +21,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api import main as api_main
 from mindroom.config.main import Config
 from mindroom.external_triggers.auth import sign_trigger_request
-from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim
+from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim, ExternalTriggerReplayStoreError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,13 +62,14 @@ def _sign(
     trigger_id: str = "campground",
     body: bytes,
     nonce: str = "nonce-1",
+    timestamp: str | None = None,
 ) -> dict[str, str]:
     return sign_trigger_request(
         method="POST",
         path=f"/api/triggers/{trigger_id}",
         body=body,
         key_id="campground-main",
-        timestamp=str(int(time.time())),
+        timestamp=timestamp or str(int(time.time())),
         nonce=nonce,
         private_key=private_key,
     )
@@ -164,7 +165,6 @@ def _bind_runtime() -> object:
         api_main.app,
         client=client,
         conversation_cache=object(),
-        ready_trigger_ids=frozenset({"alerts", "campground"}),
         is_trigger_ready=is_trigger_ready,
     )
     return client
@@ -185,6 +185,51 @@ def test_unknown_trigger_returns_404(trigger_api: TriggerApiContext) -> None:
 def test_missing_signature_headers_return_401(trigger_api: TriggerApiContext) -> None:
     """Configured triggers require signature headers."""
     response = trigger_api.client.post("/api/triggers/campground", content=_body())
+
+    assert response.status_code == 401
+
+
+def test_tampered_external_trigger_body_returns_401(trigger_api: TriggerApiContext) -> None:
+    """Route auth must bind the exact request body bytes."""
+    signed_body = _body(event_id="signed-body")
+    tampered_body = _body(event_id="tampered-body")
+
+    response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=tampered_body,
+        headers=_sign(trigger_api.private_key, body=signed_body, nonce="nonce-tampered-body"),
+    )
+
+    assert response.status_code == 401
+
+
+def test_forged_external_trigger_signature_returns_401(trigger_api: TriggerApiContext) -> None:
+    """Route auth must reject signatures from non-configured keys."""
+    body = _body(event_id="forged-signature")
+
+    response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(Ed25519PrivateKey.generate(), body=body, nonce="nonce-forged-signature"),
+    )
+
+    assert response.status_code == 401
+
+
+def test_expired_external_trigger_timestamp_returns_401(trigger_api: TriggerApiContext) -> None:
+    """Route auth must enforce the configured replay window."""
+    body = _body(event_id="expired-timestamp")
+
+    response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(
+            trigger_api.private_key,
+            body=body,
+            nonce="nonce-expired-timestamp",
+            timestamp=str(int(time.time()) - 3600),
+        ),
+    )
 
     assert response.status_code == 401
 
@@ -314,11 +359,15 @@ def test_external_trigger_unready_target_does_not_block_ready_trigger(
         return "$matrix-event"
 
     monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+
+    async def is_trigger_ready(trigger_id: str) -> bool:
+        return trigger_id == "alerts"
+
     api_main.bind_external_trigger_runtime(
         api_main.app,
         client=object(),
         conversation_cache=object(),
-        ready_trigger_ids=frozenset({"alerts"}),
+        is_trigger_ready=is_trigger_ready,
     )
 
     ready_body = _body(event_id="alerts-ready")
@@ -368,7 +417,6 @@ def test_external_trigger_live_readiness_rejects_stale_ready_snapshot(
         api_main.app,
         client=object(),
         conversation_cache=object(),
-        ready_trigger_ids=frozenset({"campground"}),
         is_trigger_ready=is_trigger_ready,
     )
 
@@ -403,7 +451,6 @@ def test_external_trigger_live_readiness_allows_late_ready_snapshot(
         api_main.app,
         client=object(),
         conversation_cache=object(),
-        ready_trigger_ids=frozenset(),
         is_trigger_ready=is_trigger_ready,
     )
 
@@ -468,6 +515,37 @@ def test_executor_none_releases_event_claim_for_retry(
     assert retry.json()["duplicate"] is False
     assert retry.json()["matrix_event_id"] == "$matrix-event"
     assert calls == ["availability-retry", "availability-retry"]
+
+
+def test_release_failure_does_not_mask_delivery_failure(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rollback store failures must not replace the delivery failure status."""
+    _bind_runtime()
+
+    async def execute_external_trigger(**_kwargs: object) -> None:
+        return None
+
+    def release_event_id(*_args: object, **_kwargs: object) -> None:
+        message = "release failed"
+        raise ExternalTriggerReplayStoreError(message)
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    monkeypatch.setattr(
+        "mindroom.external_triggers.replay_store.ExternalTriggerReplayStore.release_event_id",
+        release_event_id,
+    )
+
+    body = _body(event_id="release-failure-does-not-mask")
+    response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(trigger_api.private_key, body=body, nonce="nonce-release-failure"),
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "External trigger delivery failed"}
 
 
 def test_executor_exception_releases_event_claim_for_retry(
@@ -795,11 +873,15 @@ def test_api_lifespan_rebases_preload_external_trigger_runtime(tmp_path: Path) -
     )
     api_main.initialize_api_app(api_main.app, runtime_paths)
     client = object()
+
+    async def is_trigger_ready(_trigger_id: str) -> bool:
+        return True
+
     api_main.bind_external_trigger_runtime(
         api_main.app,
         client=client,
         conversation_cache=object(),
-        ready_trigger_ids=frozenset({"campground"}),
+        is_trigger_ready=is_trigger_ready,
     )
     runtime = config_lifecycle.app_state(api_main.app).external_trigger_runtime
     preload_generation = config_lifecycle.require_api_state(api_main.app).snapshot.generation
@@ -865,11 +947,15 @@ models:
         api_main.app,
     )
     published_generation = config_lifecycle.require_api_state(api_main.app).snapshot.generation
+
+    async def is_trigger_ready(_trigger_id: str) -> bool:
+        return True
+
     api_main.bind_external_trigger_runtime(
         api_main.app,
         client=object(),
         conversation_cache=object(),
-        ready_trigger_ids=frozenset({"campground"}),
+        is_trigger_ready=is_trigger_ready,
     )
 
     assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True

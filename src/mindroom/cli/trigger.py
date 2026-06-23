@@ -18,6 +18,7 @@ import httpx
 import typer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
+from rich.markup import escape
 
 from mindroom.cli.config import console
 from mindroom.external_triggers.auth import sign_trigger_request
@@ -128,10 +129,12 @@ def send(
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        console.print(f"[red]Error:[/red] external trigger request failed: {_status_error_detail(exc.response)}")
+        console.print(
+            f"[red]Error:[/red] external trigger request failed: {escape(_status_error_detail(exc.response))}",
+        )
         raise typer.Exit(1) from exc
     except httpx.HTTPError as exc:
-        console.print(f"[red]Error:[/red] external trigger request failed: {exc}")
+        console.print(f"[red]Error:[/red] external trigger request failed: {escape(str(exc))}")
         raise typer.Exit(1) from exc
     console.print_json(data=response.json())
 

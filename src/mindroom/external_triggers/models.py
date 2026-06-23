@@ -6,13 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
-def _non_empty_stripped(value: str, *, field_name: str) -> str:
-    stripped = value.strip()
-    if not stripped:
-        msg = f"{field_name} must not be empty"
-        raise ValueError(msg)
-    return stripped
+from mindroom.config.validation import non_empty_stripped
 
 
 class ExternalTriggerPayload(BaseModel):
@@ -30,13 +24,13 @@ class ExternalTriggerPayload(BaseModel):
     @classmethod
     def validate_kind(cls, value: str) -> str:
         """Reject empty trigger kinds."""
-        return _non_empty_stripped(value, field_name="kind")
+        return non_empty_stripped(value, field_name="kind")
 
     @field_validator("message")
     @classmethod
     def validate_message(cls, value: str) -> str:
         """Reject empty trigger messages."""
-        return _non_empty_stripped(value, field_name="message")
+        return non_empty_stripped(value, field_name="message")
 
 
 class ExternalTriggerAcceptedResponse(BaseModel):

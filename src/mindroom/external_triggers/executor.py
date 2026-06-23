@@ -10,7 +10,7 @@ from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND
 from mindroom.hooks.sender import send_and_track_message
 from mindroom.matrix.mentions import parse_mentions_in_text
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
-from mindroom.matrix.state import resolve_room_aliases
+from mindroom.matrix.state import resolve_room_id
 
 if TYPE_CHECKING:
     import nio
@@ -54,7 +54,7 @@ async def execute_external_trigger(
     conversation_cache: ConversationCacheProtocol,
 ) -> str | None:
     """Post one authenticated external trigger payload to its configured Matrix target."""
-    room_id = _resolve_trigger_room_id(trigger.target.room_id, runtime_paths)
+    room_id = resolve_room_id(trigger.target.room_id, runtime_paths)
     thread_event_id = None if trigger.target.new_thread else trigger.target.thread_id
     latest_thread_event_id = None
     if thread_event_id is not None:
@@ -83,12 +83,6 @@ async def execute_external_trigger(
     if delivered is None:
         return None
     return delivered.event_id
-
-
-def _resolve_trigger_room_id(room_id_or_alias: str, runtime_paths: RuntimePaths) -> str:
-    """Resolve configured trigger room refs to Matrix room IDs when known."""
-    resolved = resolve_room_aliases([room_id_or_alias], runtime_paths=runtime_paths)
-    return resolved[0] if resolved else room_id_or_alias
 
 
 def _external_trigger_content_metadata(trigger_id: str, payload: ExternalTriggerPayload) -> dict[str, Any]:

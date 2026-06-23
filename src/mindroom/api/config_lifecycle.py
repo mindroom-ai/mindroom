@@ -83,8 +83,7 @@ class ExternalTriggerRuntime:
     client: object
     conversation_cache: object
     config_generation: int
-    ready_trigger_ids: frozenset[str]
-    is_trigger_ready: Callable[[str], Awaitable[bool]] | None = None
+    is_trigger_ready: Callable[[str], Awaitable[bool]]
 
 
 @dataclass

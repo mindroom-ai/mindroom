@@ -342,6 +342,42 @@ def test_trigger_send_reports_status_error(monkeypatch: pytest.MonkeyPatch, tmp_
     assert "not available" in result.output
 
 
+def test_trigger_send_escapes_status_error_markup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Server-provided details should be displayed as text, not Rich markup."""
+    key_path = tmp_path / "trigger.key"
+    _write_private_key(key_path)
+    request = httpx.Request("POST", "http://127.0.0.1:8765/api/triggers/campground")
+    response = httpx.Response(
+        422,
+        request=request,
+        json={"detail": "bad [/red] payload"},
+    )
+
+    def fake_post(*_args: object, **_kwargs: object) -> httpx.Response:
+        return response
+
+    monkeypatch.setattr("mindroom.cli.trigger.httpx.post", fake_post)
+
+    result = runner.invoke(
+        app,
+        [
+            "trigger",
+            "send",
+            "campground",
+            "--key-file",
+            str(key_path),
+            "--kind",
+            "campground.availability",
+            "--message",
+            "site open",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "HTTP 422" in result.output
+    assert "[/red]" in result.output
+
+
 def test_trigger_send_rejects_malformed_private_key(tmp_path: Path) -> None:
     """Send should reject private key files that are not base64 raw 32-byte Ed25519 keys."""
     key_path = tmp_path / "trigger.key"

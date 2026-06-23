@@ -19,6 +19,7 @@ from mindroom.external_triggers.replay_store import (
     ExternalTriggerReplayStore,
     ExternalTriggerReplayStoreError,
 )
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 router = APIRouter(prefix="/api/triggers", tags=["external-triggers"])
+logger = get_logger(__name__)
 _IN_PROGRESS_EVENT_ID_TTL_SECONDS = 86400
 _DELIVERED_EVENT_ID_TTL_SECONDS = 86400
 _P = ParamSpec("_P")
@@ -113,10 +115,10 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
             conversation_cache=cast("ConversationCacheProtocol", runtime.conversation_cache),
         )
     except Exception:
-        await _run_replay_store_call(store.release_event_id, trigger_id, event_id)
+        await _release_event_id_best_effort(store, trigger_id, event_id)
         raise
     if matrix_event_id is None:
-        await _run_replay_store_call(store.release_event_id, trigger_id, event_id)
+        await _release_event_id_best_effort(store, trigger_id, event_id)
         raise HTTPException(status_code=502, detail="External trigger delivery failed")
 
     await _run_replay_store_call(
@@ -185,6 +187,23 @@ async def _run_replay_store_call(call: Callable[_P, _T], *args: _P.args, **kwarg
         raise HTTPException(status_code=503, detail="External trigger replay store is not available") from exc
 
 
+async def _release_event_id_best_effort(
+    store: ExternalTriggerReplayStore,
+    trigger_id: str,
+    event_id: str,
+) -> None:
+    """Release an in-progress event claim without masking the delivery failure."""
+    try:
+        await asyncio.to_thread(store.release_event_id, trigger_id, event_id)
+    except Exception:
+        logger.warning(
+            "Failed to release external trigger event claim after delivery failure",
+            trigger_id=trigger_id,
+            event_id=event_id,
+            exc_info=True,
+        )
+
+
 async def _require_external_trigger_runtime(
     request: Request,
     snapshot_generation: int,
@@ -193,13 +212,10 @@ async def _require_external_trigger_runtime(
     runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
     if runtime is None or runtime.config_generation != snapshot_generation:
         raise HTTPException(status_code=503, detail="External trigger runtime is not available")
-    if runtime.is_trigger_ready is not None:
-        try:
-            is_trigger_ready = await runtime.is_trigger_ready(trigger_id)
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail="External trigger target runtime is not available") from exc
-        if not is_trigger_ready:
-            raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
-    elif trigger_id not in runtime.ready_trigger_ids:
+    try:
+        is_trigger_ready = await runtime.is_trigger_ready(trigger_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="External trigger target runtime is not available") from exc
+    if not is_trigger_ready:
         raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
     return runtime

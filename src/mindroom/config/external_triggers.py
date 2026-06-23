@@ -8,15 +8,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from mindroom.config.validation import non_empty_stripped
+
 _ED25519_PUBLIC_KEY_BYTES = 32
-
-
-def _non_empty_stripped(value: str, *, field_name: str) -> str:
-    stripped = value.strip()
-    if not stripped:
-        msg = f"{field_name} must not be empty"
-        raise ValueError(msg)
-    return stripped
 
 
 class ExternalTriggerTargetConfig(BaseModel):
@@ -33,13 +27,13 @@ class ExternalTriggerTargetConfig(BaseModel):
     @classmethod
     def validate_room_id(cls, value: str) -> str:
         """Reject empty Matrix room IDs."""
-        return _non_empty_stripped(value, field_name="room_id")
+        return non_empty_stripped(value, field_name="room_id")
 
     @field_validator("agent")
     @classmethod
     def validate_agent(cls, value: str) -> str:
         """Reject empty agent or team targets."""
-        return _non_empty_stripped(value, field_name="agent")
+        return non_empty_stripped(value, field_name="agent")
 
     @field_validator("thread_id")
     @classmethod
@@ -47,7 +41,7 @@ class ExternalTriggerTargetConfig(BaseModel):
         """Reject empty Matrix thread IDs."""
         if value is None:
             return None
-        return _non_empty_stripped(value, field_name="thread_id")
+        return non_empty_stripped(value, field_name="thread_id")
 
 
 class ExternalTriggerConfig(BaseModel):
@@ -79,7 +73,7 @@ class ExternalTriggerConfig(BaseModel):
     @classmethod
     def validate_public_key(cls, value: str) -> str:
         """Reject invalid Ed25519 public key material."""
-        public_key = _non_empty_stripped(value, field_name="public_key")
+        public_key = non_empty_stripped(value, field_name="public_key")
         try:
             public_key_bytes = base64.b64decode(public_key, validate=True)
         except (binascii.Error, ValueError) as exc:
@@ -94,4 +88,4 @@ class ExternalTriggerConfig(BaseModel):
     @classmethod
     def validate_key_id(cls, value: str) -> str:
         """Reject empty key identifiers."""
-        return _non_empty_stripped(value, field_name="key_id")
+        return non_empty_stripped(value, field_name="key_id")
