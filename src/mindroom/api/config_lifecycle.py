@@ -76,6 +76,14 @@ class ApiState:
     snapshot: ApiSnapshot
 
 
+@dataclass(frozen=True)
+class ExternalTriggerRuntime:
+    """Runtime objects needed to deliver accepted external triggers."""
+
+    client: object
+    conversation_cache: object
+
+
 @dataclass
 class _MindroomAppState:
     """Single typed namespace for FastAPI ``app.state`` attributes used across the API."""
@@ -85,6 +93,7 @@ class _MindroomAppState:
     orchestrator_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
+    external_trigger_runtime: ExternalTriggerRuntime | None = None
 
 
 def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:

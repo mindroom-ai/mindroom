@@ -354,6 +354,32 @@ class _MultiAgentOrchestrator:
         for bot in bots:
             self._bind_runtime_support_services(bot)
         self._configure_approval_store_transport()
+        self._bind_external_trigger_runtime_from_started_bots(bots)
+
+    def _bind_external_trigger_runtime_from_started_bots(self, bots: Iterable[AgentBot | TeamBot]) -> None:
+        """Bind external trigger delivery runtime when the router client is ready."""
+        for bot in bots:
+            if bot.agent_name != ROUTER_AGENT_NAME or bot.client is None:
+                continue
+            from mindroom.api import main as api_main  # noqa: PLC0415
+
+            api_main.bind_external_trigger_runtime(
+                api_main.app,
+                client=bot.client,
+                conversation_cache=bot._conversation_cache,
+            )
+            return
+
+    def _unbind_external_trigger_runtime(self) -> None:
+        """Clear external trigger delivery runtime from the bundled API app."""
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        api_main.unbind_external_trigger_runtime(api_main.app)
+
+    def _unbind_external_trigger_runtime_if_router_affected(self, entity_names: Iterable[str]) -> None:
+        """Clear external trigger runtime before the router is stopped or removed."""
+        if ROUTER_AGENT_NAME in entity_names:
+            self._unbind_external_trigger_runtime()
 
     async def _sync_event_cache_service(self, config: Config) -> None:
         """Ensure the runtime has one initialized shared event-cache service."""
@@ -467,13 +493,17 @@ class _MultiAgentOrchestrator:
     async def _try_start_bot_once(self, entity_name: str, bot: AgentBot | TeamBot) -> bool | None:
         """Run one bot start attempt and classify the result."""
         try:
-            return bool(await bot.try_start())
+            started = bool(await bot.try_start())
         except PermanentStartupError:
             logger.error(  # noqa: TRY400
                 "Bot startup failed permanently; leaving bot disabled until configuration changes",
                 agent_name=entity_name,
             )
             return None
+        else:
+            if started and entity_name == ROUTER_AGENT_NAME:
+                self._bind_external_trigger_runtime_from_started_bots((bot,))
+            return started
 
     async def _run_bot_start_retry(self, entity_name: str) -> None:
         """Keep retrying one bot start until it succeeds or the task is cancelled."""
@@ -1159,6 +1189,7 @@ class _MultiAgentOrchestrator:
 
     async def _remove_deleted_entities(self, removed_entities: set[str]) -> None:
         """Cancel, clean up, and unregister entities removed from config."""
+        self._unbind_external_trigger_runtime_if_router_affected(removed_entities)
         for entity_name in removed_entities:
             await self._cancel_bot_start_task(entity_name)
             await cancel_sync_task(entity_name, self._sync_tasks)
@@ -1183,6 +1214,7 @@ class _MultiAgentOrchestrator:
         if not affected_entities:
             return set()
 
+        self._unbind_external_trigger_runtime_if_router_affected(affected_entities)
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
         await stop_entities(
@@ -1202,6 +1234,7 @@ class _MultiAgentOrchestrator:
         """Restart or create entities affected by the config change."""
         entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
         if entities_to_stop:
+            self._unbind_external_trigger_runtime_if_router_affected(entities_to_stop)
             for entity_name in entities_to_stop:
                 await self._cancel_bot_start_task(entity_name)
             await stop_entities(
@@ -1240,6 +1273,7 @@ class _MultiAgentOrchestrator:
                 server_id=server_id,
                 entities=sorted(changed_entities),
             )
+            self._unbind_external_trigger_runtime_if_router_affected(changed_entities)
             for entity_name in changed_entities:
                 await self._cancel_bot_start_task(entity_name)
             await stop_entities(
@@ -1637,6 +1671,7 @@ class _MultiAgentOrchestrator:
         self.running = False
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
+        self._unbind_external_trigger_runtime()
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
         await self._startup_maintenance.cancel()

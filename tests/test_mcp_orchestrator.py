@@ -12,7 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.mcp.manager import MCPServerManager
-from mindroom.orchestration.config_updates import build_config_update_plan
+from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.identity_helpers import persist_entity_accounts
@@ -181,6 +181,99 @@ async def test_handle_mcp_catalog_change_restarts_dependent_entities(tmp_path: P
     assert {args.args[0] for args in mock_cancel.await_args_list} == {"code", "dev_team"}
     mock_schedule_retry.assert_awaited_once_with("code")
     mock_clear_snapshot_cache.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_stays_unbound_on_failure(
+    tmp_path: Path,
+) -> None:
+    """Router restarts should clear external trigger runtime before stopping the old client."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    config = _config(tmp_path)
+    orchestrator.config = config
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(spec=AgentBot)}
+    order: list[str] = []
+    external_trigger_runtime_bound = True
+
+    plan = build_config_update_plan(
+        current_config=config,
+        new_config=config,
+        configured_entities={ROUTER_AGENT_NAME},
+        existing_entities={ROUTER_AGENT_NAME},
+        agent_bots=orchestrator.agent_bots,
+    )
+    plan = ConfigUpdatePlan(
+        new_config=config,
+        changed_mcp_servers=plan.changed_mcp_servers,
+        configured_entities={ROUTER_AGENT_NAME},
+        entities_to_restart={ROUTER_AGENT_NAME},
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+
+    def unbind_external_trigger_runtime() -> None:
+        nonlocal external_trigger_runtime_bound
+        order.append("unbind")
+        external_trigger_runtime_bound = False
+
+    async def fake_stop_entities(*_args: object, **_kwargs: object) -> None:
+        assert external_trigger_runtime_bound is False
+        order.append("stop")
+
+    async def fake_create_and_start_entities(*_args: object, **_kwargs: object) -> EntityStartResults:
+        order.append("create")
+        return EntityStartResults(retryable_entities=[ROUTER_AGENT_NAME])
+
+    with (
+        patch.object(orchestrator, "_unbind_external_trigger_runtime", side_effect=unbind_external_trigger_runtime),
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=fake_stop_entities)),
+        patch.object(orchestrator, "_create_and_start_entities", side_effect=fake_create_and_start_entities),
+    ):
+        (
+            changed_entities,
+            retryable_entities,
+            permanently_failed_entities,
+        ) = await orchestrator._restart_changed_entities(
+            plan,
+        )
+
+    assert changed_entities == {ROUTER_AGENT_NAME}
+    assert retryable_entities == [ROUTER_AGENT_NAME]
+    assert permanently_failed_entities == []
+    assert external_trigger_runtime_bound is False
+    assert order == ["unbind", "stop", "create"]
+
+
+@pytest.mark.asyncio
+async def test_router_removal_unbinds_external_trigger_runtime_before_cleanup(tmp_path: Path) -> None:
+    """Router removal should clear external trigger runtime before cleaning up the old client."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    order: list[str] = []
+    external_trigger_runtime_bound = True
+
+    async def cleanup() -> None:
+        assert external_trigger_runtime_bound is False
+        order.append("cleanup")
+
+    router_bot = MagicMock(spec=AgentBot)
+    router_bot.cleanup = AsyncMock(side_effect=cleanup)
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+
+    def unbind_external_trigger_runtime() -> None:
+        nonlocal external_trigger_runtime_bound
+        order.append("unbind")
+        external_trigger_runtime_bound = False
+
+    with patch.object(orchestrator, "_unbind_external_trigger_runtime", side_effect=unbind_external_trigger_runtime):
+        await orchestrator._remove_deleted_entities({ROUTER_AGENT_NAME})
+
+    assert ROUTER_AGENT_NAME not in orchestrator.agent_bots
+    assert external_trigger_runtime_bound is False
+    assert order == ["unbind", "cleanup"]
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,7 @@ from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResul
 # Import routers
 from mindroom.api.credentials import router as credentials_router
 from mindroom.api.dynamic_workflows import router as dynamic_workflows_router
+from mindroom.api.external_triggers import router as external_triggers_router
 from mindroom.api.frontend import router as frontend_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
 from mindroom.api.integrations import router as integrations_router
@@ -294,6 +295,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
     previous_state = app_state.api_state
     if previous_state is None:
+        app_state.external_trigger_runtime = None
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),
             snapshot=ApiSnapshot(
@@ -319,6 +321,8 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         source_fingerprint = (
             current_snapshot.source_fingerprint if current_snapshot.runtime_paths == runtime_paths else None
         )
+        if current_snapshot.runtime_paths != runtime_paths:
+            app_state.external_trigger_runtime = None
         previous_state.snapshot = config_lifecycle._published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
@@ -485,6 +489,19 @@ def bind_orchestrator_knowledge_refresh_scheduler(
     config_lifecycle.app_state(api_app).orchestrator_knowledge_refresh_scheduler = scheduler
 
 
+def bind_external_trigger_runtime(api_app: FastAPI, client: object, conversation_cache: object) -> None:
+    """Attach router Matrix delivery runtime to one API app."""
+    config_lifecycle.app_state(api_app).external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
+        client=client,
+        conversation_cache=conversation_cache,
+    )
+
+
+def unbind_external_trigger_runtime(api_app: FastAPI) -> None:
+    """Clear router Matrix delivery runtime from one API app."""
+    config_lifecycle.app_state(api_app).external_trigger_runtime = None
+
+
 def _api_docs_kwargs(runtime_paths: constants.RuntimePaths) -> dict[str, str | None]:
     """Return generated-docs routes for this runtime."""
     docs_enabled = runtime_paths.env_flag(
@@ -639,6 +656,7 @@ app.include_router(tools_router, dependencies=[Depends(verify_user)])
 app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)
+app.include_router(external_triggers_router)
 app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)])
 
 

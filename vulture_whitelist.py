@@ -112,6 +112,7 @@ _.mark_event_delivered  # unused method (src/mindroom/external_triggers/replay_s
 _.release_event_id  # unused method (src/mindroom/external_triggers/replay_store.py)
 ExternalTriggerReplayStore  # unused class (src/mindroom/external_triggers/replay_store.py)
 _.validate_external_trigger_targets  # unused method (src/mindroom/config/main.py)
+post_external_trigger  # unused function (src/mindroom/api/external_triggers.py)
 _.validate_team_agents  # unused method (src/mindroom/config/main.py)
 _.handle_endtag  # unused method (src/mindroom/matrix/message_builder.py)
 _._normalize_set_at  # unused method (src/mindroom/thread_tags.py)
