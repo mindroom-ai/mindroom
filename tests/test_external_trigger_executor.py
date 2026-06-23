@@ -20,7 +20,7 @@ from mindroom.dispatch_source import (
     source_kind_from_content,
 )
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.external_triggers.executor import _build_external_trigger_message_text, execute_external_trigger
+from mindroom.external_triggers.executor import _build_external_trigger_text, execute_external_trigger
 from mindroom.external_triggers.models import ExternalTriggerPayload
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
@@ -90,7 +90,7 @@ def _conversation_cache(*, latest_thread_event_id: str | None = "$latest") -> As
 
 def test_build_external_trigger_message_text_mentions_agent_and_includes_payload_details() -> None:
     """External trigger text is built from configured target plus signed payload fields only."""
-    text = _build_external_trigger_message_text(_trigger(), _payload())
+    text = _build_external_trigger_text("@research", _payload())
 
     assert text == (
         "@research Campground opened\n\n"
@@ -106,6 +106,16 @@ def test_build_external_trigger_message_text_mentions_agent_and_includes_payload
         "```"
     )
     assert "!fixed:localhost" not in text
+
+
+def test_build_external_trigger_message_text_preserves_payload_mentions() -> None:
+    """Signed payload text should stay visible exactly as supplied."""
+    text = _build_external_trigger_text("@research", _payload_with_payload_controlled_mentions())
+
+    assert "@ops campground opened" in text
+    assert "Notify @ops." in text
+    assert '"assignee": "@ops"' in text
+    assert "(at)ops" not in text
 
 
 def test_dispatch_source_recognizes_external_trigger_as_automation_and_trusted_source() -> None:
@@ -223,10 +233,10 @@ async def test_execute_external_trigger_only_parses_configured_target_mention(
     mentioned_user_ids = content["m.mentions"]["user_ids"]
     assert mentioned_user_ids == [registry.current_id("research").full_id]
     assert registry.current_id("ops").full_id not in mentioned_user_ids
-    assert "(at)ops" in content["body"]
-    assert "(at)ops" in content["formatted_body"]
-    assert "@ops" not in content["body"]
-    assert "@ops" not in content["formatted_body"]
+    assert "@ops" in content["body"]
+    assert "@ops" in content["formatted_body"]
+    assert "(at)ops" not in content["body"]
+    assert "(at)ops" not in content["formatted_body"]
 
 
 @pytest.mark.asyncio

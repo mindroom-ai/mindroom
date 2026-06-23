@@ -6,18 +6,16 @@ import base64
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import httpx
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 from typer.testing import CliRunner
 
 from mindroom.cli.main import app
 from mindroom.external_triggers.auth import verify_trigger_request
-
-if TYPE_CHECKING:
-    import pytest
 
 runner = CliRunner()
 
@@ -109,6 +107,24 @@ def test_trigger_keygen_rejects_directory_without_changing_permissions(tmp_path:
     assert result.exit_code == 2
     assert "regular file" in result.output
     assert mode_after == 0o700
+
+
+def test_trigger_keygen_rejects_symlink_without_changing_target(tmp_path: Path) -> None:
+    """Keygen should reject symlink targets without overwriting the linked file."""
+    target_path = tmp_path / "target.txt"
+    target_path.write_text("do-not-overwrite", encoding="utf-8")
+    key_path = tmp_path / "trigger.key"
+    try:
+        key_path.symlink_to(target_path)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    result = runner.invoke(app, ["trigger", "keygen", "--private-key-file", str(key_path)])
+
+    assert result.exit_code == 2
+    assert "regular file" in result.output
+    assert key_path.is_symlink()
+    assert target_path.read_text(encoding="utf-8") == "do-not-overwrite"
 
 
 def test_trigger_send_builds_default_signed_request(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

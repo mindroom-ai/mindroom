@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 import json
 import os
 import secrets
+import stat
 import time
 from pathlib import Path  # noqa: TC003
 from typing import cast
@@ -50,12 +52,21 @@ def keygen(
 
 
 def _write_private_key_file(private_key_file: Path, private_key_b64: str) -> None:
-    if private_key_file.exists():
-        if not private_key_file.is_file():
+    try:
+        mode = private_key_file.lstat().st_mode
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISREG(mode):
             raise typer.BadParameter(_PRIVATE_KEY_PATH_ERROR)
         private_key_file.chmod(0o600)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    file_descriptor = os.open(private_key_file, flags, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    try:
+        file_descriptor = os.open(private_key_file, flags, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise typer.BadParameter(_PRIVATE_KEY_PATH_ERROR) from exc
+        raise
     with os.fdopen(file_descriptor, "w", encoding="utf-8") as key_file:
         key_file.write(private_key_b64)
 

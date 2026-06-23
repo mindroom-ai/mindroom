@@ -210,8 +210,8 @@ async def test_router_start_attempt_does_not_bind_external_trigger_runtime_befor
     mock_bind.assert_not_called()
 
 
-def test_external_trigger_runtime_binds_router_with_ready_target_snapshot(tmp_path: Path) -> None:
-    """Trigger delivery runtime should bind router runtime even when a target is down."""
+def test_external_trigger_runtime_binds_router_with_joined_target_snapshot(tmp_path: Path) -> None:
+    """Trigger delivery runtime should bind only targets joined to their trigger room."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     orchestrator.config = _config_with_external_trigger(tmp_path)
 
@@ -223,6 +223,7 @@ def test_external_trigger_runtime_binds_router_with_ready_target_snapshot(tmp_pa
     target_bot = MagicMock(spec=AgentBot)
     target_bot.agent_name = "code"
     target_bot.running = False
+    target_bot.client = object()
     orchestrator.agent_bots = {
         ROUTER_AGENT_NAME: router_bot,
         "code": target_bot,
@@ -232,13 +233,34 @@ def test_external_trigger_runtime_binds_router_with_ready_target_snapshot(tmp_pa
         orchestrator._bind_external_trigger_runtime_if_ready()
         target_bot.running = True
         orchestrator._bind_external_trigger_runtime_if_ready()
+        orchestrator._external_trigger_joined_room_ids["code"] = frozenset({"!campground:example.org"})
+        orchestrator._bind_external_trigger_runtime_if_ready()
 
-    assert mock_bind.call_count == 2
-    first_call, second_call = mock_bind.call_args_list
+    assert mock_bind.call_count == 3
+    first_call, second_call, third_call = mock_bind.call_args_list
     assert first_call.args == ((router_bot,),)
     assert first_call.kwargs == {"ready_target_agents": frozenset()}
     assert second_call.args == ((router_bot,),)
-    assert second_call.kwargs == {"ready_target_agents": frozenset({"code"})}
+    assert second_call.kwargs == {"ready_target_agents": frozenset()}
+    assert third_call.args == ((router_bot,),)
+    assert third_call.kwargs == {"ready_target_agents": frozenset({"code"})}
+
+
+@pytest.mark.asyncio
+async def test_external_trigger_joined_room_snapshot_uses_matrix_joined_rooms(tmp_path: Path) -> None:
+    """Trigger readiness should come from actual Matrix joined-room state."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    orchestrator.config = _config_with_external_trigger(tmp_path)
+    target_bot = MagicMock(spec=AgentBot)
+    target_bot.agent_name = "code"
+    target_bot.client = MagicMock()
+
+    with patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!campground:example.org"])):
+        await orchestrator._refresh_external_trigger_joined_room_ids([target_bot])
+
+    assert orchestrator._external_trigger_joined_room_ids == {
+        "code": frozenset({"!campground:example.org"}),
+    }
 
 
 @pytest.mark.asyncio
@@ -603,6 +625,7 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
         ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
         "code": MagicMock(spec=AgentBot),
     }
+    orchestrator._external_trigger_joined_room_ids["code"] = frozenset({"!campground:example.org"})
     order: list[str] = []
     external_trigger_runtime_bound = True
     plan = ConfigUpdatePlan(
@@ -646,6 +669,7 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
     assert retryable_entities == []
     assert permanently_failed_entities == []
     assert external_trigger_runtime_bound is False
+    assert "code" not in orchestrator._external_trigger_joined_room_ids
     assert order == ["unbind", "stop", "create"]
 
 

@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Any
 from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND
 from mindroom.hooks.sender import send_and_track_message
-from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.mentions import parse_mentions_in_text
+from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.state import resolve_room_aliases
 
 if TYPE_CHECKING:
@@ -25,19 +26,19 @@ _EXTERNAL_TRIGGER_KIND_KEY = "io.mindroom.external_trigger.kind"
 _EXTERNAL_TRIGGER_EVENT_ID_KEY = "io.mindroom.external_trigger.event_id"
 
 
-def _build_external_trigger_message_text(trigger: ExternalTriggerConfig, payload: ExternalTriggerPayload) -> str:
-    """Build visible Matrix message text from a fixed trigger target and signed payload."""
+def _build_external_trigger_text(target_text: str, payload: ExternalTriggerPayload) -> str:
+    """Build visible trigger text from a target mention and unmodified signed payload."""
     if payload.title:
         sections = [
-            f"@{trigger.target.agent} {_escape_payload_mentions(payload.title)}",
-            _escape_payload_mentions(payload.message),
+            f"{target_text} {payload.title}",
+            payload.message,
         ]
     else:
-        sections = [f"@{trigger.target.agent} {_escape_payload_mentions(payload.message)}"]
+        sections = [f"{target_text} {payload.message}"]
 
     if payload.data:
         data_json = json.dumps(payload.data, indent=2, sort_keys=True)
-        sections.append(f"```json\n{_escape_payload_mentions(data_json)}\n```")
+        sections.append(f"```json\n{data_json}\n```")
 
     return "\n\n".join(sections)
 
@@ -63,10 +64,17 @@ async def execute_external_trigger(
             caller_label="external_trigger",
         )
 
-    content = format_message_with_mentions(
+    plain_target, mentioned_user_ids, markdown_target = parse_mentions_in_text(
+        f"@{trigger.target.agent}",
         config,
         runtime_paths,
-        _build_external_trigger_message_text(trigger, payload),
+    )
+    plain_text = _build_external_trigger_text(plain_target, payload)
+    markdown_text = _build_external_trigger_text(markdown_target, payload)
+    content = build_message_content(
+        body=plain_text,
+        formatted_body=markdown_to_html(markdown_text),
+        mentioned_user_ids=mentioned_user_ids,
         thread_event_id=thread_event_id,
         latest_thread_event_id=latest_thread_event_id,
         extra_content=_external_trigger_content_metadata(trigger_id, payload),
@@ -91,8 +99,3 @@ def _external_trigger_content_metadata(trigger_id: str, payload: ExternalTrigger
         _EXTERNAL_TRIGGER_KIND_KEY: payload.kind,
         _EXTERNAL_TRIGGER_EVENT_ID_KEY: payload.event_id,
     }
-
-
-def _escape_payload_mentions(text: str) -> str:
-    """Escape payload-controlled mention markers before Matrix mention parsing."""
-    return text.replace("@", "(at)")
