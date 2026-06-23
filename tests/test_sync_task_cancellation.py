@@ -855,8 +855,8 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
 
     mock_bot1.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
     mock_bot2.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
-    mock_bot1.stop.assert_called_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
-    mock_bot2.stop.assert_called_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    mock_bot1.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    mock_bot2.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
     assert "agent1" not in agent_bots
     assert "agent2" not in agent_bots
@@ -1586,8 +1586,8 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         assert len(orchestrator._sync_tasks) == 0
 
         # Verify bots were stopped with public shutdown metadata and no restart cancellation source.
-        mock_bot1.stop.assert_called_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
-        mock_bot2.stop.assert_called_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
+        mock_bot1.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
+        mock_bot2.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
 
 
 # ---------------------------------------------------------------------------
