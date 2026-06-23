@@ -32,6 +32,7 @@ from mindroom.agent_policy import (
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.external_triggers import ExternalTriggerConfig  # noqa: TC001
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import (
     CacheConfig,
@@ -383,6 +384,10 @@ class Config(BaseModel):
         default_factory=dict,
         description="MCP server configurations keyed by server id",
     )
+    external_triggers: dict[str, ExternalTriggerConfig] = Field(
+        default_factory=dict,
+        description="Signed external trigger configurations keyed by trigger id",
+    )
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     tool_approval: ToolApprovalConfig = Field(
         default_factory=ToolApprovalConfig,
@@ -578,6 +583,17 @@ class Config(BaseModel):
                 if target not in self.agents:
                     msg = f"Agent '{agent_name}' delegates to unknown agent '{target}'"
                     raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_external_trigger_targets(self) -> Config:
+        """Ensure external trigger targets reference configured agents or teams."""
+        known_entities = set(self.agents) | set(self.teams)
+        for trigger_id, trigger_config in self.external_triggers.items():
+            target_agent = trigger_config.target.agent
+            if target_agent not in known_entities:
+                msg = f"external_triggers.{trigger_id}.target.agent references unknown agent or team '{target_agent}'"
+                raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
