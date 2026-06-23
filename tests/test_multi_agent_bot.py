@@ -15719,6 +15719,7 @@ class TestMultiAgentOrchestrator:
         config.matrix_room_access = MagicMock()
         config.authorization = MagicMock()
         config.cache = MagicMock()
+        config.external_triggers = {}
         config.defaults.enable_streaming = True
 
         orchestrator.config = config
@@ -16046,9 +16047,11 @@ class TestMultiAgentOrchestrator:
         current_config = MagicMock()
         current_config.authorization.global_users = []
         current_config.cache = MagicMock()
+        current_config.external_triggers = {}
         new_config = MagicMock()
         new_config.authorization.global_users = []
         new_config.cache = MagicMock()
+        new_config.external_triggers = {}
         new_config.defaults.enable_streaming = True
 
         orchestrator = _MultiAgentOrchestrator(

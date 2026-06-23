@@ -30,18 +30,6 @@ _PRIVATE_KEY_ERROR = "raw 32-byte Ed25519 private key required"
 trigger_app = typer.Typer(help="Send signed external triggers.")
 
 
-def _httpx_post_bytes(
-    url: str,
-    *,
-    content: bytes,
-    headers: dict[str, str],
-    timeout: float,
-    verify: bool,
-) -> httpx.Response:
-    """Call httpx.post with bytes content."""
-    return httpx.post(url, content=content, headers=headers, timeout=timeout, verify=verify)
-
-
 @trigger_app.command("keygen")
 def keygen(
     private_key_file: Path = typer.Option(  # noqa: B008
@@ -116,7 +104,7 @@ def send(
     )
     headers["content-type"] = "application/json"
 
-    response = _httpx_post_bytes(
+    response = httpx.post(
         f"{url.rstrip('/')}{path}",
         content=body,
         headers=headers,

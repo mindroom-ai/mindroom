@@ -145,14 +145,12 @@ def trigger_api(tmp_path: Path) -> TriggerApiContext:
     )
     api_main.initialize_api_app(api_main.app, runtime_paths)
     assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
-    if hasattr(api_main, "unbind_external_trigger_runtime"):
-        api_main.unbind_external_trigger_runtime(api_main.app)
+    api_main.unbind_external_trigger_runtime(api_main.app)
 
     with TestClient(api_main.app) as client:
         yield TriggerApiContext(client=client, private_key=private_key, runtime_paths=runtime_paths)
 
-    if hasattr(api_main, "unbind_external_trigger_runtime"):
-        api_main.unbind_external_trigger_runtime(api_main.app)
+    api_main.unbind_external_trigger_runtime(api_main.app)
 
 
 def _bind_runtime() -> object:

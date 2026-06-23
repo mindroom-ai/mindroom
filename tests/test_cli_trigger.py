@@ -137,7 +137,7 @@ def test_trigger_send_builds_default_signed_request(monkeypatch: pytest.MonkeyPa
             },
         )
 
-    monkeypatch.setattr("mindroom.cli.trigger._httpx_post_bytes", fake_post)
+    monkeypatch.setattr("mindroom.cli.trigger.httpx.post", fake_post)
     monkeypatch.setattr("mindroom.cli.trigger.time.time", lambda: 1234.9)
     token_values = iter(["generated-event", "nonce-1"])
     monkeypatch.setattr("mindroom.cli.trigger.secrets.token_hex", lambda _size: next(token_values))
@@ -198,7 +198,7 @@ def test_trigger_send_accepts_custom_options(monkeypatch: pytest.MonkeyPatch, tm
         captured.update(url=url, content=content, headers=headers, timeout=timeout, verify=verify)
         return _FakeResponse({"accepted": True})
 
-    monkeypatch.setattr("mindroom.cli.trigger._httpx_post_bytes", fake_post)
+    monkeypatch.setattr("mindroom.cli.trigger.httpx.post", fake_post)
     monkeypatch.setattr("mindroom.cli.trigger.time.time", lambda: 2000)
     monkeypatch.setattr("mindroom.cli.trigger.secrets.token_hex", lambda _size: "nonce-2")
 

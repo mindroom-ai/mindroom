@@ -1395,10 +1395,10 @@ class _MultiAgentOrchestrator:
             return
         from mindroom.api import main as api_main  # noqa: PLC0415
 
-        try:
-            await api_main.reload_config_into_app(api_main.app, self.runtime_paths)
-        except TypeError:
-            return
+        if not await api_main.reload_config_into_app(api_main.app, self.runtime_paths):
+            self._unbind_external_trigger_runtime()
+            message = "Failed to publish external trigger API config snapshot"
+            raise RuntimeError(message)
 
     async def _apply_config_update_plan(
         self,
