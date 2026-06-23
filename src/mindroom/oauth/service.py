@@ -10,6 +10,7 @@ from urllib.parse import urlencode, urlparse
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials, scoped_credentials_path
 from mindroom.file_locks import async_exclusive_file_lock
+from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthClaimValidationError, OAuthProviderError, OAuthTokenResult
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 
@@ -26,6 +27,7 @@ _OAUTH_CONNECT_TOKEN_TTL_SECONDS = 600
 _OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
 _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
 _RECOVERABLE_REFRESH_ERROR_CODES = frozenset({"invalid_grant", "invalid_refresh_token"})
+logger = get_logger(__name__)
 _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
     {
         "google_calendar",
@@ -92,6 +94,7 @@ class OAuthCredentialsRefreshResult:
 
     credentials: dict[str, Any] | None
     refreshed: bool
+    stale_retry_used: bool = False
 
 
 def scoped_oauth_credentials_refresh_lock_path(
@@ -151,8 +154,10 @@ async def refresh_scoped_oauth_credentials_with_result(
             allowed_shared_services=allowed_shared_services,
         )
         if credentials is None:
+            _log_oauth_refresh_skipped(provider, None, reason="missing_credentials", stale_retry_used=False)
             return OAuthCredentialsRefreshResult(credentials=None, refreshed=False)
         if not oauth_credentials_usable(provider, runtime_paths, credentials):
+            _log_oauth_refresh_skipped(provider, credentials, reason="unusable_credentials", stale_retry_used=False)
             return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False)
         return await _refresh_scoped_oauth_credentials_locked(
             provider,
@@ -178,6 +183,13 @@ async def _refresh_scoped_oauth_credentials_locked(
         refreshed_credentials = await provider.refresh_token_data(credentials, runtime_paths)
     except OAuthProviderError as exc:
         if attempted_refresh_token is None or not _is_recoverable_stale_refresh_rejection(exc):
+            _log_oauth_refresh_failed(
+                provider,
+                credentials,
+                exc,
+                reason="provider_refresh_failed",
+                stale_retry_used=False,
+            )
             raise
         latest_credentials = load_scoped_credentials(
             provider.credential_service,
@@ -192,19 +204,57 @@ async def _refresh_scoped_oauth_credentials_locked(
             or latest_refresh_token == attempted_refresh_token
             or not oauth_credentials_usable(provider, runtime_paths, latest_credentials)
         ):
+            _log_oauth_refresh_failed(
+                provider,
+                credentials,
+                exc,
+                reason="stale_retry_unavailable",
+                stale_retry_used=False,
+            )
             raise
-        refreshed_credentials = await provider.refresh_token_data(latest_credentials, runtime_paths)
+        try:
+            refreshed_credentials = await provider.refresh_token_data(latest_credentials, runtime_paths)
+        except OAuthProviderError as retry_exc:
+            _log_oauth_refresh_failed(
+                provider,
+                latest_credentials,
+                retry_exc,
+                reason="stale_retry_failed",
+                stale_retry_used=True,
+            )
+            raise
         if refreshed_credentials is None:
-            return OAuthCredentialsRefreshResult(credentials=latest_credentials, refreshed=False)
+            _log_oauth_refresh_skipped(
+                provider,
+                latest_credentials,
+                reason="stale_retry_not_needed",
+                stale_retry_used=True,
+            )
+            return OAuthCredentialsRefreshResult(
+                credentials=latest_credentials,
+                refreshed=False,
+                stale_retry_used=True,
+            )
         save_scoped_credentials(
             provider.credential_service,
             refreshed_credentials,
             credentials_manager=credentials_manager,
             worker_target=worker_target,
         )
-        return OAuthCredentialsRefreshResult(credentials=refreshed_credentials, refreshed=True)
+        _log_oauth_refreshed(
+            provider,
+            refreshed_credentials,
+            reason="stale_retry_refreshed",
+            stale_retry_used=True,
+        )
+        return OAuthCredentialsRefreshResult(
+            credentials=refreshed_credentials,
+            refreshed=True,
+            stale_retry_used=True,
+        )
 
     if refreshed_credentials is None:
+        _log_oauth_refresh_skipped(provider, credentials, reason="not_needed", stale_retry_used=False)
         return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False)
     save_scoped_credentials(
         provider.credential_service,
@@ -212,7 +262,77 @@ async def _refresh_scoped_oauth_credentials_locked(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+    _log_oauth_refreshed(provider, refreshed_credentials, reason="refreshed", stale_retry_used=False)
     return OAuthCredentialsRefreshResult(credentials=refreshed_credentials, refreshed=True)
+
+
+def _log_oauth_refreshed(
+    provider: OAuthProvider,
+    credentials: dict[str, Any],
+    *,
+    reason: str,
+    stale_retry_used: bool,
+) -> None:
+    logger.info(
+        "oauth_credentials_refreshed",
+        **_oauth_refresh_log_context(provider, credentials),
+        reason=reason,
+        stale_retry_used=stale_retry_used,
+    )
+
+
+def _log_oauth_refresh_skipped(
+    provider: OAuthProvider,
+    credentials: dict[str, Any] | None,
+    *,
+    reason: str,
+    stale_retry_used: bool,
+) -> None:
+    logger.debug(
+        "oauth_credentials_refresh_skipped",
+        **_oauth_refresh_log_context(provider, credentials),
+        reason=reason,
+        stale_retry_used=stale_retry_used,
+    )
+
+
+def _log_oauth_refresh_failed(
+    provider: OAuthProvider,
+    credentials: dict[str, Any],
+    exc: OAuthProviderError,
+    *,
+    reason: str,
+    stale_retry_used: bool,
+) -> None:
+    logger.warning(
+        "oauth_credentials_refresh_failed",
+        **_oauth_refresh_log_context(provider, credentials),
+        reason=reason,
+        stale_retry_used=stale_retry_used,
+        error_type=type(exc).__name__,
+        oauth_error=_normalized_oauth_error_code(exc.oauth_error),
+    )
+
+
+def _oauth_refresh_log_context(
+    provider: OAuthProvider,
+    credentials: dict[str, Any] | None,
+) -> dict[str, object]:
+    return {
+        "provider_id": provider.id,
+        "credential_service": provider.credential_service,
+        "has_refresh_token": _refresh_token_value(credentials) is not None,
+        "expires_at": _oauth_credentials_expires_at(credentials),
+    }
+
+
+def _oauth_credentials_expires_at(credentials: dict[str, Any] | None) -> float | None:
+    if credentials is None:
+        return None
+    expires_at = credentials.get("expires_at")
+    if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
+        return None
+    return float(expires_at)
 
 
 def _refresh_token_value(credentials: Mapping[str, Any] | None) -> str | None:
