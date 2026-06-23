@@ -32,8 +32,11 @@ _DELIVERED_EVENT_ID_TTL_SECONDS = 86400
 )
 async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTriggerAcceptedResponse:
     """Accept one signed external trigger and dispatch it into Matrix."""
-    snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    try:
+        snapshot = config_lifecycle.bind_current_request_snapshot(request)
+        config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    except (HTTPException, TypeError) as exc:
+        raise HTTPException(status_code=503, detail="External trigger configuration is not available") from exc
     trigger = config.external_triggers.get(trigger_id)
     if trigger is None or not trigger.enabled:
         raise HTTPException(status_code=404, detail="External trigger not found")

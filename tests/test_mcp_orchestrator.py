@@ -242,6 +242,29 @@ def test_external_trigger_runtime_binds_router_with_ready_target_snapshot(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_external_trigger_api_sync_skips_when_embedded_api_disabled(tmp_path: Path) -> None:
+    """No-API runs should not touch the bundled API app for trigger delivery."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), api_enabled=False)
+    config = _config_with_external_trigger(tmp_path)
+    orchestrator.config = config
+    router_bot = MagicMock(spec=AgentBot)
+    router_bot.agent_name = ROUTER_AGENT_NAME
+    router_bot.running = True
+    router_bot.client = object()
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+
+    with (
+        patch("mindroom.api.main.reload_config_into_app", new=AsyncMock()) as mock_reload,
+        patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind,
+    ):
+        await orchestrator._sync_api_config_snapshot_for_external_triggers(config, config)
+        orchestrator._bind_external_trigger_runtime_if_ready()
+
+    mock_reload.assert_not_awaited()
+    mock_bind.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_startup_room_setup_binds_external_trigger_runtime_after_setup(tmp_path: Path) -> None:
     """Initial startup publishes trigger delivery only after room setup completes."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))

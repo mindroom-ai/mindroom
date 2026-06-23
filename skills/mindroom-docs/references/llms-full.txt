@@ -13473,7 +13473,9 @@ MindRoom treats `target.room_id` as a configured room for the router and `target
 
 When `allowed_kinds` is empty or omitted, any signed `kind` is accepted.
 
-`replay_window_seconds` defaults to `300` and limits accepted signature timestamp skew.
+`replay_window_seconds` defaults to `300` and limits accepted signature age.
+
+Future signature timestamps are rejected.
 
 `max_body_bytes` defaults to `65536` and rejects larger signed bodies.
 

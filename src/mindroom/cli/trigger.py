@@ -104,15 +104,33 @@ def send(
     )
     headers["content-type"] = "application/json"
 
-    response = httpx.post(
-        f"{url.rstrip('/')}{path}",
-        content=body,
-        headers=headers,
-        timeout=timeout,
-        verify=verify_tls,
-    )
-    response.raise_for_status()
+    try:
+        response = httpx.post(
+            f"{url.rstrip('/')}{path}",
+            content=body,
+            headers=headers,
+            timeout=timeout,
+            verify=verify_tls,
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        console.print(f"[red]Error:[/red] external trigger request failed: {_status_error_detail(exc.response)}")
+        raise typer.Exit(1) from exc
+    except httpx.HTTPError as exc:
+        console.print(f"[red]Error:[/red] external trigger request failed: {exc}")
+        raise typer.Exit(1) from exc
     console.print_json(data=response.json())
+
+
+def _status_error_detail(response: httpx.Response) -> str:
+    detail: object
+    try:
+        data = response.json()
+    except ValueError:
+        detail = response.text
+    else:
+        detail = data.get("detail", data) if isinstance(data, dict) else data
+    return f"HTTP {response.status_code}: {detail}"
 
 
 def _trigger_body_bytes(

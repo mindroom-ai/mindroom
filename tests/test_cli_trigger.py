@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 from typer.testing import CliRunner
@@ -254,6 +255,74 @@ def test_trigger_send_accepts_custom_options(monkeypatch: pytest.MonkeyPatch, tm
         public_key_b64=public_key_b64,
         now=2000,
     )
+
+
+def test_trigger_send_reports_transport_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Send should turn network failures into concise CLI errors."""
+    key_path = tmp_path / "trigger.key"
+    _write_private_key(key_path)
+
+    def fake_post(*_args: object, **_kwargs: object) -> httpx.Response:
+        message = "connection refused"
+        raise httpx.ConnectError(message)
+
+    monkeypatch.setattr("mindroom.cli.trigger.httpx.post", fake_post)
+
+    result = runner.invoke(
+        app,
+        [
+            "trigger",
+            "send",
+            "campground",
+            "--key-file",
+            str(key_path),
+            "--kind",
+            "campground.availability",
+            "--message",
+            "site open",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "external trigger request failed" in result.output
+    assert "connection refused" in result.output
+
+
+def test_trigger_send_reports_status_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Send should report server status errors without a traceback."""
+    key_path = tmp_path / "trigger.key"
+    _write_private_key(key_path)
+    request = httpx.Request("POST", "http://127.0.0.1:8765/api/triggers/campground")
+    response = httpx.Response(
+        503,
+        request=request,
+        json={"detail": "External trigger runtime is not available"},
+    )
+
+    def fake_post(*_args: object, **_kwargs: object) -> httpx.Response:
+        return response
+
+    monkeypatch.setattr("mindroom.cli.trigger.httpx.post", fake_post)
+
+    result = runner.invoke(
+        app,
+        [
+            "trigger",
+            "send",
+            "campground",
+            "--key-file",
+            str(key_path),
+            "--kind",
+            "campground.availability",
+            "--message",
+            "site open",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "HTTP 503" in result.output
+    assert "External trigger runtime is" in result.output
+    assert "not available" in result.output
 
 
 def test_trigger_send_rejects_malformed_private_key(tmp_path: Path) -> None:

@@ -66,7 +66,7 @@ class ExternalTriggerConfig(BaseModel):
         default=300,
         ge=30,
         le=3600,
-        description="Maximum accepted signature timestamp skew in seconds",
+        description="Maximum accepted signature age in seconds; future timestamps are rejected",
     )
     max_body_bytes: int = Field(
         default=65536,

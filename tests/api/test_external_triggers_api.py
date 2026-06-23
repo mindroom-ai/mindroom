@@ -183,6 +183,48 @@ def test_missing_signature_headers_return_401(trigger_api: TriggerApiContext) ->
     assert response.status_code == 401
 
 
+def test_config_load_failure_returns_generic_unavailable_before_auth(tmp_path: Path) -> None:
+    """Unsigned trigger requests should not receive detailed config validation errors."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "agents": {
+                    "research": {
+                        "display_name": "Research",
+                        "role": "test",
+                    },
+                },
+                "external_triggers": {
+                    "campground": {
+                        "public_key": "not-base64",
+                        "target": {
+                            "room_id": "!campground:example.org",
+                            "agent": "research",
+                        },
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is False
+    api_main.unbind_external_trigger_runtime(api_main.app)
+
+    with TestClient(api_main.app) as client:
+        response = client.post("/api/triggers/campground", content=_body())
+
+    api_main.unbind_external_trigger_runtime(api_main.app)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "External trigger configuration is not available"}
+
+
 def test_body_limit_returns_413_before_auth_or_runtime(trigger_api: TriggerApiContext) -> None:
     """Oversized bodies are rejected before signature or runtime checks."""
     response = trigger_api.client.post("/api/triggers/campground", content=b"x" * 1025)
@@ -633,6 +675,40 @@ def test_initialize_api_app_clears_external_trigger_runtime_on_runtime_change(
     api_main.initialize_api_app(api_main.app, other_runtime_paths)
 
     assert config_lifecycle.app_state(api_main.app).external_trigger_runtime is None
+
+
+def test_api_lifespan_rebases_preload_external_trigger_runtime(tmp_path: Path) -> None:
+    """Startup config load should not make a just-bound trigger runtime stale."""
+    private_key = Ed25519PrivateKey.generate()
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, _public_key_b64(private_key))
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    client = object()
+    api_main.bind_external_trigger_runtime(
+        api_main.app,
+        client=client,
+        conversation_cache=object(),
+        ready_target_agents=frozenset({"research"}),
+    )
+    runtime = config_lifecycle.app_state(api_main.app).external_trigger_runtime
+    preload_generation = config_lifecycle.require_api_state(api_main.app).snapshot.generation
+    assert runtime is not None
+    assert runtime.config_generation == preload_generation
+
+    with TestClient(api_main.app):
+        snapshot = config_lifecycle.require_api_state(api_main.app).snapshot
+        runtime = config_lifecycle.app_state(api_main.app).external_trigger_runtime
+        assert snapshot.runtime_config is not None
+        assert runtime is not None
+        assert runtime.client is client
+        assert runtime.config_generation == snapshot.generation
+
+    api_main.unbind_external_trigger_runtime(api_main.app)
 
 
 def test_external_trigger_rejects_runtime_bound_to_stale_config_generation(

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -442,7 +442,22 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     runtime_paths = _app_runtime_paths(_app)
     await asyncio.to_thread(constants.ensure_writable_config_path, create_minimal=True, runtime_paths=runtime_paths)
-    await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, _app)
+    app_state = config_lifecycle.app_state(_app)
+    preload_snapshot = _app_context(_app)
+    loaded = await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, _app)
+    preload_runtime = app_state.external_trigger_runtime
+    if (
+        preload_runtime is not None
+        and preload_snapshot.runtime_config is None
+        and preload_snapshot.config_load_result is None
+    ):
+        if loaded:
+            app_state.external_trigger_runtime = replace(
+                preload_runtime,
+                config_generation=_app_context(_app).generation,
+            )
+        else:
+            app_state.external_trigger_runtime = None
     logger.info(
         "Initialized API runtime config",
         config_path=str(runtime_paths.config_path),
@@ -453,7 +468,6 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info("Syncing API credentials from runtime env")
     sync_env_to_credentials(runtime_paths=runtime_paths)
 
-    app_state = config_lifecycle.app_state(_app)
     api_owned_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     standalone_knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler = app_state.orchestrator_knowledge_refresh_scheduler

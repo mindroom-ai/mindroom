@@ -202,6 +202,7 @@ class _MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
     runtime_paths: RuntimePaths
+    api_enabled: bool = True
     storage_path: Path = field(init=False)
     config_path: Path = field(init=False)
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
@@ -357,6 +358,8 @@ class _MultiAgentOrchestrator:
         ready_target_agents: frozenset[str],
     ) -> None:
         """Bind external trigger delivery runtime when the router client is ready."""
+        if not self.api_enabled:
+            return
         for bot in bots:
             if bot.agent_name != ROUTER_AGENT_NAME or bot.client is None:
                 continue
@@ -383,6 +386,8 @@ class _MultiAgentOrchestrator:
 
     def _bind_external_trigger_runtime_if_ready(self) -> None:
         """Bind trigger delivery runtime after router is running."""
+        if not self.api_enabled:
+            return
         config = self.config
         if config is None:
             return
@@ -396,6 +401,8 @@ class _MultiAgentOrchestrator:
 
     def _unbind_external_trigger_runtime(self) -> None:
         """Clear external trigger delivery runtime from the bundled API app."""
+        if not self.api_enabled:
+            return
         from mindroom.api import main as api_main  # noqa: PLC0415
 
         api_main.unbind_external_trigger_runtime(api_main.app)
@@ -1391,6 +1398,8 @@ class _MultiAgentOrchestrator:
         new_config: Config,
     ) -> None:
         """Publish the current config to the bundled API before binding trigger runtime."""
+        if not self.api_enabled:
+            return
         if not (current_config.external_triggers or new_config.external_triggers):
             return
         from mindroom.api import main as api_main  # noqa: PLC0415
@@ -2096,7 +2105,7 @@ async def main(  # noqa: PLR0915
         storage_path.mkdir(parents=True, exist_ok=True)
 
         logger.info("Starting orchestrator...")
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
         set_runtime_starting()
         auxiliary_specs = [
             (
