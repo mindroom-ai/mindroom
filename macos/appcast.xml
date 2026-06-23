@@ -5,6 +5,32 @@
         <link>https://github.com/mindroom-ai/mindroom</link>
         <description>Signed MindRoom macOS app updates.</description>
         <item>
+            <title>2026.6.182</title>
+            <pubDate>Tue, 23 Jun 2026 06:17:32 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>819</sparkle:version>
+            <sparkle:shortVersionString>2026.6.182</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.6.182
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Add OAuth refresh service logging (#1330)](https://github.com/mindroom-ai/mindroom/commit/0162f5db) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.6.182/MindRoom.zip" length="23660070" type="application/octet-stream" sparkle:edSignature="3FOyjM1zs15L5fSUi6gbHBCnF7CaF2rs9WS3pWa04jLCLot12poyTnqvrqM+NtExiRBsZfho6XMCeCuAmdJKCQ=="/>
+        </item>
+        <item>
             <title>2026.6.168</title>
             <pubDate>Fri, 19 Jun 2026 19:20:03 +0000</pubDate>
             <link>https://github.com/mindroom-ai/mindroom</link>
