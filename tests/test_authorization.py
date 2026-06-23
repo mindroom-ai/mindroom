@@ -1619,6 +1619,46 @@ def test_configured_responder_candidates_use_persisted_current_account_ids(tmp_p
     assert _entity_names(config, candidates) == ["assistant"]
 
 
+def test_external_trigger_target_room_makes_agent_configured_responder(tmp_path: Path) -> None:
+    """External trigger target rooms should count as configured responder rooms."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+            },
+        },
+        external_triggers={
+            "campground": {
+                "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "target": {
+                    "room_id": "!campground:example.org",
+                    "agent": "assistant",
+                },
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    room = nio.MatrixRoom("!campground:example.org", "@mindroom_test:example.com")
+    room.add_member("@mindroom_assistant_oldns:example.com", "Assistant", None)
+
+    candidates = mindroom.authorization.responder_candidate_entities_from_cached_room(
+        room,
+        "@alice:example.com",
+        config,
+        runtime_paths,
+    )
+
+    assert [candidate.full_id for candidate in candidates] == ["@mindroom_assistant_oldns:example.com"]
+    assert _entity_names(config, candidates) == ["assistant"]
+
+
 def test_configured_team_responder_candidates_use_persisted_current_account_ids(tmp_path: Path) -> None:
     """Team responder candidates should resolve through live persisted account usernames."""
     config = _isolated_config(

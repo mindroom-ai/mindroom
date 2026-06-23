@@ -61,6 +61,8 @@ def test_external_trigger_config_parses_minimal_signed_trigger() -> None:
     assert trigger.allowed_kinds == ("campground.availability",)
     assert trigger.replay_window_seconds == 300
     assert trigger.max_body_bytes == 65536
+    assert config.get_all_configured_rooms() == {"!room:example.org"}
+    assert config.get_external_trigger_rooms_for_entity("mind") == ["!room:example.org"]
 
 
 def test_external_trigger_rejects_empty_public_key() -> None:

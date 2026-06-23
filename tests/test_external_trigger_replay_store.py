@@ -88,8 +88,8 @@ def test_shared_store_instances_coordinate_nonce_and_event_claims(tmp_path: Path
     )
 
 
-def test_release_after_send_failure_allows_nonce_and_event_id_to_be_claimed_again(tmp_path: Path) -> None:
-    """Rollback release should remove nonce and event-id claims."""
+def test_release_after_send_failure_keeps_nonce_single_use_but_allows_event_retry(tmp_path: Path) -> None:
+    """Rollback release should remove only the event-id claim."""
     store = ExternalTriggerReplayStore(tmp_path)
 
     assert store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
@@ -97,10 +97,9 @@ def test_release_after_send_failure_allows_nonce_and_event_id_to_be_claimed_agai
         ExternalTriggerEventClaim.FRESH
     )
 
-    store.release_nonce("campground", "nonce-1")
     store.release_event_id("campground", "availability-123")
 
-    assert store.claim_nonce("campground", "nonce-1", now=1_010, ttl_seconds=300)
+    assert not store.claim_nonce("campground", "nonce-1", now=1_010, ttl_seconds=300)
     assert store.claim_event_id("campground", "availability-123", now=1_010, ttl_seconds=300) is (
         ExternalTriggerEventClaim.FRESH
     )

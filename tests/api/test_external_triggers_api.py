@@ -229,6 +229,11 @@ def test_executor_none_releases_event_claim_for_retry(
         content=first_body,
         headers=_sign(trigger_api.private_key, body=first_body, nonce="nonce-fail"),
     )
+    same_nonce_retry = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=first_body,
+        headers=_sign(trigger_api.private_key, body=first_body, nonce="nonce-fail"),
+    )
     retry_body = _body(event_id="availability-retry")
     retry = trigger_api.client.post(
         "/api/triggers/campground",
@@ -237,6 +242,7 @@ def test_executor_none_releases_event_claim_for_retry(
     )
 
     assert first.status_code == 502
+    assert same_nonce_retry.status_code == 409
     assert retry.status_code == 202
     assert retry.json()["duplicate"] is False
     assert retry.json()["matrix_event_id"] == "$matrix-event"
@@ -277,6 +283,11 @@ def test_executor_exception_releases_event_claim_for_retry(
             content=first_body,
             headers=_sign(trigger_api.private_key, body=first_body, nonce="nonce-exception"),
         )
+    same_nonce_retry = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=first_body,
+        headers=_sign(trigger_api.private_key, body=first_body, nonce="nonce-exception"),
+    )
 
     retry_body = _body(event_id="availability-exception-retry")
     retry = trigger_api.client.post(
@@ -285,6 +296,7 @@ def test_executor_exception_releases_event_claim_for_retry(
         headers=_sign(trigger_api.private_key, body=retry_body, nonce="nonce-retry"),
     )
 
+    assert same_nonce_retry.status_code == 409
     assert retry.status_code == 202
     assert retry.json()["duplicate"] is False
     assert retry.json()["matrix_event_id"] == "$matrix-event"
@@ -334,11 +346,11 @@ def test_first_success_returns_accepted_duplicate_false(
     assert [payload.event_id for payload in captured_payloads] == ["nonce-event-id"]
 
 
-def test_event_id_idempotency_ttl_uses_one_day_not_signature_window(
+def test_event_id_claim_ttls_distinguish_in_progress_from_delivered(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Event-id idempotency TTL is independent from short signature replay windows."""
+    """In-progress event claims recover quickly while delivered events stay idempotent longer."""
     _bind_runtime()
     nonce_ttls: list[int] = []
     event_claim_ttls: list[int] = []
@@ -396,7 +408,7 @@ def test_event_id_idempotency_ttl_uses_one_day_not_signature_window(
 
     assert response.status_code == 202
     assert nonce_ttls == [30]
-    assert event_claim_ttls == [86400]
+    assert event_claim_ttls == [30]
     assert delivered_ttls == [86400]
 
 

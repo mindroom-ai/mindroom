@@ -1711,10 +1711,10 @@ class Config(BaseModel):
         return any(self.get_agent_memory_backend(agent_name) == "file" for agent_name in self.agents)
 
     def get_all_configured_rooms(self) -> set[str]:
-        """Extract all configured room aliases.
+        """Extract all configured room references.
 
         Returns:
-            Set of all unique room aliases from room, agent, and team configurations
+            Set of all unique room references from room, agent, team, and trigger configurations
 
         """
         all_room_aliases = set(self.rooms)
@@ -1722,7 +1722,19 @@ class Config(BaseModel):
             all_room_aliases.update(agent_config.rooms)
         for team_config in self.teams.values():
             all_room_aliases.update(team_config.rooms)
+        for trigger_config in self.external_triggers.values():
+            if trigger_config.enabled:
+                all_room_aliases.add(trigger_config.target.room_id)
         return all_room_aliases
+
+    def get_external_trigger_rooms_for_entity(self, entity_name: str) -> list[str]:
+        """Return enabled external trigger rooms targeting one agent or team."""
+        rooms = (
+            trigger_config.target.room_id
+            for trigger_config in self.external_triggers.values()
+            if trigger_config.enabled and trigger_config.target.agent == entity_name
+        )
+        return list(dict.fromkeys(rooms))
 
     def get_entity_thread_mode(
         self,

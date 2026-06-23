@@ -59,6 +59,8 @@ Only the public key belongs in `config.yaml`.
 
 `target.room_id` is the Matrix room that receives the trigger message.
 
+MindRoom treats `target.room_id` as a configured room for the router and `target.agent`, so both bots try to join and listen there.
+
 `target.thread_id` is optional.
 
 `target.agent` must name a configured agent or team.
@@ -110,9 +112,15 @@ For example, use the external reservation ID, Git commit SHA, release tag, webho
 
 If the first delivery succeeds, a later signed request with the same `event_id` is treated as a duplicate and does not post another Matrix message while the replay record is retained.
 
-Retries should create a fresh signed request with the same `--event-id`.
+Retries must create a fresh signed request with the same `--event-id`.
 
-Do not reuse the same nonce-bearing HTTP request body and headers as a retry strategy.
+Each nonce-bearing HTTP request is single-use, even if delivery fails before MindRoom records the event as delivered.
+
+Do not reuse the same HTTP request body and headers as a retry strategy.
+
+An in-progress event claim expires after the trigger `replay_window_seconds` to recover from process crashes.
+
+After delivery succeeds, the `event_id` stays recorded for one day so duplicate retries do not post another Matrix message.
 
 If `--event-id` is omitted, the CLI generates a random event ID, so repeated sends are not idempotent.
 

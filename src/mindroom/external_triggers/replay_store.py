@@ -80,18 +80,6 @@ class ExternalTriggerReplayStore:
             self._write_store(store)
             return True
 
-    def release_nonce(self, trigger_id: str, nonce: str) -> None:
-        """Remove a nonce claim after delivery failure."""
-        with self._state.lock:
-            store = self._read_store()
-            trigger_nonces = store["nonces"].get(trigger_id)
-            if trigger_nonces is None:
-                return
-            trigger_nonces.pop(nonce, None)
-            if not trigger_nonces:
-                store["nonces"].pop(trigger_id, None)
-            self._write_store(store)
-
     def claim_event_id(
         self,
         trigger_id: str,

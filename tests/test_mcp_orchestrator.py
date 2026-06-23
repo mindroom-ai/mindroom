@@ -77,6 +77,42 @@ def test_config_update_plan_restarts_only_entities_using_changed_mcp_server(tmp_
     assert "plain" not in plan.entities_to_restart
 
 
+def test_external_trigger_room_change_restarts_router_and_target_agent(tmp_path: Path) -> None:
+    """Trigger target room changes affect both router and target bot room membership."""
+
+    def config_with_trigger_room(room_id: str) -> Config:
+        return Config.validate_with_runtime(
+            {
+                "agents": {
+                    "code": {
+                        "display_name": "Code",
+                        "role": "Write code",
+                    },
+                },
+                "external_triggers": {
+                    "campground": {
+                        "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                        "target": {
+                            "room_id": room_id,
+                            "agent": "code",
+                        },
+                    },
+                },
+            },
+            _runtime_paths(tmp_path),
+        )
+
+    plan = build_config_update_plan(
+        current_config=config_with_trigger_room("!old:example.org"),
+        new_config=config_with_trigger_room("!new:example.org"),
+        configured_entities={ROUTER_AGENT_NAME, "code"},
+        existing_entities={ROUTER_AGENT_NAME, "code"},
+        agent_bots={},
+    )
+
+    assert {ROUTER_AGENT_NAME, "code"} <= plan.entities_to_restart
+
+
 def _manager_with_failed_server(*, required: bool) -> MagicMock:
     manager = MagicMock(spec=MCPServerManager)
     manager.failed_server_ids.return_value = {"demo"}

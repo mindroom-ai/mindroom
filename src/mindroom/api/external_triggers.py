@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 router = APIRouter(prefix="/api/triggers", tags=["external-triggers"])
-_EVENT_ID_TTL_SECONDS = 86400
+_DELIVERED_EVENT_ID_TTL_SECONDS = 86400
 
 
 @router.post(
@@ -62,7 +62,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
         trigger_id,
         event_id,
         now=now,
-        ttl_seconds=_EVENT_ID_TTL_SECONDS,
+        ttl_seconds=trigger.replay_window_seconds,
     )
     if event_claim is ExternalTriggerEventClaim.DELIVERED:
         return ExternalTriggerAcceptedResponse(
@@ -86,15 +86,18 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
             conversation_cache=cast("ConversationCacheProtocol", runtime.conversation_cache),
         )
     except Exception:
-        store.release_nonce(trigger_id, signature_headers.nonce)
         store.release_event_id(trigger_id, event_id)
         raise
     if matrix_event_id is None:
-        store.release_nonce(trigger_id, signature_headers.nonce)
         store.release_event_id(trigger_id, event_id)
         raise HTTPException(status_code=502, detail="External trigger delivery failed")
 
-    store.mark_event_delivered(trigger_id, event_id, now=int(time.time()), ttl_seconds=_EVENT_ID_TTL_SECONDS)
+    store.mark_event_delivered(
+        trigger_id,
+        event_id,
+        now=int(time.time()),
+        ttl_seconds=_DELIVERED_EVENT_ID_TTL_SECONDS,
+    )
     return ExternalTriggerAcceptedResponse(
         accepted=True,
         duplicate=False,

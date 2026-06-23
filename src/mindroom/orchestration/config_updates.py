@@ -136,11 +136,18 @@ def _get_changed_agents(
         old_culture = _culture_signature_for_agent(agent_name, config) if old_agent else None
         new_culture = _culture_signature_for_agent(agent_name, new_config) if new_agent else None
         culture_differ = old_culture != new_culture
+        trigger_rooms_differ = config.get_external_trigger_rooms_for_entity(
+            agent_name,
+        ) != new_config.get_external_trigger_rooms_for_entity(agent_name)
 
-        if (agents_differ or culture_differ) and (agent_name in agent_bots or new_agent is not None):
+        if (agents_differ or culture_differ or trigger_rooms_differ) and (
+            agent_name in agent_bots or new_agent is not None
+        ):
             if old_agent and new_agent:
                 if agents_differ:
                     logger.debug("agent_configuration_changed_restart_required", agent=agent_name)
+                elif trigger_rooms_differ:
+                    logger.debug("agent_external_trigger_rooms_changed_restart_required", agent=agent_name)
                 else:
                     logger.debug("agent_culture_changed_restart_required", agent=agent_name)
             elif new_agent:
@@ -177,8 +184,11 @@ def _get_changed_teams(
         old_team = config.teams.get(team_name)
         new_team = new_config.teams.get(team_name)
         teams_differ = _config_entries_differ(old_team, new_team)
+        trigger_rooms_differ = config.get_external_trigger_rooms_for_entity(
+            team_name,
+        ) != new_config.get_external_trigger_rooms_for_entity(team_name)
 
-        if teams_differ and (team_name in agent_bots or new_team is not None):
+        if (teams_differ or trigger_rooms_differ) and (team_name in agent_bots or new_team is not None):
             changed.add(team_name)
 
     return changed

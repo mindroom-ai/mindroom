@@ -1531,7 +1531,7 @@ def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
     """
     # TeamBot check (teams)
     if entity_name in config.teams:
-        return config.teams[entity_name].rooms
+        return _with_external_trigger_rooms(config.teams[entity_name].rooms, entity_name, config)
 
     # Router agent special case - gets all rooms
     if entity_name == ROUTER_AGENT_NAME:
@@ -1539,9 +1539,14 @@ def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
 
     # Regular agents
     if entity_name in config.agents:
-        return config.agents[entity_name].rooms
+        return _with_external_trigger_rooms(config.agents[entity_name].rooms, entity_name, config)
 
     return []
+
+
+def _with_external_trigger_rooms(base_rooms: list[str], entity_name: str, config: Config) -> list[str]:
+    """Append external trigger target rooms without duplicating explicit rooms."""
+    return list(dict.fromkeys([*base_rooms, *config.get_external_trigger_rooms_for_entity(entity_name)]))
 
 
 __all__ = [
