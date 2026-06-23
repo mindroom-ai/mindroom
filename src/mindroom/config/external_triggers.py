@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_ED25519_PUBLIC_KEY_BYTES = 32
 
 
 def _non_empty_stripped(value: str, *, field_name: str) -> str:
@@ -66,8 +70,17 @@ class ExternalTriggerConfig(BaseModel):
     @field_validator("public_key")
     @classmethod
     def validate_public_key(cls, value: str) -> str:
-        """Reject empty public keys."""
-        return _non_empty_stripped(value, field_name="public_key")
+        """Reject invalid Ed25519 public key material."""
+        public_key = _non_empty_stripped(value, field_name="public_key")
+        try:
+            public_key_bytes = base64.b64decode(public_key, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            msg = "public_key must be strict base64-encoded Ed25519 public key bytes"
+            raise ValueError(msg) from exc
+        if len(public_key_bytes) != _ED25519_PUBLIC_KEY_BYTES:
+            msg = "public_key must decode to 32 raw Ed25519 public key bytes"
+            raise ValueError(msg)
+        return public_key
 
     @field_validator("key_id")
     @classmethod

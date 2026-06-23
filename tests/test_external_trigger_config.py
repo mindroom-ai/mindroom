@@ -139,3 +139,60 @@ def test_external_trigger_requires_configured_agent_or_team_target() -> None:
         Config.model_validate(config_data)
 
     assert "external_triggers.campground.target.agent" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "public_key",
+    [
+        "not-base64",
+        "c2hvcnQ=",
+    ],
+)
+def test_external_trigger_rejects_invalid_public_key_material(public_key: str) -> None:
+    """External trigger public keys must be valid raw Ed25519 public keys."""
+    config_data = {
+        **_base_config(),
+        "agents": {
+            "mind": {
+                "display_name": "Mind",
+                "model": "default",
+            },
+        },
+        "external_triggers": {
+            "campground": {
+                "public_key": public_key,
+                "target": {
+                    "room_id": "!room:example.org",
+                    "agent": "mind",
+                },
+            },
+        },
+    }
+
+    with pytest.raises(ValueError, match="public_key"):
+        Config.model_validate(config_data)
+
+
+def test_external_trigger_rejects_path_unsafe_trigger_id() -> None:
+    """External trigger IDs must be usable as a single API path segment."""
+    config_data = {
+        **_base_config(),
+        "agents": {
+            "mind": {
+                "display_name": "Mind",
+                "model": "default",
+            },
+        },
+        "external_triggers": {
+            "campground/openings": {
+                "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "target": {
+                    "room_id": "!room:example.org",
+                    "agent": "mind",
+                },
+            },
+        },
+    }
+
+    with pytest.raises(ValueError, match="External trigger IDs"):
+        Config.model_validate(config_data)

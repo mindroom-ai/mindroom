@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+_EXTERNAL_TRIGGER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 _RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user"})
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset({"delegate", "dynamic_tools", "self_config"})
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
@@ -589,6 +590,17 @@ class Config(BaseModel):
     def validate_external_trigger_targets(self) -> Config:
         """Ensure external trigger targets reference configured agents or teams."""
         known_entities = set(self.agents) | set(self.teams)
+        invalid_trigger_ids = sorted(
+            trigger_id
+            for trigger_id in self.external_triggers
+            if not _EXTERNAL_TRIGGER_ID_PATTERN.fullmatch(trigger_id)
+        )
+        if invalid_trigger_ids:
+            msg = (
+                "External trigger IDs must be path-safe alphanumeric, underscore, or hyphen values, got: "
+                f"{', '.join(invalid_trigger_ids)}"
+            )
+            raise ValueError(msg)
         for trigger_id, trigger_config in self.external_triggers.items():
             target_agent = trigger_config.target.agent
             if target_agent not in known_entities:
