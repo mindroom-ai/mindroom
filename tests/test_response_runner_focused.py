@@ -678,6 +678,78 @@ async def test_streaming_midstream_failure_persists_partial_off_event_loop(
         await coordinator.process_and_respond_streaming(_plain_request(_target()))
 
 
+def test_sync_restart_retry_notification_uses_final_cancelled_delivery_outcome(tmp_path: Path) -> None:
+    """Streaming helpers can report cancellation only through their final delivery outcome."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    retries: list[str] = []
+    request = replace(
+        _plain_request(_target()),
+        on_sync_restart_cancelled=lambda: retries.append("retry"),
+    )
+
+    coordinator._notify_sync_restart_cancelled(
+        request,
+        FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id="$stream",
+            is_visible_response=True,
+            final_visible_body="partial",
+            failure_reason="sync_restart_cancelled",
+        ),
+        delivery_cancelled=False,
+        delivery_failure_reason=None,
+    )
+
+    assert retries == ["retry"]
+
+
+@pytest.mark.asyncio
+async def test_agent_streaming_sync_restart_cancelled_outcome_registers_retry(tmp_path: Path) -> None:
+    """A visible stream cancelled by sync restart should be retried even when no outer task cancel fired."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    retries: list[str] = []
+    cancelled_outcome = FinalDeliveryOutcome(
+        terminal_status="cancelled",
+        event_id="$stream",
+        is_visible_response=True,
+        final_visible_body="partial",
+        failure_reason="sync_restart_cancelled",
+    )
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = kwargs["response_function"]
+        await response_function("$thinking")  # type: ignore[operator]
+        return "$thinking"
+
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch.object(
+            coordinator,
+            "process_and_respond_streaming",
+            new=AsyncMock(return_value=cancelled_outcome),
+        ),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=True),
+            apply_post_response_effects=AsyncMock(),
+        ),
+    ):
+        result = await coordinator.generate_response(
+            replace(
+                _plain_request(_target()),
+                on_sync_restart_cancelled=lambda: retries.append("retry"),
+            ),
+        )
+
+    assert result == "$stream"
+    assert retries == ["retry"]
+
+
 @pytest.mark.asyncio
 async def test_cancelled_interrupted_persistence_offload_keeps_running(
     monkeypatch: pytest.MonkeyPatch,

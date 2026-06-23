@@ -834,6 +834,8 @@ class ResponseRunner:
         turns are recovered by that replay instead; retrying them too would
         answer twice.
         """
+        delivery_cancelled = delivery_cancelled or final_outcome.terminal_status == "cancelled"
+        delivery_failure_reason = delivery_failure_reason or final_outcome.failure_reason
         if request.on_sync_restart_cancelled is None or not delivery_cancelled:
             return
         if not final_outcome.mark_handled:
