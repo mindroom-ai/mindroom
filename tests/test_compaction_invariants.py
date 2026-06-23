@@ -503,6 +503,7 @@ async def test_generate_compaction_summary_allows_full_history_summary_above_fou
     summary = await generate_compaction_summary(
         model=_RecordingClaude(
             id="claude-sonnet-4-6",
+            max_tokens=8192,
             response=ModelResponse(
                 content="durable full-history summary ended cleanly.",
                 output_tokens=4_097,
@@ -513,6 +514,24 @@ async def test_generate_compaction_summary_allows_full_history_summary_above_fou
     )
 
     assert summary.summary == "durable full-history summary ended cleanly."
+
+
+@pytest.mark.asyncio
+async def test_generate_compaction_summary_uses_claude_default_output_cap() -> None:
+    model = _RecordingClaude(id="claude-sonnet-4-6")
+    default_output_cap = model.max_tokens
+    assert default_output_cap is not None
+    model.response = ModelResponse(
+        content="durable summary ended cleanly.",
+        output_tokens=default_output_cap,
+    )
+
+    with pytest.raises(RuntimeError, match="output token limit"):
+        await generate_compaction_summary(
+            model=model,
+            summary_input="conversation payload",
+            summary_prompt="Summarize the conversation.",
+        )
 
 
 @pytest.mark.asyncio
