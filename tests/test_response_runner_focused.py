@@ -678,32 +678,6 @@ async def test_streaming_midstream_failure_persists_partial_off_event_loop(
         await coordinator.process_and_respond_streaming(_plain_request(_target()))
 
 
-def test_sync_restart_retry_notification_uses_final_cancelled_delivery_outcome(tmp_path: Path) -> None:
-    """Streaming helpers can report cancellation only through their final delivery outcome."""
-    bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    retries: list[str] = []
-    request = replace(
-        _plain_request(_target()),
-        on_sync_restart_cancelled=lambda: retries.append("retry"),
-    )
-
-    coordinator._notify_sync_restart_cancelled(
-        request,
-        FinalDeliveryOutcome(
-            terminal_status="cancelled",
-            event_id="$stream",
-            is_visible_response=True,
-            final_visible_body="partial",
-            failure_reason="sync_restart_cancelled",
-        ),
-        delivery_cancelled=False,
-        delivery_failure_reason=None,
-    )
-
-    assert retries == ["retry"]
-
-
 @pytest.mark.asyncio
 async def test_agent_streaming_sync_restart_cancelled_outcome_registers_retry(tmp_path: Path) -> None:
     """A visible stream cancelled by sync restart should be retried even when no outer task cancel fired."""

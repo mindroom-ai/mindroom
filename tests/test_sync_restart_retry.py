@@ -70,9 +70,20 @@ def test_notify_ignores_user_stop_and_unmarked_turns() -> None:
 
     _notify(runner, request, _cancelled_outcome(failure_reason="cancelled_by_user"))
     _notify(runner, request, _cancelled_outcome(failure_reason="sync_restart_cancelled", visible=False))
-    _notify(runner, request, _cancelled_outcome(failure_reason="sync_restart_cancelled"), delivery_cancelled=False)
 
     assert calls == []
+
+
+def test_notify_uses_final_delivery_outcome_when_cancel_flag_is_missing() -> None:
+    """Streaming cancellations can surface only through the final delivery outcome."""
+    calls: list[str] = []
+    _notify(
+        ResponseRunner(deps=MagicMock()),
+        _request(on_sync_restart_cancelled=lambda: calls.append("retry")),
+        _cancelled_outcome(failure_reason="sync_restart_cancelled"),
+        delivery_cancelled=False,
+    )
+    assert calls == ["retry"]
 
 
 @pytest.mark.asyncio
