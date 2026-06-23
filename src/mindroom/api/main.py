@@ -514,7 +514,7 @@ def bind_external_trigger_runtime(
     client: object,
     conversation_cache: object,
     *,
-    ready_target_agents: frozenset[str],
+    ready_trigger_ids: frozenset[str],
 ) -> None:
     """Attach router Matrix delivery runtime to one API app."""
     api_state = config_lifecycle.require_api_state(api_app)
@@ -522,7 +522,7 @@ def bind_external_trigger_runtime(
         client=client,
         conversation_cache=conversation_cache,
         config_generation=api_state.snapshot.generation,
-        ready_target_agents=ready_target_agents,
+        ready_trigger_ids=ready_trigger_ids,
     )
 
 

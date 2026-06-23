@@ -159,7 +159,7 @@ def _bind_runtime() -> object:
         api_main.app,
         client=client,
         conversation_cache=object(),
-        ready_target_agents=frozenset({"alerts", "research"}),
+        ready_trigger_ids=frozenset({"alerts", "campground"}),
     )
     return client
 
@@ -282,7 +282,7 @@ def test_external_trigger_unready_target_does_not_block_ready_trigger(
         api_main.app,
         client=object(),
         conversation_cache=object(),
-        ready_target_agents=frozenset({"alerts"}),
+        ready_trigger_ids=frozenset({"alerts"}),
     )
 
     ready_body = _body(event_id="alerts-ready")
@@ -693,7 +693,7 @@ def test_api_lifespan_rebases_preload_external_trigger_runtime(tmp_path: Path) -
         api_main.app,
         client=client,
         conversation_cache=object(),
-        ready_target_agents=frozenset({"research"}),
+        ready_trigger_ids=frozenset({"campground"}),
     )
     runtime = config_lifecycle.app_state(api_main.app).external_trigger_runtime
     preload_generation = config_lifecycle.require_api_state(api_main.app).snapshot.generation

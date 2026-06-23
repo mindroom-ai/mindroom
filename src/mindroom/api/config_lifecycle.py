@@ -83,7 +83,7 @@ class ExternalTriggerRuntime:
     client: object
     conversation_cache: object
     config_generation: int
-    ready_target_agents: frozenset[str]
+    ready_trigger_ids: frozenset[str]
 
 
 @dataclass

@@ -356,7 +356,7 @@ class _MultiAgentOrchestrator:
         self,
         bots: Iterable[AgentBot | TeamBot],
         *,
-        ready_target_agents: frozenset[str],
+        ready_trigger_ids: frozenset[str],
     ) -> None:
         """Bind external trigger delivery runtime when the router client is ready."""
         if not self.api_enabled:
@@ -370,14 +370,14 @@ class _MultiAgentOrchestrator:
                 api_main.app,
                 client=bot.client,
                 conversation_cache=bot._conversation_cache,
-                ready_target_agents=ready_target_agents,
+                ready_trigger_ids=ready_trigger_ids,
             )
             return
 
-    def _ready_external_trigger_target_agents(self, config: Config) -> frozenset[str]:
-        """Return enabled trigger target agents joined to their trigger room."""
-        ready_target_agents = set()
-        for trigger_config in config.external_triggers.values():
+    def _ready_external_trigger_ids(self, config: Config) -> frozenset[str]:
+        """Return enabled triggers whose target bot is joined to that trigger room."""
+        ready_trigger_ids = set()
+        for trigger_id, trigger_config in config.external_triggers.items():
             if not trigger_config.enabled:
                 continue
             target_bot = self.agent_bots.get(trigger_config.target.agent)
@@ -385,8 +385,8 @@ class _MultiAgentOrchestrator:
                 continue
             target_room_id = self._resolve_external_trigger_room_id(trigger_config.target.room_id)
             if target_room_id in self._external_trigger_joined_room_ids.get(trigger_config.target.agent, frozenset()):
-                ready_target_agents.add(trigger_config.target.agent)
-        return frozenset(ready_target_agents)
+                ready_trigger_ids.add(trigger_id)
+        return frozenset(ready_trigger_ids)
 
     def _resolve_external_trigger_room_id(self, room_id_or_alias: str) -> str:
         """Resolve one configured external trigger room reference when known."""
@@ -405,7 +405,7 @@ class _MultiAgentOrchestrator:
             return
         self._bind_external_trigger_runtime_from_started_bots(
             (router_bot,),
-            ready_target_agents=self._ready_external_trigger_target_agents(config),
+            ready_trigger_ids=self._ready_external_trigger_ids(config),
         )
 
     def _unbind_external_trigger_runtime(self) -> None:
@@ -1375,6 +1375,8 @@ class _MultiAgentOrchestrator:
                 self.config,
                 start_sync_tasks=True,
             )
+            if start_results.started_bots:
+                await self._setup_rooms_and_memberships(start_results.started_bots)
             self._bind_external_trigger_runtime_if_ready()
             for entity_name in start_results.retryable_entities:
                 await self._schedule_bot_start_retry(entity_name)

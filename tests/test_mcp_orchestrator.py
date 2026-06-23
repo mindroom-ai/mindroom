@@ -239,11 +239,51 @@ def test_external_trigger_runtime_binds_router_with_joined_target_snapshot(tmp_p
     assert mock_bind.call_count == 3
     first_call, second_call, third_call = mock_bind.call_args_list
     assert first_call.args == ((router_bot,),)
-    assert first_call.kwargs == {"ready_target_agents": frozenset()}
+    assert first_call.kwargs == {"ready_trigger_ids": frozenset()}
     assert second_call.args == ((router_bot,),)
-    assert second_call.kwargs == {"ready_target_agents": frozenset()}
+    assert second_call.kwargs == {"ready_trigger_ids": frozenset()}
     assert third_call.args == ((router_bot,),)
-    assert third_call.kwargs == {"ready_target_agents": frozenset({"code"})}
+    assert third_call.kwargs == {"ready_trigger_ids": frozenset({"campground"})}
+
+
+def test_external_trigger_readiness_is_per_trigger_room(tmp_path: Path) -> None:
+    """One ready trigger room should not make same-agent triggers in other rooms ready."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    orchestrator.config = Config.validate_with_runtime(
+        {
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                },
+            },
+            "external_triggers": {
+                "campground": {
+                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                    "target": {
+                        "room_id": "!campground:example.org",
+                        "agent": "code",
+                    },
+                },
+                "campground_other": {
+                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                    "target": {
+                        "room_id": "!other:example.org",
+                        "agent": "code",
+                    },
+                },
+            },
+        },
+        _runtime_paths(tmp_path),
+    )
+    target_bot = MagicMock(spec=AgentBot)
+    target_bot.agent_name = "code"
+    target_bot.running = True
+    target_bot.client = object()
+    orchestrator.agent_bots = {"code": target_bot}
+    orchestrator._external_trigger_joined_room_ids["code"] = frozenset({"!campground:example.org"})
+
+    assert orchestrator._ready_external_trigger_ids(orchestrator.config) == frozenset({"campground"})
 
 
 @pytest.mark.asyncio
@@ -548,6 +588,66 @@ async def test_handle_mcp_catalog_change_restarts_dependent_entities(tmp_path: P
     assert {args.args[0] for args in mock_cancel.await_args_list} == {"code", "dev_team"}
     mock_schedule_retry.assert_awaited_once_with("code")
     mock_clear_snapshot_cache.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_rebind(tmp_path: Path) -> None:
+    """MCP restarts refresh trigger target rooms before publishing trigger runtime."""
+    runtime_paths = _runtime_paths(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["mcp_demo"],
+                },
+            },
+            "external_triggers": {
+                "campground": {
+                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                    "target": {
+                        "room_id": "!campground:example.org",
+                        "agent": "code",
+                    },
+                },
+            },
+        },
+        runtime_paths,
+    )
+    orchestrator.running = True
+    started_bot = MagicMock(spec=AgentBot)
+    call_order: list[str] = []
+
+    async def setup_rooms(started_bots: list[object]) -> None:
+        assert started_bots == [started_bot]
+        call_order.append("setup")
+
+    def bind_runtime() -> None:
+        call_order.append("bind")
+
+    with (
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
+        patch.object(orchestrator, "_cancel_bot_start_task", new=AsyncMock()),
+        patch.object(
+            orchestrator,
+            "_create_and_start_entities",
+            new=AsyncMock(return_value=EntityStartResults(started_bots=[started_bot])),
+        ),
+        patch.object(orchestrator, "_unbind_external_trigger_runtime"),
+        patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=setup_rooms),
+        patch.object(orchestrator, "_bind_external_trigger_runtime_if_ready", side_effect=bind_runtime),
+    ):
+        await orchestrator._handle_mcp_catalog_change("demo")
+
+    assert call_order == ["setup", "bind"]
 
 
 @pytest.mark.asyncio
