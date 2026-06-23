@@ -697,17 +697,24 @@ def _publish_runtime_config_into_app(
     with initial_state.config_lock:
         current_state = require_api_state(api_app)
         current = current_state.snapshot
-        if current.generation != snapshot.generation or current.runtime_paths != runtime_paths:
+        if current.runtime_paths != runtime_paths:
             logger.info(
                 "Discarding stale API config publish after runtime swap",
                 publish_config_path=str(runtime_paths.config_path),
                 active_config_path=str(current.runtime_paths.config_path),
             )
             return False
+        same_config = current.config_data == validated_payload
+        if current.generation != snapshot.generation and not same_config:
+            logger.info(
+                "Discarding stale API config publish after config changed",
+                publish_config_path=str(runtime_paths.config_path),
+            )
+            return False
         same_source = source_fingerprint == current.source_fingerprint
         current_state.snapshot = _published_snapshot(
             current,
-            increment_generation=not same_source,
+            increment_generation=not (same_source or same_config),
             config_data=validated_payload,
             runtime_config=runtime_config,
             config_load_result=ConfigLoadResult(success=True),

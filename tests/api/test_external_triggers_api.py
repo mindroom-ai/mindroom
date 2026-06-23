@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.api import main as api_main
+from mindroom.config.main import Config
 from mindroom.external_triggers.auth import sign_trigger_request
 from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim
 
@@ -350,6 +351,41 @@ def test_external_trigger_live_readiness_rejects_stale_ready_snapshot(
 
     assert response.status_code == 503
     assert execute_calls == 0
+
+
+def test_external_trigger_live_readiness_allows_late_ready_snapshot(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live readiness can accept a trigger that was not ready when the runtime was bound."""
+    execute_calls = 0
+
+    async def execute_external_trigger(**_kwargs: object) -> str:
+        nonlocal execute_calls
+        execute_calls += 1
+        return "$matrix-event"
+
+    async def is_trigger_ready(_trigger_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    api_main.bind_external_trigger_runtime(
+        api_main.app,
+        client=object(),
+        conversation_cache=object(),
+        ready_trigger_ids=frozenset(),
+        is_trigger_ready=is_trigger_ready,
+    )
+
+    body = _body(event_id="late-ready-snapshot")
+    response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(trigger_api.private_key, body=body, nonce="nonce-late-ready-snapshot"),
+    )
+
+    assert response.status_code == 202
+    assert execute_calls == 1
 
 
 def test_executor_none_releases_event_claim_for_retry(
@@ -827,6 +863,58 @@ models:
 
     assert response.status_code == 202
     api_main.unbind_external_trigger_runtime(api_main.app)
+
+
+def test_runtime_publish_is_idempotent_when_watcher_loads_same_new_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-config watcher race should not make orchestrator publish fail."""
+    private_key = Ed25519PrivateKey.generate()
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, _public_key_b64(private_key))
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+    old_generation = config_lifecycle.require_api_state(api_main.app).snapshot.generation
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert isinstance(config_data, dict)
+    agents = config_data["agents"]
+    assert isinstance(agents, dict)
+    research = agents["research"]
+    assert isinstance(research, dict)
+    research["role"] = "updated role"
+    runtime_config = Config.validate_with_runtime(config_data, runtime_paths)
+    config_path.write_text(yaml.dump(config_data), encoding="utf-8")
+    raced_generations: list[int] = []
+
+    def racing_source_fingerprint(
+        runtime_paths: constants.RuntimePaths,
+        validated_payload: dict[str, object],
+    ) -> str:
+        del validated_payload
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+        snapshot = config_lifecycle.require_api_state(api_main.app).snapshot
+        raced_generations.append(snapshot.generation)
+        assert snapshot.source_fingerprint is not None
+        return snapshot.source_fingerprint
+
+    monkeypatch.setattr(
+        config_lifecycle,
+        "_source_fingerprint_for_published_runtime_config",
+        racing_source_fingerprint,
+    )
+
+    assert config_lifecycle._publish_runtime_config_into_app(runtime_config, runtime_paths, api_main.app) is True
+    snapshot = config_lifecycle.require_api_state(api_main.app).snapshot
+
+    assert raced_generations == [old_generation + 1]
+    assert snapshot.generation == raced_generations[0]
+    assert snapshot.runtime_config is runtime_config
 
 
 def test_external_trigger_rejects_runtime_bound_to_stale_config_generation(

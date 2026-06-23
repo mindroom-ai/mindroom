@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, cast
 
@@ -56,10 +57,16 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
     now = int(time.time())
     store = ExternalTriggerReplayStore(constants.tracking_dir(runtime_paths))
     event_id = payload.event_id or signature_headers.nonce
-    if not store.claim_nonce(trigger_id, signature_headers.nonce, now=now, ttl_seconds=trigger.replay_window_seconds):
+    if not await asyncio.to_thread(
+        store.claim_nonce,
+        trigger_id,
+        signature_headers.nonce,
+        now=now,
+        ttl_seconds=trigger.replay_window_seconds,
+    ):
         raise HTTPException(status_code=409, detail="External trigger nonce has already been used")
 
-    if store.event_id_is_delivered(trigger_id, event_id, now=now):
+    if await asyncio.to_thread(store.event_id_is_delivered, trigger_id, event_id, now=now):
         return ExternalTriggerAcceptedResponse(
             accepted=True,
             duplicate=True,
@@ -69,7 +76,8 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
 
     runtime = await _require_external_trigger_runtime(request, snapshot.generation, trigger_id)
 
-    event_claim = store.claim_event_id(
+    event_claim = await asyncio.to_thread(
+        store.claim_event_id,
         trigger_id,
         event_id,
         now=now,
@@ -97,13 +105,14 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
             conversation_cache=cast("ConversationCacheProtocol", runtime.conversation_cache),
         )
     except Exception:
-        store.release_event_id(trigger_id, event_id)
+        await asyncio.to_thread(store.release_event_id, trigger_id, event_id)
         raise
     if matrix_event_id is None:
-        store.release_event_id(trigger_id, event_id)
+        await asyncio.to_thread(store.release_event_id, trigger_id, event_id)
         raise HTTPException(status_code=502, detail="External trigger delivery failed")
 
-    store.mark_event_delivered(
+    await asyncio.to_thread(
+        store.mark_event_delivered,
         trigger_id,
         event_id,
         now=int(time.time()),
@@ -169,8 +178,6 @@ async def _require_external_trigger_runtime(
     runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
     if runtime is None or runtime.config_generation != snapshot_generation:
         raise HTTPException(status_code=503, detail="External trigger runtime is not available")
-    if trigger_id not in runtime.ready_trigger_ids:
-        raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
     if runtime.is_trigger_ready is not None:
         try:
             is_trigger_ready = await runtime.is_trigger_ready(trigger_id)
@@ -178,4 +185,6 @@ async def _require_external_trigger_runtime(
             raise HTTPException(status_code=503, detail="External trigger target runtime is not available") from exc
         if not is_trigger_ready:
             raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
+    elif trigger_id not in runtime.ready_trigger_ids:
+        raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
     return runtime

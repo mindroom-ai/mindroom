@@ -523,6 +523,26 @@ async def test_trigger_support_only_reload_publishes_api_config_before_binding_r
 
 
 @pytest.mark.asyncio
+async def test_trigger_support_api_publish_runs_off_event_loop(tmp_path: Path) -> None:
+    """Publishing trigger API snapshots does config IO off the orchestrator event loop."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config_with_external_trigger(tmp_path)
+    new_config = _config_with_external_trigger(tmp_path)
+    orchestrator.config = current_config
+
+    with patch("mindroom.orchestrator.asyncio.to_thread", new=AsyncMock(return_value=True)) as mock_to_thread:
+        await orchestrator._sync_api_config_snapshot_for_external_triggers(current_config, new_config)
+
+    mock_to_thread.assert_awaited_once()
+    assert mock_to_thread.await_args.args == (
+        api_main.config_lifecycle._publish_runtime_config_into_app,
+        new_config,
+        orchestrator.runtime_paths,
+        api_main.app,
+    )
+
+
+@pytest.mark.asyncio
 async def test_trigger_support_only_reload_unbinds_and_raises_when_api_publish_fails(tmp_path: Path) -> None:
     """Failed API snapshot publish must not leave trigger runtime bound to stale config."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))

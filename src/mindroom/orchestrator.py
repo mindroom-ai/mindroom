@@ -1473,11 +1473,13 @@ class _MultiAgentOrchestrator:
             return
         from mindroom.api import main as api_main  # noqa: PLC0415
 
-        if not api_main.config_lifecycle._publish_runtime_config_into_app(
+        published = await asyncio.to_thread(
+            api_main.config_lifecycle._publish_runtime_config_into_app,
             new_config,
             self.runtime_paths,
             api_main.app,
-        ):
+        )
+        if not published:
             self._unbind_external_trigger_runtime()
             message = "Failed to publish external trigger API config snapshot"
             raise RuntimeError(message)
