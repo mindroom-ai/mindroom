@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Literal
 
+TaskCancelSource = Literal["user_stop", "sync_restart"]
 CancelSource = Literal["user_stop", "sync_restart", "interrupted"]
 USER_STOP_CANCEL_MSG = "user_stop"
 SYNC_RESTART_CANCEL_MSG = "sync_restart"

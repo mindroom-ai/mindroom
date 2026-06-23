@@ -33,6 +33,13 @@ from mindroom.orchestration.runtime import (
     sync_forever_with_restart,
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.runtime_shutdown import (
+    ENTITY_REMOVED_SHUTDOWN,
+    GENERIC_SHUTDOWN,
+    SYNC_RESTART_SHUTDOWN,
+    RuntimeShutdownIntent,
+    shutdown_intent_for_entity,
+)
 from mindroom.sync_restart_retry import SyncRestartRetryQueue
 from tests.conftest import (
     TEST_PASSWORD,
@@ -396,6 +403,29 @@ def test_cancel_source_from_failure_reason_matches_canonical_reasons(
 ) -> None:
     """Canonical terminal failure reasons should map back to cancellation provenance."""
     assert cancel_source_from_failure_reason(failure_reason) == expected_cancel_source
+
+
+def test_shutdown_intent_for_restarted_entity() -> None:
+    """Restarted entities should use sync-restart cancellation provenance."""
+    intent = shutdown_intent_for_entity("agent1", restart_entities={"agent1", "agent2"})
+
+    assert intent == SYNC_RESTART_SHUTDOWN
+    assert intent.stop_reason == "restart"
+    assert intent.cancel_source == "sync_restart"
+
+
+def test_shutdown_intent_for_removed_entity() -> None:
+    """Removed entities should not look like sync restarts."""
+    intent = shutdown_intent_for_entity("removed", restart_entities={"agent1"})
+
+    assert intent == ENTITY_REMOVED_SHUTDOWN
+    assert intent.stop_reason == "entity_removed"
+    assert intent.cancel_source is None
+
+
+def test_generic_shutdown_has_no_restart_provenance() -> None:
+    """Generic shutdown should not carry a stop reason or cancellation source."""
+    assert RuntimeShutdownIntent(stop_reason=None, cancel_source=None) == GENERIC_SHUTDOWN
 
 
 @pytest.mark.parametrize(
