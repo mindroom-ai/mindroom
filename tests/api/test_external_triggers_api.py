@@ -216,6 +216,18 @@ def test_missing_runtime_binding_returns_503_after_auth_succeeds(trigger_api: Tr
     assert response.status_code == 503
 
 
+def test_missing_runtime_binding_still_consumes_nonce(trigger_api: TriggerApiContext) -> None:
+    """A valid request cannot replay the same signed nonce after the runtime gate rejects it."""
+    body = _body(event_id="runtime-unavailable-single-use")
+    headers = _sign(trigger_api.private_key, body=body, nonce="nonce-runtime-unavailable")
+
+    first = trigger_api.client.post("/api/triggers/campground", content=body, headers=headers)
+    replay = trigger_api.client.post("/api/triggers/campground", content=body, headers=headers)
+
+    assert first.status_code == 503
+    assert replay.status_code == 409
+
+
 def test_external_trigger_unready_target_does_not_block_ready_trigger(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,
@@ -520,6 +532,41 @@ def test_delivered_event_id_duplicate_returns_accepted_without_second_execute(
     assert duplicate.status_code == 202
     assert duplicate.json()["duplicate"] is True
     assert duplicate.json()["matrix_event_id"] is None
+    assert call_count == 1
+
+
+def test_delivered_event_id_duplicate_rejects_replayed_nonce(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delivered duplicate still requires a fresh signed nonce."""
+    _bind_runtime()
+    call_count = 0
+
+    async def execute_external_trigger(
+        *,
+        client: object,
+        trigger_id: str,
+        trigger: object,
+        payload: ExternalTriggerPayload,
+        config: object,
+        runtime_paths: object,
+        conversation_cache: object,
+    ) -> str:
+        del client, trigger_id, trigger, payload, config, runtime_paths, conversation_cache
+        nonlocal call_count
+        call_count += 1
+        return "$matrix-event"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    body = _body(event_id="availability-duplicate-replayed-nonce")
+    headers = _sign(trigger_api.private_key, body=body, nonce="nonce-replayed-duplicate")
+
+    first = trigger_api.client.post("/api/triggers/campground", content=body, headers=headers)
+    replay = trigger_api.client.post("/api/triggers/campground", content=body, headers=headers)
+
+    assert first.status_code == 202
+    assert replay.status_code == 409
     assert call_count == 1
 
 

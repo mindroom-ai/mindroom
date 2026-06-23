@@ -53,6 +53,9 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
     now = int(time.time())
     store = ExternalTriggerReplayStore(constants.tracking_dir(runtime_paths))
     event_id = payload.event_id or signature_headers.nonce
+    if not store.claim_nonce(trigger_id, signature_headers.nonce, now=now, ttl_seconds=trigger.replay_window_seconds):
+        raise HTTPException(status_code=409, detail="External trigger nonce has already been used")
+
     if store.event_id_is_delivered(trigger_id, event_id, now=now):
         return ExternalTriggerAcceptedResponse(
             accepted=True,
@@ -62,9 +65,6 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
         )
 
     runtime = _require_external_trigger_runtime(request, snapshot.generation, trigger.target.agent)
-
-    if not store.claim_nonce(trigger_id, signature_headers.nonce, now=now, ttl_seconds=trigger.replay_window_seconds):
-        raise HTTPException(status_code=409, detail="External trigger nonce has already been used")
 
     event_claim = store.claim_event_id(
         trigger_id,
