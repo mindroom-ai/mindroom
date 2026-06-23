@@ -371,10 +371,8 @@ def _reconcile_knowledge_mode_transitions(
     reconcile_knowledge_mode_transition_states(previous_config, current_config, current_runtime_paths)
 
 
-async def _reload_config_after_file_change(
-    api_app: FastAPI,
-    runtime_paths: constants.RuntimePaths,
-) -> None:
+async def reload_config_into_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> bool:
+    """Reload one API app config snapshot from disk."""
     previous = _read_app_runtime_config_or_none(api_app)
     # Config validation executes plugin modules and walks the filesystem;
     # keep it off the event loop (#1260).
@@ -382,6 +380,14 @@ async def _reload_config_after_file_change(
     if loaded:
         _reconcile_knowledge_mode_transitions(previous, api_app)
     await _sync_standalone_knowledge_watchers(api_app)
+    return loaded
+
+
+async def _reload_config_after_file_change(
+    api_app: FastAPI,
+    runtime_paths: constants.RuntimePaths,
+) -> None:
+    await reload_config_into_app(api_app, runtime_paths)
 
 
 async def _watch_config(
@@ -489,13 +495,20 @@ def bind_orchestrator_knowledge_refresh_scheduler(
     config_lifecycle.app_state(api_app).orchestrator_knowledge_refresh_scheduler = scheduler
 
 
-def bind_external_trigger_runtime(api_app: FastAPI, client: object, conversation_cache: object) -> None:
+def bind_external_trigger_runtime(
+    api_app: FastAPI,
+    client: object,
+    conversation_cache: object,
+    *,
+    ready_target_agents: frozenset[str],
+) -> None:
     """Attach router Matrix delivery runtime to one API app."""
     api_state = config_lifecycle.require_api_state(api_app)
     config_lifecycle.app_state(api_app).external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
         client=client,
         conversation_cache=conversation_cache,
         config_generation=api_state.snapshot.generation,
+        ready_target_agents=ready_target_agents,
     )
 
 

@@ -53,6 +53,8 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
     runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
     if runtime is None or runtime.config_generation != snapshot.generation:
         raise HTTPException(status_code=503, detail="External trigger runtime is not available")
+    if trigger.target.agent not in runtime.ready_target_agents:
+        raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
 
     now = int(time.time())
     store = ExternalTriggerReplayStore(constants.tracking_dir(runtime_paths))

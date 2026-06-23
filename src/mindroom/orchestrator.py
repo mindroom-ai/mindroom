@@ -350,7 +350,12 @@ class _MultiAgentOrchestrator:
             self._bind_runtime_support_services(bot)
         self._configure_approval_store_transport()
 
-    def _bind_external_trigger_runtime_from_started_bots(self, bots: Iterable[AgentBot | TeamBot]) -> None:
+    def _bind_external_trigger_runtime_from_started_bots(
+        self,
+        bots: Iterable[AgentBot | TeamBot],
+        *,
+        ready_target_agents: frozenset[str],
+    ) -> None:
         """Bind external trigger delivery runtime when the router client is ready."""
         for bot in bots:
             if bot.agent_name != ROUTER_AGENT_NAME or bot.client is None:
@@ -361,24 +366,33 @@ class _MultiAgentOrchestrator:
                 api_main.app,
                 client=bot.client,
                 conversation_cache=bot._conversation_cache,
+                ready_target_agents=ready_target_agents,
             )
             return
 
-    def _bind_external_trigger_runtime_if_ready(self) -> None:
-        """Bind trigger delivery only after router and trigger targets are running."""
-        config = self.config
-        if config is None:
-            return
+    def _ready_external_trigger_target_agents(self, config: Config) -> frozenset[str]:
+        """Return enabled trigger target agents whose bots are currently running."""
+        ready_target_agents = set()
         for trigger_config in config.external_triggers.values():
             if not trigger_config.enabled:
                 continue
             target_bot = self.agent_bots.get(trigger_config.target.agent)
-            if target_bot is None or not target_bot.running:
-                return
+            if target_bot is not None and target_bot.running:
+                ready_target_agents.add(trigger_config.target.agent)
+        return frozenset(ready_target_agents)
+
+    def _bind_external_trigger_runtime_if_ready(self) -> None:
+        """Bind trigger delivery runtime after router is running."""
+        config = self.config
+        if config is None:
+            return
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is None or not router_bot.running:
             return
-        self._bind_external_trigger_runtime_from_started_bots((router_bot,))
+        self._bind_external_trigger_runtime_from_started_bots(
+            (router_bot,),
+            ready_target_agents=self._ready_external_trigger_target_agents(config),
+        )
 
     def _unbind_external_trigger_runtime(self) -> None:
         """Clear external trigger delivery runtime from the bundled API app."""
@@ -1371,6 +1385,21 @@ class _MultiAgentOrchestrator:
         elif plan.mindroom_user_changed:
             self._validate_entity_accounts(new_config)
 
+    async def _sync_api_config_snapshot_for_external_triggers(
+        self,
+        current_config: Config,
+        new_config: Config,
+    ) -> None:
+        """Publish the current config to the bundled API before binding trigger runtime."""
+        if not (current_config.external_triggers or new_config.external_triggers):
+            return
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        try:
+            await api_main.reload_config_into_app(api_main.app, self.runtime_paths)
+        except TypeError:
+            return
+
     async def _apply_config_update_plan(
         self,
         current_config: Config,
@@ -1406,6 +1435,7 @@ class _MultiAgentOrchestrator:
                 "updating_config_authorization",
                 authorized_user_ids=new_config.authorization.global_users,
             )
+            await self._sync_api_config_snapshot_for_external_triggers(current_config, new_config)
             if changed_runtime_mcp_servers:
                 plan = replace(
                     plan,

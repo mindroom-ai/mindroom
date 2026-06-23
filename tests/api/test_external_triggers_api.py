@@ -90,6 +90,11 @@ def _write_config(config_path: Path, public_key: str) -> None:
                 "role": "test",
                 "rooms": [],
             },
+            "alerts": {
+                "display_name": "Alerts",
+                "role": "test",
+                "rooms": [],
+            },
         },
         "external_triggers": {
             "campground": {
@@ -111,6 +116,15 @@ def _write_config(config_path: Path, public_key: str) -> None:
                 "target": {
                     "room_id": "!campground:example.org",
                     "agent": "research",
+                },
+            },
+            "alerts": {
+                "key_id": "campground-main",
+                "public_key": public_key,
+                "allowed_kinds": ["campground.availability"],
+                "target": {
+                    "room_id": "!alerts:example.org",
+                    "agent": "alerts",
                 },
             },
         },
@@ -143,7 +157,12 @@ def trigger_api(tmp_path: Path) -> TriggerApiContext:
 
 def _bind_runtime() -> object:
     client = object()
-    api_main.bind_external_trigger_runtime(api_main.app, client=client, conversation_cache=object())
+    api_main.bind_external_trigger_runtime(
+        api_main.app,
+        client=client,
+        conversation_cache=object(),
+        ready_target_agents=frozenset({"alerts", "research"}),
+    )
     return client
 
 
@@ -195,6 +214,50 @@ def test_missing_runtime_binding_returns_503_after_auth_succeeds(trigger_api: Tr
     )
 
     assert response.status_code == 503
+
+
+def test_external_trigger_unready_target_does_not_block_ready_trigger(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A down trigger target should block only triggers addressed to that target."""
+
+    async def execute_external_trigger(**_kwargs: object) -> str:
+        return "$matrix-event"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    api_main.bind_external_trigger_runtime(
+        api_main.app,
+        client=object(),
+        conversation_cache=object(),
+        ready_target_agents=frozenset({"alerts"}),
+    )
+
+    ready_body = _body(event_id="alerts-ready")
+    ready_response = trigger_api.client.post(
+        "/api/triggers/alerts",
+        content=ready_body,
+        headers=_sign(
+            trigger_api.private_key,
+            trigger_id="alerts",
+            body=ready_body,
+            nonce="nonce-alerts-ready",
+        ),
+    )
+
+    blocked_body = _body(event_id="campground-blocked")
+    blocked_response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=blocked_body,
+        headers=_sign(
+            trigger_api.private_key,
+            body=blocked_body,
+            nonce="nonce-campground-blocked",
+        ),
+    )
+
+    assert ready_response.status_code == 202
+    assert blocked_response.status_code == 503
 
 
 def test_executor_none_releases_event_claim_for_retry(

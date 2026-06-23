@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
+from mindroom.api import config_lifecycle
+from mindroom.api import main as api_main
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
@@ -207,8 +210,8 @@ async def test_router_start_attempt_does_not_bind_external_trigger_runtime_befor
     mock_bind.assert_not_called()
 
 
-def test_external_trigger_runtime_waits_for_running_trigger_targets(tmp_path: Path) -> None:
-    """Trigger delivery stays unavailable until every enabled target bot is running."""
+def test_external_trigger_runtime_binds_router_with_ready_target_snapshot(tmp_path: Path) -> None:
+    """Trigger delivery runtime should bind router runtime even when a target is down."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     orchestrator.config = _config_with_external_trigger(tmp_path)
 
@@ -230,7 +233,12 @@ def test_external_trigger_runtime_waits_for_running_trigger_targets(tmp_path: Pa
         target_bot.running = True
         orchestrator._bind_external_trigger_runtime_if_ready()
 
-    mock_bind.assert_called_once_with((router_bot,))
+    assert mock_bind.call_count == 2
+    first_call, second_call = mock_bind.call_args_list
+    assert first_call.args == ((router_bot,),)
+    assert first_call.kwargs == {"ready_target_agents": frozenset()}
+    assert second_call.args == ((router_bot,),)
+    assert second_call.kwargs == {"ready_target_agents": frozenset({"code"})}
 
 
 @pytest.mark.asyncio
@@ -314,6 +322,80 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
 
     assert updated is False
     mock_bind_runtime.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_trigger_support_only_reload_publishes_api_config_before_binding_runtime(tmp_path: Path) -> None:
+    """Runtime binding should use the API generation for the config being applied."""
+    runtime_paths = _runtime_paths(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    current_config = _config_with_external_trigger(tmp_path)
+    new_config = Config.validate_with_runtime(
+        {
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                },
+            },
+            "external_triggers": {
+                "campground": {
+                    "public_key": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+                    "target": {
+                        "room_id": "!campground:example.org",
+                        "agent": "code",
+                    },
+                },
+            },
+        },
+        runtime_paths,
+    )
+    runtime_paths.config_path.write_text(yaml.dump(current_config.authored_model_dump()), encoding="utf-8")
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+    runtime_paths.config_path.write_text(yaml.dump(new_config.authored_model_dump()), encoding="utf-8")
+    orchestrator.config = current_config
+    router_bot = MagicMock(spec=AgentBot)
+    router_bot.agent_name = ROUTER_AGENT_NAME
+    router_bot.running = True
+    router_bot.client = object()
+    router_bot._conversation_cache = object()
+    target_bot = MagicMock(spec=AgentBot)
+    target_bot.agent_name = "code"
+    target_bot.running = True
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: router_bot,
+        "code": target_bot,
+    }
+    plan = build_config_update_plan(
+        current_config=current_config,
+        new_config=new_config,
+        configured_entities={ROUTER_AGENT_NAME, "code"},
+        existing_entities={ROUTER_AGENT_NAME, "code"},
+        agent_bots=orchestrator.agent_bots,
+    )
+
+    with (
+        patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+        patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
+        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator.plugin_watch, "sync_roots"),
+        patch.object(orchestrator, "_activate_hook_registry"),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+        patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
+        patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+    ):
+        await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+    snapshot = config_lifecycle.require_api_state(api_main.app).snapshot
+    runtime = config_lifecycle.app_state(api_main.app).external_trigger_runtime
+    assert snapshot.runtime_config is not None
+    assert snapshot.runtime_config.external_triggers["campground"].public_key.startswith("BBBB")
+    assert runtime is not None
+    assert runtime.config_generation == snapshot.generation
 
 
 def test_log_mcp_degraded_entities_warns_per_failed_optional_server(tmp_path: Path) -> None:
