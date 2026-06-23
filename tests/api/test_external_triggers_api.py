@@ -274,6 +274,36 @@ def test_missing_runtime_binding_still_consumes_nonce(trigger_api: TriggerApiCon
     assert replay.status_code == 409
 
 
+def test_corrupt_replay_store_returns_503_without_delivery(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Corrupt replay state must reject signed triggers instead of resetting claims."""
+    _bind_runtime()
+    execute_calls = 0
+
+    async def execute_external_trigger(**_kwargs: object) -> str:
+        nonlocal execute_calls
+        execute_calls += 1
+        return "$matrix-event"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    tracking_dir = constants.tracking_dir(trigger_api.runtime_paths)
+    tracking_dir.mkdir(parents=True, exist_ok=True)
+    (tracking_dir / "external_triggers.json").write_text("{not valid json", encoding="utf-8")
+    body = _body(event_id="corrupt-replay-store")
+
+    response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(trigger_api.private_key, body=body, nonce="nonce-corrupt-replay-store"),
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "External trigger replay store is not available"}
+    assert execute_calls == 0
+
+
 def test_external_trigger_unready_target_does_not_block_ready_trigger(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,

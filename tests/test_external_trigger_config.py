@@ -215,6 +215,67 @@ def test_external_trigger_requires_configured_agent_or_team_target() -> None:
     assert "external_triggers.campground.target.agent" in str(exc_info.value)
 
 
+def test_external_trigger_rejects_private_agent_target() -> None:
+    """External triggers must not target requester-private agents."""
+    config_data = {
+        **_base_config(),
+        "agents": {
+            "mind": {
+                "display_name": "Mind",
+                "model": "default",
+                "private": {"per": "user", "root": "mind_data"},
+            },
+        },
+        "external_triggers": {
+            "campground": {
+                "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "target": {
+                    "room_id": "!room:example.org",
+                    "agent": "mind",
+                },
+            },
+        },
+    }
+
+    with pytest.raises(ValueError, match=r"external_triggers\.campground\.target\.agent") as exc_info:
+        Config.model_validate(config_data)
+
+    assert "includes private agent 'mind'" in str(exc_info.value)
+
+
+def test_external_trigger_rejects_agent_target_delegating_to_private_agent() -> None:
+    """External triggers must not enter private state through delegation."""
+    config_data = {
+        **_base_config(),
+        "agents": {
+            "leader": {
+                "display_name": "Leader",
+                "model": "default",
+                "delegate_to": ["mind"],
+            },
+            "mind": {
+                "display_name": "Mind",
+                "model": "default",
+                "private": {"per": "user", "root": "mind_data"},
+            },
+        },
+        "external_triggers": {
+            "campground": {
+                "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "target": {
+                    "room_id": "!room:example.org",
+                    "agent": "leader",
+                },
+            },
+        },
+    }
+
+    with pytest.raises(ValueError, match=r"external_triggers\.campground\.target\.agent") as exc_info:
+        Config.model_validate(config_data)
+
+    assert "includes agent 'leader' which reaches private agent 'mind' via delegation" in str(exc_info.value)
+
+
 @pytest.mark.parametrize(
     "public_key",
     [

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
@@ -14,9 +14,15 @@ from mindroom.api import config_lifecycle
 from mindroom.external_triggers.auth import TriggerAuthError, TriggerSignatureHeaders, verify_trigger_request
 from mindroom.external_triggers.executor import execute_external_trigger
 from mindroom.external_triggers.models import ExternalTriggerAcceptedResponse, ExternalTriggerPayload
-from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim, ExternalTriggerReplayStore
+from mindroom.external_triggers.replay_store import (
+    ExternalTriggerEventClaim,
+    ExternalTriggerReplayStore,
+    ExternalTriggerReplayStoreError,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import nio
 
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -24,6 +30,8 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/triggers", tags=["external-triggers"])
 _IN_PROGRESS_EVENT_ID_TTL_SECONDS = 86400
 _DELIVERED_EVENT_ID_TTL_SECONDS = 86400
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
 
 
 @router.post(
@@ -57,7 +65,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
     now = int(time.time())
     store = ExternalTriggerReplayStore(constants.tracking_dir(runtime_paths))
     event_id = payload.event_id or signature_headers.nonce
-    if not await asyncio.to_thread(
+    if not await _run_replay_store_call(
         store.claim_nonce,
         trigger_id,
         signature_headers.nonce,
@@ -66,7 +74,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
     ):
         raise HTTPException(status_code=409, detail="External trigger nonce has already been used")
 
-    if await asyncio.to_thread(store.event_id_is_delivered, trigger_id, event_id, now=now):
+    if await _run_replay_store_call(store.event_id_is_delivered, trigger_id, event_id, now=now):
         return ExternalTriggerAcceptedResponse(
             accepted=True,
             duplicate=True,
@@ -76,7 +84,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
 
     runtime = await _require_external_trigger_runtime(request, snapshot.generation, trigger_id)
 
-    event_claim = await asyncio.to_thread(
+    event_claim = await _run_replay_store_call(
         store.claim_event_id,
         trigger_id,
         event_id,
@@ -105,13 +113,13 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
             conversation_cache=cast("ConversationCacheProtocol", runtime.conversation_cache),
         )
     except Exception:
-        await asyncio.to_thread(store.release_event_id, trigger_id, event_id)
+        await _run_replay_store_call(store.release_event_id, trigger_id, event_id)
         raise
     if matrix_event_id is None:
-        await asyncio.to_thread(store.release_event_id, trigger_id, event_id)
+        await _run_replay_store_call(store.release_event_id, trigger_id, event_id)
         raise HTTPException(status_code=502, detail="External trigger delivery failed")
 
-    await asyncio.to_thread(
+    await _run_replay_store_call(
         store.mark_event_delivered,
         trigger_id,
         event_id,
@@ -168,6 +176,13 @@ def _parse_payload(body: bytes) -> ExternalTriggerPayload:
         return ExternalTriggerPayload.model_validate_json(body)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
+
+
+async def _run_replay_store_call(call: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
+    try:
+        return await asyncio.to_thread(call, *args, **kwargs)
+    except ExternalTriggerReplayStoreError as exc:
+        raise HTTPException(status_code=503, detail="External trigger replay store is not available") from exc
 
 
 async def _require_external_trigger_runtime(

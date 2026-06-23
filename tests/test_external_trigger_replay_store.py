@@ -9,7 +9,11 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.external_triggers.models import ExternalTriggerAcceptedResponse, ExternalTriggerPayload
-from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim, ExternalTriggerReplayStore
+from mindroom.external_triggers.replay_store import (
+    ExternalTriggerEventClaim,
+    ExternalTriggerReplayStore,
+    ExternalTriggerReplayStoreError,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -155,21 +159,24 @@ def test_nonce_and_event_id_remain_claimed_at_exact_expiry_boundary(tmp_path: Pa
     )
 
 
-def test_invalid_store_shape_resets_to_empty(tmp_path: Path) -> None:
-    """Malformed top-level store structure should not break replay checks."""
+@pytest.mark.parametrize("store_payload", [["not", "a", "dict"], {"nonces": {}}])
+def test_invalid_store_shape_fails_closed(tmp_path: Path, store_payload: object) -> None:
+    """Malformed top-level store structure should not reset replay protection."""
     store_path = tmp_path / "external_triggers.json"
-    store_path.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+    store_path.write_text(json.dumps(store_payload), encoding="utf-8")
 
     store = ExternalTriggerReplayStore(tmp_path)
 
-    assert store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
+    with pytest.raises(ExternalTriggerReplayStoreError, match="invalid"):
+        store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
 
 
-def test_corrupt_json_store_resets_to_empty(tmp_path: Path) -> None:
-    """Syntactically corrupt store JSON should not break replay checks."""
+def test_corrupt_json_store_fails_closed(tmp_path: Path) -> None:
+    """Syntactically corrupt store JSON should not reset replay protection."""
     store_path = tmp_path / "external_triggers.json"
     store_path.write_text("{not valid json", encoding="utf-8")
 
     store = ExternalTriggerReplayStore(tmp_path)
 
-    assert store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
+    with pytest.raises(ExternalTriggerReplayStoreError, match="invalid"):
+        store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)

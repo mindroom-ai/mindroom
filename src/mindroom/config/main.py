@@ -607,6 +607,15 @@ class Config(BaseModel):
             if target_agent not in known_entities:
                 msg = f"external_triggers.{trigger_id}.target.agent references unknown agent or team '{target_agent}'"
                 raise ValueError(msg)
+            if target_agent in self.agents:
+                private_targets = self.get_private_team_targets(target_agent)
+                if private_targets:
+                    msg = self.unsupported_team_agent_message(
+                        target_agent,
+                        prefix=f"external_triggers.{trigger_id}.target.agent",
+                        private_targets=private_targets,
+                    )
+                    raise ValueError(msg)
         return self
 
     @model_validator(mode="after")

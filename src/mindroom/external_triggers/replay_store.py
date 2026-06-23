@@ -21,6 +21,10 @@ class ExternalTriggerEventClaim(StrEnum):
     DELIVERED = "delivered"
 
 
+class ExternalTriggerReplayStoreError(RuntimeError):
+    """Raised when durable replay state cannot be trusted."""
+
+
 class _SerializedNonce(TypedDict):
     expires_at: int
 
@@ -144,8 +148,9 @@ class ExternalTriggerReplayStore:
             return _empty_store()
         try:
             raw_store = json.loads(self._store_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return _empty_store()
+        except json.JSONDecodeError as exc:
+            msg = "invalid external trigger replay store JSON"
+            raise ExternalTriggerReplayStoreError(msg) from exc
         return _normalize_store(raw_store)
 
     def _write_store(self, store: _SerializedReplayStore) -> None:
@@ -177,12 +182,17 @@ def _empty_store() -> _SerializedReplayStore:
 
 def _normalize_store(raw_store: object) -> _SerializedReplayStore:
     if not isinstance(raw_store, Mapping):
-        return _empty_store()
+        msg = "invalid external trigger replay store structure"
+        raise ExternalTriggerReplayStoreError(msg)
     store_mapping = cast("Mapping[object, object]", raw_store)
-    raw_nonces = store_mapping.get("nonces", {})
-    raw_events = store_mapping.get("events", {})
+    if "nonces" not in store_mapping or "events" not in store_mapping:
+        msg = "invalid external trigger replay store structure"
+        raise ExternalTriggerReplayStoreError(msg)
+    raw_nonces = store_mapping["nonces"]
+    raw_events = store_mapping["events"]
     if not isinstance(raw_nonces, Mapping) or not isinstance(raw_events, Mapping):
-        return _empty_store()
+        msg = "invalid external trigger replay store structure"
+        raise ExternalTriggerReplayStoreError(msg)
     return {
         "nonces": _normalize_nonces(cast("Mapping[object, object]", raw_nonces)),
         "events": _normalize_events(cast("Mapping[object, object]", raw_events)),
