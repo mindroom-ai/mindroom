@@ -159,7 +159,8 @@ async def test_sync_forever_cancels_iteration_before_checkpoint_shutdown(monkeyp
         async def wait(self) -> None:
             bot.running = False
 
-        async def cancel(self) -> None:
+        async def cancel(self, *, cancel_source: object | None = None) -> None:
+            assert cancel_source is None
             call_order.append("cancel")
 
     bot.prepare_for_sync_shutdown = prepare_for_sync_shutdown
@@ -698,6 +699,48 @@ async def test_sync_iteration_cancel_logs_non_cancelled_errors() -> None:
 
     # Should not raise — the error is logged and suppressed.
     await _SyncIteration(bot=bot, sync_task=task, watchdog_task=None).cancel()
+
+
+@pytest.mark.asyncio
+async def test_sync_iteration_cancel_preserves_generic_shutdown_source() -> None:
+    """Generic sync cleanup must not relabel child callbacks as sync-restart cancellations."""
+    bot = _FakeBot()
+    cancel_args: list[tuple[object, ...]] = []
+
+    async def blocked_sync() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            cancel_args.append(exc.args)
+            raise
+
+    task = asyncio.create_task(blocked_sync())
+    await asyncio.sleep(0)
+
+    await _SyncIteration(bot=bot, sync_task=task, watchdog_task=None).cancel(cancel_source=None)
+
+    assert cancel_args == [()]
+
+
+@pytest.mark.asyncio
+async def test_sync_iteration_cancel_preserves_restart_shutdown_source() -> None:
+    """Restart cleanup should still mark child sync callbacks with restart provenance."""
+    bot = _FakeBot()
+    cancel_args: list[tuple[object, ...]] = []
+
+    async def blocked_sync() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            cancel_args.append(exc.args)
+            raise
+
+    task = asyncio.create_task(blocked_sync())
+    await asyncio.sleep(0)
+
+    await _SyncIteration(bot=bot, sync_task=task, watchdog_task=None).cancel(cancel_source="sync_restart")
+
+    assert cancel_args == [(SYNC_RESTART_CANCEL_MSG,)]
 
 
 @pytest.mark.asyncio

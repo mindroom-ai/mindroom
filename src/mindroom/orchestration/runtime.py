@@ -322,7 +322,7 @@ class _SyncIteration:
             return
         await self.watchdog_task
 
-    async def cancel(self) -> None:
+    async def cancel(self, *, cancel_source: TaskCancelSource | None = None) -> None:
         """Cancel child tasks without masking the original failure."""
         for attr in ("watchdog_task", "sync_task"):
             task = getattr(self, attr)
@@ -330,7 +330,7 @@ class _SyncIteration:
                 continue
             setattr(self, attr, None)
             if attr == "sync_task":
-                request_task_cancel(task, cancel_source="sync_restart")
+                request_task_cancel(task, cancel_source=cancel_source)
             else:
                 task.cancel()
             try:
@@ -583,9 +583,9 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             logger.exception("sync_loop_failed", agent=bot.agent_name, retry_count=retry_count)
         finally:
             if iteration is not None:
-                await iteration.cancel()
                 will_retry = retry_after_cleanup and bot.running and (max_retries < 0 or retry_count < max_retries)
                 shutdown_intent = SYNC_RESTART_SHUTDOWN if will_retry or sync_restart_cancelled else GENERIC_SHUTDOWN
+                await iteration.cancel(cancel_source=shutdown_intent.cancel_source)
                 await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
 
         if not bot.running:
