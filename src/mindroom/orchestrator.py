@@ -253,12 +253,7 @@ class _MultiAgentOrchestrator:
             event_cache_provider=lambda: self._runtime_support.event_cache,
         )
         self._startup_maintenance = StartupMaintenanceController(
-            setup_rooms_and_memberships=lambda bots: run_with_retry(
-                "Setting up Matrix rooms and memberships",
-                lambda: self._setup_rooms_and_memberships(bots),
-                permanent_error_check=is_permanent_startup_error,
-                update_runtime_state=False,
-            ),
+            setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
             cleanup_stale_streams=lambda bots, config, startup_cutoff_ms: self._cleanup_stale_streams_after_restart(
                 bots,
                 config,
@@ -354,7 +349,6 @@ class _MultiAgentOrchestrator:
         for bot in bots:
             self._bind_runtime_support_services(bot)
         self._configure_approval_store_transport()
-        self._bind_external_trigger_runtime_from_started_bots(bots)
 
     def _bind_external_trigger_runtime_from_started_bots(self, bots: Iterable[AgentBot | TeamBot]) -> None:
         """Bind external trigger delivery runtime when the router client is ready."""
@@ -370,16 +364,58 @@ class _MultiAgentOrchestrator:
             )
             return
 
+    def _bind_external_trigger_runtime_if_ready(self) -> None:
+        """Bind trigger delivery only after router and trigger targets are running."""
+        config = self.config
+        if config is None:
+            return
+        for trigger_config in config.external_triggers.values():
+            if not trigger_config.enabled:
+                continue
+            target_bot = self.agent_bots.get(trigger_config.target.agent)
+            if target_bot is None or not target_bot.running:
+                return
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if router_bot is None or not router_bot.running:
+            return
+        self._bind_external_trigger_runtime_from_started_bots((router_bot,))
+
     def _unbind_external_trigger_runtime(self) -> None:
         """Clear external trigger delivery runtime from the bundled API app."""
         from mindroom.api import main as api_main  # noqa: PLC0415
 
         api_main.unbind_external_trigger_runtime(api_main.app)
 
-    def _unbind_external_trigger_runtime_if_router_affected(self, entity_names: Iterable[str]) -> None:
-        """Clear external trigger runtime before the router is stopped or removed."""
-        if ROUTER_AGENT_NAME in entity_names:
+    def _unbind_external_trigger_runtime_if_delivery_affected(
+        self,
+        entity_names: Iterable[str],
+        *configs: Config | None,
+    ) -> None:
+        """Clear trigger runtime before the router or a configured trigger target changes."""
+        affected_entities = set(entity_names)
+        if not affected_entities:
+            return
+        if ROUTER_AGENT_NAME in affected_entities:
             self._unbind_external_trigger_runtime()
+            return
+        configs_to_check = configs or (self.config,)
+        for config in configs_to_check:
+            if config is None:
+                continue
+            for trigger_config in config.external_triggers.values():
+                if trigger_config.enabled and trigger_config.target.agent in affected_entities:
+                    self._unbind_external_trigger_runtime()
+                    return
+
+    async def _setup_startup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
+        """Run startup room setup, then publish trigger delivery runtime."""
+        await run_with_retry(
+            "Setting up Matrix rooms and memberships",
+            lambda: self._setup_rooms_and_memberships(bots),
+            permanent_error_check=is_permanent_startup_error,
+            update_runtime_state=False,
+        )
+        self._bind_external_trigger_runtime_if_ready()
 
     async def _sync_event_cache_service(self, config: Config) -> None:
         """Ensure the runtime has one initialized shared event-cache service."""
@@ -501,8 +537,6 @@ class _MultiAgentOrchestrator:
             )
             return None
         else:
-            if started and entity_name == ROUTER_AGENT_NAME:
-                self._bind_external_trigger_runtime_from_started_bots((bot,))
             return started
 
     async def _run_bot_start_retry(self, entity_name: str) -> None:
@@ -540,6 +574,7 @@ class _MultiAgentOrchestrator:
                             permanent_error_check=is_permanent_startup_error,
                             update_runtime_state=False,
                         )
+                    self._bind_external_trigger_runtime_if_ready()
                     return
 
                 attempt += 1
@@ -1189,7 +1224,7 @@ class _MultiAgentOrchestrator:
 
     async def _remove_deleted_entities(self, removed_entities: set[str]) -> None:
         """Cancel, clean up, and unregister entities removed from config."""
-        self._unbind_external_trigger_runtime_if_router_affected(removed_entities)
+        self._unbind_external_trigger_runtime_if_delivery_affected(removed_entities)
         for entity_name in removed_entities:
             await self._cancel_bot_start_task(entity_name)
             await cancel_sync_task(entity_name, self._sync_tasks)
@@ -1214,7 +1249,7 @@ class _MultiAgentOrchestrator:
         if not affected_entities:
             return set()
 
-        self._unbind_external_trigger_runtime_if_router_affected(affected_entities)
+        self._unbind_external_trigger_runtime_if_delivery_affected(affected_entities, current_config, new_config)
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
         await stop_entities(
@@ -1234,7 +1269,7 @@ class _MultiAgentOrchestrator:
         """Restart or create entities affected by the config change."""
         entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
         if entities_to_stop:
-            self._unbind_external_trigger_runtime_if_router_affected(entities_to_stop)
+            self._unbind_external_trigger_runtime_if_delivery_affected(entities_to_stop, plan.new_config)
             for entity_name in entities_to_stop:
                 await self._cancel_bot_start_task(entity_name)
             await stop_entities(
@@ -1273,7 +1308,7 @@ class _MultiAgentOrchestrator:
                 server_id=server_id,
                 entities=sorted(changed_entities),
             )
-            self._unbind_external_trigger_runtime_if_router_affected(changed_entities)
+            self._unbind_external_trigger_runtime_if_delivery_affected(changed_entities)
             for entity_name in changed_entities:
                 await self._cancel_bot_start_task(entity_name)
             await stop_entities(
@@ -1287,6 +1322,7 @@ class _MultiAgentOrchestrator:
                 self.config,
                 start_sync_tasks=True,
             )
+            self._bind_external_trigger_runtime_if_ready()
             for entity_name in start_results.retryable_entities:
                 await self._schedule_bot_start_retry(entity_name)
             if start_results.permanently_failed_entities:
@@ -1305,10 +1341,15 @@ class _MultiAgentOrchestrator:
         bots_to_setup = self._running_bots_for_entities(changed_entities)
         if bots_to_setup or plan.mindroom_user_changed or plan.matrix_room_access_changed or plan.authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
+            self._bind_external_trigger_runtime_if_ready()
             return
         if plan.matrix_space_changed or plan.room_metadata_changed:
             room_ids = await self._ensure_rooms_exist()
             await self._ensure_root_space(room_ids)
+            self._bind_external_trigger_runtime_if_ready()
+            return
+        if plan.has_entity_changes:
+            self._bind_external_trigger_runtime_if_ready()
 
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
