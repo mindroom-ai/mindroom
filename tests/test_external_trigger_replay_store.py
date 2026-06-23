@@ -171,6 +171,67 @@ def test_invalid_store_shape_fails_closed(tmp_path: Path, store_payload: object)
         store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
 
 
+@pytest.mark.parametrize(
+    "store_payload",
+    [
+        {"nonces": {"campground": {"nonce-1": {"expires_at": "later"}}}, "events": {}},
+        {"nonces": {"campground": {"nonce-1": {}}}, "events": {}},
+        {"nonces": {"campground": {"nonce-1": {"expires_at": True}}}, "events": {}},
+        {"nonces": {"campground": ["nonce-1"]}, "events": {}},
+    ],
+)
+def test_invalid_nested_nonce_record_fails_closed(tmp_path: Path, store_payload: object) -> None:
+    """Malformed nonce records should not be silently dropped."""
+    store_path = tmp_path / "external_triggers.json"
+    store_path.write_text(json.dumps(store_payload), encoding="utf-8")
+
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    with pytest.raises(ExternalTriggerReplayStoreError, match="invalid"):
+        store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
+
+
+@pytest.mark.parametrize(
+    "store_payload",
+    [
+        {
+            "nonces": {},
+            "events": {"campground": {"availability-123": {"state": "bad", "expires_at": 1_300, "delivered_at": None}}},
+        },
+        {
+            "nonces": {},
+            "events": {
+                "campground": {
+                    "availability-123": {"state": "delivered", "expires_at": "later", "delivered_at": 1_000},
+                },
+            },
+        },
+        {
+            "nonces": {},
+            "events": {
+                "campground": {
+                    "availability-123": {"state": "delivered", "expires_at": 1_300, "delivered_at": "bad"},
+                },
+            },
+        },
+        {
+            "nonces": {},
+            "events": {"campground": {"availability-123": {"state": "delivered", "expires_at": 1_300}}},
+        },
+        {"nonces": {}, "events": {"campground": ["availability-123"]}},
+    ],
+)
+def test_invalid_nested_event_record_fails_closed(tmp_path: Path, store_payload: object) -> None:
+    """Malformed event records should not be silently dropped."""
+    store_path = tmp_path / "external_triggers.json"
+    store_path.write_text(json.dumps(store_payload), encoding="utf-8")
+
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    with pytest.raises(ExternalTriggerReplayStoreError, match="invalid"):
+        store.claim_event_id("campground", "availability-123", now=1_000, ttl_seconds=300)
+
+
 def test_corrupt_json_store_fails_closed(tmp_path: Path) -> None:
     """Syntactically corrupt store JSON should not reset replay protection."""
     store_path = tmp_path / "external_triggers.json"

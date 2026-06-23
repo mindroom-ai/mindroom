@@ -13564,6 +13564,8 @@ The extra volume is available to containers that explicitly mount it.
 
 In this example, the secret volume is mounted only by the worker-scoped `campground-watcher`, not by `sandbox-runner`.
 
+The generated worker pod runs containers with UID/GID `1000` and `fsGroup: 1000`, so this secret volume uses group-readable mode for sidecar access.
+
 This example is not an always-on polling watcher deployment pattern.
 
 Put this in a `cluster/k8s/runtime` Helm values file passed with `helm -f`, not in `config.yaml`.
@@ -13578,7 +13580,7 @@ workers:
       - name: campground-trigger-key
         secret:
           secretName: campground-trigger-key
-          defaultMode: 0400
+          defaultMode: 0440
     extraContainers:
       - name: campground-watcher
         image: ghcr.io/example/campground-watcher:2026-06-22

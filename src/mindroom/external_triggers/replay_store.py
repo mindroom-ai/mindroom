@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Literal, TypedDict, cast
+from typing import Literal, TypedDict, TypeGuard, cast
 
 
 class ExternalTriggerEventClaim(StrEnum):
@@ -182,37 +182,43 @@ def _empty_store() -> _SerializedReplayStore:
 
 def _normalize_store(raw_store: object) -> _SerializedReplayStore:
     if not isinstance(raw_store, Mapping):
-        msg = "invalid external trigger replay store structure"
-        raise ExternalTriggerReplayStoreError(msg)
+        raise _invalid_store_structure()
     store_mapping = cast("Mapping[object, object]", raw_store)
     if "nonces" not in store_mapping or "events" not in store_mapping:
-        msg = "invalid external trigger replay store structure"
-        raise ExternalTriggerReplayStoreError(msg)
+        raise _invalid_store_structure()
     raw_nonces = store_mapping["nonces"]
     raw_events = store_mapping["events"]
     if not isinstance(raw_nonces, Mapping) or not isinstance(raw_events, Mapping):
-        msg = "invalid external trigger replay store structure"
-        raise ExternalTriggerReplayStoreError(msg)
+        raise _invalid_store_structure()
     return {
         "nonces": _normalize_nonces(cast("Mapping[object, object]", raw_nonces)),
         "events": _normalize_events(cast("Mapping[object, object]", raw_events)),
     }
 
 
+def _invalid_store_structure() -> ExternalTriggerReplayStoreError:
+    return ExternalTriggerReplayStoreError("invalid external trigger replay store structure")
+
+
+def _is_json_int(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _normalize_nonces(raw_nonces: Mapping[object, object]) -> dict[str, dict[str, _SerializedNonce]]:
     nonces: dict[str, dict[str, _SerializedNonce]] = {}
     for trigger_id, trigger_nonces in raw_nonces.items():
         if not isinstance(trigger_id, str) or not isinstance(trigger_nonces, Mapping):
-            continue
+            raise _invalid_store_structure()
         trigger_nonce_mapping = cast("Mapping[object, object]", trigger_nonces)
         normalized_trigger_nonces: dict[str, _SerializedNonce] = {}
         for nonce, record in trigger_nonce_mapping.items():
             if not isinstance(nonce, str) or not isinstance(record, Mapping):
-                continue
+                raise _invalid_store_structure()
             record_mapping = cast("Mapping[object, object]", record)
             expires_at = record_mapping.get("expires_at")
-            if isinstance(expires_at, int):
-                normalized_trigger_nonces[nonce] = {"expires_at": expires_at}
+            if not _is_json_int(expires_at):
+                raise _invalid_store_structure()
+            normalized_trigger_nonces[nonce] = {"expires_at": expires_at}
         if normalized_trigger_nonces:
             nonces[trigger_id] = normalized_trigger_nonces
     return nonces
@@ -222,23 +228,27 @@ def _normalize_events(raw_events: Mapping[object, object]) -> dict[str, dict[str
     events: dict[str, dict[str, _SerializedEvent]] = {}
     for trigger_id, trigger_events in raw_events.items():
         if not isinstance(trigger_id, str) or not isinstance(trigger_events, Mapping):
-            continue
+            raise _invalid_store_structure()
         trigger_event_mapping = cast("Mapping[object, object]", trigger_events)
         normalized_trigger_events: dict[str, _SerializedEvent] = {}
         for event_id, record in trigger_event_mapping.items():
             if not isinstance(event_id, str) or not isinstance(record, Mapping):
-                continue
+                raise _invalid_store_structure()
             record_mapping = cast("Mapping[object, object]", record)
+            if "delivered_at" not in record_mapping:
+                raise _invalid_store_structure()
             state = record_mapping.get("state")
             expires_at = record_mapping.get("expires_at")
             delivered_at = record_mapping.get("delivered_at")
-            if state not in {"in_progress", "delivered"} or not isinstance(expires_at, int):
-                continue
+            if state not in {"in_progress", "delivered"} or not _is_json_int(expires_at):
+                raise _invalid_store_structure()
+            if delivered_at is not None and not _is_json_int(delivered_at):
+                raise _invalid_store_structure()
             event_state = cast("Literal['in_progress', 'delivered']", state)
             normalized_trigger_events[event_id] = {
                 "state": event_state,
                 "expires_at": expires_at,
-                "delivered_at": delivered_at if isinstance(delivered_at, int) else None,
+                "delivered_at": delivered_at,
             }
         if normalized_trigger_events:
             events[trigger_id] = normalized_trigger_events
