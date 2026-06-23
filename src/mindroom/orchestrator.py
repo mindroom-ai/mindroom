@@ -62,6 +62,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling_executor import set_scheduling_hook_registry
 from mindroom.startup_errors import PermanentStartupError
@@ -1652,7 +1653,7 @@ class _MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.running = False
 
-        stop_tasks = [bot.stop() for bot in self.agent_bots.values()]
+        stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         await self._close_runtime_support_services()
         logger.info("All agent bots stopped")

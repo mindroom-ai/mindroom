@@ -11,13 +11,14 @@ if TYPE_CHECKING:
 __all__ = [
     "ENTITY_REMOVED_SHUTDOWN",
     "GENERIC_SHUTDOWN",
+    "ORDERLY_SHUTDOWN",
     "SYNC_RESTART_SHUTDOWN",
     "RuntimeShutdownIntent",
     "StopReason",
     "shutdown_intent_for_entity",
 ]
 
-StopReason = Literal["restart", "entity_removed"]
+StopReason = Literal["restart", "entity_removed", "shutdown"]
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class RuntimeShutdownIntent:
 
 
 GENERIC_SHUTDOWN = RuntimeShutdownIntent(stop_reason=None, cancel_source=None)
+ORDERLY_SHUTDOWN = RuntimeShutdownIntent(stop_reason="shutdown", cancel_source=None)
 ENTITY_REMOVED_SHUTDOWN = RuntimeShutdownIntent(stop_reason="entity_removed", cancel_source=None)
 SYNC_RESTART_SHUTDOWN = RuntimeShutdownIntent(stop_reason="restart", cancel_source="sync_restart")
 

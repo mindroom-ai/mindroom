@@ -41,6 +41,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
     SYNC_RESTART_SHUTDOWN,
     RuntimeShutdownIntent,
     shutdown_intent_for_entity,
@@ -442,6 +443,11 @@ def test_shutdown_intent_for_removed_entity() -> None:
 def test_generic_shutdown_has_no_restart_provenance() -> None:
     """Generic shutdown should not carry a stop reason or cancellation source."""
     assert RuntimeShutdownIntent(stop_reason=None, cancel_source=None) == GENERIC_SHUTDOWN
+
+
+def test_orderly_shutdown_preserves_public_stop_reason() -> None:
+    """Orderly process shutdown should keep lifecycle hook metadata without cancellation provenance."""
+    assert RuntimeShutdownIntent(stop_reason="shutdown", cancel_source=None) == ORDERLY_SHUTDOWN
 
 
 @pytest.mark.parametrize(
@@ -1536,9 +1542,9 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         # Verify sync_tasks dict is empty
         assert len(orchestrator._sync_tasks) == 0
 
-        # Verify bots were stopped
-        mock_bot1.stop.assert_called_once()
-        mock_bot2.stop.assert_called_once()
+        # Verify bots were stopped with public shutdown metadata and no restart cancellation source.
+        mock_bot1.stop.assert_called_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
+        mock_bot2.stop.assert_called_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
 
 
 # ---------------------------------------------------------------------------
