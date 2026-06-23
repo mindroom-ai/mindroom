@@ -50,18 +50,22 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
     if trigger.allowed_kinds and payload.kind not in trigger.allowed_kinds:
         raise HTTPException(status_code=422, detail="External trigger kind is not allowed")
 
-    runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
-    if runtime is None or runtime.config_generation != snapshot.generation:
-        raise HTTPException(status_code=503, detail="External trigger runtime is not available")
-    if trigger.target.agent not in runtime.ready_target_agents:
-        raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
-
     now = int(time.time())
     store = ExternalTriggerReplayStore(constants.tracking_dir(runtime_paths))
+    event_id = payload.event_id or signature_headers.nonce
+    if store.event_id_is_delivered(trigger_id, event_id, now=now):
+        return ExternalTriggerAcceptedResponse(
+            accepted=True,
+            duplicate=True,
+            trigger_id=trigger_id,
+            event_id=event_id,
+        )
+
+    runtime = _require_external_trigger_runtime(request, snapshot.generation, trigger.target.agent)
+
     if not store.claim_nonce(trigger_id, signature_headers.nonce, now=now, ttl_seconds=trigger.replay_window_seconds):
         raise HTTPException(status_code=409, detail="External trigger nonce has already been used")
 
-    event_id = payload.event_id or signature_headers.nonce
     event_claim = store.claim_event_id(
         trigger_id,
         event_id,
@@ -152,3 +156,16 @@ def _parse_payload(body: bytes) -> ExternalTriggerPayload:
         return ExternalTriggerPayload.model_validate_json(body)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
+
+
+def _require_external_trigger_runtime(
+    request: Request,
+    snapshot_generation: int,
+    target_agent: str,
+) -> config_lifecycle.ExternalTriggerRuntime:
+    runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
+    if runtime is None or runtime.config_generation != snapshot_generation:
+        raise HTTPException(status_code=503, detail="External trigger runtime is not available")
+    if target_agent not in runtime.ready_target_agents:
+        raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
+    return runtime

@@ -442,6 +442,10 @@ def test_event_id_claim_ttls_distinguish_in_progress_from_delivered(
             event_claim_ttls.append(ttl_seconds)
             return ExternalTriggerEventClaim.FRESH
 
+        def event_id_is_delivered(self, trigger_id: str, event_id: str, *, now: int) -> bool:
+            del trigger_id, event_id, now
+            return False
+
         def mark_event_delivered(self, trigger_id: str, event_id: str, *, now: int, ttl_seconds: int) -> None:
             del trigger_id, event_id, now
             delivered_ttls.append(ttl_seconds)
@@ -510,6 +514,51 @@ def test_delivered_event_id_duplicate_returns_accepted_without_second_execute(
         "/api/triggers/campground",
         content=body,
         headers=_sign(trigger_api.private_key, body=body, nonce="nonce-second"),
+    )
+
+    assert first.status_code == 202
+    assert duplicate.status_code == 202
+    assert duplicate.json()["duplicate"] is True
+    assert duplicate.json()["matrix_event_id"] is None
+    assert call_count == 1
+
+
+def test_delivered_event_id_duplicate_returns_accepted_when_runtime_unbound(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delivered event id stays idempotent while trigger delivery runtime is unavailable."""
+    _bind_runtime()
+    call_count = 0
+
+    async def execute_external_trigger(
+        *,
+        client: object,
+        trigger_id: str,
+        trigger: object,
+        payload: ExternalTriggerPayload,
+        config: object,
+        runtime_paths: object,
+        conversation_cache: object,
+    ) -> str:
+        del client, trigger_id, trigger, payload, config, runtime_paths, conversation_cache
+        nonlocal call_count
+        call_count += 1
+        return "$matrix-event"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    body = _body(event_id="availability-duplicate-runtime-down")
+
+    first = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(trigger_api.private_key, body=body, nonce="nonce-runtime-first"),
+    )
+    api_main.unbind_external_trigger_runtime(api_main.app)
+    duplicate = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(trigger_api.private_key, body=body, nonce="nonce-runtime-second"),
     )
 
     assert first.status_code == 202

@@ -106,6 +106,14 @@ class ExternalTriggerReplayStore:
             self._write_store(store)
             return ExternalTriggerEventClaim.FRESH
 
+    def event_id_is_delivered(self, trigger_id: str, event_id: str, *, now: int) -> bool:
+        """Return whether one unexpired external event id was already delivered."""
+        with self._state.lock:
+            store = self._read_store()
+            _prune_expired(store, now=now)
+            event = store["events"].get(trigger_id, {}).get(event_id)
+            return event is not None and event["state"] == ExternalTriggerEventClaim.DELIVERED.value
+
     def mark_event_delivered(self, trigger_id: str, event_id: str, *, now: int, ttl_seconds: int) -> None:
         """Record that one external event id reached Matrix delivery."""
         with self._state.lock:
