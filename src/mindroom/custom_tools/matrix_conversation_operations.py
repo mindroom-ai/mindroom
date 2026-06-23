@@ -151,6 +151,7 @@ class MatrixMessageOperations:
         room_id: str,
         effective_thread_id: str | None,
         ignore_mentions: bool,
+        as_voice: bool,
         message_extras: list[MessageExtraSection] | None,
     ) -> MatrixMessageOperationResult:
         if action in {"thread-reply", "reply"} and effective_thread_id is None:
@@ -247,6 +248,7 @@ class MatrixMessageOperations:
                     thread_id=effective_thread_id,
                     latest_thread_event_id=latest_thread_event_id,
                     conversation_cache=context.conversation_cache,
+                    as_voice=as_voice,
                 )
                 if first_attachment_event_id is None:
                     return self._result(
@@ -269,6 +271,7 @@ class MatrixMessageOperations:
                     room_id=room_id,
                     thread_id=attachment_thread_id,
                     attachment_paths=remaining_attachment_paths,
+                    as_voice=as_voice,
                 )
                 attachment_event_ids.extend(remaining_attachment_event_ids)
                 if send_error is not None:
@@ -297,6 +300,7 @@ class MatrixMessageOperations:
                     thread_id=attachment_thread_id,
                     require_joined_room=False,
                     inherit_context_thread=False,
+                    as_voice=as_voice,
                     workspace_root=self._tool_output_workspace_root,
                 )
                 if send_result is not None:
@@ -724,6 +728,7 @@ class MatrixMessageOperations:
         target: str | None,
         thread_id: str | None,
         ignore_mentions: bool,
+        as_voice: bool,
         message_extras: list[MessageExtraSection] | None,
         read_limit: int,
         page_token: str | None,
@@ -748,6 +753,7 @@ class MatrixMessageOperations:
                 room_id=room_id,
                 effective_thread_id=effective_thread_id,
                 ignore_mentions=ignore_mentions,
+                as_voice=as_voice,
                 message_extras=message_extras,
             )
         if action == "react":

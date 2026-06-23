@@ -1657,7 +1657,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.client_delivery"
-depends_on = ["mindroom.config.matrix"]
+depends_on = ["mindroom.config.matrix", "mindroom.matrix.voice_message"]
 visibility = [
     "mindroom.approval_transport",
     "mindroom.conversation_resolver",
@@ -1672,6 +1672,11 @@ visibility = [
     "mindroom.streaming",
     "mindroom.thread_summary",
 ]
+
+[[modules]]
+path = "mindroom.matrix.voice_message"
+depends_on = []
+visibility = ["mindroom.matrix.client_delivery"]
 
 [[modules]]
 path = "mindroom.matrix.client_room_admin"

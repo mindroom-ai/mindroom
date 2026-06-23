@@ -562,7 +562,72 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
         thread_id="$evt",
         latest_thread_event_id="$evt",
         conversation_cache=ctx.conversation_cache,
+        as_voice=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_passes_as_voice_for_attachments(tmp_path: Path) -> None:
+    """The model-facing Matrix tool should pass as_voice to attachment sends."""
+    tool = MatrixMessageTools()
+    sample_file = tmp_path / "upload.wav"
+    sample_file.write_bytes(b"audio")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_voice",
+    )
+    assert attachment is not None
+    ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_voice",))
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.return_value = "$evt"
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ),
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mock_send_file,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="hello",
+                attachment_ids=["att_voice"],
+                as_voice=True,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["attachment_event_ids"] == ["$file_evt"]
+    mock_send_file.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        attachment.local_path,
+        config=ctx.config,
+        thread_id="$evt",
+        latest_thread_event_id="$evt",
+        conversation_cache=ctx.conversation_cache,
+        as_voice=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_rejects_as_voice_for_non_send_action() -> None:
+    """as_voice should be rejected on actions that cannot send attachments."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_message(action="read", as_voice=True))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "read"
+    assert "as_voice is only supported" in payload["message"]
 
 
 @pytest.mark.asyncio
@@ -619,6 +684,7 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
         thread_id=None,
         latest_thread_event_id=None,
         conversation_cache=ctx.conversation_cache,
+        as_voice=False,
     )
 
 
@@ -670,6 +736,7 @@ async def test_matrix_message_reply_with_attachments_keeps_existing_thread(tmp_p
         thread_id=ctx.thread_id,
         latest_thread_event_id=ctx.thread_id,
         conversation_cache=ctx.conversation_cache,
+        as_voice=False,
     )
 
 
@@ -729,6 +796,7 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
         thread_id=explicit_thread_id,
         latest_thread_event_id=explicit_thread_id,
         conversation_cache=ctx.conversation_cache,
+        as_voice=False,
     )
 
 
@@ -780,6 +848,7 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
         thread_id=None,
         latest_thread_event_id=None,
         conversation_cache=ctx.conversation_cache,
+        as_voice=False,
     )
 
 
@@ -841,6 +910,7 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
         thread_id=None,
         latest_thread_event_id=None,
         conversation_cache=ctx.conversation_cache,
+        as_voice=False,
     )
     ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
         ctx.room_id,
@@ -853,6 +923,7 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
         "room_id": ctx.room_id,
         "thread_id": "$file_root",
         "attachment_paths": [second_attachment.local_path],
+        "as_voice": False,
     }
 
 
@@ -922,6 +993,7 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
         "thread_id": None,
         "latest_thread_event_id": None,
         "conversation_cache": ctx.conversation_cache,
+        "as_voice": False,
     }
     assert second_call.args == (ctx.client, ctx.room_id, second_attachment.local_path)
     assert second_call.kwargs == {
@@ -929,6 +1001,7 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
         "thread_id": None,
         "latest_thread_event_id": "$file_one",
         "conversation_cache": ctx.conversation_cache,
+        "as_voice": False,
     }
 
 
@@ -975,6 +1048,7 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
         thread_id="$evt",
         latest_thread_event_id="$evt",
         conversation_cache=ctx.conversation_cache,
+        as_voice=False,
     )
 
 
@@ -1018,6 +1092,7 @@ async def test_matrix_message_send_resolves_relative_attachment_file_paths_from_
         thread_id="$evt",
         latest_thread_event_id="$evt",
         conversation_cache=ctx.conversation_cache,
+        as_voice=False,
     )
 
 
@@ -1126,6 +1201,7 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
         thread_id=None,
         latest_thread_event_id=None,
         conversation_cache=ctx.conversation_cache,
+        as_voice=False,
     )
     mock_send_attachment_paths.assert_not_awaited()
 

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -19,9 +20,7 @@ from mindroom.matrix.client_delivery import (
     send_file_message,
     send_message_result,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from mindroom.matrix.voice_message import VoiceMessagePayload
 
 
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
@@ -451,6 +450,312 @@ class TestSendFileMessage:
         assert sent_content is not None
         assert sent_content["body"] == "Q4 Report"
         assert sent_content["filename"] == "report.pdf"
+
+    @pytest.mark.asyncio
+    async def test_send_file_message_voice_adds_msc_flags_and_opus_mimetype(self, tmp_path: Path) -> None:
+        """Successful voice preparation should send Matrix voice-message metadata."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/voice"), {})
+        original = tmp_path / "reply.wav"
+        original.write_bytes(b"wav")
+        prepared = tmp_path / "prepared.ogg"
+        prepared.write_bytes(b"opus")
+        payload = VoiceMessagePayload(
+            source_path=prepared,
+            cleanup=False,
+            duration_ms=1234,
+            waveform=[512] * 30,
+            mimetype="audio/ogg",
+        )
+        sent_content: dict | None = None
+
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
+            nonlocal sent_content
+            assert isinstance(config, Config)
+            sent_content = content
+            return DeliveredMatrixEvent(event_id="$voice:localhost", content_sent=content)
+
+        with (
+            patch("mindroom.matrix.client_delivery.build_voice_message_payload", new=AsyncMock(return_value=payload)),
+            patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
+        ):
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                original,
+                config=Config(),
+                caption="ignored",
+                as_voice=True,
+            )
+
+        assert event_id == "$voice:localhost"
+        assert sent_content is not None
+        assert sent_content["msgtype"] == "m.audio"
+        assert sent_content["body"] == "voice-message.ogg"
+        assert sent_content["filename"] == "voice-message.ogg"
+        assert sent_content["url"] == "mxc://localhost/voice"
+        assert sent_content["info"] == {"size": 4, "mimetype": "audio/ogg", "duration": 1234}
+        assert sent_content["org.matrix.msc1767.audio"] == {"duration": 1234, "waveform": [512] * 30}
+        assert sent_content["org.matrix.msc3245.voice"] == {}
+        assert sent_content["m.voice"] == {}
+        upload_call = client.upload.await_args
+        assert upload_call.kwargs["content_type"] == "audio/ogg"
+        assert upload_call.kwargs["filename"] == "prepared.ogg"
+
+    @pytest.mark.asyncio
+    async def test_send_file_message_voice_falls_back_to_bare_audio_on_payload_none(self, tmp_path: Path) -> None:
+        """Voice sends should preserve existing audio behavior when preparation fails."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/audio"), {})
+        audio = tmp_path / "reply.wav"
+        audio.write_bytes(b"wav")
+        sent_content: dict | None = None
+
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
+            nonlocal sent_content
+            assert isinstance(config, Config)
+            sent_content = content
+            return DeliveredMatrixEvent(event_id="$audio:localhost", content_sent=content)
+
+        with (
+            patch("mindroom.matrix.client_delivery.build_voice_message_payload", new=AsyncMock(return_value=None)),
+            patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
+        ):
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                audio,
+                config=Config(),
+                caption="Fallback caption",
+                as_voice=True,
+            )
+
+        assert event_id == "$audio:localhost"
+        assert sent_content is not None
+        assert sent_content["msgtype"] == "m.audio"
+        assert sent_content["body"] == "Fallback caption"
+        assert sent_content["url"] == "mxc://localhost/audio"
+        assert sent_content["info"] == {"size": 3, "mimetype": "audio/x-wav"}
+        assert "filename" not in sent_content
+        assert "org.matrix.msc1767.audio" not in sent_content
+        assert "org.matrix.msc3245.voice" not in sent_content
+        assert "m.voice" not in sent_content
+
+    @pytest.mark.asyncio
+    async def test_send_file_message_default_remains_bare_m_audio(self, tmp_path: Path) -> None:
+        """Audio files should stay bare m.audio unless as_voice is explicitly set."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/audio"), {})
+        audio = tmp_path / "plain.wav"
+        audio.write_bytes(b"wav")
+        sent_content: dict | None = None
+
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
+            nonlocal sent_content
+            assert isinstance(config, Config)
+            sent_content = content
+            return DeliveredMatrixEvent(event_id="$audio:localhost", content_sent=content)
+
+        with (
+            patch("mindroom.matrix.client_delivery.build_voice_message_payload", new=AsyncMock()) as mock_voice,
+            patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
+        ):
+            event_id = await send_file_message(client, "!room:localhost", audio, config=Config())
+
+        assert event_id == "$audio:localhost"
+        mock_voice.assert_not_awaited()
+        assert sent_content is not None
+        assert sent_content["msgtype"] == "m.audio"
+        assert sent_content["body"] == "plain.wav"
+        assert "filename" not in sent_content
+        assert "org.matrix.msc1767.audio" not in sent_content
+
+    @pytest.mark.asyncio
+    async def test_send_file_message_voice_cleans_up_tempfile_on_success(self, tmp_path: Path) -> None:
+        """Prepared voice tempfiles should be removed after a successful send."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/voice"), {})
+        original = tmp_path / "reply.wav"
+        original.write_bytes(b"wav")
+        prepared = tmp_path / "prepared.ogg"
+        prepared.write_bytes(b"opus")
+        payload = VoiceMessagePayload(
+            source_path=prepared,
+            cleanup=True,
+            duration_ms=1000,
+            waveform=[512] * 30,
+            mimetype="audio/ogg",
+        )
+
+        with (
+            patch("mindroom.matrix.client_delivery.build_voice_message_payload", new=AsyncMock(return_value=payload)),
+            patch(
+                "mindroom.matrix.client_delivery.send_message_result",
+                new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$voice", content_sent={})),
+            ),
+        ):
+            event_id = await send_file_message(client, "!room:localhost", original, config=Config(), as_voice=True)
+
+        assert event_id == "$voice"
+        assert not prepared.exists()
+
+    @pytest.mark.asyncio
+    async def test_send_file_message_voice_cleans_up_tempfile_on_upload_failure(self, tmp_path: Path) -> None:
+        """Prepared voice tempfiles should be removed if Matrix upload fails."""
+        client = _mock_client(encrypted=False)
+        client.upload.side_effect = RuntimeError("upload failed")
+        original = tmp_path / "reply.wav"
+        original.write_bytes(b"wav")
+        prepared = tmp_path / "prepared.ogg"
+        prepared.write_bytes(b"opus")
+        payload = VoiceMessagePayload(
+            source_path=prepared,
+            cleanup=True,
+            duration_ms=1000,
+            waveform=[512] * 30,
+            mimetype="audio/ogg",
+        )
+
+        with patch("mindroom.matrix.client_delivery.build_voice_message_payload", new=AsyncMock(return_value=payload)):
+            event_id = await send_file_message(client, "!room:localhost", original, config=Config(), as_voice=True)
+
+        assert event_id is None
+        assert not prepared.exists()
+
+    @pytest.mark.asyncio
+    async def test_send_file_message_voice_cleans_up_tempfile_on_cancellation(self, tmp_path: Path) -> None:
+        """Prepared voice tempfiles should be removed when sending is cancelled."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/voice"), {})
+        original = tmp_path / "reply.wav"
+        original.write_bytes(b"wav")
+        prepared = tmp_path / "prepared.ogg"
+        prepared.write_bytes(b"opus")
+        payload = VoiceMessagePayload(
+            source_path=prepared,
+            cleanup=True,
+            duration_ms=1000,
+            waveform=[512] * 30,
+            mimetype="audio/ogg",
+        )
+
+        with (
+            patch("mindroom.matrix.client_delivery.build_voice_message_payload", new=AsyncMock(return_value=payload)),
+            patch(
+                "mindroom.matrix.client_delivery.send_message_result",
+                new=AsyncMock(side_effect=asyncio.CancelledError),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await send_file_message(client, "!room:localhost", original, config=Config(), as_voice=True)
+
+        assert not prepared.exists()
+
+    @pytest.mark.asyncio
+    async def test_send_file_message_voice_cleanup_failure_does_not_override_success(self, tmp_path: Path) -> None:
+        """Best-effort voice tempfile cleanup should not hide a delivered event."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/voice"), {})
+        original = tmp_path / "reply.wav"
+        original.write_bytes(b"wav")
+        prepared = tmp_path / "prepared.ogg"
+        prepared.write_bytes(b"opus")
+        payload = VoiceMessagePayload(
+            source_path=prepared,
+            cleanup=True,
+            duration_ms=1000,
+            waveform=[512] * 30,
+            mimetype="audio/ogg",
+        )
+
+        with (
+            patch("mindroom.matrix.client_delivery.build_voice_message_payload", new=AsyncMock(return_value=payload)),
+            patch(
+                "mindroom.matrix.client_delivery.send_message_result",
+                new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$voice", content_sent={})),
+            ),
+            patch.object(Path, "unlink", side_effect=OSError("cleanup failed")),
+        ):
+            event_id = await send_file_message(client, "!room:localhost", original, config=Config(), as_voice=True)
+
+        assert event_id == "$voice"
+
+    @pytest.mark.asyncio
+    async def test_send_file_message_voice_in_encrypted_room(self, tmp_path: Path) -> None:
+        """Encrypted voice sends should keep voice flags in cleartext content."""
+        client = _mock_client(encrypted=True)
+        client.upload.return_value = (_upload_response("mxc://localhost/encvoice"), {})
+        original = tmp_path / "reply.wav"
+        original.write_bytes(b"wav")
+        prepared = tmp_path / "prepared.ogg"
+        prepared.write_bytes(b"opus")
+        payload = VoiceMessagePayload(
+            source_path=prepared,
+            cleanup=False,
+            duration_ms=4321,
+            waveform=[512] * 30,
+            mimetype="audio/ogg",
+        )
+        sent_content: dict | None = None
+
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
+            nonlocal sent_content
+            assert isinstance(config, Config)
+            sent_content = content
+            return DeliveredMatrixEvent(event_id="$voice:localhost", content_sent=content)
+
+        with (
+            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True),
+            patch(
+                "mindroom.matrix.client_delivery.crypto.attachments.encrypt_attachment",
+                return_value=(
+                    b"encrypted",
+                    {
+                        "key": {"k": "k1"},
+                        "iv": "iv1",
+                        "hashes": {"sha256": "h1"},
+                    },
+                ),
+            ),
+            patch("mindroom.matrix.client_delivery.build_voice_message_payload", new=AsyncMock(return_value=payload)),
+            patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
+        ):
+            event_id = await send_file_message(client, "!room:localhost", original, config=Config(), as_voice=True)
+
+        assert event_id == "$voice:localhost"
+        assert sent_content is not None
+        assert "url" not in sent_content
+        assert sent_content["file"]["url"] == "mxc://localhost/encvoice"
+        assert sent_content["file"]["mimetype"] == "audio/ogg"
+        assert sent_content["file"]["size"] == 4
+        assert sent_content["info"] == {"size": 4, "mimetype": "audio/ogg", "duration": 4321}
+        assert sent_content["org.matrix.msc1767.audio"] == {"duration": 4321, "waveform": [512] * 30}
+        assert sent_content["org.matrix.msc3245.voice"] == {}
+        assert sent_content["m.voice"] == {}
 
 
 class TestMsgtypeForMimetype:
