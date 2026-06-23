@@ -10,7 +10,7 @@ import pytest
 import mindroom.oauth.service as oauth_service_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
-from mindroom.oauth.providers import OAuthClientConfig, OAuthRefreshRejectedError
+from mindroom.oauth.providers import OAuthClientConfig, OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.oauth.service import refresh_scoped_oauth_credentials_with_result
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
@@ -280,6 +280,122 @@ async def test_scoped_oauth_refresh_logs_terminal_failure_without_tokens(
                 "stale_retry_used": False,
                 "has_refresh_token": True,
                 "expires_at": 1.0,
+                "error_type": "OAuthRefreshRejectedError",
+                "oauth_error": INVALID_ROTATION,
+            },
+        ),
+    ]
+    _assert_no_token_values_logged(logger)
+
+
+@pytest.mark.asyncio
+async def test_scoped_oauth_refresh_logs_non_recoverable_provider_failure_without_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A non-recoverable provider error should emit the provider_refresh_failed warning."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target()
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    _save_credentials(runtime_paths, worker_target, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    logger = _CapturingLogger()
+    monkeypatch.setattr(oauth_service_module, "logger", logger, raising=False)
+
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
+        assert credentials["refresh_token"] == CHAIN_0
+        message = "provider unavailable"
+        description = f"provider detail must not log {CHAIN_0}"
+        raise OAuthProviderError(
+            message,
+            oauth_error="temporarily_unavailable",
+            oauth_error_description=description,
+        )
+
+    provider = _FakeOAuthProvider(refresh)
+
+    with pytest.raises(OAuthProviderError):
+        await refresh_scoped_oauth_credentials_with_result(
+            provider,
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert logger.info_calls == []
+    assert logger.warning_calls == [
+        (
+            "oauth_credentials_refresh_failed",
+            {
+                "provider_id": "demo_provider",
+                "credential_service": "demo_oauth",
+                "reason": "provider_refresh_failed",
+                "stale_retry_used": False,
+                "has_refresh_token": True,
+                "expires_at": 1.0,
+                "error_type": "OAuthProviderError",
+                "oauth_error": "temporarily_unavailable",
+            },
+        ),
+    ]
+    _assert_no_token_values_logged(logger)
+
+
+@pytest.mark.asyncio
+async def test_scoped_oauth_refresh_logs_stale_retry_failure_without_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed stale-token retry should emit the stale_retry_failed warning."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target()
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    _save_credentials(runtime_paths, worker_target, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    logger = _CapturingLogger()
+    monkeypatch.setattr(oauth_service_module, "logger", logger, raising=False)
+    seen_refresh_tokens: list[str] = []
+
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
+        refresh_token = str(credentials["refresh_token"])
+        seen_refresh_tokens.append(refresh_token)
+        if refresh_token == CHAIN_0:
+            save_scoped_credentials(
+                "demo_oauth",
+                _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT),
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+            raise OAuthRefreshRejectedError(INVALID_ROTATION, oauth_error=INVALID_ROTATION)
+        assert refresh_token == CHAIN_1
+        message = "latest refresh grant rejected"
+        description = f"provider detail must not log {CHAIN_1}"
+        raise OAuthRefreshRejectedError(
+            message,
+            oauth_error=INVALID_ROTATION,
+            oauth_error_description=description,
+        )
+
+    provider = _FakeOAuthProvider(refresh)
+
+    with pytest.raises(OAuthRefreshRejectedError):
+        await refresh_scoped_oauth_credentials_with_result(
+            provider,
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert seen_refresh_tokens == [CHAIN_0, CHAIN_1]
+    assert logger.info_calls == []
+    assert logger.warning_calls == [
+        (
+            "oauth_credentials_refresh_failed",
+            {
+                "provider_id": "demo_provider",
+                "credential_service": "demo_oauth",
+                "reason": "stale_retry_failed",
+                "stale_retry_used": True,
+                "has_refresh_token": True,
+                "expires_at": FUTURE_EXPIRES_AT,
                 "error_type": "OAuthRefreshRejectedError",
                 "oauth_error": INVALID_ROTATION,
             },
