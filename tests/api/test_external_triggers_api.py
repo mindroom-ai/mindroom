@@ -243,6 +243,54 @@ def test_executor_none_releases_event_claim_for_retry(
     assert calls == ["availability-retry", "availability-retry"]
 
 
+def test_executor_exception_releases_event_claim_for_retry(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An executor exception does not burn event idempotency state."""
+    _bind_runtime()
+    calls: list[str] = []
+
+    async def execute_external_trigger(
+        *,
+        client: object,
+        trigger_id: str,
+        trigger: object,
+        payload: ExternalTriggerPayload,
+        config: object,
+        runtime_paths: object,
+        conversation_cache: object,
+    ) -> str:
+        del client, trigger_id, trigger, config, runtime_paths, conversation_cache
+        calls.append(payload.event_id or "")
+        if len(calls) == 1:
+            message = "executor failed"
+            raise RuntimeError(message)
+        return "$matrix-event"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+
+    first_body = _body(event_id="availability-exception-retry")
+    with pytest.raises(RuntimeError, match="executor failed"):
+        trigger_api.client.post(
+            "/api/triggers/campground",
+            content=first_body,
+            headers=_sign(trigger_api.private_key, body=first_body, nonce="nonce-exception"),
+        )
+
+    retry_body = _body(event_id="availability-exception-retry")
+    retry = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=retry_body,
+        headers=_sign(trigger_api.private_key, body=retry_body, nonce="nonce-retry"),
+    )
+
+    assert retry.status_code == 202
+    assert retry.json()["duplicate"] is False
+    assert retry.json()["matrix_event_id"] == "$matrix-event"
+    assert calls == ["availability-exception-retry", "availability-exception-retry"]
+
+
 def test_first_success_returns_accepted_duplicate_false(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,

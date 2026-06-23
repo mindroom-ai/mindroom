@@ -132,17 +132,27 @@ MindRoom does not host watcher loops, schedule watcher polls, or keep an agent t
 
 ### Kubernetes Hardened Mode
 
-Keep the trigger private key in a sidecar or CronJob.
+Keep the trigger private key outside the agent sandbox.
 
 Do not mount the private key into the agent sandbox.
 
 Store only the public key in MindRoom config.
 
-With Kubernetes workers, use `workers.kubernetes.extraContainers` and `workers.kubernetes.extraVolumes` to add watcher sidecars and secret volumes to generated worker pods.
+Kubernetes worker pods can scale to zero when idle.
+
+Worker `extraContainers` are bound to the generated worker pod lifecycle.
+
+Use `workers.kubernetes.extraContainers` and `workers.kubernetes.extraVolumes` only for worker-scoped helper behavior that should exist while a worker pod exists.
+
+Always-on polling watchers should run as a top-level runtime chart `extraContainer`, a CronJob, or an external deployment.
+
+With Kubernetes workers, use `workers.kubernetes.extraContainers` and `workers.kubernetes.extraVolumes` to add worker-scoped helper containers and secret volumes to generated worker pods.
 
 The extra volume is available to containers that explicitly mount it.
 
-In this example, the secret volume is mounted only by `campground-watcher`, not by `sandbox-runner`.
+In this example, the secret volume is mounted only by the worker-scoped `campground-watcher`, not by `sandbox-runner`.
+
+This example is not an always-on polling watcher deployment pattern.
 
 Put this in a `cluster/k8s/runtime` Helm values file passed with `helm -f`, not in `config.yaml`.
 

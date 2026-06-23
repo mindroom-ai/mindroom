@@ -75,15 +75,20 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
         raise HTTPException(status_code=409, detail="External trigger event is already in progress")
 
     payload = payload.model_copy(update={"event_id": event_id})
-    matrix_event_id = await execute_external_trigger(
-        client=cast("nio.AsyncClient", runtime.client),
-        trigger_id=trigger_id,
-        trigger=trigger,
-        payload=payload,
-        config=config,
-        runtime_paths=runtime_paths,
-        conversation_cache=cast("ConversationCacheProtocol", runtime.conversation_cache),
-    )
+    try:
+        matrix_event_id = await execute_external_trigger(
+            client=cast("nio.AsyncClient", runtime.client),
+            trigger_id=trigger_id,
+            trigger=trigger,
+            payload=payload,
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_cache=cast("ConversationCacheProtocol", runtime.conversation_cache),
+        )
+    except Exception:
+        store.release_nonce(trigger_id, signature_headers.nonce)
+        store.release_event_id(trigger_id, event_id)
+        raise
     if matrix_event_id is None:
         store.release_nonce(trigger_id, signature_headers.nonce)
         store.release_event_id(trigger_id, event_id)
