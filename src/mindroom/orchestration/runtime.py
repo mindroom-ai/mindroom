@@ -17,11 +17,11 @@ from mindroom.cancellation import (
     SYNC_RESTART_CANCEL_MSG,
     USER_STOP_CANCEL_MSG,
     CancelSource,
+    TaskCancelSource,
     cancel_failure_reason,
     cancel_source_from_failure_reason,
     classify_cancel_source,
     request_task_cancel,
-    task_cancel_source_from_message,
 )
 from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
@@ -31,6 +31,7 @@ from mindroom.matrix.health import (
     matrix_versions_url,
     response_has_matrix_versions,
 )
+from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, SYNC_RESTART_SHUTDOWN, shutdown_intent_for_entity
 from mindroom.runtime_state import set_runtime_starting
 from mindroom.startup_errors import PermanentStartupError
 
@@ -91,7 +92,6 @@ __all__ = [
     "run_with_retry",
     "stop_entities",
     "sync_forever_with_restart",
-    "task_cancel_source_from_message",
     "wait_for_matrix_homeserver",
 ]
 
@@ -192,12 +192,12 @@ async def cancel_task(
     task: asyncio.Task | None,
     *,
     suppress_exceptions: tuple[type[BaseException], ...] = (asyncio.CancelledError,),
-    cancel_msg: str | None = None,
+    cancel_source: TaskCancelSource | None = None,
 ) -> None:
     """Cancel a detached task and wait for it to finish."""
     if task is None:
         return
-    request_task_cancel(task, cancel_source=task_cancel_source_from_message(cancel_msg))
+    request_task_cancel(task, cancel_source=cancel_source)
     with suppress(*suppress_exceptions):
         await task
 
@@ -499,22 +499,11 @@ async def cancel_sync_task(
     entity_name: str,
     sync_tasks: dict[str, asyncio.Task],
     *,
-    cancel_msg: str | None = None,
+    cancel_source: TaskCancelSource | None = None,
 ) -> None:
     """Cancel and remove a sync task for an entity."""
     task = sync_tasks.pop(entity_name, None)
-    await cancel_task(task, cancel_msg=cancel_msg)
-
-
-async def _prepare_for_sync_shutdown(
-    bot: AgentBot | TeamBot,
-    *,
-    sync_restart: bool,
-) -> None:
-    if sync_restart:
-        await bot.prepare_for_sync_shutdown(cancel_msg=SYNC_RESTART_CANCEL_MSG)
-        return
-    await bot.prepare_for_sync_shutdown()
+    await cancel_task(task, cancel_source=cancel_source)
 
 
 async def stop_entities(
@@ -526,22 +515,26 @@ async def stop_entities(
 ) -> None:
     """Stop a set of entities and remove them from runtime maps."""
     restart_entities = set() if restart_entities is None else restart_entities
+    shutdown_intents = {
+        entity_name: shutdown_intent_for_entity(entity_name, restart_entities=restart_entities)
+        for entity_name in entities_to_stop
+    }
     # Stop sync loops before certifying callback drains; otherwise fresh callbacks can
     # appear after the checkpoint decision.
     for entity_name in entities_to_stop:
-        cancel_msg = SYNC_RESTART_CANCEL_MSG if entity_name in restart_entities else None
-        await cancel_sync_task(entity_name, sync_tasks, cancel_msg=cancel_msg)
+        await cancel_sync_task(
+            entity_name,
+            sync_tasks,
+            cancel_source=shutdown_intents[entity_name].cancel_source,
+        )
 
     for entity_name in entities_to_stop:
         bot = agent_bots.get(entity_name)
         if bot is not None:
-            await _prepare_for_sync_shutdown(bot, sync_restart=entity_name in restart_entities)
+            await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intents[entity_name])
 
     stop_tasks = [
-        agent_bots[entity_name].stop(
-            reason="restart" if entity_name in restart_entities else "entity_removed",
-            cancel_msg=SYNC_RESTART_CANCEL_MSG if entity_name in restart_entities else None,
-        )
+        agent_bots[entity_name].stop(shutdown_intent=shutdown_intents[entity_name])
         for entity_name in entities_to_stop
         if entity_name in agent_bots
     ]
@@ -592,7 +585,8 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             if iteration is not None:
                 await iteration.cancel()
                 will_retry = retry_after_cleanup and bot.running and (max_retries < 0 or retry_count < max_retries)
-                await _prepare_for_sync_shutdown(bot, sync_restart=will_retry or sync_restart_cancelled)
+                shutdown_intent = SYNC_RESTART_SHUTDOWN if will_retry or sync_restart_cancelled else GENERIC_SHUTDOWN
+                await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
 
         if not bot.running:
             break

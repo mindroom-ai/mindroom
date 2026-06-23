@@ -252,8 +252,8 @@ async def _noop_try_start(self: AgentBot) -> bool:
     return True
 
 
-async def _noop_stop(self: AgentBot, reason: str = "shutdown", cancel_msg: str | None = None) -> None:
-    del reason, cancel_msg
+async def _noop_stop(self: AgentBot, *, shutdown_intent: object | None = None) -> None:
+    del shutdown_intent
     self.running = False
 
 

@@ -105,10 +105,14 @@ class _FakeBot:
                 self.first_call_cancel_args = exc.args
             raise
 
-    async def prepare_for_sync_shutdown(self, *, cancel_msg: str | None = None) -> None:
+    async def prepare_for_sync_shutdown(
+        self,
+        *,
+        shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+    ) -> None:
         self._sync_shutting_down = True
         self.prepare_for_sync_shutdown_calls += 1
-        self.prepare_for_sync_shutdown_cancel_messages.append(cancel_msg)
+        self.prepare_for_sync_shutdown_cancel_messages.append(shutdown_intent.cancel_source)
 
 
 @pytest.mark.asyncio
@@ -147,7 +151,7 @@ async def test_sync_forever_cancels_iteration_before_checkpoint_shutdown(monkeyp
     bot = _FakeBot()
     call_order: list[str] = []
 
-    async def prepare_for_sync_shutdown() -> None:
+    async def prepare_for_sync_shutdown(**_kwargs: object) -> None:
         call_order.append("prepare")
 
     class FakeIteration:
@@ -800,10 +804,10 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
     assert task2.cancelled()
     assert not task3.cancelled()
 
-    mock_bot1.prepare_for_sync_shutdown.assert_awaited_once()
-    mock_bot2.prepare_for_sync_shutdown.assert_awaited_once()
-    mock_bot1.stop.assert_called_once_with(reason="restart", cancel_msg=SYNC_RESTART_CANCEL_MSG)
-    mock_bot2.stop.assert_called_once_with(reason="restart", cancel_msg=SYNC_RESTART_CANCEL_MSG)
+    mock_bot1.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    mock_bot2.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    mock_bot1.stop.assert_called_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    mock_bot2.stop.assert_called_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
     assert "agent1" not in agent_bots
     assert "agent2" not in agent_bots
@@ -831,15 +835,15 @@ async def test_stop_entities_uses_generic_shutdown_for_removed_entities() -> Non
         "restart": asyncio.create_task(asyncio.sleep(60)),
         "removed": asyncio.create_task(asyncio.sleep(60)),
     }
-    cancel_messages: list[tuple[str, str | None]] = []
+    cancel_sources: list[tuple[str, str | None]] = []
 
     async def fake_cancel_sync_task(
         entity_name: str,
         _sync_tasks: dict[str, asyncio.Task],
         *,
-        cancel_msg: str | None = None,
+        cancel_source: str | None = None,
     ) -> None:
-        cancel_messages.append((entity_name, cancel_msg))
+        cancel_sources.append((entity_name, cancel_source))
         task = _sync_tasks.pop(entity_name)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -847,19 +851,19 @@ async def test_stop_entities_uses_generic_shutdown_for_removed_entities() -> Non
     with patch("mindroom.orchestration.runtime.cancel_sync_task", side_effect=fake_cancel_sync_task):
         await stop_entities({"restart", "removed"}, agent_bots, sync_tasks, restart_entities={"restart"})
 
-    assert sorted(cancel_messages) == [
+    assert sorted(cancel_sources) == [
         ("removed", None),
-        ("restart", SYNC_RESTART_CANCEL_MSG),
+        ("restart", "sync_restart"),
     ]
-    removed_bot.prepare_for_sync_shutdown.assert_awaited_once_with()
-    removed_bot.stop.assert_awaited_once_with(reason="entity_removed", cancel_msg=None)
-    restart_bot.prepare_for_sync_shutdown.assert_awaited_once_with(cancel_msg=SYNC_RESTART_CANCEL_MSG)
-    restart_bot.stop.assert_awaited_once_with(reason="restart", cancel_msg=SYNC_RESTART_CANCEL_MSG)
+    removed_bot.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
+    removed_bot.stop.assert_awaited_once_with(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
+    restart_bot.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    restart_bot.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
 
 @pytest.mark.asyncio
-async def test_agent_bot_stop_preserves_restart_shutdown_cancel_message() -> None:
-    """AgentBot.stop(reason="restart") must keep restart provenance for final drains."""
+async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
+    """AgentBot.stop() must keep restart provenance for final drains."""
     bot = object.__new__(AgentBot)
     bot.agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -880,9 +884,10 @@ async def test_agent_bot_stop_preserves_restart_shutdown_cancel_message() -> Non
     bot.prepare_for_sync_shutdown = AsyncMock()
     bot._emit_agent_lifecycle_event = AsyncMock()
 
-    await AgentBot.stop(bot, reason="restart", cancel_msg=SYNC_RESTART_CANCEL_MSG)
+    await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
-    bot.prepare_for_sync_shutdown.assert_awaited_once_with(cancel_msg=SYNC_RESTART_CANCEL_MSG)
+    bot._emit_agent_lifecycle_event.assert_awaited_once_with("agent:stopped", stop_reason="restart")
+    bot.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
 
 @pytest.mark.asyncio
@@ -920,17 +925,17 @@ async def test_stop_entities_completes_with_real_supervisor_task(monkeypatch: py
     assert supervisor_task.done()
     assert bot.prepare_for_sync_shutdown_calls >= 2
     assert bot.prepare_for_sync_shutdown_cancel_messages[:2] == [
-        SYNC_RESTART_CANCEL_MSG,
-        SYNC_RESTART_CANCEL_MSG,
+        "sync_restart",
+        "sync_restart",
     ]
-    bot.stop.assert_awaited_once_with(reason="restart", cancel_msg=SYNC_RESTART_CANCEL_MSG)
+    bot.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
 
 @pytest.mark.asyncio
 async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> None:
     """Restart teardown should stop sync callbacks before checkpoint drain can certify."""
     call_order: list[tuple[str, str]] = []
-    cancel_messages: list[tuple[str, str | None]] = []
+    cancel_sources: list[tuple[str, str | None]] = []
 
     mock_bot1 = AsyncMock()
     mock_bot1.prepare_for_sync_shutdown = AsyncMock(
@@ -957,10 +962,10 @@ async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> 
         entity_name: str,
         _sync_tasks: dict[str, asyncio.Task],
         *,
-        cancel_msg: str | None = None,
+        cancel_source: str | None = None,
     ) -> None:
         call_order.append(("cancel", entity_name))
-        cancel_messages.append((entity_name, cancel_msg))
+        cancel_sources.append((entity_name, cancel_source))
         task = _sync_tasks.pop(entity_name)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -974,12 +979,12 @@ async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> 
     assert prepare_indexes
     assert cancel_indexes
     assert max(cancel_indexes) < min(prepare_indexes)
-    assert sorted(cancel_messages) == [
-        ("agent1", SYNC_RESTART_CANCEL_MSG),
-        ("agent2", SYNC_RESTART_CANCEL_MSG),
+    assert sorted(cancel_sources) == [
+        ("agent1", "sync_restart"),
+        ("agent2", "sync_restart"),
     ]
-    mock_bot1.prepare_for_sync_shutdown.assert_awaited_once_with(cancel_msg=SYNC_RESTART_CANCEL_MSG)
-    mock_bot2.prepare_for_sync_shutdown.assert_awaited_once_with(cancel_msg=SYNC_RESTART_CANCEL_MSG)
+    mock_bot1.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    mock_bot2.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
 
 @pytest.mark.asyncio

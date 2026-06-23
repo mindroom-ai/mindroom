@@ -40,7 +40,6 @@ from mindroom.orchestration.runtime import (
     log_cancelled_response,
     log_cancelled_response_source,
     request_task_cancel,
-    task_cancel_source_from_message,
 )
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
@@ -89,6 +88,7 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
 
     from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.cancellation import TaskCancelSource
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -382,7 +382,7 @@ class ResponseRunner:
         self,
         *,
         cancel_after_seconds: float | None = None,
-        cancel_msg: str | None = None,
+        cancel_source: TaskCancelSource | None = None,
     ) -> bool:
         """Settle detached inbox responses: graceful drains await, bounded drains cancel.
 
@@ -399,7 +399,6 @@ class ResponseRunner:
         _done, pending = await asyncio.wait(tasks, timeout=cancel_after_seconds)
         if not pending:
             return True
-        cancel_source = task_cancel_source_from_message(cancel_msg)
         for task in pending:
             request_task_cancel(task, cancel_source=cancel_source)
         await asyncio.wait(pending, timeout=cancel_after_seconds)

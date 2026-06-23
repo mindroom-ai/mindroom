@@ -15473,7 +15473,7 @@ class TestMultiAgentOrchestrator:
             assert decision.status == "expired"
             assert decision.reason == "MindRoom shut down before approval completed."
             assert router_bot.running is False
-            router_bot.stop.assert_awaited_once_with(reason="shutdown")
+            router_bot.stop.assert_awaited_once_with()
         finally:
             allow_send_to_finish.set()
             if task is not None and not task.done():

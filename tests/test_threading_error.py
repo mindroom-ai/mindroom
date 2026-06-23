@@ -1902,7 +1902,7 @@ class TestThreadingBehavior:
                 await bot.start()
                 assert bot.client is start_client
 
-                await bot.stop(reason="test")
+                await bot.stop()
 
             await support.event_cache.store_event(
                 "$post-stop-event",
@@ -1997,7 +1997,7 @@ class TestThreadingBehavior:
                 patch.object(bot, "prepare_for_sync_shutdown", AsyncMock()),
                 patch("mindroom.bot.wait_for_background_tasks", AsyncMock()),
             ):
-                await bot.stop(reason="test")
+                await bot.stop()
 
             cached_event = await other_bot.event_cache.get_event("!test:localhost", "$shared-event")
         finally:
@@ -3338,7 +3338,7 @@ class TestThreadingBehavior:
             await wait_for_background_tasks(timeout=0.05, owner=owner)
 
     @pytest.mark.asyncio
-    async def test_wait_for_background_tasks_timeout_preserves_cancel_message(self) -> None:
+    async def test_wait_for_background_tasks_timeout_preserves_cancel_source(self) -> None:
         """Timed-out owner task cancellation should preserve explicit cancellation provenance."""
         owner = object()
         task_started = asyncio.Event()
@@ -3358,7 +3358,7 @@ class TestThreadingBehavior:
         completed = await wait_for_background_tasks(
             timeout=0.0,
             owner=owner,
-            cancel_msg=SYNC_RESTART_CANCEL_MSG,
+            cancel_source="sync_restart",
         )
 
         assert completed is False

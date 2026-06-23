@@ -1252,7 +1252,7 @@ async def test_bounded_inbox_drain_preserves_cancel_message(tmp_path: Path) -> N
     try:
         completed = await runner.drain_inbox_responses(
             cancel_after_seconds=0.05,
-            cancel_msg=SYNC_RESTART_CANCEL_MSG,
+            cancel_source="sync_restart",
         )
     finally:
         if not task.done():
