@@ -478,6 +478,43 @@ def test_initialize_api_app_clears_external_trigger_runtime_on_runtime_change(
     assert config_lifecycle.app_state(api_main.app).external_trigger_runtime is None
 
 
+def test_external_trigger_rejects_runtime_bound_to_stale_config_generation(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trigger delivery is unavailable until the runtime is rebound for the current config."""
+    _bind_runtime()
+    original_generation = config_lifecycle.require_api_state(api_main.app).snapshot.generation
+    config_data = yaml.safe_load(trigger_api.runtime_paths.config_path.read_text(encoding="utf-8"))
+    config_data["agents"]["research"]["role"] = "changed role"
+    trigger_api.runtime_paths.config_path.write_text(yaml.dump(config_data), encoding="utf-8")
+
+    assert config_lifecycle.load_config_into_app(trigger_api.runtime_paths, api_main.app) is True
+    assert config_lifecycle.require_api_state(api_main.app).snapshot.generation > original_generation
+
+    body = _body(event_id="stale-runtime")
+    stale_response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(trigger_api.private_key, body=body, nonce="nonce-stale-runtime"),
+    )
+
+    assert stale_response.status_code == 503
+
+    async def execute_external_trigger(**_kwargs: object) -> str:
+        return "$matrix-event"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    _bind_runtime()
+    rebound_response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(trigger_api.private_key, body=body, nonce="nonce-rebound-runtime"),
+    )
+
+    assert rebound_response.status_code == 202
+
+
 @pytest.mark.asyncio
 async def test_concurrent_same_event_id_cannot_both_deliver(
     trigger_api: TriggerApiContext,

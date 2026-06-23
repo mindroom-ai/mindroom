@@ -82,6 +82,7 @@ class ExternalTriggerRuntime:
 
     client: object
     conversation_cache: object
+    config_generation: int
 
 
 @dataclass

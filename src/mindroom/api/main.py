@@ -491,9 +491,11 @@ def bind_orchestrator_knowledge_refresh_scheduler(
 
 def bind_external_trigger_runtime(api_app: FastAPI, client: object, conversation_cache: object) -> None:
     """Attach router Matrix delivery runtime to one API app."""
+    api_state = config_lifecycle.require_api_state(api_app)
     config_lifecycle.app_state(api_app).external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
         client=client,
         conversation_cache=conversation_cache,
+        config_generation=api_state.snapshot.generation,
     )
 
 

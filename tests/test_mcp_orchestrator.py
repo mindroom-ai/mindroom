@@ -489,6 +489,83 @@ async def test_disabling_external_trigger_target_unbinds_runtime_before_stop(tmp
 
 
 @pytest.mark.asyncio
+async def test_apply_config_update_plan_unbinds_disabled_trigger_target_from_previous_config(
+    tmp_path: Path,
+) -> None:
+    """Config reload should use the previous config when deciding whether to unbind trigger delivery."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config_with_external_trigger(tmp_path)
+    new_config = Config.validate_with_runtime(
+        {
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                },
+            },
+            "external_triggers": {
+                "campground": {
+                    "enabled": False,
+                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                    "target": {
+                        "room_id": "!campground:example.org",
+                        "agent": "code",
+                    },
+                },
+            },
+        },
+        _runtime_paths(tmp_path),
+    )
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
+        "code": MagicMock(spec=AgentBot),
+    }
+    plan = ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        configured_entities={ROUTER_AGENT_NAME, "code"},
+        entities_to_restart={"code"},
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+    external_trigger_runtime_bound = True
+
+    def unbind_external_trigger_runtime() -> None:
+        nonlocal external_trigger_runtime_bound
+        external_trigger_runtime_bound = False
+
+    async def fake_stop_entities(*_args: object, **_kwargs: object) -> None:
+        assert external_trigger_runtime_bound is False
+
+    with (
+        patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+        patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
+        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator.plugin_watch, "sync_roots"),
+        patch.object(orchestrator, "_activate_hook_registry"),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+        patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
+        patch.object(orchestrator, "_unbind_external_trigger_runtime", side_effect=unbind_external_trigger_runtime),
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=fake_stop_entities)),
+        patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(return_value=EntityStartResults())),
+        patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
+        patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+    ):
+        updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+    assert updated is True
+    assert external_trigger_runtime_bound is False
+
+
+@pytest.mark.asyncio
 async def test_router_removal_unbinds_external_trigger_runtime_before_cleanup(tmp_path: Path) -> None:
     """Router removal should clear external trigger runtime before cleaning up the old client."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))

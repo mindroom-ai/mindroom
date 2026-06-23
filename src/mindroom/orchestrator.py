@@ -1222,9 +1222,9 @@ class _MultiAgentOrchestrator:
         )
         await emit(self.hook_registry, EVENT_CONFIG_RELOADED, context)
 
-    async def _remove_deleted_entities(self, removed_entities: set[str]) -> None:
+    async def _remove_deleted_entities(self, removed_entities: set[str], *configs: Config | None) -> None:
         """Cancel, clean up, and unregister entities removed from config."""
-        self._unbind_external_trigger_runtime_if_delivery_affected(removed_entities)
+        self._unbind_external_trigger_runtime_if_delivery_affected(removed_entities, *configs)
         for entity_name in removed_entities:
             await self._cancel_bot_start_task(entity_name)
             await cancel_sync_task(entity_name, self._sync_tasks)
@@ -1264,12 +1264,17 @@ class _MultiAgentOrchestrator:
         self,
         plan: ConfigUpdatePlan,
         *,
+        current_config: Config | None = None,
         already_stopped_entities: set[str] | None = None,
     ) -> tuple[set[str], list[str], list[str]]:
         """Restart or create entities affected by the config change."""
         entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
         if entities_to_stop:
-            self._unbind_external_trigger_runtime_if_delivery_affected(entities_to_stop, self.config, plan.new_config)
+            self._unbind_external_trigger_runtime_if_delivery_affected(
+                entities_to_stop,
+                current_config or self.config,
+                plan.new_config,
+            )
             for entity_name in entities_to_stop:
                 await self._cancel_bot_start_task(entity_name)
             await stop_entities(
@@ -1291,7 +1296,7 @@ class _MultiAgentOrchestrator:
         for entity_name in removed_restarted_entities:
             self.agent_bots.pop(entity_name, None)
 
-        await self._remove_deleted_entities(plan.removed_entities)
+        await self._remove_deleted_entities(plan.removed_entities, current_config or self.config, plan.new_config)
         return changed_entities, start_results.retryable_entities, start_results.permanently_failed_entities
 
     async def _handle_mcp_catalog_change(self, server_id: str) -> None:
@@ -1429,6 +1434,7 @@ class _MultiAgentOrchestrator:
 
             changed_entities, retryable_entities, permanently_failed_entities = await self._restart_changed_entities(
                 plan,
+                current_config=current_config,
                 already_stopped_entities=pre_stopped_mcp_entities,
             )
             await self._reconcile_post_update_rooms(plan, changed_entities)
