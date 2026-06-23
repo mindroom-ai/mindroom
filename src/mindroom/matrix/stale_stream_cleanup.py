@@ -114,6 +114,25 @@ class _ScannedRoomMessageStates:
     auto_resume_target_event_ids: set[str]
 
 
+@dataclass(frozen=True)
+class _CleanupScanPolicy:
+    """History scan bounds for one startup stale-stream cleanup run."""
+
+    startup_cutoff_ms: int | None
+    collect_terminal_interrupted_for_resume: bool
+    max_extra_old_pages: int
+
+
+def _cleanup_scan_policy(config: Config, *, startup_cutoff_ms: int | None) -> _CleanupScanPolicy:
+    """Return history scan policy for one stale-stream cleanup run."""
+    collect_terminal_interrupted_for_resume = config.defaults.auto_resume_after_restart
+    return _CleanupScanPolicy(
+        startup_cutoff_ms=startup_cutoff_ms,
+        collect_terminal_interrupted_for_resume=collect_terminal_interrupted_for_resume,
+        max_extra_old_pages=(MAX_AUTO_RESUME_AFTER_RESTART_THREADS if collect_terminal_interrupted_for_resume else 0),
+    )
+
+
 def _requester_resolution_message(
     *,
     event_id: str,
@@ -152,7 +171,7 @@ async def cleanup_stale_streaming_messages(
         return 0, []
 
     exact_bot_user_ids = {bot_user_id} if bot_user_ids is None else set(bot_user_ids)
-    collect_old_interrupted_threads = config.defaults.auto_resume_after_restart
+    scan_policy = _cleanup_scan_policy(config, startup_cutoff_ms=startup_cutoff_ms)
     cleaned_count = 0
     interrupted_threads: list[InterruptedThread] = []
 
@@ -166,8 +185,7 @@ async def cleanup_stale_streaming_messages(
                 config=config,
                 runtime_paths=runtime_paths,
                 conversation_cache=conversation_cache,
-                startup_cutoff_ms=startup_cutoff_ms,
-                collect_old_interrupted_threads=collect_old_interrupted_threads,
+                scan_policy=scan_policy,
             )
             cleaned_count += room_cleaned_count
             interrupted_threads.extend(room_interrupted_threads)
@@ -253,8 +271,7 @@ async def _cleanup_room_stale_streaming_messages(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
-    startup_cutoff_ms: int | None = None,
-    collect_old_interrupted_threads: bool = False,
+    scan_policy: _CleanupScanPolicy,
 ) -> tuple[int, list[InterruptedThread]]:
     """Clean stale bot messages in one room."""
     current_time_ms = int(time.time() * 1000)
@@ -266,7 +283,7 @@ async def _cleanup_room_stale_streaming_messages(
         config=config,
         runtime_paths=runtime_paths,
         now_ms=current_time_ms,
-        collect_old_interrupted_threads=collect_old_interrupted_threads,
+        scan_policy=scan_policy,
     )
     message_states = scanned_state.message_states
     if not message_states:
@@ -288,8 +305,7 @@ async def _cleanup_room_stale_streaming_messages(
         if _should_skip_for_startup_cleanup_window(
             state,
             now_ms=current_time_ms,
-            startup_cutoff_ms=startup_cutoff_ms,
-            collect_old_interrupted_threads=collect_old_interrupted_threads,
+            scan_policy=scan_policy,
         ):
             continue
 
@@ -521,7 +537,7 @@ async def _scan_room_message_states(
     config: Config,
     runtime_paths: RuntimePaths,
     now_ms: int,
-    collect_old_interrupted_threads: bool,
+    scan_policy: _CleanupScanPolicy,
 ) -> _ScannedRoomMessageStates:
     """Scan room history and return latest state by original event ID."""
     message_states, message_events = await _collect_room_history_events(
@@ -529,8 +545,7 @@ async def _scan_room_message_states(
         room_id=room_id,
         bot_user_id=bot_user_id,
         now_ms=now_ms,
-        scan_past_cleanup_window=collect_old_interrupted_threads,
-        extra_lookback_pages=MAX_AUTO_RESUME_AFTER_RESTART_THREADS if collect_old_interrupted_threads else 0,
+        scan_policy=scan_policy,
     )
 
     trusted_sender_ids = _cleanup_trusted_sender_ids(
@@ -625,8 +640,7 @@ async def _collect_room_history_events(
     room_id: str,
     bot_user_id: str,
     now_ms: int,
-    scan_past_cleanup_window: bool,
-    extra_lookback_pages: int,
+    scan_policy: _CleanupScanPolicy,
 ) -> tuple[dict[str, _MessageState], list[nio.RoomMessageText]]:
     """Return room history text events plus tracked stop reactions."""
     message_states: dict[str, _MessageState] = {}
@@ -676,9 +690,8 @@ async def _collect_room_history_events(
         lookback_pages_scanned, stop_scan = _lookback_scan_state(
             response.chunk,
             now_ms=now_ms,
-            scan_past_cleanup_window=scan_past_cleanup_window,
+            scan_policy=scan_policy,
             lookback_pages_scanned=lookback_pages_scanned,
-            extra_lookback_pages=extra_lookback_pages,
         )
         if stop_scan:
             break
@@ -1484,17 +1497,16 @@ def _should_skip_for_startup_cleanup_window(
     state: _MessageState,
     *,
     now_ms: int,
-    startup_cutoff_ms: int | None = None,
-    collect_old_interrupted_threads: bool,
+    scan_policy: _CleanupScanPolicy,
 ) -> bool:
     """Return whether startup cleanup should ignore one candidate by age."""
     timestamp_ms = state.latest_timestamp
-    if _is_at_or_after_startup_cutoff(timestamp_ms, startup_cutoff_ms=startup_cutoff_ms):
+    if _is_at_or_after_startup_cutoff(timestamp_ms, startup_cutoff_ms=scan_policy.startup_cutoff_ms):
         return True
     if _is_recent_timestamp(timestamp_ms, now_ms=now_ms):
         return True
     if _is_older_than_cleanup_window(timestamp_ms, now_ms=now_ms):
-        return not (collect_old_interrupted_threads and _has_resumable_interrupted_note(state))
+        return not (scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(state))
     return False
 
 
@@ -1528,17 +1540,16 @@ def _lookback_scan_state(
     events: list[object],
     *,
     now_ms: int,
-    scan_past_cleanup_window: bool,
+    scan_policy: _CleanupScanPolicy,
     lookback_pages_scanned: int,
-    extra_lookback_pages: int,
 ) -> tuple[int, bool]:
     """Return updated old-page count and whether history pagination should stop."""
     if not _chunk_reaches_cleanup_lookback_limit(events, now_ms=now_ms):
         return lookback_pages_scanned, False
-    if not scan_past_cleanup_window:
+    if not scan_policy.collect_terminal_interrupted_for_resume:
         return lookback_pages_scanned, True
     updated_count = lookback_pages_scanned + 1
-    return updated_count, updated_count >= extra_lookback_pages
+    return updated_count, updated_count >= scan_policy.max_extra_old_pages
 
 
 def _build_auto_resume_content(
