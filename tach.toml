@@ -2013,6 +2013,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.cli.trigger"
+depends_on = [
+    "mindroom.cli.config",
+    "mindroom.external_triggers.auth",
+]
+visibility = ["mindroom.cli.main"]
+
+[[modules]]
 path = "mindroom.cli.main"
 depends_on = [
     "mindroom",
@@ -2024,6 +2032,7 @@ depends_on = [
     "mindroom.cli.local_stack",
     "mindroom.cli.migrate",
     "mindroom.cli.service",
+    "mindroom.cli.trigger",
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.error_handling",
