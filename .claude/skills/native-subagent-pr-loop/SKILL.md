@@ -8,7 +8,7 @@ description: Use when the user asks for native Codex sub-agents, parallel PR rev
 ## Core Rule
 
 The main thread owns all repository mutations.
-Native subagents provide bounded analysis, task work, or review, but review findings are untrusted until the main thread verifies them against current code.
+Native subagents provide bounded analysis or review, but review findings are untrusted until the main thread verifies them against current code.
 After each fix, use fresh read-only reviewers with neutral prompts.
 
 ## Use When
@@ -28,12 +28,12 @@ After each fix, use fresh read-only reviewers with neutral prompts.
 1. Pin context.
    Read repo instructions, check `git status --short --branch`, identify base/head, and keep the active branch unless a separate branch is clearly safer.
    In this repo, never create `codex/...` branches.
-2. Implement in main thread.
+2. Implement in the main thread.
    The main thread edits, verifies, stages targeted files only, commits, and pushes.
    Do not use `git add .`, amend, or force-push unless the user explicitly asks.
-3. Use task subagents only for bounded, non-overlapping work.
-   If a subagent edits code, give it a disjoint ownership area and say other agents may also be working.
-   The main thread still reviews and integrates the result.
+3. Use task subagents only for bounded, non-overlapping analysis or review.
+   Subagents must not edit repository files.
+   The main thread applies any verified changes.
 4. After each pushed step, start two fresh native Codex PR-review agents.
    Use read-only prompts, attach `pr-review` when reviewing merge readiness, and tell them not to edit, commit, push, or inspect CI if the user excluded CI.
 5. Treat findings as claims.
@@ -42,8 +42,9 @@ After each fix, use fresh read-only reviewers with neutral prompts.
    Classify stale, incorrect, overreaching, or duplicate findings instead of patching blindly.
 6. Repeat after any fix.
    Commit and push the main-thread fix, close old reviewers, then launch fresh reviewers against the new head.
+   After every third review round that still finds many issues or a new major bug class, stop patching and reconsider the design before another patch round.
 7. Stop only when both fresh reviewers approve the same head.
-   Confirm worktree clean and remote branch matches local head.
+   Confirm the worktree is clean and the remote branch matches the local head.
 
 ## Bias Firewall
 
@@ -89,7 +90,7 @@ If no blockers, say APPROVE and no findings.
 - Wait for both reviewers before declaring the loop clean.
 - One approval is not enough if the other reviewer is still running.
 - If any reviewer says `CHANGES REQUIRED`, verify the claim before editing.
-- If the claim is real, fix it in main thread, run focused verification, commit, push, and start a new review loop.
+- If the claim is real, fix it in the main thread, run focused verification, commit, push, and start a new review loop.
 - If the claim is stale or wrong, record the reason and continue evaluating the other findings.
 - Close completed subagents after their results are no longer needed.
 
