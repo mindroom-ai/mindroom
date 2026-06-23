@@ -109,6 +109,16 @@ _EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
 )
 _EXTRA_VOLUME_SOURCE_KEYS = frozenset({"secret", "configMap", "emptyDir", "projected"})
 _EXTRA_VOLUME_ALLOWED_KEYS = frozenset({"name", *_EXTRA_VOLUME_SOURCE_KEYS})
+_RESERVED_EXTRA_CONTAINER_NAMES = frozenset({"sandbox-runner", "agent-vault-mint-token"})
+_RESERVED_EXTRA_VOLUME_NAMES = frozenset(
+    {
+        "worker-storage",
+        "worker-config",
+        "agent-vault-token",
+        "agent-vault-bootstrap",
+        "agent-vault-ca",
+    },
+)
 
 
 def is_kubernetes_worker_backend_config_env_name(name: str) -> bool:
@@ -144,6 +154,23 @@ def _validate_required_string(item: dict[str, object], env_name: str, index: int
         raise WorkerBackendError(msg)
 
 
+def _validate_unique_names(
+    items: tuple[dict[str, object], ...],
+    env_name: str,
+    reserved_names: frozenset[str],
+) -> None:
+    seen_names: set[str] = set()
+    for index, item in enumerate(items):
+        name = cast("str", item["name"]).strip()
+        if name in reserved_names:
+            msg = f"{env_name}[{index}].name must not use reserved name: {name}."
+            raise WorkerBackendError(msg)
+        if name in seen_names:
+            msg = f"{env_name}[{index}].name duplicates an earlier item: {name}."
+            raise WorkerBackendError(msg)
+        seen_names.add(name)
+
+
 def _read_extra_containers_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
     containers = _read_json_object_list_env(env, _EXTRA_CONTAINERS_JSON_ENV)
     for index, container in enumerate(containers):
@@ -154,6 +181,7 @@ def _read_extra_containers_env(env: Mapping[str, str]) -> tuple[dict[str, object
             raise WorkerBackendError(msg)
         _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "name")
         _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "image")
+    _validate_unique_names(containers, _EXTRA_CONTAINERS_JSON_ENV, _RESERVED_EXTRA_CONTAINER_NAMES)
     return containers
 
 
@@ -170,6 +198,7 @@ def _read_extra_volumes_env(env: Mapping[str, str]) -> tuple[dict[str, object], 
         if len(source_keys) != 1:
             msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}] must set exactly one of secret, configMap, emptyDir, projected."
             raise WorkerBackendError(msg)
+    _validate_unique_names(volumes, _EXTRA_VOLUMES_JSON_ENV, _RESERVED_EXTRA_VOLUME_NAMES)
     return volumes
 
 

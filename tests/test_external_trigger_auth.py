@@ -177,6 +177,32 @@ def test_timestamp_outside_replay_window_fails() -> None:
         )
 
 
+def test_future_timestamp_fails_before_nonce_can_outlive_claim() -> None:
+    """Future-dated requests must not remain replayable after nonce TTL expiry."""
+    private_key = _private_key()
+    headers = sign_trigger_request(
+        method="POST",
+        path="/api/external-triggers/campground",
+        body=b"{}",
+        key_id="campground-main",
+        timestamp="1710000001",
+        nonce="nonce-1",
+        private_key=private_key,
+    )
+
+    with pytest.raises(TriggerAuthError, match="timestamp"):
+        verify_trigger_request(
+            method="POST",
+            path="/api/external-triggers/campground",
+            body=b"{}",
+            headers=TriggerSignatureHeaders.from_mapping(headers),
+            expected_key_id="campground-main",
+            public_key_b64=_public_key_b64(private_key),
+            replay_window_seconds=300,
+            now=1710000000,
+        )
+
+
 def test_missing_required_header_fails() -> None:
     """All signature headers are required."""
     private_key = _private_key()

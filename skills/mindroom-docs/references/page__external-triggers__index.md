@@ -118,7 +118,7 @@ Each nonce-bearing HTTP request is single-use, even if delivery fails before Min
 
 Do not reuse the same HTTP request body and headers as a retry strategy.
 
-An in-progress event claim expires after the trigger `replay_window_seconds` to recover from process crashes.
+An in-progress event claim expires after one day to recover from process crashes without redelivering slow in-flight requests.
 
 After delivery succeeds, the `event_id` stays recorded for one day so duplicate retries do not post another Matrix message.
 
@@ -152,7 +152,7 @@ Worker `extraContainers` are bound to the generated worker pod lifecycle.
 
 Use `workers.kubernetes.extraContainers` and `workers.kubernetes.extraVolumes` only for worker-scoped helper behavior that should exist while a worker pod exists.
 
-Always-on polling watchers should run as a top-level runtime chart `extraContainer`, a CronJob, or an external deployment.
+Always-on polling watchers should run as a top-level runtime chart `extraContainers` entry, a CronJob, or an external deployment.
 
 With Kubernetes workers, use `workers.kubernetes.extraContainers` and `workers.kubernetes.extraVolumes` to add worker-scoped helper containers and secret volumes to generated worker pods.
 

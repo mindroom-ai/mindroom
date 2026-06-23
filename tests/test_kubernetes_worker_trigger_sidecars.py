@@ -190,11 +190,18 @@ def test_kubernetes_config_reads_trigger_sidecars_and_volumes_from_env(tmp_path:
         (_EXTRA_CONTAINERS_ENV, "[1]"),
         (_EXTRA_CONTAINERS_ENV, '[{"name":"trigger-listener"}]'),
         (_EXTRA_CONTAINERS_ENV, '[{"name":"trigger-listener","image":"busybox","ports":[]}]'),
+        (
+            _EXTRA_CONTAINERS_ENV,
+            '[{"name":"trigger-listener","image":"busybox"},{"name":"trigger-listener","image":"busybox"}]',
+        ),
+        (_EXTRA_CONTAINERS_ENV, '[{"name":"sandbox-runner","image":"busybox"}]'),
         (_EXTRA_VOLUMES_ENV, '{"name":"trigger-state","emptyDir":{}}'),
         (_EXTRA_VOLUMES_ENV, "[1]"),
         (_EXTRA_VOLUMES_ENV, '[{"name":"trigger-state"}]'),
         (_EXTRA_VOLUMES_ENV, '[{"name":"trigger-state","secret":{},"configMap":{}}]'),
         (_EXTRA_VOLUMES_ENV, '[{"name":"trigger-state","emptyDir":{},"hostPath":{"path":"/tmp"}}]'),
+        (_EXTRA_VOLUMES_ENV, '[{"name":"trigger-state","emptyDir":{}},{"name":"trigger-state","emptyDir":{}}]'),
+        (_EXTRA_VOLUMES_ENV, '[{"name":"worker-storage","emptyDir":{}}]'),
     ],
 )
 def test_kubernetes_config_rejects_invalid_trigger_sidecar_json(

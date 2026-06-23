@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
 from mindroom.cli.config import console
+from mindroom.external_triggers.auth import sign_trigger_request
 
 if TYPE_CHECKING:
     import httpx
@@ -108,7 +109,7 @@ def send(
     )
     timestamp = str(int(time.time()))
     nonce = secrets.token_hex(16)
-    headers = _sign_trigger_request(
+    headers = sign_trigger_request(
         method="POST",
         path=path,
         body=body,
@@ -162,29 +163,6 @@ def _decode_data_json(data_json: str | None) -> dict[str, object]:
     if not isinstance(data, dict):
         raise typer.BadParameter(_DATA_JSON_OBJECT_ERROR)
     return cast("dict[str, object]", data)
-
-
-def _sign_trigger_request(
-    *,
-    method: str,
-    path: str,
-    body: bytes,
-    key_id: str,
-    timestamp: str,
-    nonce: str,
-    private_key: Ed25519PrivateKey,
-) -> dict[str, str]:
-    from mindroom.external_triggers.auth import sign_trigger_request  # noqa: PLC0415
-
-    return sign_trigger_request(
-        method=method,
-        path=path,
-        body=body,
-        key_id=key_id,
-        timestamp=timestamp,
-        nonce=nonce,
-        private_key=private_key,
-    )
 
 
 def _load_private_key(key_file: Path) -> Ed25519PrivateKey:

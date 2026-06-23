@@ -20,7 +20,7 @@ from mindroom.dispatch_source import (
     source_kind_from_content,
 )
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.external_triggers.executor import build_external_trigger_message_text, execute_external_trigger
+from mindroom.external_triggers.executor import _build_external_trigger_message_text, execute_external_trigger
 from mindroom.external_triggers.models import ExternalTriggerPayload
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
@@ -90,7 +90,7 @@ def _conversation_cache(*, latest_thread_event_id: str | None = "$latest") -> As
 
 def test_build_external_trigger_message_text_mentions_agent_and_includes_payload_details() -> None:
     """External trigger text is built from configured target plus signed payload fields only."""
-    text = build_external_trigger_message_text(_trigger(), _payload())
+    text = _build_external_trigger_message_text(_trigger(), _payload())
 
     assert text == (
         "@research Campground opened\n\n"

@@ -41,6 +41,14 @@ class ExternalTriggerTargetConfig(BaseModel):
         """Reject empty agent or team targets."""
         return _non_empty_stripped(value, field_name="agent")
 
+    @field_validator("thread_id")
+    @classmethod
+    def validate_thread_id(cls, value: str | None) -> str | None:
+        """Reject empty Matrix thread IDs."""
+        if value is None:
+            return None
+        return _non_empty_stripped(value, field_name="thread_id")
+
 
 class ExternalTriggerConfig(BaseModel):
     """Configuration for one externally signed trigger ingress."""

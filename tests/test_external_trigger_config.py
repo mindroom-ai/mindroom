@@ -133,6 +133,35 @@ def test_external_trigger_rejects_empty_key_id() -> None:
     assert "key_id" in str(exc_info.value)
 
 
+@pytest.mark.parametrize("thread_id", ["", "   "])
+def test_external_trigger_rejects_empty_thread_id(thread_id: str) -> None:
+    """Blank configured thread IDs should fail before delivery builds Matrix relations."""
+    config_data = {
+        **_base_config(),
+        "agents": {
+            "mind": {
+                "display_name": "Mind",
+                "model": "default",
+            },
+        },
+        "external_triggers": {
+            "campground": {
+                "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "target": {
+                    "room_id": "!room:example.org",
+                    "thread_id": thread_id,
+                    "agent": "mind",
+                },
+            },
+        },
+    }
+
+    with pytest.raises(ValueError, match="thread_id") as exc_info:
+        Config.model_validate(config_data)
+
+    assert "thread_id" in str(exc_info.value)
+
+
 def test_external_trigger_requires_configured_agent_or_team_target() -> None:
     """External trigger targets must reference configured agents or teams."""
     config_data = {

@@ -25,7 +25,7 @@ _EXTERNAL_TRIGGER_KIND_KEY = "io.mindroom.external_trigger.kind"
 _EXTERNAL_TRIGGER_EVENT_ID_KEY = "io.mindroom.external_trigger.event_id"
 
 
-def build_external_trigger_message_text(trigger: ExternalTriggerConfig, payload: ExternalTriggerPayload) -> str:
+def _build_external_trigger_message_text(trigger: ExternalTriggerConfig, payload: ExternalTriggerPayload) -> str:
     """Build visible Matrix message text from a fixed trigger target and signed payload."""
     if payload.title:
         sections = [
@@ -66,7 +66,7 @@ async def execute_external_trigger(
     content = format_message_with_mentions(
         config,
         runtime_paths,
-        build_external_trigger_message_text(trigger, payload),
+        _build_external_trigger_message_text(trigger, payload),
         thread_event_id=thread_event_id,
         latest_thread_event_id=latest_thread_event_id,
         extra_content=_external_trigger_content_metadata(trigger_id, payload),

@@ -1269,7 +1269,7 @@ class _MultiAgentOrchestrator:
         """Restart or create entities affected by the config change."""
         entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
         if entities_to_stop:
-            self._unbind_external_trigger_runtime_if_delivery_affected(entities_to_stop, plan.new_config)
+            self._unbind_external_trigger_runtime_if_delivery_affected(entities_to_stop, self.config, plan.new_config)
             for entity_name in entities_to_stop:
                 await self._cancel_bot_start_task(entity_name)
             await stop_entities(

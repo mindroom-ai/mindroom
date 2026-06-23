@@ -144,7 +144,7 @@ def verify_trigger_request(
 
     signed_at = _parse_timestamp(signature_headers.timestamp)
     current_time = int(time.time()) if now is None else now
-    if abs(current_time - signed_at) > replay_window_seconds:
+    if signed_at > current_time or current_time - signed_at > replay_window_seconds:
         msg = "trigger signature timestamp outside replay window"
         raise TriggerAuthError(msg)
 
