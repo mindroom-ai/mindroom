@@ -1580,6 +1580,8 @@ async def test_cleanup_returns_restart_marked_terminal_thread_for_auto_resume(tm
     cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
 
     assert cleaned == 0
+    assert len(interrupted) == 1
+    assert interrupted[0].timestamp_ms == NOW_MS - STALE_AGE_MS
     assert interrupted == [
         InterruptedThread(
             room_id=ROOM_ID,
@@ -1631,6 +1633,171 @@ async def test_cleanup_returns_generic_interrupted_thread_from_graceful_restart(
     assert cleaned == 0
     assert [thread.target_event_id for thread in interrupted] == ["$interrupted"]
     assert interrupted[0].partial_text == "Partial answer"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_returns_old_terminal_interrupted_thread_for_auto_resume(tmp_path: Path) -> None:
+    """Old terminal interrupted replies should still resume; only in-progress stale streams age out."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - 20_000,
+        ),
+        _make_message_event(
+            event_id="$old-interrupted",
+            body="Partial answer\n\n**[Response interrupted]**",
+            timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert len(interrupted) == 1
+    assert interrupted[0].timestamp_ms == NOW_MS - OLD_STALE_AGE_MS
+    assert interrupted == [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-root",
+            target_event_id="$old-interrupted",
+            partial_text="Partial answer",
+            agent_name="test_agent",
+            original_sender_id=USER_ID,
+            timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_scans_past_lookback_page_for_old_terminal_interruption(tmp_path: Path) -> None:
+    """A busy room may push old terminal interrupted notes behind a lookback-crossing page."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _room_messages_response(
+                _make_message_event(
+                    event_id="$old-filler",
+                    body="Later unrelated chatter",
+                    sender=USER_ID,
+                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
+                ),
+                end="older-page",
+            ),
+            _room_messages_response(
+                _make_message_event(
+                    event_id="$thread-root",
+                    body="Question",
+                    sender=USER_ID,
+                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - 20_000,
+                ),
+                _make_message_event(
+                    event_id="$old-interrupted",
+                    body="Partial answer\n\n**[Response interrupted]**",
+                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - 10_000,
+                    relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED},
+                ),
+            ),
+        ],
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert client.room_messages.await_count == 2
+    assert [thread.target_event_id for thread in interrupted] == ["$old-interrupted"]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_stops_at_lookback_page_when_auto_resume_disabled(tmp_path: Path) -> None:
+    """Default startup cleanup must not full-scan busy rooms when no resume relay will be queued."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _room_messages_response(
+                _make_message_event(
+                    event_id="$old-filler",
+                    body="Later unrelated chatter",
+                    sender=USER_ID,
+                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
+                ),
+                end="older-page",
+            ),
+            _room_messages_response(
+                _make_message_event(
+                    event_id="$old-interrupted",
+                    body="Partial answer\n\n**[Response interrupted]**",
+                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - 10_000,
+                    relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED},
+                ),
+            ),
+        ],
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    assert client.room_messages.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_caps_old_terminal_interruption_scan_when_auto_resume_enabled(tmp_path: Path) -> None:
+    """Auto-resume opt-in may scan past the outage window, but never the whole room history."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    old_pages = [
+        _room_messages_response(
+            _make_message_event(
+                event_id=f"$old-filler-{page_number}",
+                body="Later unrelated chatter",
+                sender=USER_ID,
+                timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - page_number,
+            ),
+            end=f"old-page-{page_number}",
+        )
+        for page_number in range(1, 13)
+    ]
+    client.room_messages = AsyncMock(
+        side_effect=[
+            *old_pages,
+            _room_messages_response(
+                _make_message_event(
+                    event_id="$too-deep-interrupted",
+                    body="Partial answer\n\n**[Response interrupted]**",
+                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - 20_000,
+                    relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED},
+                ),
+            ),
+        ],
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    assert client.room_messages.await_count == 10
 
 
 @pytest.mark.asyncio
@@ -2366,6 +2533,7 @@ async def test_orchestrator_auto_resume_uses_router_client(tmp_path: Path) -> No
     assert mock_auto_resume.await_args.args[1] == interrupted
     assert mock_auto_resume.await_args.kwargs["config"] == config
     assert mock_auto_resume.await_args.kwargs["runtime_paths"] == runtime_paths_for(config)
+    assert mock_auto_resume.await_args.kwargs["max_resumes"] == 10
 
 
 @pytest.mark.asyncio

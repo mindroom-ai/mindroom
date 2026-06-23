@@ -60,6 +60,7 @@ from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
+from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN, GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.tool_approval import is_process_active_approval_card
@@ -1422,9 +1423,13 @@ class AgentBot:
             self.logger.exception("Error leaving rooms during cleanup")
 
         # Stop the bot
-        await self.stop(reason="entity_removed")
+        await self.stop(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
 
-    async def stop(self, *, reason: str | None = None) -> None:
+    async def stop(
+        self,
+        *,
+        shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+    ) -> None:
         """Stop the agent bot."""
         self.running = False
         self.last_sync_time = None
@@ -1433,9 +1438,9 @@ class AgentBot:
         self._room_member_join_hooks_armed = False
         self._room_member_callback_registered = False
         clear_matrix_sync_state(self.agent_name)
-        await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=reason)
+        await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=shutdown_intent.stop_reason)
 
-        await self.prepare_for_sync_shutdown()
+        await self.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
 
         if self.agent_name == ROUTER_AGENT_NAME:
             cleared_queued_tasks = clear_deferred_overdue_tasks()
@@ -1514,16 +1519,34 @@ class AgentBot:
 
         await asyncio.gather(prewarm_task, return_exceptions=True)
 
-    async def prepare_for_sync_shutdown(self) -> None:
+    async def prepare_for_sync_shutdown(
+        self,
+        *,
+        shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+    ) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
         if self.agent_name == ROUTER_AGENT_NAME:
             await self._cancel_deferred_overdue_task_drain()
-        background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
-        drain_result = await self._coalescing_gate.drain_all(ready_timeout_seconds=5.0)
-        responses_drained = await self._response_runner.drain_inbox_responses(cancel_after_seconds=5.0)
-        post_drain_background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
+        background_tasks_completed = await wait_for_background_tasks(
+            timeout=5.0,
+            owner=self._runtime_view,
+            shutdown_intent=shutdown_intent,
+        )
+        drain_result = await self._coalescing_gate.drain_all(
+            ready_timeout_seconds=5.0,
+            shutdown_intent=shutdown_intent,
+        )
+        responses_drained = await self._response_runner.drain_inbox_responses(
+            cancel_after_seconds=5.0,
+            shutdown_intent=shutdown_intent,
+        )
+        post_drain_background_tasks_completed = await wait_for_background_tasks(
+            timeout=5.0,
+            owner=self._runtime_view,
+            shutdown_intent=shutdown_intent,
+        )
         callback_failure_count = self._runtime_view.callback_failure_count
         if (
             background_tasks_completed

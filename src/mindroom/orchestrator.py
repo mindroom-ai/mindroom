@@ -43,6 +43,7 @@ from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.rooms import ensure_all_rooms_exist, ensure_root_space, ensure_user_in_rooms
 from mindroom.matrix.stale_stream_cleanup import (
+    MAX_AUTO_RESUME_AFTER_RESTART_THREADS,
     InterruptedThread,
     auto_resume_interrupted_threads,
     cleanup_stale_streaming_messages,
@@ -61,6 +62,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling_executor import set_scheduling_hook_registry
 from mindroom.startup_errors import PermanentStartupError
@@ -1013,6 +1015,7 @@ class _MultiAgentOrchestrator:
                 config=config,
                 runtime_paths=self.runtime_paths,
                 conversation_cache=router_bot._conversation_cache,
+                max_resumes=MAX_AUTO_RESUME_AFTER_RESTART_THREADS,
             )
             if resumed_count > 0:
                 logger.info("Queued auto-resume messages after restart", count=resumed_count)
@@ -1182,7 +1185,12 @@ class _MultiAgentOrchestrator:
 
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
-        await stop_entities(affected_entities, self.agent_bots, self._sync_tasks)
+        await stop_entities(
+            affected_entities,
+            self.agent_bots,
+            self._sync_tasks,
+            restart_entities=affected_entities & set(configured_entity_names(new_config)),
+        )
         return affected_entities
 
     async def _restart_changed_entities(
@@ -1196,7 +1204,12 @@ class _MultiAgentOrchestrator:
         if entities_to_stop:
             for entity_name in entities_to_stop:
                 await self._cancel_bot_start_task(entity_name)
-            await stop_entities(entities_to_stop, self.agent_bots, self._sync_tasks)
+            await stop_entities(
+                entities_to_stop,
+                self.agent_bots,
+                self._sync_tasks,
+                restart_entities=entities_to_stop & plan.configured_entities,
+            )
 
         entities_to_recreate = plan.entities_to_restart & plan.configured_entities
         changed_entities = entities_to_recreate | plan.new_entities
@@ -1229,7 +1242,12 @@ class _MultiAgentOrchestrator:
             )
             for entity_name in changed_entities:
                 await self._cancel_bot_start_task(entity_name)
-            await stop_entities(changed_entities, self.agent_bots, self._sync_tasks)
+            await stop_entities(
+                changed_entities,
+                self.agent_bots,
+                self._sync_tasks,
+                restart_entities=changed_entities,
+            )
             start_results = await self._create_and_start_entities(
                 changed_entities,
                 self.config,
@@ -1635,7 +1653,7 @@ class _MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.running = False
 
-        stop_tasks = [bot.stop(reason="shutdown") for bot in self.agent_bots.values()]
+        stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         await self._close_runtime_support_services()
         logger.info("All agent bots stopped")

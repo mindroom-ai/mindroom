@@ -381,8 +381,8 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
         assert set(router_bot.rooms) == {"room1"}
 
         # Mock bot operations using monkeypatch to avoid method assignment errors
-        async def mock_stop(*, reason: str | None = None) -> None:
-            del reason
+        async def mock_stop(*, shutdown_intent: object | None = None) -> None:
+            del shutdown_intent
 
         async def mock_start() -> None:
             pass

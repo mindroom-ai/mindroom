@@ -30,6 +30,7 @@ import mindroom.timing as timing_module
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -79,6 +80,7 @@ from mindroom.matrix.thread_membership import (
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_runner import ResponseRequest
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
     StartupThreadPrewarmRegistry,
@@ -1901,7 +1903,7 @@ class TestThreadingBehavior:
                 await bot.start()
                 assert bot.client is start_client
 
-                await bot.stop(reason="test")
+                await bot.stop()
 
             await support.event_cache.store_event(
                 "$post-stop-event",
@@ -1996,7 +1998,7 @@ class TestThreadingBehavior:
                 patch.object(bot, "prepare_for_sync_shutdown", AsyncMock()),
                 patch("mindroom.bot.wait_for_background_tasks", AsyncMock()),
             ):
-                await bot.stop(reason="test")
+                await bot.stop()
 
             cached_event = await other_bot.event_cache.get_event("!test:localhost", "$shared-event")
         finally:
@@ -3335,6 +3337,67 @@ class TestThreadingBehavior:
         finally:
             allow_respawn = False
             await wait_for_background_tasks(timeout=0.05, owner=owner)
+
+    @pytest.mark.asyncio
+    async def test_wait_for_background_tasks_timeout_returns_when_task_suppresses_cancel(self) -> None:
+        """Timed-out draining should not hang on a task that ignores cancellation."""
+        owner = object()
+        task_started = asyncio.Event()
+        release_task = asyncio.Event()
+        cancel_count = 0
+
+        async def stubborn_task() -> None:
+            nonlocal cancel_count
+            task_started.set()
+            while not release_task.is_set():
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancel_count += 1
+                    if release_task.is_set():
+                        raise
+
+        task = create_background_task(stubborn_task(), name="stubborn_task", owner=owner)
+        await asyncio.wait_for(task_started.wait(), timeout=1.0)
+
+        try:
+            completed = await asyncio.wait_for(
+                wait_for_background_tasks(timeout=0.0, owner=owner),
+                timeout=1.0,
+            )
+            assert completed is False
+            assert cancel_count >= 1
+        finally:
+            release_task.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_wait_for_background_tasks_timeout_preserves_shutdown_intent(self) -> None:
+        """Timed-out owner task cancellation should preserve shutdown provenance."""
+        owner = object()
+        task_started = asyncio.Event()
+        cancelled_args: list[tuple[object, ...]] = []
+
+        async def never_finishes() -> None:
+            task_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError as exc:
+                cancelled_args.append(exc.args)
+                raise
+
+        create_background_task(never_finishes(), name="sync_restart_cancelled_task", owner=owner)
+        await asyncio.wait_for(task_started.wait(), timeout=1.0)
+
+        completed = await wait_for_background_tasks(
+            timeout=0.0,
+            owner=owner,
+            shutdown_intent=SYNC_RESTART_SHUTDOWN,
+        )
+
+        assert completed is False
+        assert cancelled_args == [(SYNC_RESTART_CANCEL_MSG,)]
 
     @pytest.mark.asyncio
     async def test_live_edit_cache_lookup_failure_does_not_raise(self, bot: AgentBot) -> None:

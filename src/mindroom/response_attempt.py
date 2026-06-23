@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.cancellation import request_task_cancel
+from mindroom.cancellation import request_task_cancel, task_cancel_source_from_message
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import bound_log_context
@@ -103,7 +103,10 @@ class ResponseAttemptRunner:
         """
         if task.done():
             return
-        request_task_cancel(task, cancel_msg=str(exc.args[0]) if exc.args else None)
+        request_task_cancel(
+            task,
+            cancel_source=task_cancel_source_from_message(str(exc.args[0]) if exc.args else None),
+        )
         done, pending = await asyncio.wait({task}, timeout=_FORWARDED_CANCEL_WAIT_SECONDS)
         if pending:
             self.deps.logger.warning(

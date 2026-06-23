@@ -9,7 +9,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .cancellation import SYNC_RESTART_CANCEL_MSG, request_task_cancel
+from .cancellation import request_task_cancel
 from .coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
@@ -34,6 +34,7 @@ from .coalescing_policy import (
 from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot
 from .logging_config import get_logger
+from .runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from .timing import elapsed_ms_since, emit_elapsed_timing, event_timing_scope
 
 if TYPE_CHECKING:
@@ -128,6 +129,7 @@ class _MutableDrainResult:
 class _DrainContext:
     ready_timeout_seconds: float | None
     result: _MutableDrainResult
+    shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN
     cancelled_initial_drain_tasks: bool = False
 
 
@@ -606,11 +608,17 @@ class CoalescingGate:
             flush_outcome="scheduled_drain" if path == "zero_debounce" else None,
         )
 
-    async def drain_all(self, *, ready_timeout_seconds: float | None = None) -> CoalescingDrainResult:
+    async def drain_all(
+        self,
+        *,
+        ready_timeout_seconds: float | None = None,
+        shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+    ) -> CoalescingDrainResult:
         """Flush every active gate and await owned drain tasks."""
         drain_context = _DrainContext(
             ready_timeout_seconds=ready_timeout_seconds,
             result=_MutableDrainResult(),
+            shutdown_intent=shutdown_intent,
         )
         return await _CoalescingDrainCoordinator(self, drain_context).run()
 
@@ -1013,9 +1021,7 @@ class _CoalescingDrainCoordinator:
         dropped_ready_count = 0
         for gate in self.gate._gates.values():
             if gate.drain_task is not None and not gate.drain_task.done():
-                # Carry sync-restart provenance so cancelled in-flight responses can
-                # tell stall recovery apart from a user stop or a plain interruption.
-                request_task_cancel(gate.drain_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+                request_task_cancel(gate.drain_task, cancel_source=self.context.shutdown_intent.cancel_source)
                 self.context.result.dispatch_cancelled_count += 1
                 gate.drain_task = None
             admissions = [*gate.claimed_admissions, *gate.queue]

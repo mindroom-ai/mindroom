@@ -39,6 +39,7 @@ from mindroom.orchestration.runtime import (
     classify_cancel_source,
     log_cancelled_response,
     log_cancelled_response_source,
+    request_task_cancel,
 )
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
@@ -47,6 +48,7 @@ from mindroom.response_terminal import (
     build_placeholder_terminal_stream_transport_outcome,
     build_terminal_stream_transport_outcome,
 )
+from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
@@ -376,7 +378,12 @@ class ResponseRunner:
                 error=str(error),
             )
 
-    async def drain_inbox_responses(self, *, cancel_after_seconds: float | None = None) -> bool:
+    async def drain_inbox_responses(
+        self,
+        *,
+        cancel_after_seconds: float | None = None,
+        shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+    ) -> bool:
         """Settle detached inbox responses: graceful drains await, bounded drains cancel.
 
         Returns False when a bounded drain had to cancel or abandon running work.
@@ -393,7 +400,7 @@ class ResponseRunner:
         if not pending:
             return True
         for task in pending:
-            task.cancel()
+            request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
         await asyncio.wait(pending, timeout=cancel_after_seconds)
         return False
 
@@ -827,6 +834,8 @@ class ResponseRunner:
         turns are recovered by that replay instead; retrying them too would
         answer twice.
         """
+        delivery_cancelled = delivery_cancelled or final_outcome.terminal_status == "cancelled"
+        delivery_failure_reason = delivery_failure_reason or final_outcome.failure_reason
         if request.on_sync_restart_cancelled is None or not delivery_cancelled:
             return
         if not final_outcome.mark_handled:

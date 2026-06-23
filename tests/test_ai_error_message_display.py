@@ -346,7 +346,7 @@ class TestAIErrorDisplay:
         async def fake_cached_run(*_args: object, **_kwargs: object) -> RunOutput:
             current_task = asyncio.current_task()
             assert current_task is not None
-            request_task_cancel(current_task, cancel_msg=USER_STOP_CANCEL_MSG)
+            request_task_cancel(current_task, cancel_source="user_stop")
             return RunOutput(
                 run_id="run-1",
                 agent_id="test_agent",
@@ -413,7 +413,7 @@ class TestAIErrorDisplay:
             yield RunContentEvent(content="Partial answer")
             current_task = asyncio.current_task()
             assert current_task is not None
-            request_task_cancel(current_task, cancel_msg=USER_STOP_CANCEL_MSG)
+            request_task_cancel(current_task, cancel_source="user_stop")
             yield RunCancelledEvent(
                 run_id="run-2",
                 session_id="session-1",
@@ -476,7 +476,7 @@ class TestAIErrorDisplay:
             yield RunContentEvent(content="Partial answer")
             current_task = asyncio.current_task()
             assert current_task is not None
-            request_task_cancel(current_task, cancel_msg=USER_STOP_CANCEL_MSG)
+            request_task_cancel(current_task, cancel_source="user_stop")
             yield RunCancelledEvent(
                 run_id="run-2",
                 session_id="session-1",

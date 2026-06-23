@@ -130,6 +130,7 @@ from mindroom.response_runner import (
     ResponseRunner,
     _merge_response_extra_content,
 )
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.startup_errors import PermanentStartupError
@@ -2582,6 +2583,7 @@ class TestAgentBot:
             assert ai_kwargs["media"] == MediaInputs()
             assert ai_kwargs["reply_to_event_id"] == "event123"
             assert ai_kwargs["show_tool_calls"] is True
+            assert ai_kwargs["collect_streamed_response"] is True
             assert ai_kwargs["tool_trace_collector"] == []
             assert ai_kwargs["run_metadata_collector"] == {}
             assert ai_kwargs["compaction_outcomes_collector"] == []
@@ -15472,7 +15474,7 @@ class TestMultiAgentOrchestrator:
             assert decision.status == "expired"
             assert decision.reason == "MindRoom shut down before approval completed."
             assert router_bot.running is False
-            router_bot.stop.assert_awaited_once_with(reason="shutdown")
+            router_bot.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
         finally:
             allow_send_to_finish.set()
             if task is not None and not task.done():
