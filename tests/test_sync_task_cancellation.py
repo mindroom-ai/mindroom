@@ -12,7 +12,12 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, _cancel_failure_reason
+from mindroom.cancellation import (
+    SYNC_RESTART_CANCEL_MSG,
+    USER_STOP_CANCEL_MSG,
+    cancel_failure_reason,
+    cancel_message_for_source,
+)
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.matrix.users import AgentMatrixUser
@@ -382,9 +387,16 @@ async def test_classify_cancel_source_unknown_returns_interrupted() -> None:
 @pytest.mark.asyncio
 async def test_cancel_failure_reason_matches_cancel_source() -> None:
     """Failure reasons should stay aligned with the shared cancel provenance mapping."""
-    assert _cancel_failure_reason("user_stop") == "cancelled_by_user"
-    assert _cancel_failure_reason("sync_restart") == "sync_restart_cancelled"
-    assert _cancel_failure_reason("interrupted") == "interrupted"
+    assert cancel_failure_reason("user_stop") == "cancelled_by_user"
+    assert cancel_failure_reason("sync_restart") == "sync_restart_cancelled"
+    assert cancel_failure_reason("interrupted") == "interrupted"
+
+
+def test_cancel_message_for_source() -> None:
+    """Task-cancel sources should map to canonical asyncio cancel messages."""
+    assert cancel_message_for_source("sync_restart") == SYNC_RESTART_CANCEL_MSG
+    assert cancel_message_for_source("user_stop") == USER_STOP_CANCEL_MSG
+    assert cancel_message_for_source(None) is None
 
 
 @pytest.mark.parametrize(

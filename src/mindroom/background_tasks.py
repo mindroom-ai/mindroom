@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from mindroom.cancellation import request_task_cancel
+from mindroom.cancellation import request_task_cancel, task_cancel_source_from_message
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -89,8 +89,9 @@ async def _cancel_and_drain_background_tasks(
     for _ in range(_MAX_BACKGROUND_TASK_CANCEL_ROUNDS):
         if not pending_tasks:
             return
+        cancel_source = task_cancel_source_from_message(cancel_msg)
         for task in pending_tasks:
-            request_task_cancel(task, cancel_msg=cancel_msg)
+            request_task_cancel(task, cancel_source=cancel_source)
         await asyncio.gather(*pending_tasks, return_exceptions=True)
         pending_tasks = _tasks_for_owner(owner)
     if pending_tasks:

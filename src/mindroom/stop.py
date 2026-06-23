@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import nio
 from agno.run.cancel import acancel_run
 
-from mindroom.cancellation import USER_STOP_CANCEL_MSG, request_task_cancel
+from mindroom.cancellation import request_task_cancel
 from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.logging_config import get_logger
 from mindroom.matrix.message_builder import build_reaction_content
@@ -327,7 +327,7 @@ class StopManager:
                     run_id=tracked.run_id,
                     **target_log,
                 )
-                request_task_cancel(tracked.task, cancel_msg=USER_STOP_CANCEL_MSG)
+                request_task_cancel(tracked.task, cancel_source="user_stop")
                 if tracked.run_id:
                     logger.info(
                         "Scheduling best-effort Agno run cleanup after hard task cancel",

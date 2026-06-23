@@ -40,6 +40,7 @@ from mindroom.orchestration.runtime import (
     log_cancelled_response,
     log_cancelled_response_source,
     request_task_cancel,
+    task_cancel_source_from_message,
 )
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
@@ -398,8 +399,9 @@ class ResponseRunner:
         _done, pending = await asyncio.wait(tasks, timeout=cancel_after_seconds)
         if not pending:
             return True
+        cancel_source = task_cancel_source_from_message(cancel_msg)
         for task in pending:
-            request_task_cancel(task, cancel_msg=cancel_msg)
+            request_task_cancel(task, cancel_source=cancel_source)
         await asyncio.wait(pending, timeout=cancel_after_seconds)
         return False
 

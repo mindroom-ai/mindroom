@@ -21,6 +21,7 @@ from mindroom.cancellation import (
     cancel_source_from_failure_reason,
     classify_cancel_source,
     request_task_cancel,
+    task_cancel_source_from_message,
 )
 from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
@@ -90,6 +91,7 @@ __all__ = [
     "run_with_retry",
     "stop_entities",
     "sync_forever_with_restart",
+    "task_cancel_source_from_message",
     "wait_for_matrix_homeserver",
 ]
 
@@ -195,7 +197,7 @@ async def cancel_task(
     """Cancel a detached task and wait for it to finish."""
     if task is None:
         return
-    request_task_cancel(task, cancel_msg=cancel_msg)
+    request_task_cancel(task, cancel_source=task_cancel_source_from_message(cancel_msg))
     with suppress(*suppress_exceptions):
         await task
 
@@ -267,7 +269,7 @@ class _SyncIteration:
                 )
 
             watchdog_cancelled_sync.set()
-            request_task_cancel(sync_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+            request_task_cancel(sync_task, cancel_source="sync_restart")
             with suppress(asyncio.CancelledError):
                 await sync_task
             msg = f"Matrix sync loop stalled for {bot.agent_name}"
@@ -328,7 +330,7 @@ class _SyncIteration:
                 continue
             setattr(self, attr, None)
             if attr == "sync_task":
-                request_task_cancel(task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+                request_task_cancel(task, cancel_source="sync_restart")
             else:
                 task.cancel()
             try:
