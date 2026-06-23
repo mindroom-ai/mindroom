@@ -12,6 +12,7 @@ import stat
 import time
 from pathlib import Path  # noqa: TC003
 from typing import cast
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import typer
@@ -28,6 +29,8 @@ _ED25519_PRIVATE_KEY_BYTES = 32
 _DATA_JSON_OBJECT_ERROR = "--data-json must decode to a JSON object"
 _PRIVATE_KEY_PATH_ERROR = "private key path must be a regular file"
 _PRIVATE_KEY_ERROR = "raw 32-byte Ed25519 private key required"
+_URL_ABSOLUTE_ERROR = "--url must be an absolute URL"
+_URL_QUERY_FRAGMENT_ERROR = "--url must not include query or fragment"
 
 trigger_app = typer.Typer(help="Send signed external triggers.")
 
@@ -94,7 +97,7 @@ def send(
     key_id: str = typer.Option(_DEFAULT_KEY_ID, "--key-id", help="Trigger signing key id."),
 ) -> None:
     """Send a signed external trigger request."""
-    path = f"/api/triggers/{trigger_id}"
+    request_url, path = _trigger_request_url_and_path(url, trigger_id)
     body = _trigger_body_bytes(
         kind=kind,
         message=message,
@@ -117,7 +120,7 @@ def send(
 
     try:
         response = httpx.post(
-            f"{url.rstrip('/')}{path}",
+            request_url,
             content=body,
             headers=headers,
             timeout=timeout,
@@ -131,6 +134,19 @@ def send(
         console.print(f"[red]Error:[/red] external trigger request failed: {exc}")
         raise typer.Exit(1) from exc
     console.print_json(data=response.json())
+
+
+def _trigger_request_url_and_path(base_url: str, trigger_id: str) -> tuple[str, str]:
+    """Return the request URL and exact path covered by the trigger signature."""
+    parts = urlsplit(base_url)
+    if not parts.scheme or not parts.netloc:
+        raise typer.BadParameter(_URL_ABSOLUTE_ERROR)
+    if parts.query or parts.fragment:
+        raise typer.BadParameter(_URL_QUERY_FRAGMENT_ERROR)
+
+    base_path = parts.path.rstrip("/")
+    path = f"{base_path}/api/triggers/{trigger_id}" if base_path else f"/api/triggers/{trigger_id}"
+    return urlunsplit((parts.scheme, parts.netloc, path, "", "")), path
 
 
 def _status_error_detail(response: httpx.Response) -> str:

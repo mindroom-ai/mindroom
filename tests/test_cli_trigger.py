@@ -226,7 +226,7 @@ def test_trigger_send_accepts_custom_options(monkeypatch: pytest.MonkeyPatch, tm
             "send",
             "campground",
             "--url",
-            "https://example.test/",
+            "https://example.test/prefix/",
             "--key-file",
             str(key_path),
             "--key-id",
@@ -248,7 +248,7 @@ def test_trigger_send_accepts_custom_options(monkeypatch: pytest.MonkeyPatch, tm
     )
 
     assert result.exit_code == 0
-    assert captured["url"] == "https://example.test/api/triggers/campground"
+    assert captured["url"] == "https://example.test/prefix/api/triggers/campground"
     content = cast("bytes", captured["content"])
     headers = cast("dict[str, str]", captured["headers"])
     assert json.loads(content) == {
@@ -264,7 +264,7 @@ def test_trigger_send_accepts_custom_options(monkeypatch: pytest.MonkeyPatch, tm
     assert captured["verify"] is False
     verify_trigger_request(
         method="POST",
-        path="/api/triggers/campground",
+        path="/prefix/api/triggers/campground",
         body=content,
         headers=headers,
         expected_key_id="rotated",
