@@ -160,6 +160,7 @@ mindroom run
 - [Knowledge Bases](knowledge.md) - Configure semantic indexing or files-only knowledge access
 - [Memory System](memory.md) - How agent memory works
 - [Scheduling](scheduling.md) - Schedule tasks with cron or natural language
+- [External Triggers](external-triggers.md) - Wake agents from signed watcher events
 - [Voice Messages](voice.md) - Voice message transcription
 - [Image Messages](images.md) - Image analysis with vision models
 - [File & Video Attachments](attachments.md) - Context-scoped file and video handling

@@ -62,6 +62,7 @@ nav = [
   { "Interactive Q&A" = "interactive.md" },
   { "Streaming" = "streaming.md" },
   { "Scheduling" = "scheduling.md" },
+  { "External Triggers" = "external-triggers.md" },
   { "Authorization" = "authorization.md" },
   { "Matrix Space" = "matrix-space.md" },
   { "OpenAI-Compatible API" = "openai-api.md" },
