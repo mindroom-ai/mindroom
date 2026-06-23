@@ -191,6 +191,24 @@ def _load_config_result(
         return ConfigLoadResult(success=True), validated_payload, runtime_config, source_fingerprint
 
 
+def _source_fingerprint_for_published_runtime_config(
+    runtime_paths: constants.RuntimePaths,
+    validated_payload: dict[str, Any],
+) -> str:
+    """Return the disk fingerprint when the file still matches the runtime config."""
+    canonical_source = yaml.dump(
+        validated_payload,
+        default_flow_style=False,
+        sort_keys=True,
+        allow_unicode=True,
+    )
+    canonical_fingerprint = _source_fingerprint(canonical_source)
+    result, disk_payload, _disk_config, disk_fingerprint = _load_config_result(runtime_paths)
+    if result.success and disk_payload == validated_payload and disk_fingerprint is not None:
+        return disk_fingerprint
+    return canonical_fingerprint
+
+
 def _raise_for_config_load_result(result: ConfigLoadResult | None) -> None:
     """Raise HTTPException when the cached config state reflects a failed load."""
     if result is None or result.success:
@@ -672,13 +690,10 @@ def _publish_runtime_config_into_app(
     initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
     validated_payload = runtime_config.authored_model_dump()
-    source = yaml.dump(
+    source_fingerprint = _source_fingerprint_for_published_runtime_config(
+        runtime_paths,
         validated_payload,
-        default_flow_style=False,
-        sort_keys=True,
-        allow_unicode=True,
     )
-    source_fingerprint = _source_fingerprint(source)
     with initial_state.config_lock:
         current_state = require_api_state(api_app)
         current = current_state.snapshot

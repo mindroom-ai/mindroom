@@ -751,6 +751,84 @@ def test_api_lifespan_rebases_preload_external_trigger_runtime(tmp_path: Path) -
     api_main.unbind_external_trigger_runtime(api_main.app)
 
 
+def test_runtime_publish_preserves_disk_fingerprint_for_matching_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publishing an applied runtime config should not make unchanged disk reloads stale."""
+    private_key = Ed25519PrivateKey.generate()
+    public_key = json.dumps(_public_key_b64(private_key))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+external_triggers:
+  campground:
+    key_id: campground-main
+    public_key: {public_key}
+    allowed_kinds:
+      - campground.availability
+    target:
+      room_id: "!campground:example.org"
+      agent: research
+agents:
+  research:
+    role: test
+    display_name: Research
+    rooms: []
+router:
+  model: default
+models:
+  default:
+    id: gpt-5.5
+    provider: openai
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+    snapshot = config_lifecycle.require_api_state(api_main.app).snapshot
+    assert snapshot.runtime_config is not None
+    assert config_lifecycle._publish_runtime_config_into_app(
+        snapshot.runtime_config,
+        runtime_paths,
+        api_main.app,
+    )
+    published_generation = config_lifecycle.require_api_state(api_main.app).snapshot.generation
+    api_main.bind_external_trigger_runtime(
+        api_main.app,
+        client=object(),
+        conversation_cache=object(),
+        ready_trigger_ids=frozenset({"campground"}),
+    )
+
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+    reloaded_snapshot = config_lifecycle.require_api_state(api_main.app).snapshot
+    runtime = config_lifecycle.app_state(api_main.app).external_trigger_runtime
+    assert runtime is not None
+    assert reloaded_snapshot.generation == published_generation
+    assert runtime.config_generation == reloaded_snapshot.generation
+
+    async def execute_external_trigger(**_kwargs: object) -> str:
+        return "$matrix-event"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    body = _body(event_id="matching-disk-fingerprint")
+    with TestClient(api_main.app) as client:
+        response = client.post(
+            "/api/triggers/campground",
+            content=body,
+            headers=_sign(private_key, body=body, nonce="nonce-matching-disk-fingerprint"),
+        )
+
+    assert response.status_code == 202
+    api_main.unbind_external_trigger_runtime(api_main.app)
+
+
 def test_external_trigger_rejects_runtime_bound_to_stale_config_generation(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,
