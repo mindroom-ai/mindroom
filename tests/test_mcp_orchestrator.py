@@ -256,6 +256,66 @@ async def test_startup_room_setup_binds_external_trigger_runtime_after_setup(tmp
     assert call_order == ["setup", "bind"]
 
 
+@pytest.mark.asyncio
+async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_path: Path) -> None:
+    """Trigger-only reloads should publish a runtime bound to the new config generation."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config_with_external_trigger(tmp_path)
+    new_config = Config.validate_with_runtime(
+        {
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                },
+            },
+            "external_triggers": {
+                "campground": {
+                    "public_key": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+                    "target": {
+                        "room_id": "!campground:example.org",
+                        "agent": "code",
+                    },
+                },
+            },
+        },
+        _runtime_paths(tmp_path),
+    )
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
+        "code": MagicMock(spec=AgentBot),
+    }
+    plan = build_config_update_plan(
+        current_config=current_config,
+        new_config=new_config,
+        configured_entities={ROUTER_AGENT_NAME, "code"},
+        existing_entities={ROUTER_AGENT_NAME, "code"},
+        agent_bots=orchestrator.agent_bots,
+    )
+
+    assert plan.only_support_service_changes is True
+
+    with (
+        patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+        patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
+        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator.plugin_watch, "sync_roots"),
+        patch.object(orchestrator, "_activate_hook_registry"),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+        patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
+        patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+        patch.object(orchestrator, "_bind_external_trigger_runtime_if_ready") as mock_bind_runtime,
+    ):
+        updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+    assert updated is False
+    mock_bind_runtime.assert_called_once_with()
+
+
 def test_log_mcp_degraded_entities_warns_per_failed_optional_server(tmp_path: Path) -> None:
     """Report only running entities as degraded by an unavailable optional MCP server."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
