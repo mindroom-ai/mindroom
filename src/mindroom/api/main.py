@@ -53,7 +53,7 @@ from mindroom.workers.runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from starlette.types import ASGIApp, Receive, Scope, Send
@@ -371,7 +371,7 @@ def _reconcile_knowledge_mode_transitions(
     reconcile_knowledge_mode_transition_states(previous_config, current_config, current_runtime_paths)
 
 
-async def reload_config_into_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> bool:
+async def _reload_config_into_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> bool:
     """Reload one API app config snapshot from disk."""
     previous = _read_app_runtime_config_or_none(api_app)
     # Config validation executes plugin modules and walks the filesystem;
@@ -387,7 +387,7 @@ async def _reload_config_after_file_change(
     api_app: FastAPI,
     runtime_paths: constants.RuntimePaths,
 ) -> None:
-    await reload_config_into_app(api_app, runtime_paths)
+    await _reload_config_into_app(api_app, runtime_paths)
 
 
 async def _watch_config(
@@ -515,6 +515,7 @@ def bind_external_trigger_runtime(
     conversation_cache: object,
     *,
     ready_trigger_ids: frozenset[str],
+    is_trigger_ready: Callable[[str], Awaitable[bool]] | None = None,
 ) -> None:
     """Attach router Matrix delivery runtime to one API app."""
     api_state = config_lifecycle.require_api_state(api_app)
@@ -523,6 +524,7 @@ def bind_external_trigger_runtime(
         conversation_cache=conversation_cache,
         config_generation=api_state.snapshot.generation,
         ready_trigger_ids=ready_trigger_ids,
+        is_trigger_ready=is_trigger_ready,
     )
 
 

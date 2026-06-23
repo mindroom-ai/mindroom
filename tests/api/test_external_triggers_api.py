@@ -155,11 +155,16 @@ def trigger_api(tmp_path: Path) -> TriggerApiContext:
 
 def _bind_runtime() -> object:
     client = object()
+
+    async def is_trigger_ready(_trigger_id: str) -> bool:
+        return True
+
     api_main.bind_external_trigger_runtime(
         api_main.app,
         client=client,
         conversation_cache=object(),
         ready_trigger_ids=frozenset({"alerts", "campground"}),
+        is_trigger_ready=is_trigger_ready,
     )
     return client
 
@@ -310,6 +315,41 @@ def test_external_trigger_unready_target_does_not_block_ready_trigger(
 
     assert ready_response.status_code == 202
     assert blocked_response.status_code == 503
+
+
+def test_external_trigger_live_readiness_rejects_stale_ready_snapshot(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime readiness is rechecked before accepting a signed trigger."""
+    execute_calls = 0
+
+    async def execute_external_trigger(**_kwargs: object) -> str:
+        nonlocal execute_calls
+        execute_calls += 1
+        return "$matrix-event"
+
+    async def is_trigger_ready(_trigger_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    api_main.bind_external_trigger_runtime(
+        api_main.app,
+        client=object(),
+        conversation_cache=object(),
+        ready_trigger_ids=frozenset({"campground"}),
+        is_trigger_ready=is_trigger_ready,
+    )
+
+    body = _body(event_id="stale-ready-snapshot")
+    response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(trigger_api.private_key, body=body, nonce="nonce-stale-ready-snapshot"),
+    )
+
+    assert response.status_code == 503
+    assert execute_calls == 0
 
 
 def test_executor_none_releases_event_claim_for_retry(

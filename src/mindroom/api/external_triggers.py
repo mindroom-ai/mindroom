@@ -67,7 +67,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
             event_id=event_id,
         )
 
-    runtime = _require_external_trigger_runtime(request, snapshot.generation, trigger_id)
+    runtime = await _require_external_trigger_runtime(request, snapshot.generation, trigger_id)
 
     event_claim = store.claim_event_id(
         trigger_id,
@@ -161,7 +161,7 @@ def _parse_payload(body: bytes) -> ExternalTriggerPayload:
         raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
 
 
-def _require_external_trigger_runtime(
+async def _require_external_trigger_runtime(
     request: Request,
     snapshot_generation: int,
     trigger_id: str,
@@ -171,4 +171,11 @@ def _require_external_trigger_runtime(
         raise HTTPException(status_code=503, detail="External trigger runtime is not available")
     if trigger_id not in runtime.ready_trigger_ids:
         raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
+    if runtime.is_trigger_ready is not None:
+        try:
+            is_trigger_ready = await runtime.is_trigger_ready(trigger_id)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="External trigger target runtime is not available") from exc
+        if not is_trigger_ready:
+            raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
     return runtime

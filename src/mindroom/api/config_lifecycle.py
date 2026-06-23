@@ -84,6 +84,7 @@ class ExternalTriggerRuntime:
     conversation_cache: object
     config_generation: int
     ready_trigger_ids: frozenset[str]
+    is_trigger_ready: Callable[[str], Awaitable[bool]] | None = None
 
 
 @dataclass
@@ -660,6 +661,44 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
             source_fingerprint=source_fingerprint,
         )
     return result.success
+
+
+def _publish_runtime_config_into_app(
+    runtime_config: Config,
+    runtime_paths: constants.RuntimePaths,
+    api_app: FastAPI,
+) -> bool:
+    """Publish one already-validated runtime config into one API app's committed cache."""
+    initial_state = require_api_state(api_app)
+    snapshot = initial_state.snapshot
+    validated_payload = runtime_config.authored_model_dump()
+    source = yaml.dump(
+        validated_payload,
+        default_flow_style=False,
+        sort_keys=True,
+        allow_unicode=True,
+    )
+    source_fingerprint = _source_fingerprint(source)
+    with initial_state.config_lock:
+        current_state = require_api_state(api_app)
+        current = current_state.snapshot
+        if current.generation != snapshot.generation or current.runtime_paths != runtime_paths:
+            logger.info(
+                "Discarding stale API config publish after runtime swap",
+                publish_config_path=str(runtime_paths.config_path),
+                active_config_path=str(current.runtime_paths.config_path),
+            )
+            return False
+        same_source = source_fingerprint == current.source_fingerprint
+        current_state.snapshot = _published_snapshot(
+            current,
+            increment_generation=not same_source,
+            config_data=validated_payload,
+            runtime_config=runtime_config,
+            config_load_result=ConfigLoadResult(success=True),
+            source_fingerprint=source_fingerprint,
+        )
+    return True
 
 
 def read_app_committed_runtime_config(

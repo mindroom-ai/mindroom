@@ -371,12 +371,14 @@ class _MultiAgentOrchestrator:
                 client=bot.client,
                 conversation_cache=bot._conversation_cache,
                 ready_trigger_ids=ready_trigger_ids,
+                is_trigger_ready=self._external_trigger_is_ready,
             )
             return
 
     def _ready_external_trigger_ids(self, config: Config) -> frozenset[str]:
         """Return enabled triggers whose target bot is joined to that trigger room."""
         ready_trigger_ids = set()
+        router_joined_room_ids = self._external_trigger_joined_room_ids.get(ROUTER_AGENT_NAME, frozenset())
         for trigger_id, trigger_config in config.external_triggers.items():
             if not trigger_config.enabled:
                 continue
@@ -384,7 +386,11 @@ class _MultiAgentOrchestrator:
             if target_bot is None or not target_bot.running or target_bot.client is None:
                 continue
             target_room_id = self._resolve_external_trigger_room_id(trigger_config.target.room_id)
-            if target_room_id in self._external_trigger_joined_room_ids.get(trigger_config.target.agent, frozenset()):
+            target_joined_room_ids = self._external_trigger_joined_room_ids.get(
+                trigger_config.target.agent,
+                frozenset(),
+            )
+            if target_room_id in router_joined_room_ids and target_room_id in target_joined_room_ids:
                 ready_trigger_ids.add(trigger_id)
         return frozenset(ready_trigger_ids)
 
@@ -440,7 +446,7 @@ class _MultiAgentOrchestrator:
                     return
 
     async def _refresh_external_trigger_joined_room_ids(self, bots: Iterable[AgentBot | TeamBot]) -> None:
-        """Refresh actual Matrix joined-room snapshots for trigger target bots."""
+        """Refresh actual Matrix joined-room snapshots for trigger delivery participants."""
         config = self.config
         if config is None:
             return
@@ -449,11 +455,45 @@ class _MultiAgentOrchestrator:
             for trigger_config in config.external_triggers.values()
             if trigger_config.enabled
         }
-        for bot in bots:
-            if bot.agent_name not in trigger_target_agents:
+        if not trigger_target_agents:
+            return
+        trigger_participant_agents = {ROUTER_AGENT_NAME, *trigger_target_agents}
+        bots_to_refresh = list(bots)
+        refreshed_entity_names = {bot.agent_name for bot in bots_to_refresh}
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if ROUTER_AGENT_NAME not in refreshed_entity_names and router_bot is not None:
+            bots_to_refresh.append(router_bot)
+        for bot in bots_to_refresh:
+            if bot.agent_name not in trigger_participant_agents:
                 continue
             joined_rooms = await get_joined_rooms(bot.client) if bot.client is not None else None
             self._external_trigger_joined_room_ids[bot.agent_name] = frozenset(joined_rooms or ())
+
+    async def _external_trigger_is_ready(self, trigger_id: str) -> bool:
+        """Return whether router and target clients are currently joined to one trigger room."""
+        config = self.config
+        if config is None:
+            return False
+        trigger_config = config.external_triggers.get(trigger_id)
+        if trigger_config is None or not trigger_config.enabled:
+            return False
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        target_bot = self.agent_bots.get(trigger_config.target.agent)
+        if (
+            router_bot is None
+            or router_bot.client is None
+            or not router_bot.running
+            or target_bot is None
+            or target_bot.client is None
+            or not target_bot.running
+        ):
+            return False
+        trigger_room_id = self._resolve_external_trigger_room_id(trigger_config.target.room_id)
+        router_joined_room_ids = frozenset(await get_joined_rooms(router_bot.client) or ())
+        target_joined_room_ids = frozenset(await get_joined_rooms(target_bot.client) or ())
+        self._external_trigger_joined_room_ids[ROUTER_AGENT_NAME] = router_joined_room_ids
+        self._external_trigger_joined_room_ids[trigger_config.target.agent] = target_joined_room_ids
+        return trigger_room_id in router_joined_room_ids and trigger_room_id in target_joined_room_ids
 
     async def _setup_startup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
         """Run startup room setup, then publish trigger delivery runtime."""
@@ -1433,7 +1473,11 @@ class _MultiAgentOrchestrator:
             return
         from mindroom.api import main as api_main  # noqa: PLC0415
 
-        if not await api_main.reload_config_into_app(api_main.app, self.runtime_paths):
+        if not api_main.config_lifecycle._publish_runtime_config_into_app(
+            new_config,
+            self.runtime_paths,
+            api_main.app,
+        ):
             self._unbind_external_trigger_runtime()
             message = "Failed to publish external trigger API config snapshot"
             raise RuntimeError(message)

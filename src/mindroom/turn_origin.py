@@ -7,6 +7,7 @@ from enum import StrEnum
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_source import (
+    EXTERNAL_TRIGGER_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
@@ -29,6 +30,7 @@ class TurnIntent(StrEnum):
     ROUTER_HANDOFF = "router_handoff"
     ROUTER_NOTICE = "router_notice"
     SCHEDULED_FIRE = "scheduled_fire"
+    EXTERNAL_TRIGGER = EXTERNAL_TRIGGER_SOURCE_KIND
     HOOK_MESSAGE = "hook_message"
     HOOK_DISPATCH = HOOK_DISPATCH_SOURCE_KIND
     TRUSTED_INTERNAL_RELAY = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -61,6 +63,7 @@ class TurnOrigin:
         """Return whether this synthetic turn may bypass the managed-sender mention gate."""
         return self.intent in {
             TurnIntent.HOOK_DISPATCH,
+            TurnIntent.EXTERNAL_TRIGGER,
             TurnIntent.ROUTER_HANDOFF,
             TurnIntent.SCHEDULED_FIRE,
         }
@@ -200,6 +203,8 @@ def _turn_intent(
             intent = TurnIntent.TRUSTED_INTERNAL_RELAY
     elif source_kind == SCHEDULED_SOURCE_KIND:
         intent = TurnIntent.SCHEDULED_FIRE
+    elif source_kind == EXTERNAL_TRIGGER_SOURCE_KIND:
+        intent = TurnIntent.EXTERNAL_TRIGGER
     elif source_kind == HOOK_DISPATCH_SOURCE_KIND:
         intent = TurnIntent.HOOK_DISPATCH
     elif source_kind == HOOK_SOURCE_KIND:
