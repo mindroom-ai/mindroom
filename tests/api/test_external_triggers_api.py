@@ -350,7 +350,7 @@ def test_event_id_claim_ttls_distinguish_in_progress_from_delivered(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In-progress event claims recover quickly while delivered events stay idempotent longer."""
+    """In-progress event claims use processing TTL, not signature replay skew."""
     _bind_runtime()
     nonce_ttls: list[int] = []
     event_claim_ttls: list[int] = []
@@ -408,7 +408,7 @@ def test_event_id_claim_ttls_distinguish_in_progress_from_delivered(
 
     assert response.status_code == 202
     assert nonce_ttls == [30]
-    assert event_claim_ttls == [30]
+    assert event_claim_ttls == [86400]
     assert delivered_ttls == [86400]
 
 

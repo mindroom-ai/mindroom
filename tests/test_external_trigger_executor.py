@@ -23,6 +23,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.external_triggers.executor import build_external_trigger_message_text, execute_external_trigger
 from mindroom.external_triggers.models import ExternalTriggerPayload
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -42,12 +43,17 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
-def _trigger(*, new_thread: bool = False, thread_id: str | None = "$thread-root") -> ExternalTriggerConfig:
+def _trigger(
+    *,
+    room_id: str = "!fixed:localhost",
+    new_thread: bool = False,
+    thread_id: str | None = "$thread-root",
+) -> ExternalTriggerConfig:
     return ExternalTriggerConfig.model_validate(
         {
             "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             "target": {
-                "room_id": "!fixed:localhost",
+                "room_id": room_id,
                 "thread_id": thread_id,
                 "agent": "research",
                 "new_thread": new_thread,
@@ -152,6 +158,41 @@ async def test_execute_external_trigger_sends_to_fixed_thread_target_with_source
     assert content["io.mindroom.external_trigger.id"] == "campground"
     assert content["io.mindroom.external_trigger.kind"] == "campground.availability"
     assert content["io.mindroom.external_trigger.event_id"] == "availability-42"
+
+
+@pytest.mark.asyncio
+async def test_execute_external_trigger_resolves_configured_room_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Executor resolves authored room keys before thread lookup and Matrix send."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths)
+    state.add_room("lobby", "!resolved:localhost", "#lobby:localhost", "Lobby")
+    state.save(runtime_paths)
+    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    send_and_track_message = AsyncMock(
+        return_value=DeliveredMatrixEvent(event_id="$matrix-event", content_sent={}),
+    )
+    monkeypatch.setattr("mindroom.external_triggers.executor.send_and_track_message", send_and_track_message)
+
+    await execute_external_trigger(
+        client=AsyncMock(),
+        trigger_id="campground",
+        trigger=_trigger(room_id="lobby"),
+        payload=_payload(),
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_cache=conversation_cache,
+    )
+
+    conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        "!resolved:localhost",
+        "$thread-root",
+        caller_label="external_trigger",
+    )
+    assert send_and_track_message.await_args.args[1] == "!resolved:localhost"
 
 
 @pytest.mark.asyncio

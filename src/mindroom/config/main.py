@@ -144,6 +144,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_room_access",
     "matrix_space",
     "matrix_delivery",
+    "external_triggers",
 )
 _OPTIONAL_MODEL_SECTION_NAMES = ("debug", "tool_approval")
 

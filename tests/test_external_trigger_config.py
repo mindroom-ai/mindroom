@@ -65,6 +65,19 @@ def test_external_trigger_config_parses_minimal_signed_trigger() -> None:
     assert config.get_external_trigger_rooms_for_entity("mind") == ["!room:example.org"]
 
 
+def test_external_triggers_null_section_uses_empty_mapping() -> None:
+    """An uncommented blank external_triggers section should behave like omission."""
+    config = Config.model_validate(
+        {
+            **_base_config(),
+            "external_triggers": None,
+        },
+    )
+
+    assert config.external_triggers == {}
+    assert "external_triggers" not in config.authored_model_dump()
+
+
 def test_external_trigger_rejects_empty_public_key() -> None:
     """External trigger public keys must not be empty."""
     config_data = {

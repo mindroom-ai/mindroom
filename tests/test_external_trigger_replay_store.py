@@ -120,6 +120,21 @@ def test_expired_nonce_and_event_id_can_be_reclaimed(tmp_path: Path) -> None:
     )
 
 
+def test_in_progress_event_id_processing_ttl_outlives_nonce_ttl(tmp_path: Path) -> None:
+    """Long-running deliveries should not be re-claimed when signature replay TTL expires."""
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    assert store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
+    assert store.claim_event_id("campground", "availability-123", now=1_000, ttl_seconds=86_400) is (
+        ExternalTriggerEventClaim.FRESH
+    )
+
+    assert store.claim_nonce("campground", "nonce-1", now=1_301, ttl_seconds=300)
+    assert store.claim_event_id("campground", "availability-123", now=1_301, ttl_seconds=86_400) is (
+        ExternalTriggerEventClaim.IN_PROGRESS
+    )
+
+
 def test_nonce_and_event_id_remain_claimed_at_exact_expiry_boundary(tmp_path: Path) -> None:
     """Replay claims should expire after their final valid timestamp."""
     store = ExternalTriggerReplayStore(tmp_path)

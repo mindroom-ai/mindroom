@@ -24,7 +24,7 @@ class ExternalTriggerTargetConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    room_id: str = Field(description="Matrix room ID that receives the trigger message")
+    room_id: str = Field(description="Matrix room ID or configured room key that receives the trigger message")
     thread_id: str | None = Field(default=None, description="Optional Matrix thread ID to append to")
     agent: str = Field(description="Agent or team name that should handle this trigger")
     new_thread: bool = Field(default=False, description="Whether the trigger should start a new thread")

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 router = APIRouter(prefix="/api/triggers", tags=["external-triggers"])
+_IN_PROGRESS_EVENT_ID_TTL_SECONDS = 86400
 _DELIVERED_EVENT_ID_TTL_SECONDS = 86400
 
 
@@ -62,7 +63,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
         trigger_id,
         event_id,
         now=now,
-        ttl_seconds=trigger.replay_window_seconds,
+        ttl_seconds=_IN_PROGRESS_EVENT_ID_TTL_SECONDS,
     )
     if event_claim is ExternalTriggerEventClaim.DELIVERED:
         return ExternalTriggerAcceptedResponse(
