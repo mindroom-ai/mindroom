@@ -23,7 +23,7 @@ from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.matrix.sync_certification import SyncCertificationDecision, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1093,7 +1093,10 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_undrained_inbox_res
 
     await bot.prepare_for_sync_shutdown()
 
-    bot._response_runner.drain_inbox_responses.assert_awaited_once_with(cancel_after_seconds=5.0, cancel_source=None)
+    bot._response_runner.drain_inbox_responses.assert_awaited_once_with(
+        cancel_after_seconds=5.0,
+        shutdown_intent=GENERIC_SHUTDOWN,
+    )
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
     assert bot._sync_checkpoint is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
@@ -1110,5 +1113,5 @@ async def test_prepare_for_sync_shutdown_passes_cancel_source_to_inbox_drain(tmp
 
     bot._response_runner.drain_inbox_responses.assert_awaited_once_with(
         cancel_after_seconds=5.0,
-        cancel_source="sync_restart",
+        shutdown_intent=SYNC_RESTART_SHUTDOWN,
     )
