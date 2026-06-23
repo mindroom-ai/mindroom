@@ -230,26 +230,26 @@ def test_external_trigger_runtime_binds_router_with_joined_target_snapshot(tmp_p
     }
 
     with patch.object(orchestrator._external_trigger_runtime, "_bind_from_started_bots") as mock_bind:
-        orchestrator._external_trigger_runtime.bind_if_ready()
+        orchestrator._external_trigger_runtime.bind_if_ready(orchestrator.config, orchestrator.agent_bots)
         target_bot.running = True
-        orchestrator._external_trigger_runtime.bind_if_ready()
+        orchestrator._external_trigger_runtime.bind_if_ready(orchestrator.config, orchestrator.agent_bots)
         orchestrator._external_trigger_runtime.joined_room_ids["code"] = frozenset({"!campground:example.org"})
-        orchestrator._external_trigger_runtime.bind_if_ready()
+        orchestrator._external_trigger_runtime.bind_if_ready(orchestrator.config, orchestrator.agent_bots)
         orchestrator._external_trigger_runtime.joined_room_ids[ROUTER_AGENT_NAME] = frozenset(
             {"!campground:example.org"},
         )
-        orchestrator._external_trigger_runtime.bind_if_ready()
+        orchestrator._external_trigger_runtime.bind_if_ready(orchestrator.config, orchestrator.agent_bots)
 
     assert mock_bind.call_count == 4
     first_call, second_call, third_call, fourth_call = mock_bind.call_args_list
     assert first_call.args == ((router_bot,),)
-    assert first_call.kwargs == {"ready_trigger_ids": frozenset()}
+    assert first_call.kwargs["ready_trigger_ids"] == frozenset()
     assert second_call.args == ((router_bot,),)
-    assert second_call.kwargs == {"ready_trigger_ids": frozenset()}
+    assert second_call.kwargs["ready_trigger_ids"] == frozenset()
     assert third_call.args == ((router_bot,),)
-    assert third_call.kwargs == {"ready_trigger_ids": frozenset()}
+    assert third_call.kwargs["ready_trigger_ids"] == frozenset()
     assert fourth_call.args == ((router_bot,),)
-    assert fourth_call.kwargs == {"ready_trigger_ids": frozenset({"campground"})}
+    assert fourth_call.kwargs["ready_trigger_ids"] == frozenset({"campground"})
 
 
 def test_external_trigger_readiness_is_per_trigger_room(tmp_path: Path) -> None:
@@ -290,7 +290,12 @@ def test_external_trigger_readiness_is_per_trigger_room(tmp_path: Path) -> None:
     orchestrator._external_trigger_runtime.joined_room_ids["code"] = frozenset({"!campground:example.org"})
     orchestrator._external_trigger_runtime.joined_room_ids[ROUTER_AGENT_NAME] = frozenset({"!campground:example.org"})
 
-    assert orchestrator._external_trigger_runtime.ready_trigger_ids(orchestrator.config) == frozenset({"campground"})
+    assert orchestrator._external_trigger_runtime.ready_trigger_ids(
+        orchestrator.config,
+        orchestrator.agent_bots,
+    ) == frozenset(
+        {"campground"},
+    )
 
 
 @pytest.mark.asyncio
@@ -315,7 +320,11 @@ async def test_external_trigger_joined_room_snapshot_uses_matrix_joined_rooms(tm
         }[client]
 
     with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms", side_effect=get_joined_room_ids):
-        await orchestrator._external_trigger_runtime.refresh_joined_room_ids([target_bot])
+        await orchestrator._external_trigger_runtime.refresh_joined_room_ids(
+            orchestrator.config,
+            [target_bot],
+            orchestrator.agent_bots,
+        )
 
     assert orchestrator._external_trigger_runtime.joined_room_ids == {
         ROUTER_AGENT_NAME: frozenset({"!campground:example.org"}),
@@ -340,7 +349,7 @@ async def test_external_trigger_api_sync_skips_when_embedded_api_disabled(tmp_pa
         patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind,
     ):
         await orchestrator._external_trigger_runtime.sync_api_config_snapshot(config, config)
-        orchestrator._external_trigger_runtime.bind_if_ready()
+        orchestrator._external_trigger_runtime.bind_if_ready(orchestrator.config, orchestrator.agent_bots)
 
     mock_publish.assert_not_called()
     mock_bind.assert_not_called()
@@ -357,7 +366,7 @@ async def test_startup_room_setup_binds_external_trigger_runtime_after_setup(tmp
         assert started_bots == [bot]
         call_order.append("setup")
 
-    def bind_runtime() -> None:
+    def bind_runtime(_config: Config | None, _bots: object) -> None:
         call_order.append("bind")
 
     with (
@@ -427,7 +436,7 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
         updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
 
     assert updated is False
-    mock_bind_runtime.assert_called_once_with()
+    mock_bind_runtime.assert_called_once_with(new_config, orchestrator.agent_bots)
 
 
 @pytest.mark.asyncio
@@ -693,7 +702,7 @@ async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_re
         assert started_bots == [started_bot]
         call_order.append("setup")
 
-    def bind_runtime() -> None:
+    def bind_runtime(_config: Config | None, _bots: object) -> None:
         call_order.append("bind")
 
     with (

@@ -242,8 +242,6 @@ class _MultiAgentOrchestrator:
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
         self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
-            config_getter=lambda: self.config,
-            bots_getter=lambda: self.agent_bots,
             api_enabled=self.api_enabled,
         )
         self.config_reload = ConfigReloadLifecycle(
@@ -367,7 +365,7 @@ class _MultiAgentOrchestrator:
             permanent_error_check=is_permanent_startup_error,
             update_runtime_state=False,
         )
-        self._external_trigger_runtime.bind_if_ready()
+        self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
 
     async def _sync_event_cache_service(self, config: Config) -> None:
         """Ensure the runtime has one initialized shared event-cache service."""
@@ -526,7 +524,7 @@ class _MultiAgentOrchestrator:
                             permanent_error_check=is_permanent_startup_error,
                             update_runtime_state=False,
                         )
-                    self._external_trigger_runtime.bind_if_ready()
+                    self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
                     return
 
                 attempt += 1
@@ -1265,7 +1263,7 @@ class _MultiAgentOrchestrator:
                 server_id=server_id,
                 entities=sorted(changed_entities),
             )
-            self._external_trigger_runtime.unbind_if_delivery_affected(changed_entities)
+            self._external_trigger_runtime.unbind_if_delivery_affected(changed_entities, self.config)
             for entity_name in changed_entities:
                 await self._cancel_bot_start_task(entity_name)
             await stop_entities(
@@ -1281,7 +1279,7 @@ class _MultiAgentOrchestrator:
             )
             if start_results.started_bots:
                 await self._setup_rooms_and_memberships(start_results.started_bots)
-            self._external_trigger_runtime.bind_if_ready()
+            self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
             for entity_name in start_results.retryable_entities:
                 await self._schedule_bot_start_retry(entity_name)
             if start_results.permanently_failed_entities:
@@ -1300,15 +1298,15 @@ class _MultiAgentOrchestrator:
         bots_to_setup = self._running_bots_for_entities(changed_entities)
         if bots_to_setup or plan.mindroom_user_changed or plan.matrix_room_access_changed or plan.authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
-            self._external_trigger_runtime.bind_if_ready()
+            self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
             return
         if plan.matrix_space_changed or plan.room_metadata_changed:
             room_ids = await self._ensure_rooms_exist()
             await self._ensure_root_space(room_ids)
-            self._external_trigger_runtime.bind_if_ready()
+            self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
             return
         if plan.has_entity_changes:
-            self._external_trigger_runtime.bind_if_ready()
+            self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
 
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
@@ -1378,7 +1376,7 @@ class _MultiAgentOrchestrator:
                     previous_config=current_config,
                 )
                 await self._approval_transport.mark_startup_runtime_support_ready()
-                self._external_trigger_runtime.bind_if_ready()
+                self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
                 await self._emit_config_reloaded(
                     new_config=new_config,
                     changed_entities=set(),
@@ -1483,7 +1481,7 @@ class _MultiAgentOrchestrator:
         if follow_up_bots:
             await asyncio.gather(*(bot.ensure_rooms() for bot in follow_up_bots))
 
-        await self._external_trigger_runtime.refresh_joined_room_ids(bots)
+        await self._external_trigger_runtime.refresh_joined_room_ids(self.config, bots, self.agent_bots)
         logger.info("All agents have joined their configured rooms")
 
     async def _ensure_rooms_exist(self) -> dict[str, str]:

@@ -50,8 +50,6 @@ def test_runtime_coordinator_binds_router_with_joined_target_snapshot(tmp_path: 
     config = _config_with_external_trigger(tmp_path)
     coordinator = ExternalTriggerRuntimeCoordinator(
         runtime_paths=_runtime_paths(tmp_path),
-        config_getter=lambda: config,
-        bots_getter=lambda: bots,
     )
 
     router_bot = MagicMock()
@@ -70,13 +68,13 @@ def test_runtime_coordinator_binds_router_with_joined_target_snapshot(tmp_path: 
     }
 
     with patch.object(coordinator, "_bind_from_started_bots") as mock_bind:
-        coordinator.bind_if_ready()
+        coordinator.bind_if_ready(config, bots)
         target_bot.running = True
-        coordinator.bind_if_ready()
+        coordinator.bind_if_ready(config, bots)
         coordinator.joined_room_ids["code"] = frozenset({"!campground:example.org"})
-        coordinator.bind_if_ready()
+        coordinator.bind_if_ready(config, bots)
         coordinator.joined_room_ids[ROUTER_AGENT_NAME] = frozenset({"!campground:example.org"})
-        coordinator.bind_if_ready()
+        coordinator.bind_if_ready(config, bots)
 
     assert [call.kwargs["ready_trigger_ids"] for call in mock_bind.call_args_list] == [
         frozenset(),
@@ -92,8 +90,6 @@ async def test_runtime_coordinator_refreshes_joined_room_snapshot_from_matrix(tm
     config = _config_with_external_trigger(tmp_path)
     coordinator = ExternalTriggerRuntimeCoordinator(
         runtime_paths=_runtime_paths(tmp_path),
-        config_getter=lambda: config,
-        bots_getter=lambda: bots,
     )
     router_client = object()
     router_bot = MagicMock()
@@ -115,7 +111,7 @@ async def test_runtime_coordinator_refreshes_joined_room_snapshot_from_matrix(tm
         "mindroom.orchestration.external_trigger_runtime.get_joined_rooms",
         side_effect=get_joined_room_ids,
     ):
-        await coordinator.refresh_joined_room_ids([target_bot])
+        await coordinator.refresh_joined_room_ids(config, [target_bot], bots)
 
     assert coordinator.joined_room_ids == {
         ROUTER_AGENT_NAME: frozenset({"!campground:example.org"}),
@@ -129,8 +125,6 @@ async def test_runtime_coordinator_sync_api_config_snapshot_runs_off_event_loop(
     config = _config_with_external_trigger(tmp_path)
     coordinator = ExternalTriggerRuntimeCoordinator(
         runtime_paths=_runtime_paths(tmp_path),
-        config_getter=lambda: config,
-        bots_getter=dict,
     )
 
     with patch(
