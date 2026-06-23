@@ -2623,8 +2623,8 @@ from = ["mindroom.memory._backend"]
 # explicit budget-shrink retry policy. Tested in tests/test_compaction_invariants.py.
 [[interfaces]]
 expose = [
+    "CompactionSummaryOutputLimitError",
     "DEFAULT_SUMMARY_RETRY_POLICY",
-    "SUMMARY_MAX_OUTPUT_TOKENS",
     "SummaryRetryPolicy",
     "build_summary_request_messages",
     "configure_summary_model",

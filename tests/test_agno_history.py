@@ -95,7 +95,7 @@ from mindroom.history.storage import (
     update_scope_seen_event_ids,
     write_scope_state,
 )
-from mindroom.history.summary_call import _CompactionSummaryOutputLimitError, generate_compaction_summary
+from mindroom.history.summary_call import CompactionSummaryOutputLimitError, generate_compaction_summary
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
@@ -1275,7 +1275,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_output_cap(tmp_p
         summary_inputs.append(summary_input)
         if len(summary_inputs) == 1:
             msg = "renamed owned output-limit signal"
-            raise _CompactionSummaryOutputLimitError(msg)
+            raise CompactionSummaryOutputLimitError(msg)
         return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
 
     with patch(

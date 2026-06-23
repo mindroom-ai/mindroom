@@ -46,9 +46,8 @@ from mindroom.history.storage import (
 )
 from mindroom.history.summary_call import (
     DEFAULT_SUMMARY_RETRY_POLICY,
-    SUMMARY_MAX_OUTPUT_TOKENS,
+    CompactionSummaryOutputLimitError,
     SummaryRetryPolicy,
-    _CompactionSummaryOutputLimitError,
     build_summary_request_messages,
     configure_summary_model,
     generate_compaction_summary,
@@ -376,7 +375,7 @@ def test_configure_summary_model_tunes_claude_in_one_place() -> None:
     assert model.cache_system_prompt is False
     assert model.extended_cache_time is False
     assert model.thinking is None
-    assert model.max_tokens == SUMMARY_MAX_OUTPUT_TOKENS
+    assert model.max_tokens == 64_000
     assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0, "custom": "keep"}
 
@@ -397,12 +396,12 @@ def test_configure_summary_model_tunes_vertexai_claude() -> None:
     assert model.cache_system_prompt is False
     assert model.extended_cache_time is False
     assert model.thinking is None
-    assert model.max_tokens == SUMMARY_MAX_OUTPUT_TOKENS
+    assert model.max_tokens == 8192
     assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0}
 
 
-def test_configure_summary_model_only_caps_downward() -> None:
+def test_configure_summary_model_preserves_authored_output_cap() -> None:
     model = Claude(id="claude-sonnet-4-6", max_tokens=1024, timeout=30.0)
 
     configure_summary_model(model)
@@ -441,7 +440,7 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
     assert model.cache_system_prompt is False
     assert model.extended_cache_time is False
     assert model.thinking is None
-    assert model.max_tokens == SUMMARY_MAX_OUTPUT_TOKENS
+    assert model.max_tokens == 64_000
     assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0}
     assert [(message.role, message.content) for message in model.seen_messages] == [
@@ -459,7 +458,7 @@ async def test_generate_compaction_summary_rejects_output_cap_truncation() -> No
                 max_tokens=64_000,
                 response=ModelResponse(
                     content="durable summary ended cleanly.",
-                    output_tokens=SUMMARY_MAX_OUTPUT_TOKENS,
+                    output_tokens=64_000,
                 ),
             ),
             summary_input="conversation payload",
@@ -489,7 +488,7 @@ async def test_generate_compaction_summary_allows_claude_summary_below_output_ca
             max_tokens=64_000,
             response=ModelResponse(
                 content="durable summary ended cleanly.",
-                output_tokens=SUMMARY_MAX_OUTPUT_TOKENS - 1,
+                output_tokens=63_999,
             ),
         ),
         summary_input="conversation payload",
@@ -500,10 +499,27 @@ async def test_generate_compaction_summary_allows_claude_summary_below_output_ca
 
 
 @pytest.mark.asyncio
+async def test_generate_compaction_summary_allows_full_history_summary_above_four_k() -> None:
+    summary = await generate_compaction_summary(
+        model=_RecordingClaude(
+            id="claude-sonnet-4-6",
+            response=ModelResponse(
+                content="durable full-history summary ended cleanly.",
+                output_tokens=4_097,
+            ),
+        ),
+        summary_input="conversation payload",
+        summary_prompt="Summarize the conversation.",
+    )
+
+    assert summary.summary == "durable full-history summary ended cleanly."
+
+
+@pytest.mark.asyncio
 async def test_generate_compaction_summary_allows_unknown_provider_without_output_cap() -> None:
     class _UncappedSummaryModel(FakeModel):
         async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            return ModelResponse(content="durable summary ended cleanly.", output_tokens=SUMMARY_MAX_OUTPUT_TOKENS + 1)
+            return ModelResponse(content="durable summary ended cleanly.", output_tokens=64_001)
 
     summary = await generate_compaction_summary(
         model=_UncappedSummaryModel(id="summary-model", provider="fake"),
@@ -534,7 +550,7 @@ def test_retry_policy_shrinks_on_timeout_and_context_length_errors() -> None:
         policy.retry_budget(
             attempt=1,
             budget=16_000,
-            error=_CompactionSummaryOutputLimitError("renamed owned output-limit signal"),
+            error=CompactionSummaryOutputLimitError("renamed owned output-limit signal"),
         )
         == 8_000
     )
