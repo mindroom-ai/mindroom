@@ -203,7 +203,7 @@ async def test_router_start_attempt_does_not_bind_external_trigger_runtime_befor
     router_bot = MagicMock(spec=AgentBot)
     router_bot.try_start = AsyncMock(return_value=True)
 
-    with patch.object(orchestrator, "_bind_external_trigger_runtime_from_started_bots") as mock_bind:
+    with patch.object(orchestrator._external_trigger_runtime, "_bind_from_started_bots") as mock_bind:
         started = await orchestrator._try_start_bot_once(ROUTER_AGENT_NAME, router_bot)
 
     assert started is True
@@ -229,14 +229,16 @@ def test_external_trigger_runtime_binds_router_with_joined_target_snapshot(tmp_p
         "code": target_bot,
     }
 
-    with patch.object(orchestrator, "_bind_external_trigger_runtime_from_started_bots") as mock_bind:
-        orchestrator._bind_external_trigger_runtime_if_ready()
+    with patch.object(orchestrator._external_trigger_runtime, "_bind_from_started_bots") as mock_bind:
+        orchestrator._external_trigger_runtime.bind_if_ready()
         target_bot.running = True
-        orchestrator._bind_external_trigger_runtime_if_ready()
-        orchestrator._external_trigger_joined_room_ids["code"] = frozenset({"!campground:example.org"})
-        orchestrator._bind_external_trigger_runtime_if_ready()
-        orchestrator._external_trigger_joined_room_ids[ROUTER_AGENT_NAME] = frozenset({"!campground:example.org"})
-        orchestrator._bind_external_trigger_runtime_if_ready()
+        orchestrator._external_trigger_runtime.bind_if_ready()
+        orchestrator._external_trigger_runtime.joined_room_ids["code"] = frozenset({"!campground:example.org"})
+        orchestrator._external_trigger_runtime.bind_if_ready()
+        orchestrator._external_trigger_runtime.joined_room_ids[ROUTER_AGENT_NAME] = frozenset(
+            {"!campground:example.org"},
+        )
+        orchestrator._external_trigger_runtime.bind_if_ready()
 
     assert mock_bind.call_count == 4
     first_call, second_call, third_call, fourth_call = mock_bind.call_args_list
@@ -285,10 +287,10 @@ def test_external_trigger_readiness_is_per_trigger_room(tmp_path: Path) -> None:
     target_bot.running = True
     target_bot.client = object()
     orchestrator.agent_bots = {"code": target_bot}
-    orchestrator._external_trigger_joined_room_ids["code"] = frozenset({"!campground:example.org"})
-    orchestrator._external_trigger_joined_room_ids[ROUTER_AGENT_NAME] = frozenset({"!campground:example.org"})
+    orchestrator._external_trigger_runtime.joined_room_ids["code"] = frozenset({"!campground:example.org"})
+    orchestrator._external_trigger_runtime.joined_room_ids[ROUTER_AGENT_NAME] = frozenset({"!campground:example.org"})
 
-    assert orchestrator._ready_external_trigger_ids(orchestrator.config) == frozenset({"campground"})
+    assert orchestrator._external_trigger_runtime.ready_trigger_ids(orchestrator.config) == frozenset({"campground"})
 
 
 @pytest.mark.asyncio
@@ -312,10 +314,10 @@ async def test_external_trigger_joined_room_snapshot_uses_matrix_joined_rooms(tm
             target_client: ["!campground:example.org"],
         }[client]
 
-    with patch("mindroom.orchestrator.get_joined_rooms", side_effect=get_joined_room_ids):
-        await orchestrator._refresh_external_trigger_joined_room_ids([target_bot])
+    with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms", side_effect=get_joined_room_ids):
+        await orchestrator._external_trigger_runtime.refresh_joined_room_ids([target_bot])
 
-    assert orchestrator._external_trigger_joined_room_ids == {
+    assert orchestrator._external_trigger_runtime.joined_room_ids == {
         ROUTER_AGENT_NAME: frozenset({"!campground:example.org"}),
         "code": frozenset({"!campground:example.org"}),
     }
@@ -337,8 +339,8 @@ async def test_external_trigger_api_sync_skips_when_embedded_api_disabled(tmp_pa
         patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app") as mock_publish,
         patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind,
     ):
-        await orchestrator._sync_api_config_snapshot_for_external_triggers(config, config)
-        orchestrator._bind_external_trigger_runtime_if_ready()
+        await orchestrator._external_trigger_runtime.sync_api_config_snapshot(config, config)
+        orchestrator._external_trigger_runtime.bind_if_ready()
 
     mock_publish.assert_not_called()
     mock_bind.assert_not_called()
@@ -360,7 +362,7 @@ async def test_startup_room_setup_binds_external_trigger_runtime_after_setup(tmp
 
     with (
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=setup_rooms),
-        patch.object(orchestrator, "_bind_external_trigger_runtime_if_ready", side_effect=bind_runtime),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready", side_effect=bind_runtime),
     ):
         await orchestrator._setup_startup_rooms_and_memberships([bot])
 
@@ -420,7 +422,7 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
-        patch.object(orchestrator, "_bind_external_trigger_runtime_if_ready") as mock_bind_runtime,
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
     ):
         updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
 
@@ -530,8 +532,11 @@ async def test_trigger_support_api_publish_runs_off_event_loop(tmp_path: Path) -
     new_config = _config_with_external_trigger(tmp_path)
     orchestrator.config = current_config
 
-    with patch("mindroom.orchestrator.asyncio.to_thread", new=AsyncMock(return_value=True)) as mock_to_thread:
-        await orchestrator._sync_api_config_snapshot_for_external_triggers(current_config, new_config)
+    with patch(
+        "mindroom.orchestration.external_trigger_runtime.asyncio.to_thread",
+        new=AsyncMock(return_value=True),
+    ) as mock_to_thread:
+        await orchestrator._external_trigger_runtime.sync_api_config_snapshot(current_config, new_config)
 
     mock_to_thread.assert_awaited_once()
     assert mock_to_thread.await_args.args == (
@@ -589,8 +594,8 @@ async def test_trigger_support_only_reload_unbinds_and_raises_when_api_publish_f
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
         patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app", return_value=False),
-        patch.object(orchestrator, "_unbind_external_trigger_runtime") as mock_unbind_runtime,
-        patch.object(orchestrator, "_bind_external_trigger_runtime_if_ready") as mock_bind_runtime,
+        patch.object(orchestrator._external_trigger_runtime, "unbind") as mock_unbind_runtime,
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
         pytest.raises(RuntimeError, match="Failed to publish external trigger API config snapshot"),
     ):
         await orchestrator._apply_config_update_plan(current_config, plan, ())
@@ -699,9 +704,9 @@ async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_re
             "_create_and_start_entities",
             new=AsyncMock(return_value=EntityStartResults(started_bots=[started_bot])),
         ),
-        patch.object(orchestrator, "_unbind_external_trigger_runtime"),
+        patch.object(orchestrator._external_trigger_runtime, "unbind"),
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=setup_rooms),
-        patch.object(orchestrator, "_bind_external_trigger_runtime_if_ready", side_effect=bind_runtime),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready", side_effect=bind_runtime),
     ):
         await orchestrator._handle_mcp_catalog_change("demo")
 
@@ -754,7 +759,7 @@ async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_s
         return EntityStartResults(retryable_entities=[ROUTER_AGENT_NAME])
 
     with (
-        patch.object(orchestrator, "_unbind_external_trigger_runtime", side_effect=unbind_external_trigger_runtime),
+        patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime),
         patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=fake_stop_entities)),
         patch.object(orchestrator, "_create_and_start_entities", side_effect=fake_create_and_start_entities),
     ):
@@ -783,7 +788,7 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
         ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
         "code": MagicMock(spec=AgentBot),
     }
-    orchestrator._external_trigger_joined_room_ids["code"] = frozenset({"!campground:example.org"})
+    orchestrator._external_trigger_runtime.joined_room_ids["code"] = frozenset({"!campground:example.org"})
     order: list[str] = []
     external_trigger_runtime_bound = True
     plan = ConfigUpdatePlan(
@@ -813,7 +818,7 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
         return EntityStartResults(started_bots=[orchestrator.agent_bots["code"]])
 
     with (
-        patch.object(orchestrator, "_unbind_external_trigger_runtime", side_effect=unbind_external_trigger_runtime),
+        patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime),
         patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=fake_stop_entities)),
         patch.object(orchestrator, "_create_and_start_entities", side_effect=fake_create_and_start_entities),
     ):
@@ -827,7 +832,7 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
     assert retryable_entities == []
     assert permanently_failed_entities == []
     assert external_trigger_runtime_bound is False
-    assert "code" not in orchestrator._external_trigger_joined_room_ids
+    assert "code" not in orchestrator._external_trigger_runtime.joined_room_ids
     assert order == ["unbind", "stop", "create"]
 
 
@@ -884,7 +889,7 @@ async def test_disabling_external_trigger_target_unbinds_runtime_before_stop(tmp
         assert external_trigger_runtime_bound is False
 
     with (
-        patch.object(orchestrator, "_unbind_external_trigger_runtime", side_effect=unbind_external_trigger_runtime),
+        patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime),
         patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=fake_stop_entities)),
         patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(return_value=EntityStartResults())),
     ):
@@ -957,7 +962,7 @@ async def test_apply_config_update_plan_unbinds_disabled_trigger_target_from_pre
         patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app", return_value=True),
         patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
-        patch.object(orchestrator, "_unbind_external_trigger_runtime", side_effect=unbind_external_trigger_runtime),
+        patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime),
         patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=fake_stop_entities)),
         patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(return_value=EntityStartResults())),
         patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()),
@@ -991,7 +996,7 @@ async def test_router_removal_unbinds_external_trigger_runtime_before_cleanup(tm
         order.append("unbind")
         external_trigger_runtime_bound = False
 
-    with patch.object(orchestrator, "_unbind_external_trigger_runtime", side_effect=unbind_external_trigger_runtime):
+    with patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime):
         await orchestrator._remove_deleted_entities({ROUTER_AGENT_NAME})
 
     assert ROUTER_AGENT_NAME not in orchestrator.agent_bots

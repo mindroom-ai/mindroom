@@ -1048,6 +1048,15 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.external_trigger_runtime"
+depends_on = [
+    "mindroom.api.main",
+    "mindroom.constants",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.state",
+]
+
+[[modules]]
 path = "mindroom.orchestration.runtime"
 depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants", "mindroom.matrix.users"]
 
@@ -1077,6 +1086,7 @@ depends_on = [
     "mindroom.mcp.registry",
     "mindroom.mcp.toolkit",
     "mindroom.orchestration.config_lifecycle",
+    "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.runtime",
     "mindroom.runtime_support",
     "mindroom.scheduling_executor",
@@ -1700,6 +1710,7 @@ visibility = [
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestrator",
 ]
 

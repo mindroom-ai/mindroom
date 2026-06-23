@@ -86,6 +86,7 @@ from .credentials_sync import sync_env_to_credentials
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import configured_entity_names
+from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
 from .orchestration.rooms import get_authorized_user_ids_to_invite, get_root_space_user_ids_to_invite
 from .orchestration.runtime import (
@@ -223,7 +224,7 @@ class _MultiAgentOrchestrator:
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
-    _external_trigger_joined_room_ids: dict[str, frozenset[str]] = field(default_factory=dict, init=False)
+    _external_trigger_runtime: ExternalTriggerRuntimeCoordinator = field(init=False, repr=False)
     _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
     _startup_maintenance: StartupMaintenanceController = field(init=False, repr=False)
 
@@ -239,6 +240,12 @@ class _MultiAgentOrchestrator:
         self._knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler)
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
+        self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(
+            runtime_paths=self.runtime_paths,
+            config_getter=lambda: self.config,
+            bots_getter=lambda: self.agent_bots,
+            api_enabled=self.api_enabled,
+        )
         self.config_reload = ConfigReloadLifecycle(
             runtime_paths=self.runtime_paths,
             is_running=lambda: self.running,
@@ -352,149 +359,6 @@ class _MultiAgentOrchestrator:
             self._bind_runtime_support_services(bot)
         self._configure_approval_store_transport()
 
-    def _bind_external_trigger_runtime_from_started_bots(
-        self,
-        bots: Iterable[AgentBot | TeamBot],
-        *,
-        ready_trigger_ids: frozenset[str],
-    ) -> None:
-        """Bind external trigger delivery runtime when the router client is ready."""
-        if not self.api_enabled:
-            return
-        for bot in bots:
-            if bot.agent_name != ROUTER_AGENT_NAME or bot.client is None:
-                continue
-            from mindroom.api import main as api_main  # noqa: PLC0415
-
-            api_main.bind_external_trigger_runtime(
-                api_main.app,
-                client=bot.client,
-                conversation_cache=bot._conversation_cache,
-                ready_trigger_ids=ready_trigger_ids,
-                is_trigger_ready=self._external_trigger_is_ready,
-            )
-            return
-
-    def _ready_external_trigger_ids(self, config: Config) -> frozenset[str]:
-        """Return enabled triggers whose target bot is joined to that trigger room."""
-        ready_trigger_ids = set()
-        router_joined_room_ids = self._external_trigger_joined_room_ids.get(ROUTER_AGENT_NAME, frozenset())
-        for trigger_id, trigger_config in config.external_triggers.items():
-            if not trigger_config.enabled:
-                continue
-            target_bot = self.agent_bots.get(trigger_config.target.agent)
-            if target_bot is None or not target_bot.running or target_bot.client is None:
-                continue
-            target_room_id = self._resolve_external_trigger_room_id(trigger_config.target.room_id)
-            target_joined_room_ids = self._external_trigger_joined_room_ids.get(
-                trigger_config.target.agent,
-                frozenset(),
-            )
-            if target_room_id in router_joined_room_ids and target_room_id in target_joined_room_ids:
-                ready_trigger_ids.add(trigger_id)
-        return frozenset(ready_trigger_ids)
-
-    def _resolve_external_trigger_room_id(self, room_id_or_alias: str) -> str:
-        """Resolve one configured external trigger room reference when known."""
-        resolved = resolve_room_aliases([room_id_or_alias], runtime_paths=self.runtime_paths)
-        return resolved[0] if resolved else room_id_or_alias
-
-    def _bind_external_trigger_runtime_if_ready(self) -> None:
-        """Bind trigger delivery runtime after router is running."""
-        if not self.api_enabled:
-            return
-        config = self.config
-        if config is None:
-            return
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or not router_bot.running:
-            return
-        self._bind_external_trigger_runtime_from_started_bots(
-            (router_bot,),
-            ready_trigger_ids=self._ready_external_trigger_ids(config),
-        )
-
-    def _unbind_external_trigger_runtime(self) -> None:
-        """Clear external trigger delivery runtime from the bundled API app."""
-        if not self.api_enabled:
-            return
-        from mindroom.api import main as api_main  # noqa: PLC0415
-
-        api_main.unbind_external_trigger_runtime(api_main.app)
-
-    def _unbind_external_trigger_runtime_if_delivery_affected(
-        self,
-        entity_names: Iterable[str],
-        *configs: Config | None,
-    ) -> None:
-        """Clear trigger runtime before the router or a configured trigger target changes."""
-        affected_entities = set(entity_names)
-        if not affected_entities:
-            return
-        if ROUTER_AGENT_NAME in affected_entities:
-            self._unbind_external_trigger_runtime()
-            return
-        configs_to_check = configs or (self.config,)
-        for config in configs_to_check:
-            if config is None:
-                continue
-            for trigger_config in config.external_triggers.values():
-                if trigger_config.enabled and trigger_config.target.agent in affected_entities:
-                    self._unbind_external_trigger_runtime()
-                    for entity_name in affected_entities:
-                        self._external_trigger_joined_room_ids.pop(entity_name, None)
-                    return
-
-    async def _refresh_external_trigger_joined_room_ids(self, bots: Iterable[AgentBot | TeamBot]) -> None:
-        """Refresh actual Matrix joined-room snapshots for trigger delivery participants."""
-        config = self.config
-        if config is None:
-            return
-        trigger_target_agents = {
-            trigger_config.target.agent
-            for trigger_config in config.external_triggers.values()
-            if trigger_config.enabled
-        }
-        if not trigger_target_agents:
-            return
-        trigger_participant_agents = {ROUTER_AGENT_NAME, *trigger_target_agents}
-        bots_to_refresh = list(bots)
-        refreshed_entity_names = {bot.agent_name for bot in bots_to_refresh}
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if ROUTER_AGENT_NAME not in refreshed_entity_names and router_bot is not None:
-            bots_to_refresh.append(router_bot)
-        for bot in bots_to_refresh:
-            if bot.agent_name not in trigger_participant_agents:
-                continue
-            joined_rooms = await get_joined_rooms(bot.client) if bot.client is not None else None
-            self._external_trigger_joined_room_ids[bot.agent_name] = frozenset(joined_rooms or ())
-
-    async def _external_trigger_is_ready(self, trigger_id: str) -> bool:
-        """Return whether router and target clients are currently joined to one trigger room."""
-        config = self.config
-        if config is None:
-            return False
-        trigger_config = config.external_triggers.get(trigger_id)
-        if trigger_config is None or not trigger_config.enabled:
-            return False
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        target_bot = self.agent_bots.get(trigger_config.target.agent)
-        if (
-            router_bot is None
-            or router_bot.client is None
-            or not router_bot.running
-            or target_bot is None
-            or target_bot.client is None
-            or not target_bot.running
-        ):
-            return False
-        trigger_room_id = self._resolve_external_trigger_room_id(trigger_config.target.room_id)
-        router_joined_room_ids = frozenset(await get_joined_rooms(router_bot.client) or ())
-        target_joined_room_ids = frozenset(await get_joined_rooms(target_bot.client) or ())
-        self._external_trigger_joined_room_ids[ROUTER_AGENT_NAME] = router_joined_room_ids
-        self._external_trigger_joined_room_ids[trigger_config.target.agent] = target_joined_room_ids
-        return trigger_room_id in router_joined_room_ids and trigger_room_id in target_joined_room_ids
-
     async def _setup_startup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
         """Run startup room setup, then publish trigger delivery runtime."""
         await run_with_retry(
@@ -503,7 +367,7 @@ class _MultiAgentOrchestrator:
             permanent_error_check=is_permanent_startup_error,
             update_runtime_state=False,
         )
-        self._bind_external_trigger_runtime_if_ready()
+        self._external_trigger_runtime.bind_if_ready()
 
     async def _sync_event_cache_service(self, config: Config) -> None:
         """Ensure the runtime has one initialized shared event-cache service."""
@@ -662,7 +526,7 @@ class _MultiAgentOrchestrator:
                             permanent_error_check=is_permanent_startup_error,
                             update_runtime_state=False,
                         )
-                    self._bind_external_trigger_runtime_if_ready()
+                    self._external_trigger_runtime.bind_if_ready()
                     return
 
                 attempt += 1
@@ -1312,7 +1176,7 @@ class _MultiAgentOrchestrator:
 
     async def _remove_deleted_entities(self, removed_entities: set[str], *configs: Config | None) -> None:
         """Cancel, clean up, and unregister entities removed from config."""
-        self._unbind_external_trigger_runtime_if_delivery_affected(removed_entities, *configs)
+        self._external_trigger_runtime.unbind_if_delivery_affected(removed_entities, *configs)
         for entity_name in removed_entities:
             await self._cancel_bot_start_task(entity_name)
             await cancel_sync_task(entity_name, self._sync_tasks)
@@ -1337,7 +1201,7 @@ class _MultiAgentOrchestrator:
         if not affected_entities:
             return set()
 
-        self._unbind_external_trigger_runtime_if_delivery_affected(affected_entities, current_config, new_config)
+        self._external_trigger_runtime.unbind_if_delivery_affected(affected_entities, current_config, new_config)
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
         await stop_entities(
@@ -1358,7 +1222,7 @@ class _MultiAgentOrchestrator:
         """Restart or create entities affected by the config change."""
         entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
         if entities_to_stop:
-            self._unbind_external_trigger_runtime_if_delivery_affected(
+            self._external_trigger_runtime.unbind_if_delivery_affected(
                 entities_to_stop,
                 current_config or self.config,
                 plan.new_config,
@@ -1401,7 +1265,7 @@ class _MultiAgentOrchestrator:
                 server_id=server_id,
                 entities=sorted(changed_entities),
             )
-            self._unbind_external_trigger_runtime_if_delivery_affected(changed_entities)
+            self._external_trigger_runtime.unbind_if_delivery_affected(changed_entities)
             for entity_name in changed_entities:
                 await self._cancel_bot_start_task(entity_name)
             await stop_entities(
@@ -1417,7 +1281,7 @@ class _MultiAgentOrchestrator:
             )
             if start_results.started_bots:
                 await self._setup_rooms_and_memberships(start_results.started_bots)
-            self._bind_external_trigger_runtime_if_ready()
+            self._external_trigger_runtime.bind_if_ready()
             for entity_name in start_results.retryable_entities:
                 await self._schedule_bot_start_retry(entity_name)
             if start_results.permanently_failed_entities:
@@ -1436,15 +1300,15 @@ class _MultiAgentOrchestrator:
         bots_to_setup = self._running_bots_for_entities(changed_entities)
         if bots_to_setup or plan.mindroom_user_changed or plan.matrix_room_access_changed or plan.authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
-            self._bind_external_trigger_runtime_if_ready()
+            self._external_trigger_runtime.bind_if_ready()
             return
         if plan.matrix_space_changed or plan.room_metadata_changed:
             room_ids = await self._ensure_rooms_exist()
             await self._ensure_root_space(room_ids)
-            self._bind_external_trigger_runtime_if_ready()
+            self._external_trigger_runtime.bind_if_ready()
             return
         if plan.has_entity_changes:
-            self._bind_external_trigger_runtime_if_ready()
+            self._external_trigger_runtime.bind_if_ready()
 
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
@@ -1460,29 +1324,6 @@ class _MultiAgentOrchestrator:
             await self._prepare_entity_accounts(new_config, entities_requiring_account_check)
         elif plan.mindroom_user_changed:
             self._validate_entity_accounts(new_config)
-
-    async def _sync_api_config_snapshot_for_external_triggers(
-        self,
-        current_config: Config,
-        new_config: Config,
-    ) -> None:
-        """Publish the current config to the bundled API before binding trigger runtime."""
-        if not self.api_enabled:
-            return
-        if not (current_config.external_triggers or new_config.external_triggers):
-            return
-        from mindroom.api import main as api_main  # noqa: PLC0415
-
-        published = await asyncio.to_thread(
-            api_main.config_lifecycle._publish_runtime_config_into_app,
-            new_config,
-            self.runtime_paths,
-            api_main.app,
-        )
-        if not published:
-            self._unbind_external_trigger_runtime()
-            message = "Failed to publish external trigger API config snapshot"
-            raise RuntimeError(message)
 
     async def _apply_config_update_plan(
         self,
@@ -1519,7 +1360,7 @@ class _MultiAgentOrchestrator:
                 "updating_config_authorization",
                 authorized_user_ids=new_config.authorization.global_users,
             )
-            await self._sync_api_config_snapshot_for_external_triggers(current_config, new_config)
+            await self._external_trigger_runtime.sync_api_config_snapshot(current_config, new_config)
             if changed_runtime_mcp_servers:
                 plan = replace(
                     plan,
@@ -1537,7 +1378,7 @@ class _MultiAgentOrchestrator:
                     previous_config=current_config,
                 )
                 await self._approval_transport.mark_startup_runtime_support_ready()
-                self._bind_external_trigger_runtime_if_ready()
+                self._external_trigger_runtime.bind_if_ready()
                 await self._emit_config_reloaded(
                     new_config=new_config,
                     changed_entities=set(),
@@ -1642,7 +1483,7 @@ class _MultiAgentOrchestrator:
         if follow_up_bots:
             await asyncio.gather(*(bot.ensure_rooms() for bot in follow_up_bots))
 
-        await self._refresh_external_trigger_joined_room_ids(bots)
+        await self._external_trigger_runtime.refresh_joined_room_ids(bots)
         logger.info("All agents have joined their configured rooms")
 
     async def _ensure_rooms_exist(self) -> dict[str, str]:
@@ -1834,7 +1675,7 @@ class _MultiAgentOrchestrator:
         self.running = False
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
-        self._unbind_external_trigger_runtime()
+        self._external_trigger_runtime.unbind()
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
         await self._startup_maintenance.cancel()
