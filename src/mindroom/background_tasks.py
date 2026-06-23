@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from mindroom.cancellation import TaskCancelSource, request_task_cancel
+from mindroom.cancellation import request_task_cancel
 from mindroom.logging_config import get_logger
+from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -84,14 +85,14 @@ async def _cancel_and_drain_background_tasks(
     tasks: tuple[asyncio.Task[Any], ...],
     *,
     owner: object | None,
-    cancel_source: TaskCancelSource | None,
+    shutdown_intent: RuntimeShutdownIntent,
 ) -> None:
     pending_tasks = tasks
     for _ in range(_MAX_BACKGROUND_TASK_CANCEL_ROUNDS):
         if not pending_tasks:
             return
         for task in pending_tasks:
-            request_task_cancel(task, cancel_source=cancel_source)
+            request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
         done, _pending = await asyncio.wait(
             pending_tasks,
             timeout=_BACKGROUND_TASK_CANCEL_ROUND_TIMEOUT_SECONDS,
@@ -111,14 +112,14 @@ async def wait_for_background_tasks(
     timeout: float | None = None,  # noqa: ASYNC109
     *,
     owner: object | None = None,
-    cancel_source: TaskCancelSource | None = None,
+    shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
 ) -> bool:
     """Wait for all background tasks to complete.
 
     Args:
         timeout: Optional timeout in seconds
         owner: Optional logical owner to scope the wait to one bot
-        cancel_source: Optional cancellation provenance to preserve when timeout cancellation is needed
+        shutdown_intent: Shutdown provenance to preserve when timeout cancellation is needed
 
     Returns:
         True when all tasks completed, False when timeout cancellation was needed.
@@ -138,12 +139,12 @@ async def wait_for_background_tasks(
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 logger.warning("background_tasks_wait_timeout", timeout_seconds=timeout)
-                await _cancel_and_drain_background_tasks(tasks, owner=owner, cancel_source=cancel_source)
+                await _cancel_and_drain_background_tasks(tasks, owner=owner, shutdown_intent=shutdown_intent)
                 return False
 
         done, pending = await asyncio.wait(tasks, timeout=remaining)
         await asyncio.gather(*done, return_exceptions=True)
         if pending:
             logger.warning("background_tasks_wait_timeout", timeout_seconds=timeout)
-            await _cancel_and_drain_background_tasks(tuple(pending), owner=owner, cancel_source=cancel_source)
+            await _cancel_and_drain_background_tasks(tuple(pending), owner=owner, shutdown_intent=shutdown_intent)
             return False

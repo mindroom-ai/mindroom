@@ -17,7 +17,6 @@ from mindroom.cancellation import (
     SYNC_RESTART_CANCEL_MSG,
     USER_STOP_CANCEL_MSG,
     CancelSource,
-    TaskCancelSource,
     cancel_failure_reason,
     cancel_source_from_failure_reason,
     classify_cancel_source,
@@ -31,7 +30,12 @@ from mindroom.matrix.health import (
     matrix_versions_url,
     response_has_matrix_versions,
 )
-from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, SYNC_RESTART_SHUTDOWN, shutdown_intent_for_entity
+from mindroom.runtime_shutdown import (
+    GENERIC_SHUTDOWN,
+    SYNC_RESTART_SHUTDOWN,
+    RuntimeShutdownIntent,
+    shutdown_intent_for_entity,
+)
 from mindroom.runtime_state import set_runtime_starting
 from mindroom.startup_errors import PermanentStartupError
 
@@ -192,12 +196,12 @@ async def cancel_task(
     task: asyncio.Task | None,
     *,
     suppress_exceptions: tuple[type[BaseException], ...] = (asyncio.CancelledError,),
-    cancel_source: TaskCancelSource | None = None,
+    shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
 ) -> None:
     """Cancel a detached task and wait for it to finish."""
     if task is None:
         return
-    request_task_cancel(task, cancel_source=cancel_source)
+    request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
     with suppress(*suppress_exceptions):
         await task
 
@@ -322,7 +326,7 @@ class _SyncIteration:
             return
         await self.watchdog_task
 
-    async def cancel(self, *, cancel_source: TaskCancelSource | None = None) -> None:
+    async def cancel(self, *, shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN) -> None:
         """Cancel child tasks without masking the original failure."""
         for attr in ("watchdog_task", "sync_task"):
             task = getattr(self, attr)
@@ -330,7 +334,7 @@ class _SyncIteration:
                 continue
             setattr(self, attr, None)
             if attr == "sync_task":
-                request_task_cancel(task, cancel_source=cancel_source)
+                request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
             else:
                 task.cancel()
             try:
@@ -499,11 +503,11 @@ async def cancel_sync_task(
     entity_name: str,
     sync_tasks: dict[str, asyncio.Task],
     *,
-    cancel_source: TaskCancelSource | None = None,
+    shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
 ) -> None:
     """Cancel and remove a sync task for an entity."""
     task = sync_tasks.pop(entity_name, None)
-    await cancel_task(task, cancel_source=cancel_source)
+    await cancel_task(task, shutdown_intent=shutdown_intent)
 
 
 async def stop_entities(
@@ -525,7 +529,7 @@ async def stop_entities(
         await cancel_sync_task(
             entity_name,
             sync_tasks,
-            cancel_source=shutdown_intents[entity_name].cancel_source,
+            shutdown_intent=shutdown_intents[entity_name],
         )
 
     for entity_name in entities_to_stop:
@@ -585,7 +589,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             if iteration is not None:
                 will_retry = retry_after_cleanup and bot.running and (max_retries < 0 or retry_count < max_retries)
                 shutdown_intent = SYNC_RESTART_SHUTDOWN if will_retry or sync_restart_cancelled else GENERIC_SHUTDOWN
-                await iteration.cancel(cancel_source=shutdown_intent.cancel_source)
+                await iteration.cancel(shutdown_intent=shutdown_intent)
                 await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
 
         if not bot.running:

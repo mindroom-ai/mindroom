@@ -1532,20 +1532,20 @@ class AgentBot:
         background_tasks_completed = await wait_for_background_tasks(
             timeout=5.0,
             owner=self._runtime_view,
-            cancel_source=shutdown_intent.cancel_source,
+            shutdown_intent=shutdown_intent,
         )
         drain_result = await self._coalescing_gate.drain_all(
             ready_timeout_seconds=5.0,
-            cancel_source=shutdown_intent.cancel_source,
+            shutdown_intent=shutdown_intent,
         )
         responses_drained = await self._response_runner.drain_inbox_responses(
             cancel_after_seconds=5.0,
-            cancel_source=shutdown_intent.cancel_source,
+            shutdown_intent=shutdown_intent,
         )
         post_drain_background_tasks_completed = await wait_for_background_tasks(
             timeout=5.0,
             owner=self._runtime_view,
-            cancel_source=shutdown_intent.cancel_source,
+            shutdown_intent=shutdown_intent,
         )
         callback_failure_count = self._runtime_view.callback_failure_count
         if (

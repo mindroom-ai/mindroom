@@ -80,6 +80,7 @@ from mindroom.matrix.thread_membership import (
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_runner import ResponseRequest
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
     StartupThreadPrewarmRegistry,
@@ -3372,8 +3373,8 @@ class TestThreadingBehavior:
             await asyncio.gather(task, return_exceptions=True)
 
     @pytest.mark.asyncio
-    async def test_wait_for_background_tasks_timeout_preserves_cancel_source(self) -> None:
-        """Timed-out owner task cancellation should preserve explicit cancellation provenance."""
+    async def test_wait_for_background_tasks_timeout_preserves_shutdown_intent(self) -> None:
+        """Timed-out owner task cancellation should preserve shutdown provenance."""
         owner = object()
         task_started = asyncio.Event()
         cancelled_args: list[tuple[object, ...]] = []
@@ -3392,7 +3393,7 @@ class TestThreadingBehavior:
         completed = await wait_for_background_tasks(
             timeout=0.0,
             owner=owner,
-            cancel_source="sync_restart",
+            shutdown_intent=SYNC_RESTART_SHUTDOWN,
         )
 
         assert completed is False

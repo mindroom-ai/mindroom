@@ -30,6 +30,7 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -921,7 +922,7 @@ async def test_bounded_shutdown_times_out_stuck_in_flight_dispatch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bounded_shutdown_preserves_explicit_drain_cancel_source() -> None:
+async def test_bounded_shutdown_preserves_shutdown_intent_for_drain_tasks() -> None:
     """Bounded sync-restart drains should preserve restart provenance for in-flight dispatch."""
     dispatch_started = asyncio.Event()
     release_dispatch = asyncio.Event()
@@ -947,7 +948,7 @@ async def test_bounded_shutdown_preserves_explicit_drain_cancel_source() -> None
     drain_task = asyncio.create_task(
         gate.drain_all(
             ready_timeout_seconds=0.01,
-            cancel_source="sync_restart",
+            shutdown_intent=SYNC_RESTART_SHUTDOWN,
         ),
     )
     try:

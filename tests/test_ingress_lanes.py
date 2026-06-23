@@ -23,6 +23,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from tests.conftest import prepared_dispatch_result, unwrap_extracted_collaborator
 from tests.test_live_message_coalescing import (
     _enqueue_for_dispatch,
@@ -1252,7 +1253,7 @@ async def test_bounded_inbox_drain_preserves_cancel_message(tmp_path: Path) -> N
     try:
         completed = await runner.drain_inbox_responses(
             cancel_after_seconds=0.05,
-            cancel_source="sync_restart",
+            shutdown_intent=SYNC_RESTART_SHUTDOWN,
         )
     finally:
         if not task.done():

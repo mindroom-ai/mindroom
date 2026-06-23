@@ -48,6 +48,7 @@ from mindroom.response_terminal import (
     build_placeholder_terminal_stream_transport_outcome,
     build_terminal_stream_transport_outcome,
 )
+from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
@@ -88,7 +89,6 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.cancellation import TaskCancelSource
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -382,7 +382,7 @@ class ResponseRunner:
         self,
         *,
         cancel_after_seconds: float | None = None,
-        cancel_source: TaskCancelSource | None = None,
+        shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> bool:
         """Settle detached inbox responses: graceful drains await, bounded drains cancel.
 
@@ -400,7 +400,7 @@ class ResponseRunner:
         if not pending:
             return True
         for task in pending:
-            request_task_cancel(task, cancel_source=cancel_source)
+            request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
         await asyncio.wait(pending, timeout=cancel_after_seconds)
         return False
 
