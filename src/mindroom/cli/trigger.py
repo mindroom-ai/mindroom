@@ -9,17 +9,15 @@ import os
 import secrets
 import time
 from pathlib import Path  # noqa: TC003
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
+import httpx
 import typer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
 from mindroom.cli.config import console
 from mindroom.external_triggers.auth import sign_trigger_request
-
-if TYPE_CHECKING:
-    import httpx
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:8765"
 _DEFAULT_KEY_ID = "default"
@@ -40,9 +38,7 @@ def _httpx_post_bytes(
     timeout: float,
     verify: bool,
 ) -> httpx.Response:
-    """Call httpx.post without importing httpx during CLI help rendering."""
-    import httpx  # noqa: PLC0415
-
+    """Call httpx.post with bytes content."""
     return httpx.post(url, content=content, headers=headers, timeout=timeout, verify=verify)
 
 
