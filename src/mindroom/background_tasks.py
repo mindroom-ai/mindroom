@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _MAX_BACKGROUND_TASK_CANCEL_ROUNDS = 3
+_BACKGROUND_TASK_CANCEL_ROUND_TIMEOUT_SECONDS = 0.1
 
 # Global registries keep strong references to background tasks and optional owners.
 _background_tasks: set[asyncio.Task[Any]] = set()
@@ -91,7 +92,12 @@ async def _cancel_and_drain_background_tasks(
             return
         for task in pending_tasks:
             request_task_cancel(task, cancel_source=cancel_source)
-        await asyncio.gather(*pending_tasks, return_exceptions=True)
+        done, _pending = await asyncio.wait(
+            pending_tasks,
+            timeout=_BACKGROUND_TASK_CANCEL_ROUND_TIMEOUT_SECONDS,
+        )
+        await asyncio.gather(*done, return_exceptions=True)
+        await asyncio.sleep(0)
         pending_tasks = _tasks_for_owner(owner)
     if pending_tasks:
         logger.warning(

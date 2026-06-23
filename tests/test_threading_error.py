@@ -3338,6 +3338,40 @@ class TestThreadingBehavior:
             await wait_for_background_tasks(timeout=0.05, owner=owner)
 
     @pytest.mark.asyncio
+    async def test_wait_for_background_tasks_timeout_returns_when_task_suppresses_cancel(self) -> None:
+        """Timed-out draining should not hang on a task that ignores cancellation."""
+        owner = object()
+        task_started = asyncio.Event()
+        release_task = asyncio.Event()
+        cancel_count = 0
+
+        async def stubborn_task() -> None:
+            nonlocal cancel_count
+            task_started.set()
+            while not release_task.is_set():
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancel_count += 1
+                    if release_task.is_set():
+                        raise
+
+        task = create_background_task(stubborn_task(), name="stubborn_task", owner=owner)
+        await asyncio.wait_for(task_started.wait(), timeout=1.0)
+
+        try:
+            completed = await asyncio.wait_for(
+                wait_for_background_tasks(timeout=0.0, owner=owner),
+                timeout=1.0,
+            )
+            assert completed is False
+            assert cancel_count >= 1
+        finally:
+            release_task.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    @pytest.mark.asyncio
     async def test_wait_for_background_tasks_timeout_preserves_cancel_source(self) -> None:
         """Timed-out owner task cancellation should preserve explicit cancellation provenance."""
         owner = object()
