@@ -149,6 +149,8 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "extra_env_json": "MINDROOM_KUBERNETES_WORKER_ENV_JSON",
         "extra_labels_json": "MINDROOM_KUBERNETES_WORKER_LABELS_JSON",
         "extra_annotations_json": "MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON",
+        "extra_containers_json": "MINDROOM_KUBERNETES_WORKER_EXTRA_CONTAINERS_JSON",
+        "extra_volumes_json": "MINDROOM_KUBERNETES_WORKER_EXTRA_VOLUMES_JSON",
         "owner_deployment_name": "MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME",
         "memory_request": "MINDROOM_KUBERNETES_WORKER_MEMORY_REQUEST",
         "memory_limit": "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT",

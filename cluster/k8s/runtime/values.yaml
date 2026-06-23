@@ -346,6 +346,8 @@ workers:
     extraEnv: {}
     extraLabels: {}
     extraAnnotations: {}
+    extraContainers: []
+    extraVolumes: []
     resources:
       requests:
         cpu: 100m

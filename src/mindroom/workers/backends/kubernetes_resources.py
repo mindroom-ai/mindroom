@@ -1014,6 +1014,8 @@ class KubernetesResourceManager:
             ],
             "volumes": self._volumes(),
         }
+        containers = cast("list[dict[str, object]]", template_spec["containers"])
+        containers.extend(dict(container) for container in self.config.extra_containers)
         if self.config.agent_vault is not None:
             template_spec["initContainers"] = [self._agent_vault_init_container(worker_key=worker_key)]
         node_name = self._worker_node_name_or_none()
@@ -1338,6 +1340,7 @@ class KubernetesResourceManager:
                     },
                 },
             )
+        volumes.extend(dict(volume) for volume in self.config.extra_volumes)
         return volumes
 
     def _worker_node_name_or_none(self) -> str | None:

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import runtime_env_values
 from mindroom.runtime_env_policy import (
@@ -70,6 +71,8 @@ _RECONCILE_POD_TEMPLATES_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["reco
 _EXTRA_ENV_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"]
 _EXTRA_LABELS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_labels_json"]
 _EXTRA_ANNOTATIONS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_annotations_json"]
+_EXTRA_CONTAINERS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_containers_json"]
+_EXTRA_VOLUMES_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_volumes_json"]
 _OWNER_DEPLOYMENT_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["owner_deployment_name"]
 _MEMORY_REQUEST_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_request"]
 _MEMORY_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_limit"]
@@ -90,11 +93,84 @@ _AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV
     "agent_vault_worker_ca_configmap_name"
 ]
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
+_EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
+    {
+        "name",
+        "image",
+        "imagePullPolicy",
+        "command",
+        "args",
+        "env",
+        "envFrom",
+        "volumeMounts",
+        "resources",
+        "securityContext",
+    },
+)
+_EXTRA_VOLUME_SOURCE_KEYS = frozenset({"secret", "configMap", "emptyDir", "projected"})
+_EXTRA_VOLUME_ALLOWED_KEYS = frozenset({"name", *_EXTRA_VOLUME_SOURCE_KEYS})
 
 
 def is_kubernetes_worker_backend_config_env_name(name: str) -> bool:
     """Return whether an env var configures the primary-side Kubernetes worker backend."""
     return is_worker_backend_config_env_name(name) and name != _WORKER_BACKEND_ENV
+
+
+def _read_json_object_list_env(env: Mapping[str, str], env_name: str) -> tuple[dict[str, object], ...]:
+    raw_value = read_env(env, env_name)
+    if not raw_value:
+        return ()
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        msg = f"{env_name} must contain a JSON list of objects."
+        raise WorkerBackendError(msg) from exc
+    if not isinstance(parsed, list):
+        msg = f"{env_name} must contain a JSON list of objects."
+        raise WorkerBackendError(msg)
+    items: list[dict[str, object]] = []
+    for index, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            msg = f"{env_name}[{index}] must be a JSON object."
+            raise WorkerBackendError(msg)
+        items.append(cast("dict[str, object]", item))
+    return tuple(items)
+
+
+def _validate_required_string(item: dict[str, object], env_name: str, index: int, field_name: str) -> None:
+    value = item.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        msg = f"{env_name}[{index}].{field_name} must be a non-empty string."
+        raise WorkerBackendError(msg)
+
+
+def _read_extra_containers_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
+    containers = _read_json_object_list_env(env, _EXTRA_CONTAINERS_JSON_ENV)
+    for index, container in enumerate(containers):
+        unknown_keys = sorted(set(container) - _EXTRA_CONTAINER_ALLOWED_KEYS)
+        if unknown_keys:
+            unknown_keys_text = ", ".join(unknown_keys)
+            msg = f"{_EXTRA_CONTAINERS_JSON_ENV}[{index}] has unsupported keys: {unknown_keys_text}."
+            raise WorkerBackendError(msg)
+        _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "name")
+        _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "image")
+    return containers
+
+
+def _read_extra_volumes_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
+    volumes = _read_json_object_list_env(env, _EXTRA_VOLUMES_JSON_ENV)
+    for index, volume in enumerate(volumes):
+        unknown_keys = sorted(set(volume) - _EXTRA_VOLUME_ALLOWED_KEYS)
+        if unknown_keys:
+            unknown_keys_text = ", ".join(unknown_keys)
+            msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}] has unsupported keys: {unknown_keys_text}."
+            raise WorkerBackendError(msg)
+        _validate_required_string(volume, _EXTRA_VOLUMES_JSON_ENV, index, "name")
+        source_keys = [key for key in _EXTRA_VOLUME_SOURCE_KEYS if key in volume]
+        if len(source_keys) != 1:
+            msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}] must set exactly one of secret, configMap, emptyDir, projected."
+            raise WorkerBackendError(msg)
+    return volumes
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +269,8 @@ class KubernetesWorkerBackendConfig:
     auth_secret_name: str | None
     reconcile_pod_templates: bool = True
     agent_vault: KubernetesAgentVaultConfig | None = None
+    extra_containers: tuple[dict[str, object], ...] = ()
+    extra_volumes: tuple[dict[str, object], ...] = ()
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> KubernetesWorkerBackendConfig:
@@ -242,6 +320,8 @@ class KubernetesWorkerBackendConfig:
             extra_env=read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV),
             extra_labels=read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
             extra_annotations=read_json_mapping_env(env, _EXTRA_ANNOTATIONS_JSON_ENV),
+            extra_containers=_read_extra_containers_env(env),
+            extra_volumes=_read_extra_volumes_env(env),
             owner_deployment_name=read_env(env, _OWNER_DEPLOYMENT_NAME_ENV) or None,
             resource_requests=resource_requests,
             resource_limits=resource_limits,
@@ -265,6 +345,8 @@ def kubernetes_backend_config_signature(
     extra_env_json = stable_signature_json(config.extra_env)
     extra_labels_json = stable_signature_json(config.extra_labels)
     extra_annotations_json = stable_signature_json(config.extra_annotations)
+    extra_containers_json = stable_signature_json(config.extra_containers)
+    extra_volumes_json = stable_signature_json(config.extra_volumes)
     resource_requests_json = stable_signature_json(config.resource_requests)
     resource_limits_json = stable_signature_json(config.resource_limits)
     return (
@@ -288,6 +370,8 @@ def kubernetes_backend_config_signature(
         extra_env_json,
         extra_labels_json,
         extra_annotations_json,
+        extra_containers_json,
+        extra_volumes_json,
         config.owner_deployment_name or "",
         resource_requests_json,
         resource_limits_json,
