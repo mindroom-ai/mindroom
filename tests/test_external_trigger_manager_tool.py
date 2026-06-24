@@ -179,6 +179,33 @@ def test_private_agent_create_trigger_accepts_current_dynamic_room(tmp_path: Pat
     }
 
 
+def test_private_agent_create_trigger_rejects_other_dynamic_room(tmp_path: Path) -> None:
+    """Private agents may not bind triggers to a different dynamic room."""
+    config = _config(admin_users=["@admin:example.org"], private_watcher=True)
+    config.agents["watcher"].rooms = []
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(
+        _context(
+            tmp_path,
+            requester_id="@admin:example.org",
+            room_id="!private:example.org",
+            config=config,
+        ),
+    ):
+        payload = _payload(
+            tool.create_trigger(
+                "private-other-room",
+                public_key=_PUBLIC_KEY,
+                key_id="campground-main",
+                target_room_id="!other:example.org",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "target room must already be configured" in payload["message"]
+
+
 def test_non_admin_cannot_target_other_agent_or_room(tmp_path: Path) -> None:
     """Non-admin callers can only create triggers for the current agent and room."""
     tool = ExternalTriggerManagerTools()

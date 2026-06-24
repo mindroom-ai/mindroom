@@ -508,7 +508,7 @@ def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePa
 
 
 def _validate_target(record: ExternalTriggerRecord, config: Config, runtime_paths: RuntimePaths) -> None:
-    """Require a configured entity and an already configured target room."""
+    """Require a configured entity and a deliverable room target."""
     target = record.target
     if target.agent not in config.agents and target.agent not in config.teams:
         msg = f"external trigger target references unknown agent or team: {target.agent}"
@@ -546,7 +546,7 @@ def _targets_private_current_room(
 
 
 def _room_ids_match(left: str, right: str, runtime_paths: RuntimePaths) -> bool:
-    """Return whether two room references resolve to the same live room."""
+    """Return whether two room references match after best-effort alias resolution."""
     if left == right:
         return True
     return resolve_room_id(left, runtime_paths) == resolve_room_id(right, runtime_paths)
