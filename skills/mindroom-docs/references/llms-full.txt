@@ -13557,6 +13557,8 @@ The trigger owner is the private-scope requester for the triggered turn.
 
 A trigger created by `@alice:example.org` wakes Alice's private state for that agent.
 
+An admin-created trigger for another private agent still wakes the admin's private state, because trigger ownership always stays with the requester that created it.
+
 The API does not store private workspace paths, worker keys, OAuth tokens, or serialized execution identities.
 
 The target agent must still be configured for the target room, and the router plus target transport bot must be joined before delivery.
