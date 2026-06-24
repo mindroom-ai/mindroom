@@ -77,10 +77,10 @@ def _request_config_and_trigger_snapshot(
     trigger_id: str,
     request: Request,
 ) -> tuple[Config, RuntimePaths, TriggerDeliverySnapshot]:
+    api_snapshot = _bind_request_api_snapshot(request)
     try:
-        api_snapshot = config_lifecycle.bind_current_request_snapshot(request)
         config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
-    except (HTTPException, TypeError) as exc:
+    except HTTPException as exc:
         raise HTTPException(status_code=503, detail="External trigger configuration is not available") from exc
     if not config.external_trigger_policy.enabled:
         raise HTTPException(status_code=404, detail="External trigger not found")
@@ -97,6 +97,13 @@ def _request_config_and_trigger_snapshot(
     if trigger_snapshot is None or not trigger_snapshot.enabled:
         raise HTTPException(status_code=404, detail="External trigger not found")
     return config, runtime_paths, trigger_snapshot
+
+
+def _bind_request_api_snapshot(request: Request) -> config_lifecycle.ApiSnapshot:
+    try:
+        return config_lifecycle.bind_current_request_snapshot(request)
+    except TypeError as exc:
+        raise HTTPException(status_code=503, detail="External trigger configuration is not available") from exc
 
 
 async def _claim_and_execute_trigger(

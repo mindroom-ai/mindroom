@@ -157,6 +157,26 @@ _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
 _CREDENTIALS_ENCRYPTION_KEY_SECRET_SUFFIX = "credentials-encryption-key"  # noqa: S105
 
 
+def _extend_unique_named_pod_entries(
+    entries: list[dict[str, object]],
+    extra_entries: tuple[dict[str, object], ...],
+    *,
+    field_name: str,
+) -> None:
+    existing_names = {name.strip() for entry in entries if isinstance(name := entry.get("name"), str) and name.strip()}
+    for index, extra_entry in enumerate(extra_entries):
+        name = extra_entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            msg = f"{field_name}[{index}].name must be a non-empty string."
+            raise WorkerBackendError(msg)
+        name = name.strip()
+        if name in existing_names:
+            msg = f"{field_name}[{index}].name duplicates existing pod entry: {name}."
+            raise WorkerBackendError(msg)
+        existing_names.add(name)
+        entries.append(dict(extra_entry))
+
+
 @dataclass(frozen=True, slots=True)
 class DeploymentApplyResult:
     """Describe whether applying one worker Deployment forced a recreate."""
@@ -1020,7 +1040,11 @@ class KubernetesResourceManager:
             "volumes": self._volumes(),
         }
         containers = cast("list[dict[str, object]]", template_spec["containers"])
-        containers.extend(dict(container) for container in self.config.extra_containers)
+        _extend_unique_named_pod_entries(
+            containers,
+            self.config.extra_containers,
+            field_name="extra_containers",
+        )
         if self.config.agent_vault is not None:
             template_spec["initContainers"] = [self._agent_vault_init_container(worker_key=worker_key)]
         node_name = self._worker_node_name_or_none()
@@ -1345,7 +1369,11 @@ class KubernetesResourceManager:
                     },
                 },
             )
-        volumes.extend(dict(volume) for volume in self.config.extra_volumes)
+        _extend_unique_named_pod_entries(
+            volumes,
+            self.config.extra_volumes,
+            field_name="extra_volumes",
+        )
         return volumes
 
     def _worker_node_name_or_none(self) -> str | None:

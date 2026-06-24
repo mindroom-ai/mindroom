@@ -43,9 +43,9 @@ class _SerializedReplayStore(TypedDict):
 
 _STORE_STATES: dict[str, threading.RLock] = {}
 _STORE_STATES_LOCK = threading.Lock()
-# NOTE: The per-path lock is in-process only. Deploy the external trigger API
-# with a single writer process/replica for replay correctness until this store
-# moves to a database or another cross-process atomic backend.
+# NOTE: The thread lock serializes same-process callers before the advisory
+# file lock serializes cross-process writers. Deploy with a file-lock-capable
+# filesystem, or a single writer, until this moves to a database.
 
 
 def _shared_store_state(store_path: Path) -> threading.RLock:
@@ -135,10 +135,15 @@ class ExternalTriggerReplayStore:
             self._write_store(store)
 
     def _read_store(self) -> _SerializedReplayStore:
-        if not self._store_path.exists():
-            return _empty_store()
         try:
-            raw_store = json.loads(self._store_path.read_text(encoding="utf-8"))
+            raw_store_text = self._store_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return _empty_store()
+        except OSError as exc:
+            msg = "external trigger replay store is unavailable"
+            raise ExternalTriggerReplayStoreError(msg) from exc
+        try:
+            raw_store = json.loads(raw_store_text)
         except json.JSONDecodeError as exc:
             msg = "invalid external trigger replay store JSON"
             raise ExternalTriggerReplayStoreError(msg) from exc
@@ -162,6 +167,9 @@ class ExternalTriggerReplayStore:
                 os.fsync(temp_file.fileno())
             temp_path.replace(self._store_path)
             _fsync_directory(self._store_path.parent)
+        except OSError as exc:
+            msg = "external trigger replay store is unavailable"
+            raise ExternalTriggerReplayStoreError(msg) from exc
         finally:
             if temp_path is not None and temp_path.exists():
                 temp_path.unlink()
@@ -257,8 +265,14 @@ def _prune_expired(store: _SerializedReplayStore, *, now: int) -> None:
 
 
 def _fsync_directory(directory: Path) -> None:
-    directory_fd = os.open(directory, os.O_RDONLY)
     try:
-        os.fsync(directory_fd)
+        directory_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        try:
+            os.fsync(directory_fd)
+        except OSError:
+            return
     finally:
         os.close(directory_fd)

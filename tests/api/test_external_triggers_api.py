@@ -6,16 +6,18 @@ import base64
 import json
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 import yaml
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
+from mindroom.api import external_triggers as external_triggers_api
 from mindroom.api import main as api_main
 from mindroom.config.main import Config
 from mindroom.external_triggers.auth import sign_trigger_request
@@ -136,6 +138,36 @@ def _bind_runtime(ready_snapshots: list[TriggerDeliverySnapshot]) -> object:
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
     )
     return client
+
+
+def test_uninitialized_api_state_maps_to_external_trigger_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the API-state initialization sentinel should be converted to trigger-unavailable."""
+
+    def raise_uninitialized(_request: Request) -> object:
+        msg = "MindRoom app state is not initialized"
+        raise TypeError(msg)
+
+    monkeypatch.setattr(config_lifecycle, "bind_current_request_snapshot", raise_uninitialized)
+
+    with pytest.raises(HTTPException) as exc_info:
+        external_triggers_api._request_config_and_trigger_snapshot("campground", cast("Request", object()))
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "External trigger configuration is not available"
+
+
+def test_runtime_config_type_error_is_not_masked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Programming errors after snapshot binding should not become generic trigger 503s."""
+
+    def raise_programming_error(_request: Request) -> tuple[Config, constants.RuntimePaths]:
+        msg = "programming bug"
+        raise TypeError(msg)
+
+    monkeypatch.setattr(config_lifecycle, "bind_current_request_snapshot", lambda _request: object())
+    monkeypatch.setattr(config_lifecycle, "read_committed_runtime_config", raise_programming_error)
+
+    with pytest.raises(TypeError, match="programming bug"):
+        external_triggers_api._request_config_and_trigger_snapshot("campground", cast("Request", object()))
 
 
 async def _owner_joined(*_args: object, **_kwargs: object) -> bool:

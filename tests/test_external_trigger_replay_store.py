@@ -13,6 +13,7 @@ from mindroom.external_triggers.replay_store import (
     ExternalTriggerEventClaim,
     ExternalTriggerReplayStore,
     ExternalTriggerReplayStoreError,
+    _fsync_directory,
 )
 
 if TYPE_CHECKING:
@@ -235,3 +236,62 @@ def test_corrupt_json_store_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(ExternalTriggerReplayStoreError, match="invalid"):
         store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
+
+
+def test_replay_store_read_oserror_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay store read failures should not become implicit empty state."""
+    store_path = _store_path(tmp_path)
+    store_path.write_text(json.dumps({"nonces": {}, "events": {}}), encoding="utf-8")
+    original_read_text = type(store_path).read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == store_path:
+            msg = "permission denied"
+            raise OSError(msg)
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(store_path), "read_text", read_text)
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    with pytest.raises(ExternalTriggerReplayStoreError, match="unavailable"):
+        store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
+
+
+def test_replay_store_write_oserror_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay store write failures should surface through the typed store error."""
+
+    def raise_disk_full(_fd: int) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    monkeypatch.setattr("mindroom.external_triggers.replay_store.os.fsync", raise_disk_full)
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    with pytest.raises(ExternalTriggerReplayStoreError, match="unavailable"):
+        store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
+
+
+def test_fsync_directory_ignores_unsupported_directory_fsync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Directory fsync is best-effort on filesystems that do not support it."""
+    closed_fds: list[int] = []
+
+    def raise_unsupported(_fd: int) -> None:
+        msg = "unsupported"
+        raise OSError(msg)
+
+    monkeypatch.setattr("mindroom.external_triggers.replay_store.os.open", lambda _path, _flags: 123)
+    monkeypatch.setattr("mindroom.external_triggers.replay_store.os.fsync", raise_unsupported)
+    monkeypatch.setattr("mindroom.external_triggers.replay_store.os.close", closed_fds.append)
+
+    _fsync_directory(tmp_path)
+
+    assert closed_fds == [123]

@@ -243,6 +243,52 @@ def test_worker_pod_template_appends_trigger_sidecar_and_volume_without_main_mou
     assert "trigger-state" not in main_mount_names
 
 
+@pytest.mark.parametrize(
+    ("extra_containers", "extra_volumes", "match"),
+    [
+        (
+            ({"name": "sandbox-runner", "image": "busybox"},),
+            (),
+            r"extra_containers\[0\]\.name duplicates existing pod entry: sandbox-runner",
+        ),
+        (
+            (
+                {"name": "trigger-listener", "image": "busybox"},
+                {"name": "trigger-listener", "image": "busybox"},
+            ),
+            (),
+            r"extra_containers\[1\]\.name duplicates existing pod entry: trigger-listener",
+        ),
+        (
+            (),
+            ({"name": "worker-storage", "emptyDir": {}},),
+            r"extra_volumes\[0\]\.name duplicates existing pod entry: worker-storage",
+        ),
+        (
+            (),
+            (
+                {"name": "trigger-state", "emptyDir": {}},
+                {"name": "trigger-state", "emptyDir": {}},
+            ),
+            r"extra_volumes\[1\]\.name duplicates existing pod entry: trigger-state",
+        ),
+    ],
+)
+def test_worker_pod_template_rejects_extra_name_collisions(
+    tmp_path: Path,
+    extra_containers: tuple[dict[str, object], ...],
+    extra_volumes: tuple[dict[str, object], ...],
+    match: str,
+) -> None:
+    """Direct worker config construction should still reject invalid PodSpecs."""
+    with pytest.raises(WorkerBackendError, match=match):
+        _pod_template(
+            tmp_path,
+            extra_containers=extra_containers,
+            extra_volumes=extra_volumes,
+        )
+
+
 def test_runtime_chart_exposes_kubernetes_worker_trigger_sidecar_env_json(tmp_path: Path) -> None:
     """Runtime chart should pass configured worker sidecars and volumes through JSON env vars."""
     extra_container = {
