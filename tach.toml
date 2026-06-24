@@ -410,6 +410,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.external_triggers.executor"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.hooks.sender",
+    "mindroom.matrix.client_room_admin",
+]
+
+[[modules]]
 path = "mindroom.api.report_headers"
 depends_on = []
 
@@ -1705,6 +1713,7 @@ visibility = [
     "mindroom.bot",
     "mindroom.bot_room_lifecycle",
     "mindroom.commands.thread_mode_commands",
+    "mindroom.external_triggers.executor",
     "mindroom.hooks.matrix_admin",
     "mindroom.matrix.client",
     "mindroom.matrix.room_cleanup",
