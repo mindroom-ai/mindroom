@@ -13599,7 +13599,7 @@ Mount the trigger private key only into the watcher container that needs it.
 
 Do not mount the trigger private key into `sandbox-runner` or the agent workspace.
 
-Use your deployed MindRoom service URL for `MINDROOM_URL`.
+Set `MINDROOM_URL` to your deployed MindRoom service URL, or pass `--url` to `mindroom trigger send`.
 
 The watcher image must contain the watcher code and the `mindroom` CLI if the watcher shells out to `mindroom trigger send`.
 
@@ -17509,6 +17509,7 @@ Send one signed trigger request to MindRoom.
 │    --verify-tls      --no-verify-tls           Verify TLS certificates.                │
 │                                                [default: verify-tls]                   │
 │    --url                                TEXT   MindRoom base URL.                      │
+│                                                [env var: MINDROOM_URL]                 │
 │                                                [default: http://127.0.0.1:8765]        │
 │    --key-id                             TEXT   Trigger signing key id.                 │
 │                                                [default: default]                      │

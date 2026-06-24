@@ -274,6 +274,62 @@ def test_trigger_send_accepts_custom_options(monkeypatch: pytest.MonkeyPatch, tm
     )
 
 
+def test_trigger_send_uses_mindroom_url_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Send should accept the MindRoom base URL from the watcher environment."""
+    key_path = tmp_path / "trigger.key"
+    private_key = _write_private_key(key_path)
+    public_key_b64 = base64.b64encode(private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode(
+        "ascii",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_post(
+        url: str,
+        *,
+        content: bytes,
+        headers: dict[str, str],
+        timeout: float,
+        verify: bool,
+    ) -> _FakeResponse:
+        captured.update(url=url, content=content, headers=headers, timeout=timeout, verify=verify)
+        return _FakeResponse({"accepted": True})
+
+    monkeypatch.setattr("mindroom.cli.trigger.httpx.post", fake_post)
+    monkeypatch.setattr("mindroom.cli.trigger.time.time", lambda: 3000)
+    token_values = iter(["event-from-env", "nonce-from-env"])
+    monkeypatch.setattr("mindroom.cli.trigger.secrets.token_hex", lambda _size: next(token_values))
+
+    result = runner.invoke(
+        app,
+        [
+            "trigger",
+            "send",
+            "campground",
+            "--key-file",
+            str(key_path),
+            "--kind",
+            "campground.availability",
+            "--message",
+            "site open",
+        ],
+        env={"MINDROOM_URL": "https://mindroom.example"},
+    )
+
+    assert result.exit_code == 0
+    assert captured["url"] == "https://mindroom.example/api/triggers/campground"
+    content = cast("bytes", captured["content"])
+    headers = cast("dict[str, str]", captured["headers"])
+    verify_trigger_request(
+        method="POST",
+        path="/api/triggers/campground",
+        body=content,
+        headers=headers,
+        expected_key_id="default",
+        public_key_b64=public_key_b64,
+        now=3000,
+    )
+
+
 def test_trigger_send_reports_transport_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Send should turn network failures into concise CLI errors."""
     key_path = tmp_path / "trigger.key"

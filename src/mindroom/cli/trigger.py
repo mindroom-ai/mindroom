@@ -100,7 +100,12 @@ def send(
     data_json: str | None = typer.Option(None, "--data-json", help="Optional JSON object for trigger data."),
     timeout: float = typer.Option(_DEFAULT_TIMEOUT, "--timeout", help="HTTP request timeout in seconds."),
     verify_tls: bool = typer.Option(True, "--verify-tls/--no-verify-tls", help="Verify TLS certificates."),
-    url: str = typer.Option(_DEFAULT_BASE_URL, "--url", help="MindRoom base URL."),
+    url: str = typer.Option(
+        _DEFAULT_BASE_URL,
+        "--url",
+        envvar="MINDROOM_URL",
+        help="MindRoom base URL.",
+    ),
     key_id: str = typer.Option(_DEFAULT_KEY_ID, "--key-id", help="Trigger signing key id."),
 ) -> None:
     """Send a signed external trigger request."""

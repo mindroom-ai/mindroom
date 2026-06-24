@@ -861,6 +861,7 @@ Send one signed trigger request to MindRoom.
 │    --verify-tls      --no-verify-tls           Verify TLS certificates.                │
 │                                                [default: verify-tls]                   │
 │    --url                                TEXT   MindRoom base URL.                      │
+│                                                [env var: MINDROOM_URL]                 │
 │                                                [default: http://127.0.0.1:8765]        │
 │    --key-id                             TEXT   Trigger signing key id.                 │
 │                                                [default: default]                      │

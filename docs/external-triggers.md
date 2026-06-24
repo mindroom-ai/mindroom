@@ -201,7 +201,7 @@ Mount the trigger private key only into the watcher container that needs it.
 
 Do not mount the trigger private key into `sandbox-runner` or the agent workspace.
 
-Use your deployed MindRoom service URL for `MINDROOM_URL`.
+Set `MINDROOM_URL` to your deployed MindRoom service URL, or pass `--url` to `mindroom trigger send`.
 
 The watcher image must contain the watcher code and the `mindroom` CLI if the watcher shells out to `mindroom trigger send`.
 
