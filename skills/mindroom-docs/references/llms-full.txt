@@ -13473,9 +13473,11 @@ Admin-created triggers are still owned by the admin requester, but admins can ch
 
 Non-admin callers can create triggers only for the current agent and current room in the live Matrix tool context, but can still choose either `target_thread_id` or `new_thread` inside that room.
 
-The target room must already be configured for the target agent or team.
+For shared agents and teams, the target room must already be configured for the target entity.
 
-Triggers do not widen static room membership.
+For private agents, a trigger created by that same private agent may target the current live Matrix room even when the room is dynamically provisioned and not listed in `rooms`.
+
+Triggers do not create rooms or make agents join rooms.
 
 No new Matrix room is created for a trigger.
 
@@ -13561,7 +13563,11 @@ An admin-created trigger for another private agent still wakes the admin's priva
 
 The API does not store private workspace paths, worker keys, OAuth tokens, or serialized execution identities.
 
-The target agent must still be configured for the target room, and the router plus target transport bot must be joined before delivery.
+Shared target agents must still be configured for the target room.
+
+Private target agents created from their current live room may use that room even when it is not listed in `rooms`.
+
+The router plus target transport bot must be joined before delivery.
 
 ## Idempotency
 

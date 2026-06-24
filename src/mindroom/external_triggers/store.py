@@ -406,7 +406,7 @@ class ExternalTriggerStore:
 
     def _validate_record_against_config(self, record: ExternalTriggerRecord, config: Config) -> None:
         _validate_owner(record.owner_user_id, config, self._runtime_paths)
-        _validate_target(record.target, config, self._runtime_paths)
+        _validate_target(record, config, self._runtime_paths)
 
     def _read_records(self) -> _SerializedTriggerRecords:
         try:
@@ -507,8 +507,9 @@ def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePa
         raise ExternalTriggerStoreError(msg)
 
 
-def _validate_target(target: ExternalTriggerTarget, config: Config, runtime_paths: RuntimePaths) -> None:
+def _validate_target(record: ExternalTriggerRecord, config: Config, runtime_paths: RuntimePaths) -> None:
     """Require a configured entity and an already configured target room."""
+    target = record.target
     if target.agent not in config.agents and target.agent not in config.teams:
         msg = f"external trigger target references unknown agent or team: {target.agent}"
         raise ExternalTriggerStoreError(msg)
@@ -521,9 +522,34 @@ def _validate_target(target: ExternalTriggerTarget, config: Config, runtime_path
         runtime_paths,
         room_aliases=(target.room_id,),
     )
-    if target.agent not in configured_entities:
-        msg = "external trigger target room must already be configured for the target entity"
-        raise ExternalTriggerStoreError(msg)
+    if target.agent in configured_entities:
+        return
+    if _targets_private_current_room(record, config, runtime_paths):
+        return
+    msg = "external trigger target room must already be configured for the target entity"
+    raise ExternalTriggerStoreError(msg)
+
+
+def _targets_private_current_room(
+    record: ExternalTriggerRecord,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Allow private current-agent triggers for dynamic rooms created outside config."""
+    target = record.target
+    if target.agent != record.created_by_agent_name:
+        return False
+    agent_config = config.agents.get(target.agent)
+    if agent_config is None or agent_config.private is None:
+        return False
+    return _room_ids_match(target.room_id, record.created_in_room_id, runtime_paths)
+
+
+def _room_ids_match(left: str, right: str, runtime_paths: RuntimePaths) -> bool:
+    """Return whether two room references resolve to the same live room."""
+    if left == right:
+        return True
+    return resolve_room_id(left, runtime_paths) == resolve_room_id(right, runtime_paths)
 
 
 def _validate_record_update(record: ExternalTriggerRecord) -> ExternalTriggerRecord:
