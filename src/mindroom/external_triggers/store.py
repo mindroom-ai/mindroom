@@ -10,24 +10,26 @@ import re
 import time
 import uuid
 from collections.abc import Iterable
-from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom import constants
 from mindroom.config.validation import non_empty_stripped
+from mindroom.durable_write import write_json_file_durable
 from mindroom.entity_resolution import (
     MissingManagedEntityAccountError,
     configured_routable_entity_names_for_room,
     entity_identity_registry,
 )
 from mindroom.file_locks import advisory_file_lock
-from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.state import resolve_room_id
+from mindroom.matrix.identity import MatrixID, managed_account_key
+from mindroom.matrix.state import matrix_state_for_runtime, resolve_room_id
+from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -233,6 +235,7 @@ class ExternalTriggerStore:
         _validate_trigger_id(trigger_id)
         policy = config.external_trigger_policy
         now = int(time.time())
+        normalized_public_key = _normalize_public_key(public_key)
         record = ExternalTriggerRecord(
             trigger_id=trigger_id,
             uid=uuid.uuid4().hex,
@@ -246,8 +249,8 @@ class ExternalTriggerStore:
             created_in_thread_id=created_in_thread_id,
             target=target,
             key_id=key_id,
-            public_key=_normalize_public_key(public_key),
-            public_key_fingerprint=public_key_fingerprint(public_key),
+            public_key=normalized_public_key,
+            public_key_fingerprint=public_key_fingerprint(normalized_public_key),
             allowed_kinds=tuple(allowed_kinds),
             replay_window_seconds=min(
                 replay_window_seconds or policy.default_replay_window_seconds,
@@ -400,24 +403,17 @@ class ExternalTriggerStore:
             raise ExternalTriggerStoreError(msg) from exc
 
     def _write_records(self, records: _SerializedTriggerRecords) -> None:
-        self._root.mkdir(parents=True, exist_ok=True)
-        temp_path = None
         try:
-            with NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=self._root,
-                prefix=f"{self._store_path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as temp_file:
-                temp_path = self._root / Path(temp_file.name).name
-                json.dump(records.model_dump(mode="json"), temp_file, indent=2, sort_keys=True)
-                temp_file.flush()
-            constants.safe_replace(temp_path, self._store_path)
-        finally:
-            if temp_path is not None and temp_path.exists():
-                temp_path.unlink()
+            write_json_file_durable(
+                self._store_path,
+                records.model_dump(mode="json"),
+                temp_dir=self._root,
+                indent=2,
+                sort_keys=True,
+            )
+        except OSError as exc:
+            msg = "external trigger store is unavailable"
+            raise ExternalTriggerStoreError(msg) from exc
 
 
 def _validate_trigger_id(trigger_id: str) -> str:
@@ -456,9 +452,27 @@ def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePa
     if owner_user_id in config.bot_accounts:
         msg = "external trigger owner must not be a configured bot account"
         raise ExternalTriggerStoreError(msg)
-    if config.mindroom_user and config.mindroom_user.username == parsed_owner.username:
+    local_domain = extract_server_name_from_homeserver(
+        constants.runtime_matrix_homeserver(runtime_paths),
+        runtime_paths,
+    )
+    if (
+        config.mindroom_user
+        and parsed_owner.domain == local_domain
+        and config.mindroom_user.username == parsed_owner.username
+    ):
         msg = "external trigger owner must not be the MindRoom user"
         raise ExternalTriggerStoreError(msg)
+    configured_entities = [constants.ROUTER_AGENT_NAME, *config.agents, *config.teams]
+    matrix_state = matrix_state_for_runtime(runtime_paths)
+    for entity_name in configured_entities:
+        account = matrix_state.get_account(managed_account_key(entity_name))
+        if account is None:
+            continue
+        managed_id = MatrixID.from_username(account.username, account.domain or local_domain).full_id
+        if owner_user_id == managed_id:
+            msg = "external trigger owner must not be a managed entity account"
+            raise ExternalTriggerStoreError(msg)
     try:
         managed_account_ids = {
             identity.full_id for identity in entity_identity_registry(config, runtime_paths).current_ids.values()
@@ -468,8 +482,8 @@ def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePa
     if owner_user_id in managed_account_ids:
         msg = "external trigger owner must not be a managed entity account"
         raise ExternalTriggerStoreError(msg)
-    managed_entity_ids = set(config.agents) | set(config.teams) | {constants.ROUTER_AGENT_NAME}
-    if parsed_owner.username in managed_entity_ids:
+    managed_localparts = {agent_username_localpart(entity_name, runtime_paths) for entity_name in configured_entities}
+    if parsed_owner.domain == local_domain and parsed_owner.username in managed_localparts:
         msg = "external trigger owner must not be a managed entity account"
         raise ExternalTriggerStoreError(msg)
 

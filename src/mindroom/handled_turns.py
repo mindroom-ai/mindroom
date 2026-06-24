@@ -11,20 +11,21 @@ loop never blocks on filesystem I/O (issue #1260).
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 import typing
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any, NotRequired, TypedDict
 
+from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.history import HistoryScope, HistoryScopeMetadata
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget, MessageTargetMetadata
+
+if typing.TYPE_CHECKING:
+    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -504,25 +505,7 @@ class HandledTurnLedger:
 
     def _write_responses_file_locked(self, responses: dict[str, _SerializedHandledTurnRecord]) -> None:
         """Atomically write one ledger payload while the file lock is held."""
-        temp_path = None
-        try:
-            with NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=self.base_path,
-                prefix=f"{self._responses_file.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as temp_file:
-                temp_path = self.base_path / Path(temp_file.name).name
-                json.dump(responses, temp_file, indent=2)
-                temp_file.flush()
-                os.fsync(temp_file.fileno())
-            temp_path.replace(self._responses_file)
-            self._fsync_base_path()
-        finally:
-            if temp_path is not None and temp_path.exists():
-                temp_path.unlink()
+        write_json_file_durable(self._responses_file, responses, temp_dir=self.base_path, indent=2)
 
     def _cleanup_old_events(self, max_events: int = 10000, max_age_days: int = 30) -> None:
         """Drop stale persisted records by age and count, then reload shared memory."""
@@ -596,14 +579,6 @@ class HandledTurnLedger:
         except FileNotFoundError:
             return None
         return quarantined_file
-
-    def _fsync_base_path(self) -> None:
-        """Flush the tracking directory so atomic replacements are durable."""
-        base_dir_fd = os.open(self.base_path, os.O_RDONLY)
-        try:
-            os.fsync(base_dir_fd)
-        finally:
-            os.close(base_dir_fd)
 
     def _visible_echo_for_sources(self, source_event_ids: tuple[str, ...]) -> str | None:
         """Return the first visible echo already tracked for one turn."""

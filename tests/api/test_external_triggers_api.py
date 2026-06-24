@@ -237,6 +237,71 @@ def test_missing_signature_headers_return_401(trigger_api: TriggerApiContext) ->
     assert response.status_code == 401
 
 
+def test_tampered_signed_body_returns_401(trigger_api: TriggerApiContext) -> None:
+    """HTTP boundary should reject bodies changed after signing."""
+    signed_body = _body(message="Site 42 opened.")
+    tampered_body = _body(message="Site 43 opened.")
+
+    response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=tampered_body,
+        headers=_sign(trigger_api.private_key, body=signed_body),
+    )
+
+    assert response.status_code == 401
+
+
+def test_forged_signature_returns_401(trigger_api: TriggerApiContext) -> None:
+    """HTTP boundary should reject signatures from an unconfigured key."""
+    body = _body()
+
+    response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(Ed25519PrivateKey.generate(), body=body),
+    )
+
+    assert response.status_code == 401
+
+
+def test_expired_signature_returns_401(trigger_api: TriggerApiContext) -> None:
+    """HTTP boundary should reject signed requests outside the replay window."""
+    body = _body()
+
+    response = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(trigger_api.private_key, body=body, timestamp=str(int(time.time()) - 31)),
+    )
+
+    assert response.status_code == 401
+
+
+def test_reused_nonce_returns_409(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP boundary should reject exact nonce reuse before dispatching again."""
+
+    async def execute_external_trigger(**_kwargs: object) -> str:
+        return "$matrix-event"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+
+    first = _post_signed(trigger_api, nonce="same-nonce")
+    second = _post_signed(trigger_api, nonce="same-nonce")
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+
+
+def test_disallowed_kind_returns_422(trigger_api: TriggerApiContext) -> None:
+    """HTTP boundary should reject payload kinds outside the trigger allowlist."""
+    response = _post_signed(trigger_api, body=_body(kind="campground.closed"), nonce="wrong-kind")
+
+    assert response.status_code == 422
+
+
 def test_delivery_uses_single_snapshot_for_auth_readiness_and_execute(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,

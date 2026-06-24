@@ -1174,7 +1174,8 @@ class _MultiAgentOrchestrator:
 
     async def _remove_deleted_entities(self, removed_entities: set[str], *configs: Config | None) -> None:
         """Cancel, clean up, and unregister entities removed from config."""
-        self._external_trigger_runtime.unbind_if_delivery_affected(removed_entities, *configs)
+        del configs
+        self._external_trigger_runtime.unbind_if_delivery_affected(removed_entities)
         for entity_name in removed_entities:
             await self._cancel_bot_start_task(entity_name)
             await cancel_sync_task(entity_name, self._sync_tasks)
@@ -1199,7 +1200,7 @@ class _MultiAgentOrchestrator:
         if not affected_entities:
             return set()
 
-        self._external_trigger_runtime.unbind_if_delivery_affected(affected_entities, current_config, new_config)
+        self._external_trigger_runtime.unbind_if_delivery_affected(affected_entities)
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
         await stop_entities(
@@ -1220,11 +1221,7 @@ class _MultiAgentOrchestrator:
         """Restart or create entities affected by the config change."""
         entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
         if entities_to_stop:
-            self._external_trigger_runtime.unbind_if_delivery_affected(
-                entities_to_stop,
-                current_config or self.config,
-                plan.new_config,
-            )
+            self._external_trigger_runtime.unbind_if_delivery_affected(entities_to_stop)
             for entity_name in entities_to_stop:
                 await self._cancel_bot_start_task(entity_name)
             await stop_entities(
@@ -1263,7 +1260,7 @@ class _MultiAgentOrchestrator:
                 server_id=server_id,
                 entities=sorted(changed_entities),
             )
-            self._external_trigger_runtime.unbind_if_delivery_affected(changed_entities, self.config)
+            self._external_trigger_runtime.unbind_if_delivery_affected(changed_entities)
             for entity_name in changed_entities:
                 await self._cancel_bot_start_task(entity_name)
             await stop_entities(
@@ -1296,16 +1293,17 @@ class _MultiAgentOrchestrator:
     ) -> None:
         """Reconcile rooms and memberships after entity/config updates."""
         bots_to_setup = self._running_bots_for_entities(changed_entities)
+        should_rebind_triggers = False
         if bots_to_setup or plan.mindroom_user_changed or plan.matrix_room_access_changed or plan.authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
-            self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
-            return
+            should_rebind_triggers = True
         if plan.matrix_space_changed or plan.room_metadata_changed:
             room_ids = await self._ensure_rooms_exist()
             await self._ensure_root_space(room_ids)
-            self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
-            return
+            should_rebind_triggers = True
         if plan.has_entity_changes:
+            should_rebind_triggers = True
+        if should_rebind_triggers:
             self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
 
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:

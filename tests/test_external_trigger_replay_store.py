@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
+from mindroom.durable_write import _fsync_directory
 from mindroom.external_triggers.models import ExternalTriggerAcceptedResponse, ExternalTriggerPayload
 from mindroom.external_triggers.replay_store import (
     ExternalTriggerEventClaim,
     ExternalTriggerReplayStore,
     ExternalTriggerReplayStoreError,
-    _fsync_directory,
 )
 
 if TYPE_CHECKING:
@@ -270,11 +270,34 @@ def test_replay_store_write_oserror_fails_closed(
         msg = "disk full"
         raise OSError(msg)
 
-    monkeypatch.setattr("mindroom.external_triggers.replay_store.os.fsync", raise_disk_full)
+    monkeypatch.setattr("mindroom.durable_write.os.fsync", raise_disk_full)
     store = ExternalTriggerReplayStore(tmp_path)
 
     with pytest.raises(ExternalTriggerReplayStoreError, match="unavailable"):
         store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
+
+
+def test_replay_store_write_uses_bind_mount_safe_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay writes should survive filesystems where atomic replace reports EBUSY."""
+    store_path = _store_path(tmp_path)
+    original_replace = type(store_path).replace
+
+    def raise_busy_on_store_replace(path: Path, target: Path) -> Path:
+        if target == store_path:
+            msg = "Device or resource busy"
+            raise OSError(msg)
+        return original_replace(path, target)
+
+    monkeypatch.setattr(type(store_path), "replace", raise_busy_on_store_replace)
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    assert store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
+    assert json.loads(store_path.read_text(encoding="utf-8"))["nonces"]["campground"]["nonce-1"] == {
+        "expires_at": 1_300,
+    }
 
 
 def test_fsync_directory_ignores_unsupported_directory_fsync(
@@ -288,9 +311,9 @@ def test_fsync_directory_ignores_unsupported_directory_fsync(
         msg = "unsupported"
         raise OSError(msg)
 
-    monkeypatch.setattr("mindroom.external_triggers.replay_store.os.open", lambda _path, _flags: 123)
-    monkeypatch.setattr("mindroom.external_triggers.replay_store.os.fsync", raise_unsupported)
-    monkeypatch.setattr("mindroom.external_triggers.replay_store.os.close", closed_fds.append)
+    monkeypatch.setattr("mindroom.durable_write.os.open", lambda _path, _flags: 123)
+    monkeypatch.setattr("mindroom.durable_write.os.fsync", raise_unsupported)
+    monkeypatch.setattr("mindroom.durable_write.os.close", closed_fds.append)
 
     _fsync_directory(tmp_path)
 

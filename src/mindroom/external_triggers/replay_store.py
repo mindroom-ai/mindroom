@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import Literal, TypedDict, TypeGuard, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, TypeGuard, cast
 
+from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class ExternalTriggerEventClaim(StrEnum):
@@ -150,29 +151,11 @@ class ExternalTriggerReplayStore:
         return _normalize_store(raw_store)
 
     def _write_store(self, store: _SerializedReplayStore) -> None:
-        self._store_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = None
         try:
-            with NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=self._store_path.parent,
-                prefix=f"{self._store_path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as temp_file:
-                temp_path = self._store_path.parent / Path(temp_file.name).name
-                json.dump(store, temp_file, indent=2, sort_keys=True)
-                temp_file.flush()
-                os.fsync(temp_file.fileno())
-            temp_path.replace(self._store_path)
-            _fsync_directory(self._store_path.parent)
+            write_json_file_durable(self._store_path, store, indent=2, sort_keys=True)
         except OSError as exc:
             msg = "external trigger replay store is unavailable"
             raise ExternalTriggerReplayStoreError(msg) from exc
-        finally:
-            if temp_path is not None and temp_path.exists():
-                temp_path.unlink()
 
 
 def _empty_store() -> _SerializedReplayStore:
@@ -262,17 +245,3 @@ def _prune_expired(store: _SerializedReplayStore, *, now: int) -> None:
         }
         if not store["events"][trigger_id]:
             store["events"].pop(trigger_id)
-
-
-def _fsync_directory(directory: Path) -> None:
-    try:
-        directory_fd = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        try:
-            os.fsync(directory_fd)
-        except OSError:
-            return
-    finally:
-        os.close(directory_fd)

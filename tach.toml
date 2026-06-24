@@ -1061,7 +1061,6 @@ depends_on = [
     "mindroom.api.main",
     "mindroom.constants",
     "mindroom.matrix.client_room_admin",
-    "mindroom.matrix.state",
 ]
 
 [[modules]]

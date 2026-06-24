@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="external_trigger_manager",
     display_name="External Trigger Manager",
-    description="Create and manage approval-gated external trigger endpoints",
+    description="Create and manage signed external trigger endpoints",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

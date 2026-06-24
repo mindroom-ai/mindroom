@@ -62,15 +62,10 @@ class ExternalTriggerRuntimeCoordinator:
     def unbind_if_delivery_affected(
         self,
         entity_names: Iterable[str],
-        *configs: Config | None,
     ) -> None:
         """Clear trigger runtime before the router or a configured trigger target changes."""
-        del configs
         affected_entities = set(entity_names)
         if not affected_entities:
-            return
-        if ROUTER_AGENT_NAME in affected_entities:
-            self.unbind()
             return
         self.unbind()
 

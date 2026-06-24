@@ -7561,7 +7561,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Create and manage approval-gated external trigger endpoints",
+      "description": "Create and manage signed external trigger endpoints",
       "display_name": "External Trigger Manager",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
