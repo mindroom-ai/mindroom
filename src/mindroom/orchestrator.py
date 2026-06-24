@@ -1313,6 +1313,32 @@ class _MultiAgentOrchestrator:
         elif plan.mindroom_user_changed:
             self._validate_entity_accounts(new_config)
 
+    async def _finalize_config_reload(
+        self,
+        *,
+        new_config: Config,
+        current_config: Config,
+        changed_entities: set[str],
+        added_entities: set[str],
+        removed_entities: set[str],
+        plugin_changes: tuple[str, ...],
+    ) -> None:
+        """Publish post-reload runtime services and external trigger delivery binding."""
+        await self._sync_runtime_support_services(
+            new_config,
+            start_watcher=self.running,
+            previous_config=current_config,
+        )
+        await self._approval_transport.mark_startup_runtime_support_ready()
+        self._external_trigger_runtime.bind_if_ready(new_config, self.agent_bots)
+        await self._emit_config_reloaded(
+            new_config=new_config,
+            changed_entities=changed_entities,
+            added_entities=added_entities,
+            removed_entities=removed_entities,
+            plugin_changes=plugin_changes,
+        )
+
     async def _apply_config_update_plan(
         self,
         current_config: Config,
@@ -1360,15 +1386,9 @@ class _MultiAgentOrchestrator:
             await self._update_unchanged_bots(plan)
 
             if plan.only_support_service_changes:
-                await self._sync_runtime_support_services(
-                    new_config,
-                    start_watcher=self.running,
-                    previous_config=current_config,
-                )
-                await self._approval_transport.mark_startup_runtime_support_ready()
-                self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
-                await self._emit_config_reloaded(
+                await self._finalize_config_reload(
                     new_config=new_config,
+                    current_config=current_config,
                     changed_entities=set(),
                     added_entities=plan.added_entities,
                     removed_entities=plan.removed_entities,
@@ -1391,15 +1411,9 @@ class _MultiAgentOrchestrator:
                     agent_names=permanently_failed_entities,
                 )
 
-            await self._sync_runtime_support_services(
-                new_config,
-                start_watcher=self.running,
-                previous_config=current_config,
-            )
-            await self._approval_transport.mark_startup_runtime_support_ready()
-            self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
-            await self._emit_config_reloaded(
+            await self._finalize_config_reload(
                 new_config=new_config,
+                current_config=current_config,
                 changed_entities=changed_entities,
                 added_entities=plan.added_entities,
                 removed_entities=plan.removed_entities,
