@@ -69,7 +69,7 @@ external_trigger_policy:
 
 Admin-created triggers are still owned by the admin requester, but admins can choose a different target agent, team, or room.
 
-Non-admin callers can create triggers only for the current agent and current room in the live Matrix tool context, but can still choose `target_thread_id` or `new_thread` inside that room.
+Non-admin callers can create triggers only for the current agent and current room in the live Matrix tool context, but can still choose either `target_thread_id` or `new_thread` inside that room.
 
 The target room must already be configured for the target agent or team.
 
@@ -103,7 +103,9 @@ Example tool arguments:
 }
 ```
 
-For a non-admin caller, the target agent and room are the current agent and current room, and `target_thread_id` or `new_thread` may still choose placement inside that room.
+For a non-admin caller, the target agent and room are the current agent and current room, and either `target_thread_id` or `new_thread` may still choose placement inside that room.
+
+`target_thread_id` and `new_thread` are mutually exclusive.
 
 For an admin caller, `target_agent` and `target_room_id` can additionally target a different agent, team, or room.
 

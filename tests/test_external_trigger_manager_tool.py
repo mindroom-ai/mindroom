@@ -130,16 +130,26 @@ def test_create_trigger_validation_error_returns_tool_error_payload(tmp_path: Pa
     """Bad model-backed tool input should remain a structured tool error."""
     tool = ExternalTriggerManagerTools()
     with tool_runtime_context(_context(tmp_path)):
-        payload = _payload(
+        empty_thread_payload = _payload(
             tool.create_trigger(
                 "campground",
                 public_key=_PUBLIC_KEY,
                 target_thread_id="  ",
             ),
         )
+        conflict_payload = _payload(
+            tool.create_trigger(
+                "thread-conflict",
+                public_key=_PUBLIC_KEY,
+                target_thread_id="$thread",
+                new_thread=True,
+            ),
+        )
 
-    assert payload["status"] == "error"
-    assert "thread_id" in payload["message"]
+    assert empty_thread_payload["status"] == "error"
+    assert "thread_id" in empty_thread_payload["message"]
+    assert conflict_payload["status"] == "error"
+    assert "thread_id and new_thread" in conflict_payload["message"]
 
 
 def test_manager_requires_live_human_requester_context(tmp_path: Path) -> None:

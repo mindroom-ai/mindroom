@@ -259,7 +259,7 @@ async def test_execute_external_trigger_new_thread_sends_room_message_without_th
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """new_thread external triggers ignore configured thread_id and avoid thread lookup."""
+    """new_thread external triggers avoid thread lookup."""
     config = _config(tmp_path)
     conversation_cache = _conversation_cache()
     send_and_track_message = AsyncMock(
@@ -269,7 +269,7 @@ async def test_execute_external_trigger_new_thread_sends_room_message_without_th
 
     event_id = await execute_external_trigger(
         client=AsyncMock(),
-        snapshot=_snapshot(new_thread=True),
+        snapshot=_snapshot(new_thread=True, thread_id=None),
         payload=_payload(),
         config=config,
         runtime_paths=runtime_paths_for(config),

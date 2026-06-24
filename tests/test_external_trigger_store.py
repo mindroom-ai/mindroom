@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
@@ -73,6 +74,12 @@ def _create(store: ExternalTriggerStore, config: Config, trigger_id: str = "camp
         allowed_kinds=["campground.availability"],
         config=config,
     )
+
+
+def test_target_rejects_thread_id_with_new_thread() -> None:
+    """A trigger cannot both append to a thread and request a fresh thread."""
+    with pytest.raises(ValidationError, match="thread_id and new_thread"):
+        ExternalTriggerTarget(room_id="lobby", agent="watcher", thread_id="$thread", new_thread=True)
 
 
 def test_create_record_assigns_uid_version_and_auth_epoch(tmp_path: Path) -> None:

@@ -73,6 +73,14 @@ class ExternalTriggerTarget(BaseModel):
             return None
         return non_empty_stripped(value, field_name="thread_id")
 
+    @model_validator(mode="after")
+    def validate_thread_placement(self) -> ExternalTriggerTarget:
+        """Reject conflicting thread placement modes."""
+        if self.new_thread and self.thread_id is not None:
+            msg = "thread_id and new_thread are mutually exclusive"
+            raise ValueError(msg)
+        return self
+
 
 class ExternalTriggerRecord(BaseModel):
     """Durable trigger record owned by one Matrix user."""
