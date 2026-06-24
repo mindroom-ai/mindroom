@@ -22,6 +22,7 @@ from mindroom.entity_resolution import (
     configured_routable_entity_names_for_room,
     entity_identity_registry,
 )
+from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import matrix_state_for_runtime, resolve_room_id
@@ -503,7 +504,7 @@ def _validate_target(target: ExternalTriggerTarget, config: Config, runtime_path
     if target.agent not in config.agents and target.agent not in config.teams:
         msg = f"external trigger target references unknown agent or team: {target.agent}"
         raise ExternalTriggerStoreError(msg)
-    if target.room_id in _configured_room_refs_for_entity(target.agent, config):
+    if target.room_id in get_rooms_for_entity(target.agent, config):
         return
     resolved_room_id = resolve_room_id(target.room_id, runtime_paths)
     configured_entities = configured_routable_entity_names_for_room(
@@ -515,14 +516,6 @@ def _validate_target(target: ExternalTriggerTarget, config: Config, runtime_path
     if target.agent not in configured_entities:
         msg = "external trigger target room must already be configured for the target entity"
         raise ExternalTriggerStoreError(msg)
-
-
-def _configured_room_refs_for_entity(entity_name: str, config: Config) -> list[str]:
-    if entity_name in config.agents:
-        return config.agents[entity_name].rooms
-    if entity_name in config.teams:
-        return config.teams[entity_name].rooms
-    return []
 
 
 def _validate_record_update(record: ExternalTriggerRecord) -> ExternalTriggerRecord:
