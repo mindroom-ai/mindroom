@@ -36,13 +36,13 @@ def write_json_file_durable(
             temp_file.flush()
             os.fsync(temp_file.fileno())
         safe_replace(temp_path, path)
-        _fsync_directory(path.parent)
+        fsync_directory(path.parent)
     finally:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
 
 
-def _fsync_directory(directory: Path) -> None:
+def fsync_directory(directory: Path) -> None:
     """Best-effort flush of one directory entry after replace/copy fallback."""
     try:
         directory_fd = os.open(directory, os.O_RDONLY)

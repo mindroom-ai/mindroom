@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from mindroom.config.validation import non_empty_stripped
+
 
 class HookOverrideConfig(BaseModel):
     """Per-hook deployer override configuration."""
@@ -27,8 +29,4 @@ class PluginEntryConfig(BaseModel):
     @classmethod
     def validate_path(cls, value: str) -> str:
         """Reject empty plugin paths after trimming whitespace."""
-        normalized = value.strip()
-        if not normalized:
-            msg = "Plugin path must not be empty"
-            raise ValueError(msg)
-        return normalized
+        return non_empty_stripped(value, field_name="Plugin path")

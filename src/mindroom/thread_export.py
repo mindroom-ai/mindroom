@@ -13,6 +13,7 @@ from urllib.parse import quote
 import yaml
 
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
+from mindroom.durable_write import fsync_directory
 from mindroom.entity_resolution import MissingManagedEntityAccountError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_thread_history import enumerate_room_thread_root_ids, refresh_thread_history_from_source
@@ -161,25 +162,10 @@ def _write_yaml_atomic(path: Path, payload: dict[str, object]) -> None:
             temp_file.flush()
             os.fsync(temp_file.fileno())
         temp_path.replace(path)
-        _fsync_directory(path.parent)
+        fsync_directory(path.parent)
     finally:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
-
-
-def _fsync_directory(path: Path) -> None:
-    """Flush one directory entry after an atomic replace."""
-    try:
-        directory_fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        try:
-            os.fsync(directory_fd)
-        except OSError:
-            return
-    finally:
-        os.close(directory_fd)
 
 
 def _thread_export_path(output_dir: Path, room: _ThreadExportRoom, thread_id: str) -> Path:

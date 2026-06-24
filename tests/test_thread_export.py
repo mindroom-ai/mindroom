@@ -15,7 +15,6 @@ from mindroom.matrix.state import MatrixRoom, MatrixState
 from mindroom.thread_export import (
     _export_rooms,
     _export_threads_for_client,
-    _fsync_directory,
     _safe_path_segment,
     export_threads_once,
 )
@@ -57,20 +56,6 @@ def test_export_rooms_filters_by_room_metadata_substring(tmp_path: Path) -> None
 
     assert [room.key for room in _export_rooms(runtime_paths, "obb")] == ["lobby"]
     assert {room.key for room in _export_rooms(runtime_paths, "LOCALHOST")} == {"lobby", "dev"}
-
-
-def test_fsync_directory_ignores_unsupported_directory_fsync(tmp_path: Path) -> None:
-    """Directory fsync is a best-effort durability hint on filesystems that support it."""
-    with (
-        patch("mindroom.thread_export.os.open", return_value=123) as open_directory,
-        patch("mindroom.thread_export.os.fsync", side_effect=OSError("unsupported")) as fsync_directory,
-        patch("mindroom.thread_export.os.close") as close_directory,
-    ):
-        _fsync_directory(tmp_path)
-
-    open_directory.assert_called_once()
-    fsync_directory.assert_called_once_with(123)
-    close_directory.assert_called_once_with(123)
 
 
 def test_safe_path_segment_blocks_dot_directory_segments() -> None:
