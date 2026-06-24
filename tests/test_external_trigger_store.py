@@ -353,6 +353,23 @@ def test_corrupt_record_store_fails_closed(tmp_path: Path) -> None:
         store.list_records()
 
 
+def test_record_store_read_oserror_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Store path stat failures should map to the store-unavailable boundary."""
+    store = ExternalTriggerStore(_runtime_paths(tmp_path))
+    original_exists = type(store.store_path).exists
+
+    def raise_for_store_path(path: Path) -> bool:
+        if path == store.store_path:
+            msg = "permission denied"
+            raise OSError(msg)
+        return original_exists(path)
+
+    monkeypatch.setattr(type(store.store_path), "exists", raise_for_store_path)
+
+    with pytest.raises(ExternalTriggerStoreError, match="invalid"):
+        store.list_records()
+
+
 def test_non_owner_cannot_modify_trigger_but_admin_can(tmp_path: Path) -> None:
     """Record mutation requires trigger ownership or configured trigger admin."""
     config = _config(admin_users=["@admin:example.org"])

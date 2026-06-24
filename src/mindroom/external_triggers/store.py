@@ -400,9 +400,9 @@ class ExternalTriggerStore:
         _validate_target(record.target, config, self._runtime_paths)
 
     def _read_records(self) -> _SerializedTriggerRecords:
-        if not self._store_path.exists():
-            return _SerializedTriggerRecords()
         try:
+            if not self._store_path.exists():
+                return _SerializedTriggerRecords()
             raw = json.loads(self._store_path.read_text(encoding="utf-8"))
             return _SerializedTriggerRecords.model_validate(raw)
         except (OSError, json.JSONDecodeError, ValueError) as exc:

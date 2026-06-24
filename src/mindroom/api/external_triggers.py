@@ -51,7 +51,7 @@ _T = TypeVar("_T")
 )
 async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTriggerAcceptedResponse:
     """Accept one signed external trigger and dispatch it into Matrix."""
-    config, runtime_paths, trigger_snapshot = _request_config_and_trigger_snapshot(trigger_id, request)
+    config, runtime_paths, trigger_snapshot = await _request_config_and_trigger_snapshot(trigger_id, request)
     body = await _read_bounded_body(request, max_body_bytes=trigger_snapshot.max_body_bytes)
     signature_headers = _verified_signature_headers(
         request,
@@ -78,7 +78,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
     )
 
 
-def _request_config_and_trigger_snapshot(
+async def _request_config_and_trigger_snapshot(
     trigger_id: str,
     request: Request,
 ) -> tuple[Config, RuntimePaths, TriggerDeliverySnapshot]:
@@ -92,7 +92,8 @@ def _request_config_and_trigger_snapshot(
 
     trigger_store = _trigger_store(runtime_paths)
     try:
-        trigger_snapshot = trigger_store.delivery_snapshot(
+        trigger_snapshot = await asyncio.to_thread(
+            trigger_store.delivery_snapshot,
             trigger_id,
             config=config,
             config_generation=api_snapshot.generation,

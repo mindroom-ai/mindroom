@@ -6,7 +6,7 @@ import base64
 import json
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import pytest
 import yaml
@@ -29,6 +29,14 @@ if TYPE_CHECKING:
     from httpx import Response
 
 _OWNER = "@owner:example.org"
+
+
+class _NamedThreadCall(Protocol):
+    """Callable captured from asyncio.to_thread in API boundary tests."""
+
+    __name__: str
+
+    def __call__(self, *args: object, **kwargs: object) -> object: ...
 
 
 @dataclass(frozen=True)
@@ -150,7 +158,8 @@ def _bind_runtime(ready_snapshots: list[TriggerDeliverySnapshot]) -> object:
     return client
 
 
-def test_uninitialized_api_state_maps_to_external_trigger_503(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_uninitialized_api_state_maps_to_external_trigger_503(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only the API-state initialization sentinel should be converted to trigger-unavailable."""
 
     def raise_uninitialized(_request: Request) -> object:
@@ -160,13 +169,14 @@ def test_uninitialized_api_state_maps_to_external_trigger_503(monkeypatch: pytes
     monkeypatch.setattr(config_lifecycle, "bind_current_request_snapshot", raise_uninitialized)
 
     with pytest.raises(HTTPException) as exc_info:
-        external_triggers_api._request_config_and_trigger_snapshot("campground", cast("Request", object()))
+        await external_triggers_api._request_config_and_trigger_snapshot("campground", cast("Request", object()))
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "External trigger configuration is not available"
 
 
-def test_runtime_config_type_error_is_not_masked(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_runtime_config_type_error_is_not_masked(monkeypatch: pytest.MonkeyPatch) -> None:
     """Programming errors after snapshot binding should not become generic trigger 503s."""
 
     def raise_programming_error(_request: Request) -> tuple[Config, constants.RuntimePaths]:
@@ -177,7 +187,7 @@ def test_runtime_config_type_error_is_not_masked(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(config_lifecycle, "read_committed_runtime_config", raise_programming_error)
 
     with pytest.raises(TypeError, match="programming bug"):
-        external_triggers_api._request_config_and_trigger_snapshot("campground", cast("Request", object()))
+        await external_triggers_api._request_config_and_trigger_snapshot("campground", cast("Request", object()))
 
 
 async def _owner_joined(*_args: object, **_kwargs: object) -> bool:
@@ -349,6 +359,30 @@ def test_delivery_uses_single_snapshot_for_auth_readiness_and_execute(
     assert trigger_api.ready_snapshots
     assert execute_snapshots[0] is trigger_api.ready_snapshots[0]
     assert execute_snapshots[0].owner_user_id == _OWNER
+
+
+def test_delivery_snapshot_read_runs_off_event_loop(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blocking trigger-store snapshot reads should not run on the event loop."""
+    to_thread_calls: list[str] = []
+    real_to_thread = external_triggers_api.asyncio.to_thread
+
+    async def record_to_thread(call: _NamedThreadCall, *args: object, **kwargs: object) -> object:
+        to_thread_calls.append(call.__name__)
+        return await real_to_thread(call, *args, **kwargs)
+
+    async def execute_external_trigger(**_kwargs: object) -> str:
+        return "$matrix-event"
+
+    monkeypatch.setattr(external_triggers_api.asyncio, "to_thread", record_to_thread)
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+
+    response = _post_signed(trigger_api)
+
+    assert response.status_code == 202
+    assert "delivery_snapshot" in to_thread_calls
 
 
 def test_policy_caps_apply_at_request_time(
