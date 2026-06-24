@@ -32,6 +32,7 @@ from mindroom.agent_policy import (
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import (
     CacheConfig,
@@ -92,7 +93,7 @@ if TYPE_CHECKING:
 
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 _RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user"})
-_DEFER_PROHIBITED_CONTROL_TOOLS = frozenset({"delegate", "dynamic_tools", "self_config"})
+_DEFER_PROHIBITED_CONTROL_TOOLS = frozenset({"delegate", "dynamic_tools", "external_trigger_manager", "self_config"})
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "shell",
     "coding",
@@ -143,7 +144,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_space",
     "matrix_delivery",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "tool_approval")
+_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "external_trigger_policy", "tool_approval")
 
 
 class ConfigRuntimeValidationError(ValueError):
@@ -382,6 +383,10 @@ class Config(BaseModel):
     mcp_servers: dict[str, MCPServerConfig] = Field(
         default_factory=dict,
         description="MCP server configurations keyed by server id",
+    )
+    external_trigger_policy: ExternalTriggerPolicyConfig = Field(
+        default_factory=ExternalTriggerPolicyConfig,
+        description="Global policy for tool-managed signed external triggers",
     )
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     tool_approval: ToolApprovalConfig = Field(
@@ -1695,10 +1700,10 @@ class Config(BaseModel):
         return any(self.get_agent_memory_backend(agent_name) == "file" for agent_name in self.agents)
 
     def get_all_configured_rooms(self) -> set[str]:
-        """Extract all configured room aliases.
+        """Extract all configured room references.
 
         Returns:
-            Set of all unique room aliases from room, agent, and team configurations
+            Set of all unique room references from room, agent, and team configurations
 
         """
         all_room_aliases = set(self.rooms)

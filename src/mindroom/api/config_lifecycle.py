@@ -30,6 +30,7 @@ from mindroom.file_watcher import watch_file
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
 
@@ -76,6 +77,16 @@ class ApiState:
     snapshot: ApiSnapshot
 
 
+@dataclass(frozen=True)
+class ExternalTriggerRuntime:
+    """Runtime objects needed to deliver accepted external triggers."""
+
+    client: object
+    conversation_cache: object
+    config_generation: int
+    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
+
+
 @dataclass
 class _MindroomAppState:
     """Single typed namespace for FastAPI ``app.state`` attributes used across the API."""
@@ -85,6 +96,7 @@ class _MindroomAppState:
     orchestrator_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
+    external_trigger_runtime: ExternalTriggerRuntime | None = None
 
 
 def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:
@@ -177,6 +189,24 @@ def _load_config_result(
         logger.info("loaded_agent_configuration_count", agent_count=len(runtime_config.agents))
         logger.info("Loaded API config", config_path=str(runtime_paths.config_path))
         return ConfigLoadResult(success=True), validated_payload, runtime_config, source_fingerprint
+
+
+def _source_fingerprint_for_published_runtime_config(
+    runtime_paths: constants.RuntimePaths,
+    validated_payload: dict[str, Any],
+) -> str:
+    """Return the disk fingerprint when the file still matches the runtime config."""
+    canonical_source = yaml.dump(
+        validated_payload,
+        default_flow_style=False,
+        sort_keys=True,
+        allow_unicode=True,
+    )
+    canonical_fingerprint = _source_fingerprint(canonical_source)
+    result, disk_payload, _disk_config, disk_fingerprint = _load_config_result(runtime_paths)
+    if result.success and disk_payload == validated_payload and disk_fingerprint is not None:
+        return disk_fingerprint
+    return canonical_fingerprint
 
 
 def _raise_for_config_load_result(result: ConfigLoadResult | None) -> None:
@@ -649,6 +679,48 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
             source_fingerprint=source_fingerprint,
         )
     return result.success
+
+
+def _publish_runtime_config_into_app(
+    runtime_config: Config,
+    runtime_paths: constants.RuntimePaths,
+    api_app: FastAPI,
+) -> bool:
+    """Publish one already-validated runtime config into one API app's committed cache."""
+    initial_state = require_api_state(api_app)
+    snapshot = initial_state.snapshot
+    validated_payload = runtime_config.authored_model_dump()
+    source_fingerprint = _source_fingerprint_for_published_runtime_config(
+        runtime_paths,
+        validated_payload,
+    )
+    with initial_state.config_lock:
+        current_state = require_api_state(api_app)
+        current = current_state.snapshot
+        if current.runtime_paths != runtime_paths:
+            logger.info(
+                "Discarding stale API config publish after runtime swap",
+                publish_config_path=str(runtime_paths.config_path),
+                active_config_path=str(current.runtime_paths.config_path),
+            )
+            return False
+        same_config = current.config_data == validated_payload
+        if current.generation != snapshot.generation and not same_config:
+            logger.info(
+                "Discarding stale API config publish after config changed",
+                publish_config_path=str(runtime_paths.config_path),
+            )
+            return False
+        same_source = source_fingerprint == current.source_fingerprint
+        current_state.snapshot = _published_snapshot(
+            current,
+            increment_generation=not (same_source or same_config),
+            config_data=validated_payload,
+            runtime_config=runtime_config,
+            config_load_result=ConfigLoadResult(success=True),
+            source_fingerprint=source_fingerprint,
+        )
+    return True
 
 
 def read_app_committed_runtime_config(

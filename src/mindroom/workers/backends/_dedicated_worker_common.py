@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serialize_public_runtime_paths
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
+from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV, SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
     visible_state_roots_for_worker_key,
@@ -40,6 +40,7 @@ __all__ = [
 _DEDICATED_WORKER_RESERVED_ENV_NAMES = frozenset(
     {
         "HOME",
+        CONTROL_STATE_PATH_ENV,
         "MINDROOM_CONFIG_PATH",
         SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
         SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"],

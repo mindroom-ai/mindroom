@@ -11,6 +11,7 @@ import nio
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.dispatch_source import source_kind_allows_trusted_original_sender, source_kind_from_content
 from mindroom.entity_resolution import (
+    MissingManagedEntityAccountError,
     configured_routable_entity_ids_for_room,
     current_internal_sender_ids,
     entity_identity_registry,
@@ -77,7 +78,7 @@ def is_authorized_sender(
 
     """
     # Always allow active internal identities owned by this runtime.
-    if sender_id in current_internal_sender_ids(config, runtime_paths):
+    if sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths):
         return True
 
     # Resolve bridge aliases to canonical user ID before permission checks.
@@ -130,7 +131,16 @@ def is_sender_allowed_for_agent_reply(
 
     # Internal MindRoom participants are not restricted by per-user reply lists.
     # Bridge bot accounts are intentionally not exempt.
-    return sender_id in current_internal_sender_ids(config, runtime_paths)
+    return sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
+
+
+def _current_internal_sender_ids_for_auth(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return internal sender IDs when prepared, or an empty set before provisioning."""
+    try:
+        return current_internal_sender_ids(config, runtime_paths)
+    except MissingManagedEntityAccountError:
+        logger.debug("managed_entity_accounts_unavailable_for_auth_check")
+        return frozenset()
 
 
 def _is_sender_allowed_by_agent_reply_allowlist(sender_id: str, agent_name: str, config: Config) -> bool:

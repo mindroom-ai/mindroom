@@ -13,7 +13,7 @@ from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.matrix.state import get_room_alias_from_id, resolve_room_aliases
+from mindroom.matrix.state import get_room_alias_from_id, resolve_room_aliases, resolve_room_id
 from mindroom.matrix.users import create_agent_user, login_agent_user
 from mindroom.scheduling import (
     ScheduledTaskReadModel,
@@ -86,12 +86,6 @@ IncludeCancelled = Annotated[bool, Query(description="Include cancelled schedule
 CancelRoomId = Annotated[str, Query(description="Room ID or alias containing the task")]
 
 
-def _resolve_room_id(room_id_or_alias: str, runtime_paths: RuntimePaths) -> str:
-    """Resolve room aliases (e.g. lobby) to room IDs when available."""
-    resolved = resolve_room_aliases([room_id_or_alias], runtime_paths=runtime_paths)
-    return resolved[0] if resolved else room_id_or_alias
-
-
 def _configured_room_ids(runtime_config: Config, runtime_paths: RuntimePaths) -> list[str]:
     """Return configured rooms resolved to Matrix room IDs."""
     configured_rooms = sorted(runtime_config.get_all_configured_rooms())
@@ -140,7 +134,7 @@ async def list_schedules(
     """List scheduled tasks from one room or all configured rooms."""
     runtime_config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     room_ids = (
-        [_resolve_room_id(room_id, runtime_paths=runtime_paths)]
+        [resolve_room_id(room_id, runtime_paths=runtime_paths)]
         if room_id
         else _configured_room_ids(runtime_config, runtime_paths=runtime_paths)
     )
@@ -176,7 +170,7 @@ async def update_schedule(
 ) -> ScheduledTaskResponse:
     """Update prompt text and schedule fields for an existing task."""
     _, runtime_paths = config_lifecycle.read_committed_runtime_config(api_request)
-    resolved_room_id = _resolve_room_id(request.room_id, runtime_paths=runtime_paths)
+    resolved_room_id = resolve_room_id(request.room_id, runtime_paths=runtime_paths)
 
     client = await _get_router_client(runtime_paths)
     try:
@@ -217,7 +211,7 @@ async def cancel_schedule(
 ) -> CancelScheduleResponse:
     """Cancel a scheduled task by ID."""
     runtime_paths = api_runtime_paths(request)
-    resolved_room_id = _resolve_room_id(room_id, runtime_paths=runtime_paths)
+    resolved_room_id = resolve_room_id(room_id, runtime_paths=runtime_paths)
 
     client = await _get_router_client(runtime_paths)
     try:

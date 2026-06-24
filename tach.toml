@@ -399,6 +399,17 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.external_triggers"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.constants",
+    "mindroom.external_triggers.auth",
+    "mindroom.external_triggers.executor",
+    "mindroom.external_triggers.models",
+    "mindroom.external_triggers.replay_store",
+]
+
+[[modules]]
 path = "mindroom.api.report_headers"
 depends_on = []
 
@@ -504,6 +515,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.api.dynamic_workflows",
+    "mindroom.api.external_triggers",
     "mindroom.api.frontend",
     "mindroom.api.homeassistant_integration",
     "mindroom.api.integrations",
@@ -1036,6 +1048,15 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.external_trigger_runtime"
+depends_on = [
+    "mindroom.api.main",
+    "mindroom.constants",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.state",
+]
+
+[[modules]]
 path = "mindroom.orchestration.runtime"
 depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants", "mindroom.matrix.users"]
 
@@ -1065,6 +1086,7 @@ depends_on = [
     "mindroom.mcp.registry",
     "mindroom.mcp.toolkit",
     "mindroom.orchestration.config_lifecycle",
+    "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.runtime",
     "mindroom.runtime_support",
     "mindroom.scheduling_executor",
@@ -1688,6 +1710,7 @@ visibility = [
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestrator",
 ]
 
@@ -2001,6 +2024,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.cli.trigger"
+depends_on = [
+    "mindroom.cli.config",
+    "mindroom.external_triggers.auth",
+]
+visibility = ["mindroom.cli.main"]
+
+[[modules]]
 path = "mindroom.cli.main"
 depends_on = [
     "mindroom",
@@ -2012,6 +2043,7 @@ depends_on = [
     "mindroom.cli.local_stack",
     "mindroom.cli.migrate",
     "mindroom.cli.service",
+    "mindroom.cli.trigger",
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.error_handling",

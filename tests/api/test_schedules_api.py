@@ -229,7 +229,7 @@ async def test_update_schedule_does_not_resolve_cache_path_when_not_restarting()
             "mindroom.api.schedules.config_lifecycle.read_committed_runtime_config",
             return_value=(runtime_config, MagicMock()),
         ),
-        patch("mindroom.api.schedules.resolve_room_aliases", return_value=["test_room"]),
+        patch("mindroom.api.schedules.resolve_room_id", return_value="test_room"),
         patch("mindroom.api.schedules.get_room_alias_from_id", return_value=None),
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),

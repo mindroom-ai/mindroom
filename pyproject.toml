@@ -173,6 +173,7 @@ email = []
 exa = [
   "exa-py",
 ]
+external_trigger_manager = []
 fal = [
   "fal-client",
 ]

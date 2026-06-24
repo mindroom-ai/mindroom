@@ -15,6 +15,7 @@ EDIT_SOURCE_KIND = "edit"
 SCHEDULED_SOURCE_KIND = "scheduled"
 HOOK_SOURCE_KIND = "hook"
 HOOK_DISPATCH_SOURCE_KIND = "hook_dispatch"
+EXTERNAL_TRIGGER_SOURCE_KIND = "external_trigger"
 ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND = "active_thread_follow_up"
 TRUSTED_INTERNAL_RELAY_SOURCE_KIND = "trusted_internal_relay"
 _KNOWN_SOURCE_KINDS: frozenset[str] = frozenset(
@@ -27,6 +28,7 @@ _KNOWN_SOURCE_KINDS: frozenset[str] = frozenset(
         SCHEDULED_SOURCE_KIND,
         HOOK_SOURCE_KIND,
         HOOK_DISPATCH_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
@@ -35,6 +37,7 @@ _AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset(
         SCHEDULED_SOURCE_KIND,
         HOOK_SOURCE_KIND,
         HOOK_DISPATCH_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
     },
 )
 _COALESCING_BYPASS_SOURCE_KINDS: frozenset[str] = _AUTOMATION_SOURCE_KINDS | frozenset(
@@ -46,9 +49,16 @@ _TRUSTED_ORIGINAL_SENDER_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         HOOK_DISPATCH_SOURCE_KIND,
         HOOK_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
         SCHEDULED_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         VOICE_SOURCE_KIND,
+    },
+)
+_SELF_AUTHORED_INGRESS_SOURCE_KINDS: frozenset[str] = frozenset(
+    {
+        HOOK_DISPATCH_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
     },
 )
 _INTERNAL_RELAY_DETECTION_SOURCE_KINDS: frozenset[str] = frozenset(
@@ -98,6 +108,11 @@ def source_kind_bypasses_coalescing(source_kind: str | None) -> bool:
 def source_kind_allows_trusted_original_sender(source_kind: str | None) -> bool:
     """Return whether trusted senders may promote original-sender metadata for this source kind."""
     return source_kind in _TRUSTED_ORIGINAL_SENDER_SOURCE_KINDS
+
+
+def source_kind_allows_self_authored_ingress(source_kind: str | None) -> bool:
+    """Return whether one self-authored Matrix event may enter dispatch."""
+    return source_kind in _SELF_AUTHORED_INGRESS_SOURCE_KINDS
 
 
 def source_kind_allows_internal_relay_detection(source_kind: str | None) -> bool:

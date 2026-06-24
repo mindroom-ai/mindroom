@@ -159,6 +159,11 @@ def resolve_room_aliases(
     return [aliases.get(room, room) for room in room_list]
 
 
+def resolve_room_id(room_id_or_alias: str, runtime_paths: constants.RuntimePaths) -> str:
+    """Resolve one room alias to its Matrix room ID when known."""
+    return resolve_room_aliases([room_id_or_alias], runtime_paths=runtime_paths)[0]
+
+
 def get_room_alias_from_id(room_id: str, runtime_paths: constants.RuntimePaths) -> str | None:
     """Get room alias from room ID."""
     for alias, resolved_room_id in _room_aliases(runtime_paths).items():

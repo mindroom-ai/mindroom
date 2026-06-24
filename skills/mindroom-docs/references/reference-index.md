@@ -54,6 +54,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Interactive Q&A | `interactive.md` | `interactive/index.md` | `page__interactive__index.md` |
 | Streaming | `streaming.md` | `streaming/index.md` | `page__streaming__index.md` |
 | Scheduling | `scheduling.md` | `scheduling/index.md` | `page__scheduling__index.md` |
+| External Triggers | `external-triggers.md` | `external-triggers/index.md` | `page__external-triggers__index.md` |
 | Authorization | `authorization.md` | `authorization/index.md` | `page__authorization__index.md` |
 | Matrix Space | `matrix-space.md` | `matrix-space/index.md` | `page__matrix-space__index.md` |
 | OpenAI-Compatible API | `openai-api.md` | `openai-api/index.md` | `page__openai-api__index.md` |

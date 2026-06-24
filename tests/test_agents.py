@@ -30,6 +30,7 @@ from mindroom.agents import (
     build_agent_toolkit,
     create_agent,
     get_agent_toolkit_names,
+    get_rooms_for_entity,
 )
 from mindroom.config.agent import (
     AgentConfig,
@@ -41,7 +42,7 @@ from mindroom.config.agent import (
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
 from mindroom.history import close_team_runtime_state_dbs
@@ -179,6 +180,20 @@ def test_managed_entity_power_user_ids_for_room_includes_configured_teams(tmp_pa
         "@actual_router:localhost",
         "@actual_ops:localhost",
     ]
+
+
+def test_get_rooms_for_entity_uses_authored_entity_rooms_only(tmp_path: Path) -> None:
+    """Tool-managed triggers should not widen static entity room membership."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["lobby"])},
+        ),
+        runtime_paths,
+    )
+
+    assert get_rooms_for_entity("general", config) == ["lobby"]
+    assert get_rooms_for_entity(ROUTER_AGENT_NAME, config) == ["lobby"]
 
 
 class _TestVectorDb:

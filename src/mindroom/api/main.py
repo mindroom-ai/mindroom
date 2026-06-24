@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -23,6 +23,7 @@ from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResul
 # Import routers
 from mindroom.api.credentials import router as credentials_router
 from mindroom.api.dynamic_workflows import router as dynamic_workflows_router
+from mindroom.api.external_triggers import router as external_triggers_router
 from mindroom.api.frontend import router as frontend_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
 from mindroom.api.integrations import router as integrations_router
@@ -52,12 +53,13 @@ from mindroom.workers.runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from starlette.types import ASGIApp, Receive, Scope, Send
 
     from mindroom.config.main import Config
+    from mindroom.external_triggers.store import TriggerDeliverySnapshot
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
@@ -294,6 +296,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
     previous_state = app_state.api_state
     if previous_state is None:
+        app_state.external_trigger_runtime = None
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),
             snapshot=ApiSnapshot(
@@ -319,6 +322,8 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         source_fingerprint = (
             current_snapshot.source_fingerprint if current_snapshot.runtime_paths == runtime_paths else None
         )
+        if current_snapshot.runtime_paths != runtime_paths:
+            app_state.external_trigger_runtime = None
         previous_state.snapshot = config_lifecycle._published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
@@ -367,10 +372,8 @@ def _reconcile_knowledge_mode_transitions(
     reconcile_knowledge_mode_transition_states(previous_config, current_config, current_runtime_paths)
 
 
-async def _reload_config_after_file_change(
-    api_app: FastAPI,
-    runtime_paths: constants.RuntimePaths,
-) -> None:
+async def _reload_config_into_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> bool:
+    """Reload one API app config snapshot from disk."""
     previous = _read_app_runtime_config_or_none(api_app)
     # Config validation executes plugin modules and walks the filesystem;
     # keep it off the event loop (#1260).
@@ -378,6 +381,14 @@ async def _reload_config_after_file_change(
     if loaded:
         _reconcile_knowledge_mode_transitions(previous, api_app)
     await _sync_standalone_knowledge_watchers(api_app)
+    return loaded
+
+
+async def _reload_config_after_file_change(
+    api_app: FastAPI,
+    runtime_paths: constants.RuntimePaths,
+) -> None:
+    await _reload_config_into_app(api_app, runtime_paths)
 
 
 async def _watch_config(
@@ -432,7 +443,22 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     runtime_paths = _app_runtime_paths(_app)
     await asyncio.to_thread(constants.ensure_writable_config_path, create_minimal=True, runtime_paths=runtime_paths)
-    await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, _app)
+    app_state = config_lifecycle.app_state(_app)
+    preload_snapshot = _app_context(_app)
+    loaded = await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, _app)
+    preload_runtime = app_state.external_trigger_runtime
+    if (
+        preload_runtime is not None
+        and preload_snapshot.runtime_config is None
+        and preload_snapshot.config_load_result is None
+    ):
+        if loaded:
+            app_state.external_trigger_runtime = replace(
+                preload_runtime,
+                config_generation=_app_context(_app).generation,
+            )
+        else:
+            app_state.external_trigger_runtime = None
     logger.info(
         "Initialized API runtime config",
         config_path=str(runtime_paths.config_path),
@@ -443,7 +469,6 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info("Syncing API credentials from runtime env")
     sync_env_to_credentials(runtime_paths=runtime_paths)
 
-    app_state = config_lifecycle.app_state(_app)
     api_owned_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     standalone_knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler = app_state.orchestrator_knowledge_refresh_scheduler
@@ -483,6 +508,28 @@ def bind_orchestrator_knowledge_refresh_scheduler(
 ) -> None:
     """Attach the orchestrator-owned background refresh scheduler to the bundled API app."""
     config_lifecycle.app_state(api_app).orchestrator_knowledge_refresh_scheduler = scheduler
+
+
+def bind_external_trigger_runtime(
+    api_app: FastAPI,
+    client: object,
+    conversation_cache: object,
+    *,
+    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
+) -> None:
+    """Attach router Matrix delivery runtime to one API app."""
+    api_state = config_lifecycle.require_api_state(api_app)
+    config_lifecycle.app_state(api_app).external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
+        client=client,
+        conversation_cache=conversation_cache,
+        config_generation=api_state.snapshot.generation,
+        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+    )
+
+
+def unbind_external_trigger_runtime(api_app: FastAPI) -> None:
+    """Clear router Matrix delivery runtime from one API app."""
+    config_lifecycle.app_state(api_app).external_trigger_runtime = None
 
 
 def _api_docs_kwargs(runtime_paths: constants.RuntimePaths) -> dict[str, str | None]:
@@ -639,6 +686,7 @@ app.include_router(tools_router, dependencies=[Depends(verify_user)])
 app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)
+app.include_router(external_triggers_router)
 app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)])
 
 

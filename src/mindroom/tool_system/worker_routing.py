@@ -35,6 +35,7 @@ _LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
     {
         "approved_egress",
         "attachments",
+        "external_trigger_manager",
         "gmail",
         "google_calendar",
         "google_drive",

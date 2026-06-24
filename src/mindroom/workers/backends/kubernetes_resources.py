@@ -53,6 +53,15 @@ from mindroom.workers.backends.kubernetes_config import (
     credentials_encryption_key_hash,
     is_kubernetes_worker_backend_config_env_name,
 )
+from mindroom.workers.backends.kubernetes_pod_names import (
+    AGENT_VAULT_BOOTSTRAP_VOLUME_NAME,
+    AGENT_VAULT_CA_VOLUME_NAME,
+    AGENT_VAULT_MINT_CONTAINER_NAME,
+    AGENT_VAULT_TOKEN_VOLUME_NAME,
+    SANDBOX_RUNNER_CONTAINER_NAME,
+    WORKER_CONFIG_VOLUME_NAME,
+    WORKER_STORAGE_VOLUME_NAME,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -91,15 +100,11 @@ _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 # Agent Vault per-worker egress: an init container in the worker pod mints the
 # worker's proxy-role token into a shared in-pod volume; the sandbox runner
 # composes http://<token>:<vault>@<proxy host> for python/shell. No separate bridge pod.
-_AGENT_VAULT_MINT_CONTAINER_NAME = "agent-vault-mint-token"
 _AGENT_VAULT_TOKEN_MOUNT_DIR = "/agent-vault"  # noqa: S105
 _AGENT_VAULT_TOKEN_FILE = "token"  # noqa: S105
 _AGENT_VAULT_TOKEN_PATH = f"{_AGENT_VAULT_TOKEN_MOUNT_DIR}/{_AGENT_VAULT_TOKEN_FILE}"
 _AGENT_VAULT_BOOTSTRAP_MOUNT_PATH = "/agent-vault-bootstrap"
 _AGENT_VAULT_OWNER_PASSWORD_SECRET_KEY = "AGENT_VAULT_OWNER_PASSWORD"  # noqa: S105
-_AGENT_VAULT_TOKEN_VOLUME = "agent-vault-token"  # noqa: S105
-_AGENT_VAULT_BOOTSTRAP_VOLUME = "agent-vault-bootstrap"
-_AGENT_VAULT_CA_VOLUME = "agent-vault-ca"
 _AGENT_VAULT_WORKER_CA_MOUNT_DIR = "/etc/agent-vault"
 _AGENT_VAULT_WORKER_CA_FILE = "ca.pem"
 _AGENT_VAULT_WORKER_CA_PATH = f"{_AGENT_VAULT_WORKER_CA_MOUNT_DIR}/{_AGENT_VAULT_WORKER_CA_FILE}"
@@ -145,7 +150,7 @@ fi
 test -s "{token_path}"
 """
 
-_CONTAINER_NAME = "sandbox-runner"
+_CONTAINER_NAME = SANDBOX_RUNNER_CONTAINER_NAME
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
@@ -632,7 +637,7 @@ class KubernetesResourceManager:
             token_path=_AGENT_VAULT_TOKEN_PATH,
         )
         return {
-            "name": _AGENT_VAULT_MINT_CONTAINER_NAME,
+            "name": AGENT_VAULT_MINT_CONTAINER_NAME,
             "image": cfg.cli_image,
             "imagePullPolicy": self.config.image_pull_policy,
             "command": ["sh", "-ec", script],
@@ -642,9 +647,9 @@ class KubernetesResourceManager:
                 {"name": "AGENT_VAULT_VAULT", "value": vault},
             ],
             "volumeMounts": [
-                {"name": _AGENT_VAULT_TOKEN_VOLUME, "mountPath": _AGENT_VAULT_TOKEN_MOUNT_DIR},
+                {"name": AGENT_VAULT_TOKEN_VOLUME_NAME, "mountPath": _AGENT_VAULT_TOKEN_MOUNT_DIR},
                 {
-                    "name": _AGENT_VAULT_BOOTSTRAP_VOLUME,
+                    "name": AGENT_VAULT_BOOTSTRAP_VOLUME_NAME,
                     "mountPath": _AGENT_VAULT_BOOTSTRAP_MOUNT_PATH,
                     "readOnly": True,
                 },
@@ -674,8 +679,8 @@ class KubernetesResourceManager:
         if cfg is None:
             return []
         return [
-            {"name": _AGENT_VAULT_TOKEN_VOLUME, "emptyDir": {}},
-            {"name": _AGENT_VAULT_BOOTSTRAP_VOLUME, "secret": {"secretName": cfg.bootstrap_secret_name}},
+            {"name": AGENT_VAULT_TOKEN_VOLUME_NAME, "emptyDir": {}},
+            {"name": AGENT_VAULT_BOOTSTRAP_VOLUME_NAME, "secret": {"secretName": cfg.bootstrap_secret_name}},
         ]
 
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
@@ -1014,6 +1019,8 @@ class KubernetesResourceManager:
             ],
             "volumes": self._volumes(),
         }
+        containers = cast("list[dict[str, object]]", template_spec["containers"])
+        containers.extend(dict(container) for container in self.config.extra_containers)
         if self.config.agent_vault is not None:
             template_spec["initContainers"] = [self._agent_vault_init_container(worker_key=worker_key)]
         node_name = self._worker_node_name_or_none()
@@ -1257,7 +1264,7 @@ class KubernetesResourceManager:
         if self.config.config_map_name is not None:
             mounts.append(
                 {
-                    "name": "worker-config",
+                    "name": WORKER_CONFIG_VOLUME_NAME,
                     "mountPath": self.config.config_path,
                     "subPath": self.config.config_key,
                     "readOnly": True,
@@ -1266,7 +1273,7 @@ class KubernetesResourceManager:
         if self.config.agent_vault is not None:
             mounts.append(
                 {
-                    "name": _AGENT_VAULT_TOKEN_VOLUME,
+                    "name": AGENT_VAULT_TOKEN_VOLUME_NAME,
                     "mountPath": _AGENT_VAULT_TOKEN_MOUNT_DIR,
                     "readOnly": True,
                 },
@@ -1274,7 +1281,7 @@ class KubernetesResourceManager:
         if self._agent_vault_worker_ca_configmap_name() is not None:
             mounts.append(
                 {
-                    "name": _AGENT_VAULT_CA_VOLUME,
+                    "name": AGENT_VAULT_CA_VOLUME_NAME,
                     "mountPath": _AGENT_VAULT_WORKER_CA_MOUNT_DIR,
                     "readOnly": True,
                 },
@@ -1300,7 +1307,7 @@ class KubernetesResourceManager:
         visible_subpath = PurePosixPath(relative_config_path.parts[0])
         return [
             {
-                "name": "worker-storage",
+                "name": WORKER_STORAGE_VOLUME_NAME,
                 "mountPath": str(storage_root / visible_subpath),
                 "subPath": str(visible_subpath),
                 "readOnly": True,
@@ -1310,14 +1317,14 @@ class KubernetesResourceManager:
     def _volumes(self) -> list[dict[str, object]]:
         volumes: list[dict[str, object]] = [
             {
-                "name": "worker-storage",
+                "name": WORKER_STORAGE_VOLUME_NAME,
                 "persistentVolumeClaim": {"claimName": self.config.storage_pvc_name},
             },
         ]
         if self.config.config_map_name is not None:
             volumes.append(
                 {
-                    "name": "worker-config",
+                    "name": WORKER_CONFIG_VOLUME_NAME,
                     "configMap": {"name": self.config.config_map_name},
                 },
             )
@@ -1326,7 +1333,7 @@ class KubernetesResourceManager:
         if ca_configmap_name is not None:
             volumes.append(
                 {
-                    "name": _AGENT_VAULT_CA_VOLUME,
+                    "name": AGENT_VAULT_CA_VOLUME_NAME,
                     "configMap": {
                         "name": ca_configmap_name,
                         "items": [
@@ -1338,6 +1345,7 @@ class KubernetesResourceManager:
                     },
                 },
             )
+        volumes.extend(dict(volume) for volume in self.config.extra_volumes)
         return volumes
 
     def _worker_node_name_or_none(self) -> str | None:
@@ -1402,7 +1410,7 @@ class KubernetesResourceManager:
         mounted_storage_root = Path(self.config.storage_mount_path)
         mounts: list[dict[str, object]] = [
             {
-                "name": "worker-storage",
+                "name": WORKER_STORAGE_VOLUME_NAME,
                 "mountPath": str(planned_root.worker_visible_path),
                 "subPath": str(planned_root.worker_visible_path.relative_to(mounted_storage_root)),
             }
@@ -1417,7 +1425,7 @@ class KubernetesResourceManager:
         ]
         mounts.append(
             {
-                "name": "worker-storage",
+                "name": WORKER_STORAGE_VOLUME_NAME,
                 "mountPath": f"{self.config.storage_mount_path}/{state_subpath}",
                 "subPath": state_subpath,
             },

@@ -12,13 +12,13 @@ from mindroom.commands.parsing import command_parser
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import (
-    HOOK_DISPATCH_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
     is_visible_router_voice_echo_content,
     is_voice_event,
+    source_kind_allows_self_authored_ingress,
     source_kind_allows_trusted_original_sender,
     source_kind_bypasses_coalescing,
     source_kind_from_content,
@@ -252,7 +252,9 @@ class IngressValidator:
             source=event.source,
         )
 
-        if requester_user_id == self.deps.matrix_id.full_id and source_kind != HOOK_DISPATCH_SOURCE_KIND:
+        if requester_user_id == self.deps.matrix_id.full_id and not source_kind_allows_self_authored_ingress(
+            source_kind,
+        ):
             return None
 
         if not is_edit and self.deps.turn_store.is_handled(event.event_id):

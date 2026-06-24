@@ -4,6 +4,7 @@ import pytest
 
 from mindroom.constants import VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_source import (
+    EXTERNAL_TRIGGER_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
@@ -14,6 +15,7 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
     is_visible_router_voice_echo_content,
     source_kind_allows_internal_relay_detection,
+    source_kind_allows_self_authored_ingress,
     source_kind_allows_trusted_original_sender,
     source_kind_bypasses_coalescing,
 )
@@ -111,6 +113,36 @@ def test_source_kind_allows_internal_relay_detection_rejects_specialized_turns(
 ) -> None:
     """Specialized source kinds should not be reclassified as generic trusted relays."""
     assert not source_kind_allows_internal_relay_detection(source_kind)
+
+
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        HOOK_DISPATCH_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
+    ],
+)
+def test_source_kind_allows_self_authored_ingress_for_dispatch_synthetic_turns(source_kind: str) -> None:
+    """Only dispatch-origin synthetic turns may bypass self-authored ingress suppression."""
+    assert source_kind_allows_self_authored_ingress(source_kind)
+
+
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        MESSAGE_SOURCE_KIND,
+        SCHEDULED_SOURCE_KIND,
+        HOOK_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        None,
+        "",
+    ],
+)
+def test_source_kind_allows_self_authored_ingress_rejects_plain_and_non_dispatch_turns(
+    source_kind: str | None,
+) -> None:
+    """Plain and non-dispatch source kinds should keep normal self-authored suppression."""
+    assert not source_kind_allows_self_authored_ingress(source_kind)
 
 
 @pytest.mark.parametrize("content", [None, [], "visible echo"])
