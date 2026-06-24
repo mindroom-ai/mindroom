@@ -121,12 +121,12 @@ class ExternalTriggerRecord(BaseModel):
             return ()
         if not isinstance(value, Iterable) or isinstance(value, str):
             msg = "allowed_kinds must be a list of strings"
-            raise TypeError(msg)
+            raise ValueError(msg)  # noqa: TRY004 - keep Pydantic validation errors structured
         kinds: list[str] = []
         for item in value:
             if not isinstance(item, str):
                 msg = "allowed_kinds must be a list of strings"
-                raise TypeError(msg)
+                raise ValueError(msg)  # noqa: TRY004 - keep Pydantic validation errors structured
             kind = non_empty_stripped(item, field_name="allowed_kinds")
             if kind not in kinds:
                 kinds.append(kind)

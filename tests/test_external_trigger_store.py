@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -348,6 +349,19 @@ def test_corrupt_record_store_fails_closed(tmp_path: Path) -> None:
     store = ExternalTriggerStore(_runtime_paths(tmp_path))
     store.store_path.parent.mkdir(parents=True, exist_ok=True)
     store.store_path.write_text("{not valid json", encoding="utf-8")
+
+    with pytest.raises(ExternalTriggerStoreError, match="invalid"):
+        store.list_records()
+
+
+@pytest.mark.parametrize("allowed_kinds", [42, [42]])
+def test_record_store_invalid_allowed_kinds_type_fails_closed(tmp_path: Path, allowed_kinds: object) -> None:
+    """Corrupt allowed_kinds payloads should map to the store-unavailable boundary."""
+    store = ExternalTriggerStore(_runtime_paths(tmp_path))
+    record = _create(store, _config())
+    raw_records = json.loads(store.store_path.read_text(encoding="utf-8"))
+    raw_records["triggers"][record.trigger_id]["allowed_kinds"] = allowed_kinds
+    store.store_path.write_text(json.dumps(raw_records), encoding="utf-8")
 
     with pytest.raises(ExternalTriggerStoreError, match="invalid"):
         store.list_records()
