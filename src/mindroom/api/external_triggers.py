@@ -19,7 +19,12 @@ from mindroom.external_triggers.replay_store import (
     ExternalTriggerReplayStore,
     ExternalTriggerReplayStoreError,
 )
-from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerStoreError, TriggerDeliverySnapshot
+from mindroom.external_triggers.store import (
+    ExternalTriggerRecordNotDeliverableError,
+    ExternalTriggerStore,
+    ExternalTriggerStoreError,
+    TriggerDeliverySnapshot,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -92,6 +97,8 @@ def _request_config_and_trigger_snapshot(
             config=config,
             config_generation=api_snapshot.generation,
         )
+    except ExternalTriggerRecordNotDeliverableError as exc:
+        raise HTTPException(status_code=404, detail="External trigger not found") from exc
     except ExternalTriggerStoreError as exc:
         raise HTTPException(status_code=503, detail="External trigger store is not available") from exc
     if trigger_snapshot is None or not trigger_snapshot.enabled:

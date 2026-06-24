@@ -101,8 +101,18 @@ def _config_payload(*, max_body_bytes: int = 262144, owner_authorized: bool = Tr
     }
 
 
-def _write_config(config_path: Path, *, max_body_bytes: int = 262144, owner_authorized: bool = True) -> Config:
+def _write_runtime_config(
+    config_path: Path,
+    *,
+    max_body_bytes: int = 262144,
+    owner_authorized: bool = True,
+    research_rooms: list[str] | None = None,
+) -> Config:
+    """Write normal MindRoom config; trigger records live in the trigger store."""
     payload = _config_payload(max_body_bytes=max_body_bytes, owner_authorized=owner_authorized)
+    if research_rooms is not None:
+        agents = cast("dict[str, dict[str, object]]", payload["agents"])
+        agents["research"]["rooms"] = research_rooms
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     return Config.model_validate(payload)
 
@@ -183,7 +193,7 @@ def trigger_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TriggerApiCo
     """Return one initialized API app with a tool-managed trigger record."""
     private_key = Ed25519PrivateKey.generate()
     config_path = tmp_path / "config.yaml"
-    config = _write_config(config_path)
+    config = _write_runtime_config(config_path)
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "mindroom_data",
@@ -228,6 +238,21 @@ def test_unknown_trigger_returns_404(trigger_api: TriggerApiContext) -> None:
     response = _post_signed(trigger_api, trigger_id="missing")
 
     assert response.status_code == 404
+
+
+def test_trigger_invalidated_by_current_config_returns_404_before_replay_claim(
+    trigger_api: TriggerApiContext,
+) -> None:
+    """Stored triggers that no longer target configured rooms are hidden as not found."""
+    runtime_paths = trigger_api.runtime_paths
+    config = _write_runtime_config(runtime_paths.config_path, research_rooms=[])
+    assert config_lifecycle._publish_runtime_config_into_app(config, runtime_paths, api_main.app)
+
+    response = _post_signed(trigger_api, nonce="stale-target")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "External trigger not found"
+    assert not (runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
 
 
 def test_missing_signature_headers_return_401(trigger_api: TriggerApiContext) -> None:
@@ -333,7 +358,7 @@ def test_policy_caps_apply_at_request_time(
     """Lowering policy caps after creation limits later trigger requests."""
     private_key = Ed25519PrivateKey.generate()
     config_path = tmp_path / "config.yaml"
-    initial_config = _write_config(config_path, max_body_bytes=262144)
+    initial_config = _write_runtime_config(config_path, max_body_bytes=262144)
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "mindroom_data",
@@ -343,7 +368,7 @@ def test_policy_caps_apply_at_request_time(
     assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
     _create_record(runtime_paths, initial_config, _public_key_b64(private_key))
 
-    lowered_config = _write_config(config_path, max_body_bytes=1024)
+    lowered_config = _write_runtime_config(config_path, max_body_bytes=1024)
     assert config_lifecycle._publish_runtime_config_into_app(lowered_config, runtime_paths, api_main.app)
     ready_snapshots: list[TriggerDeliverySnapshot] = []
     _bind_runtime(ready_snapshots)
@@ -366,7 +391,7 @@ def test_owner_permission_removed_blocks_delivery_before_replay_claim(
 ) -> None:
     """Current authorization is checked before replay state is touched."""
     runtime_paths = trigger_api.runtime_paths
-    config = _write_config(runtime_paths.config_path, owner_authorized=False)
+    config = _write_runtime_config(runtime_paths.config_path, owner_authorized=False)
     assert config_lifecycle._publish_runtime_config_into_app(config, runtime_paths, api_main.app)
     _bind_runtime(trigger_api.ready_snapshots)
 

@@ -44,6 +44,10 @@ class ExternalTriggerStoreError(RuntimeError):
     """Raised when trigger records cannot be read or trusted."""
 
 
+class ExternalTriggerRecordNotDeliverableError(ExternalTriggerStoreError):
+    """Raised when a stored trigger is no longer deliverable under current config."""
+
+
 class ExternalTriggerTarget(BaseModel):
     """Resolved target for one external trigger."""
 
@@ -345,7 +349,10 @@ class ExternalTriggerStore:
             record = self._read_records().triggers.get(trigger_id)
         if record is None:
             return None
-        self._validate_record_against_config(record, config)
+        try:
+            self._validate_record_against_config(record, config)
+        except ExternalTriggerStoreError as exc:
+            raise ExternalTriggerRecordNotDeliverableError(str(exc)) from exc
         policy = config.external_trigger_policy
         resolved_room_id = resolve_room_id(record.target.room_id, self._runtime_paths)
         return TriggerDeliverySnapshot(
