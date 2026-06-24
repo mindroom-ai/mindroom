@@ -86,11 +86,16 @@ def _sign(
     )
 
 
-def _config_payload(*, max_body_bytes: int = 262144, owner_authorized: bool = True) -> dict[str, object]:
+def _config_payload(
+    *,
+    max_body_bytes: int = 262144,
+    owner_authorized: bool = True,
+    private_research: bool = False,
+) -> dict[str, object]:
     authorization: dict[str, object] = {"agent_reply_permissions": {"*": [_OWNER]}}
     if owner_authorized:
         authorization["global_users"] = [_OWNER]
-    return {
+    payload: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "gpt-5.5"}},
         "router": {"model": "default"},
         "agents": {
@@ -107,6 +112,10 @@ def _config_payload(*, max_body_bytes: int = 262144, owner_authorized: bool = Tr
         },
         "authorization": authorization,
     }
+    if private_research:
+        agents = cast("dict[str, dict[str, object]]", payload["agents"])
+        agents["research"]["private"] = {"per": "user", "root": "research_data"}
+    return payload
 
 
 def _write_runtime_config(
@@ -114,10 +123,15 @@ def _write_runtime_config(
     *,
     max_body_bytes: int = 262144,
     owner_authorized: bool = True,
+    private_research: bool = False,
     research_rooms: list[str] | None = None,
 ) -> Config:
     """Write normal MindRoom config; trigger records live in the trigger store."""
-    payload = _config_payload(max_body_bytes=max_body_bytes, owner_authorized=owner_authorized)
+    payload = _config_payload(
+        max_body_bytes=max_body_bytes,
+        owner_authorized=owner_authorized,
+        private_research=private_research,
+    )
     if research_rooms is not None:
         agents = cast("dict[str, dict[str, object]]", payload["agents"])
         agents["research"]["rooms"] = research_rooms
@@ -204,6 +218,36 @@ def trigger_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TriggerApiCo
     private_key = Ed25519PrivateKey.generate()
     config_path = tmp_path / "config.yaml"
     config = _write_runtime_config(config_path)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+    _create_record(runtime_paths, config, _public_key_b64(private_key))
+    api_main.unbind_external_trigger_runtime(api_main.app)
+    ready_snapshots: list[TriggerDeliverySnapshot] = []
+    _bind_runtime(ready_snapshots)
+    monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
+
+    with TestClient(api_main.app) as client:
+        yield TriggerApiContext(
+            client=client,
+            private_key=private_key,
+            runtime_paths=runtime_paths,
+            ready_snapshots=ready_snapshots,
+        )
+
+    api_main.unbind_external_trigger_runtime(api_main.app)
+
+
+@pytest.fixture
+def private_trigger_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TriggerApiContext:
+    """Return one initialized API app with a private target trigger record."""
+    private_key = Ed25519PrivateKey.generate()
+    config_path = tmp_path / "config.yaml"
+    config = _write_runtime_config(config_path, private_research=True)
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "mindroom_data",
@@ -359,6 +403,31 @@ def test_delivery_uses_single_snapshot_for_auth_readiness_and_execute(
     assert trigger_api.ready_snapshots
     assert execute_snapshots[0] is trigger_api.ready_snapshots[0]
     assert execute_snapshots[0].owner_user_id == _OWNER
+
+
+def test_post_external_trigger_accepts_private_agent_target(
+    private_trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Signed trigger requests deliver to private targets through normal runtime gating."""
+    execute_snapshots: list[TriggerDeliverySnapshot] = []
+
+    async def execute_external_trigger(**kwargs: object) -> str:
+        snapshot = kwargs["snapshot"]
+        assert isinstance(snapshot, TriggerDeliverySnapshot)
+        execute_snapshots.append(snapshot)
+        return "$delivered"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+
+    response = _post_signed(private_trigger_api)
+
+    assert response.status_code == 202
+    assert response.json()["matrix_event_id"] == "$delivered"
+    assert private_trigger_api.ready_snapshots
+    assert execute_snapshots[0] is private_trigger_api.ready_snapshots[0]
+    assert execute_snapshots[0].owner_user_id == _OWNER
+    assert execute_snapshots[0].target.agent == "research"
 
 
 def test_delivery_snapshot_read_runs_off_event_loop(

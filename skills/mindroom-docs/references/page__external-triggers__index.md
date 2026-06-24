@@ -147,6 +147,18 @@ The delivered Matrix message stamps the original Matrix requester as trusted tri
 
 That metadata lets private work agents treat the trigger as a turn from the owner, not from the router bot.
 
+### Private Agents
+
+External triggers can target agents configured with `private.per`.
+
+The trigger owner is the private-scope requester for the triggered turn.
+
+A trigger created by `@alice:example.org` wakes Alice's private state for that agent.
+
+The API does not store private workspace paths, worker keys, OAuth tokens, or serialized execution identities.
+
+The target agent must still be configured for the target room, and the router plus target transport bot must be joined before delivery.
+
 ## Idempotency
 
 Use a stable `--event-id` for the same external event.

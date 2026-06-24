@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, cast
 
+from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.external_trigger_manager import ExternalTriggerManagerTools
@@ -29,8 +30,13 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     )
 
 
-def _config(*, admin_users: list[str] | None = None) -> Config:
-    return Config.model_validate(
+def _config(
+    *,
+    admin_users: list[str] | None = None,
+    private_watcher: bool = False,
+    private_other: bool = False,
+) -> Config:
+    config = Config.model_validate(
         {
             "models": {"default": {"provider": "openai", "id": "gpt-5.5"}},
             "agents": {
@@ -57,6 +63,11 @@ def _config(*, admin_users: list[str] | None = None) -> Config:
             },
         },
     )
+    if private_watcher:
+        config.agents["watcher"].private = AgentPrivateConfig(per="user", root="watcher_data")
+    if private_other:
+        config.agents["other"].private = AgentPrivateConfig(per="user", root="other_data")
+    return config
 
 
 def _context(
@@ -107,6 +118,31 @@ def test_create_trigger_uses_current_context_and_hides_public_key(tmp_path: Path
     }
     assert "public_key" not in payload["trigger"]
     assert payload["public_key_fingerprint"].startswith("sha256:")
+
+
+def test_private_agent_create_trigger_uses_owner_as_scope_owner(tmp_path: Path) -> None:
+    """Private current-agent trigger records should stay scoped to the human requester."""
+    config = _config(private_watcher=True)
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=config)):
+        payload = _payload(
+            tool.create_trigger(
+                "private-campground",
+                public_key=_PUBLIC_KEY,
+                key_id="campground-main",
+                allowed_kinds=["campground.availability"],
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["trigger"]["owner_user_id"] == "@owner:example.org"
+    assert payload["trigger"]["target"] == {
+        "agent": "watcher",
+        "new_thread": False,
+        "room_id": "lobby",
+        "thread_id": None,
+    }
 
 
 def test_non_admin_cannot_target_other_agent_or_room(tmp_path: Path) -> None:
@@ -193,6 +229,31 @@ def test_admin_can_create_trigger_for_configured_cross_target(tmp_path: Path) ->
         "new_thread": False,
         "room_id": "other-room",
         "thread_id": "$target-thread",
+    }
+
+
+def test_admin_create_trigger_for_private_cross_target_keeps_admin_owner(tmp_path: Path) -> None:
+    """Admin-created private cross-target triggers should stay owned by the admin requester."""
+    config = _config(admin_users=["@admin:example.org"], private_other=True)
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
+        payload = _payload(
+            tool.create_trigger(
+                "admin-private-target",
+                public_key=_PUBLIC_KEY,
+                target_agent="other",
+                target_room_id="other-room",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["trigger"]["owner_user_id"] == "@admin:example.org"
+    assert payload["trigger"]["target"] == {
+        "agent": "other",
+        "new_thread": False,
+        "room_id": "other-room",
+        "thread_id": None,
     }
 
 

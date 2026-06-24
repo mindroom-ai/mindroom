@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
@@ -42,6 +42,12 @@ def _config(tmp_path: Path) -> Config:
         ),
         test_runtime_paths(tmp_path),
     )
+
+
+def _private_config(tmp_path: Path) -> Config:
+    config = _config(tmp_path)
+    config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
+    return config
 
 
 def _config_with_unprepared_stale_agent(tmp_path: Path) -> Config:
@@ -272,6 +278,35 @@ async def test_execute_external_trigger_only_parses_configured_target_mention(
     assert "@ops" in content["formatted_body"]
     assert "(at)ops" not in content["body"]
     assert "(at)ops" not in content["formatted_body"]
+
+
+@pytest.mark.asyncio
+async def test_execute_external_trigger_private_target_preserves_owner_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Private target dispatch should mention the private account but preserve external owner metadata."""
+    config = _private_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    send_and_track_message = AsyncMock(
+        return_value=DeliveredMatrixEvent(event_id="$matrix-event", content_sent={}),
+    )
+    monkeypatch.setattr("mindroom.external_triggers.executor.send_and_track_message", send_and_track_message)
+
+    event_id = await execute_external_trigger(
+        client=AsyncMock(),
+        snapshot=_snapshot(),
+        payload=_payload(),
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_cache=_conversation_cache(),
+    )
+
+    assert event_id == "$matrix-event"
+    content: dict[str, Any] = send_and_track_message.await_args.args[2]
+    assert content[SOURCE_KIND_KEY] == EXTERNAL_TRIGGER_SOURCE_KIND
+    assert content[ORIGINAL_SENDER_KEY] == "@owner:localhost"
+    assert content["m.mentions"]["user_ids"] == [current_entity_id("research", runtime_paths).full_id]
 
 
 @pytest.mark.asyncio

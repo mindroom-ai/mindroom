@@ -1795,6 +1795,83 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
 
 
 @pytest.mark.asyncio
+async def test_private_agent_response_runner_builds_execution_identity_from_requester(
+    tmp_path: Path,
+) -> None:
+    """Private agent execution identity should use the request owner, not the transport sender."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    private=AgentPrivateConfig(per="user", root="general_data"),
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    target = MessageTarget.resolve("!test:localhost", None, "$external-trigger", room_mode=True)
+
+    with (
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="done")) as mock_ai_response,
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@owner:localhost",
+            message_target=target,
+        )
+        build_calls: list[dict[str, object]] = []
+        original_build_execution_identity = coordinator.deps.tool_runtime.build_execution_identity
+
+        def spy_build_execution_identity(
+            *,
+            target: MessageTarget,
+            user_id: str | None,
+            session_id: str,
+            agent_name: str | None = None,
+        ) -> object:
+            build_calls.append(
+                {
+                    "target": target,
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "agent_name": agent_name,
+                },
+            )
+            return original_build_execution_identity(
+                target=target,
+                user_id=user_id,
+                session_id=session_id,
+                agent_name=agent_name,
+            )
+
+        with patch.object(
+            coordinator.deps.tool_runtime,
+            "build_execution_identity",
+            side_effect=spy_build_execution_identity,
+        ):
+            response_event_id = await coordinator.generate_response_locked(
+                _response_request(prompt="Campground opened", user_id="@owner:localhost"),
+                resolved_target=target,
+            )
+
+    assert response_event_id == "$thinking"
+    assert build_calls[0]["user_id"] == "@owner:localhost"
+    execution_identity = mock_ai_response.await_args.kwargs["execution_identity"]
+    assert execution_identity.agent_name == "general"
+    assert execution_identity.requester_id == "@owner:localhost"
+    assert execution_identity.room_id == "!test:localhost"
+
+
+@pytest.mark.asyncio
 async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_active_response_events(
     tmp_path: Path,
 ) -> None:
