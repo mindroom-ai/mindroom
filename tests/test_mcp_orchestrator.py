@@ -804,12 +804,41 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
-        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
     ):
         updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
 
     assert updated is True
     assert external_trigger_runtime_bound is False
+    mock_bind_runtime.assert_called_once_with(new_config, orchestrator.agent_bots)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_post_update_rooms_does_not_bind_trigger_runtime(tmp_path: Path) -> None:
+    """Room reconciliation should not bind trigger runtime before support services settle."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    config = _config_with_code_agent(tmp_path)
+    orchestrator.config = config
+    plan = ConfigUpdatePlan(
+        new_config=config,
+        changed_mcp_servers=set(),
+        configured_entities={ROUTER_AGENT_NAME, "code"},
+        entities_to_restart={"code"},
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+
+    with (
+        patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
+    ):
+        await orchestrator._reconcile_post_update_rooms(plan, changed_entities=set())
+
+    mock_bind_runtime.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -878,7 +907,8 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
 
     assert updated is True
-    assert call_order == ["rooms", "support", "bind"]
+    assert call_order.count("bind") == 1
+    assert call_order.index("rooms") < call_order.index("support") < call_order.index("bind")
 
 
 @pytest.mark.asyncio

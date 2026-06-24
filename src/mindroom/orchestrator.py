@@ -1297,8 +1297,6 @@ class _MultiAgentOrchestrator:
         if plan.matrix_space_changed or plan.room_metadata_changed:
             room_ids = await self._ensure_rooms_exist()
             await self._ensure_root_space(room_ids)
-        if not plan.only_support_service_changes:
-            self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
 
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
