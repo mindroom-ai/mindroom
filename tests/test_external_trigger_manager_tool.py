@@ -126,6 +126,22 @@ def test_non_admin_cannot_target_other_agent_or_room(tmp_path: Path) -> None:
     assert "Only external trigger admins" in payload["message"]
 
 
+def test_create_trigger_validation_error_returns_tool_error_payload(tmp_path: Path) -> None:
+    """Bad model-backed tool input should remain a structured tool error."""
+    tool = ExternalTriggerManagerTools()
+    with tool_runtime_context(_context(tmp_path)):
+        payload = _payload(
+            tool.create_trigger(
+                "campground",
+                public_key=_PUBLIC_KEY,
+                target_thread_id="  ",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "thread_id" in payload["message"]
+
+
 def test_manager_requires_live_human_requester_context(tmp_path: Path) -> None:
     """Trigger creation is available only to live human Matrix requesters."""
     tool = ExternalTriggerManagerTools()

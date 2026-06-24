@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
+from pydantic import ValidationError
 
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.external_triggers.store import (
@@ -62,7 +63,7 @@ class ExternalTriggerManagerTools(Toolkit):
         try:
             context = cls._context()
             return action(context, ExternalTriggerStore(context.runtime_paths))
-        except (_ExternalTriggerManagerError, ExternalTriggerStoreError) as exc:
+        except (_ExternalTriggerManagerError, ExternalTriggerStoreError, ValidationError) as exc:
             return cls._payload("error", message=str(exc))
 
     @staticmethod
