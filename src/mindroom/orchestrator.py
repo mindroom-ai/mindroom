@@ -1399,6 +1399,7 @@ class _MultiAgentOrchestrator:
                 previous_config=current_config,
             )
             await self._approval_transport.mark_startup_runtime_support_ready()
+            self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
             await self._emit_config_reloaded(
                 new_config=new_config,
                 changed_entities=changed_entities,

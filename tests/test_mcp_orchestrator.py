@@ -804,11 +804,81 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
     ):
         updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
 
     assert updated is True
     assert external_trigger_runtime_bound is False
+
+
+@pytest.mark.asyncio
+async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_services(
+    tmp_path: Path,
+) -> None:
+    """Config reloads should finish with trigger runtime bound to the final API snapshot."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config_with_code_agent(tmp_path)
+    new_config = _config_with_code_agent(tmp_path, role="Write better code")
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
+        "code": MagicMock(spec=AgentBot),
+    }
+    plan = ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        configured_entities={ROUTER_AGENT_NAME, "code"},
+        entities_to_restart={"code"},
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+    call_order: list[str] = []
+
+    async def reconcile_rooms(_plan: ConfigUpdatePlan, _changed_entities: set[str]) -> None:
+        call_order.append("rooms")
+
+    async def sync_support_services(
+        _config: Config,
+        *,
+        start_watcher: bool,
+        previous_config: Config | None = None,
+    ) -> None:
+        assert start_watcher is False
+        assert previous_config is current_config
+        call_order.append("support")
+
+    def bind_runtime(_config: Config | None, _bots: object) -> None:
+        assert _config is new_config
+        call_order.append("bind")
+
+    with (
+        patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+        patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
+        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator.plugin_watch, "sync_roots"),
+        patch.object(orchestrator, "_activate_hook_registry"),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+        patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app", return_value=True),
+        patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
+        patch.object(orchestrator._external_trigger_runtime, "unbind"),
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
+        patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(return_value=EntityStartResults())),
+        patch.object(orchestrator, "_reconcile_post_update_rooms", side_effect=reconcile_rooms),
+        patch.object(orchestrator, "_sync_runtime_support_services", side_effect=sync_support_services),
+        patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
+        patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready", side_effect=bind_runtime),
+    ):
+        updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+    assert updated is True
+    assert call_order == ["rooms", "support", "bind"]
 
 
 @pytest.mark.asyncio
@@ -946,7 +1016,9 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         ),
         patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
     ):
         await orchestrator.config_reload.update_config()
 
