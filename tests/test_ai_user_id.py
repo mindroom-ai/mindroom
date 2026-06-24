@@ -122,6 +122,8 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
     get_tool_execution_identity,
+    private_instance_scope_root_path,
+    resolve_worker_key,
     stream_with_tool_execution_identity,
     tool_execution_identity,
 )
@@ -1869,6 +1871,19 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
     assert execution_identity.agent_name == "general"
     assert execution_identity.requester_id == "@owner:localhost"
     assert execution_identity.room_id == "!test:localhost"
+    worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="general")
+    assert worker_key == "v1:default:user_agent:@owner:localhost:general"
+    assert worker_key != resolve_worker_key(
+        "user_agent",
+        replace(execution_identity, requester_id=bot.matrix_id.full_id),
+        agent_name="general",
+    )
+    private_workspace = (
+        private_instance_scope_root_path(runtime_paths.storage_root, worker_key) / "general" / "general_data"
+    )
+    assert private_workspace.name == "general_data"
+    assert private_workspace.parent.name == "general"
+    assert private_workspace.parent.parent.parent.name == "private_instances"
 
 
 @pytest.mark.asyncio

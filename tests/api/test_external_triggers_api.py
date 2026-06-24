@@ -506,6 +506,22 @@ def test_owner_not_joined_blocks_delivery_before_replay_claim(
     assert not (trigger_api.runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
 
 
+def test_private_owner_not_joined_blocks_delivery_before_replay_claim(
+    private_trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Private targets still require live owner membership before replay state is touched."""
+    monkeypatch.setattr(
+        "mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room",
+        _owner_not_joined,
+    )
+
+    response = _post_signed(private_trigger_api)
+
+    assert response.status_code == 403
+    assert not (private_trigger_api.runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
+
+
 def test_duplicate_event_id_returns_duplicate_response(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,
