@@ -69,9 +69,11 @@ external_trigger_policy:
 
 `enabled: false` makes trigger endpoints return not found.
 
-`admin_users` can create, list, rotate, enable, disable, or delete triggers across owners.
+`admin_users` can list, rotate, enable, disable, or delete triggers across owners.
 
-Non-admin callers can create triggers only for the current agent and current room in the live Matrix tool context.
+Admin-created triggers are still owned by the admin requester, but admins can choose a different target agent, team, or room.
+
+Non-admin callers can create triggers only for the current agent and current room in the live Matrix tool context, but can still choose `target_thread_id` or `new_thread` inside that room.
 
 The target room must already be configured for the target agent or team.
 
@@ -87,9 +89,9 @@ Generate a watcher signing key.
 mindroom trigger keygen --private-key-file /etc/mindroom/triggers/campground.key
 ```
 
-Give the printed `public_key` to the agent and ask it to call `external_trigger_manager.create_trigger`.
+Give the printed `public_key` to the agent in a live Matrix conversation and ask it to call `external_trigger_manager.create_trigger`.
 
-Keep the printed `private_key` or the `--private-key-file` output only in the watcher runtime.
+Keep the printed `private_key` and any `--private-key-file` output only in the watcher runtime.
 
 Example tool arguments:
 
@@ -155,13 +157,15 @@ For example, use a reservation ID, Git commit SHA, release tag, webhook delivery
 
 If delivery succeeds, a later signed request with the same `event_id` is treated as a duplicate and does not post another Matrix message while the replay record is retained.
 
+Delivered `event_id` records are retained for 24 hours in the current JSON replay store.
+
 Retries must create a fresh signed request with the same `--event-id`.
 
 Each nonce-bearing HTTP request is single-use.
 
 Do not reuse the same HTTP request body and headers as a retry strategy.
 
-Replay state lives in the primary control-state JSON store and uses an advisory file lock.
+Replay state lives at `<control-state>/external_triggers/replay.json` and uses an advisory file lock.
 
 Deploy trigger ingress with a single shared control-state filesystem, or keep one API writer until replay storage moves to a distributed atomic backend.
 
