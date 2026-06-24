@@ -105,9 +105,9 @@ Example tool arguments:
 }
 ```
 
-For a non-admin caller, the target is the current agent and current room.
+For a non-admin caller, the target agent and room are the current agent and current room, and `target_thread_id` or `new_thread` may still choose placement inside that room.
 
-For an admin caller, `target_agent`, `target_room_id`, and `target_thread_id` can be provided.
+For an admin caller, `target_agent` and `target_room_id` can additionally target a different agent, team, or room.
 
 The tool returns `/api/triggers/<trigger_id>` when creation succeeds.
 
