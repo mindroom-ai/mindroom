@@ -34,7 +34,6 @@ class _SerializedNonce(TypedDict):
 class _SerializedEvent(TypedDict):
     state: Literal["in_progress", "delivered"]
     expires_at: int
-    delivered_at: int | None
 
 
 class _SerializedReplayStore(TypedDict):
@@ -42,24 +41,19 @@ class _SerializedReplayStore(TypedDict):
     events: dict[str, dict[str, _SerializedEvent]]
 
 
-@dataclass
-class _ReplayStoreState:
-    lock: threading.RLock = field(default_factory=threading.RLock)
-
-
-_STORE_STATES: dict[str, _ReplayStoreState] = {}
+_STORE_STATES: dict[str, threading.RLock] = {}
 _STORE_STATES_LOCK = threading.Lock()
 # NOTE: The per-path lock is in-process only. Deploy the external trigger API
 # with a single writer process/replica for replay correctness until this store
 # moves to a database or another cross-process atomic backend.
 
 
-def _shared_store_state(store_path: Path) -> _ReplayStoreState:
+def _shared_store_state(store_path: Path) -> threading.RLock:
     key = str(store_path.absolute())
     with _STORE_STATES_LOCK:
         state = _STORE_STATES.get(key)
         if state is None:
-            state = _ReplayStoreState()
+            state = threading.RLock()
             _STORE_STATES[key] = state
         return state
 
@@ -71,7 +65,7 @@ class ExternalTriggerReplayStore:
     control_state_root: Path
     _store_path: Path = field(init=False)
     _lock_path: Path = field(init=False)
-    _state: _ReplayStoreState = field(init=False, repr=False)
+    _state: threading.RLock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Bind this store to its path-wide process lock."""
@@ -81,7 +75,7 @@ class ExternalTriggerReplayStore:
 
     def claim_nonce(self, replay_scope: str, nonce: str, *, now: int, ttl_seconds: int) -> bool:
         """Return True only for the first unexpired nonce claim."""
-        with self._state.lock, advisory_file_lock(self._lock_path):
+        with self._state, advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
             replay_nonces = store["nonces"].setdefault(replay_scope, {})
@@ -100,7 +94,7 @@ class ExternalTriggerReplayStore:
         ttl_seconds: int,
     ) -> ExternalTriggerEventClaim:
         """Claim one external event id and return its replay state."""
-        with self._state.lock, advisory_file_lock(self._lock_path):
+        with self._state, advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
             replay_events = store["events"].setdefault(replay_scope, {})
@@ -112,27 +106,25 @@ class ExternalTriggerReplayStore:
             replay_events[event_id] = {
                 "state": ExternalTriggerEventClaim.IN_PROGRESS.value,
                 "expires_at": now + ttl_seconds,
-                "delivered_at": None,
             }
             self._write_store(store)
             return ExternalTriggerEventClaim.FRESH
 
     def mark_event_delivered(self, replay_scope: str, event_id: str, *, now: int, ttl_seconds: int) -> None:
         """Record that one external event id reached Matrix delivery."""
-        with self._state.lock, advisory_file_lock(self._lock_path):
+        with self._state, advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
             replay_events = store["events"].setdefault(replay_scope, {})
             replay_events[event_id] = {
                 "state": ExternalTriggerEventClaim.DELIVERED.value,
                 "expires_at": now + ttl_seconds,
-                "delivered_at": now,
             }
             self._write_store(store)
 
     def release_event_id(self, replay_scope: str, event_id: str) -> None:
         """Remove an event id claim after delivery failure."""
-        with self._state.lock, advisory_file_lock(self._lock_path):
+        with self._state, advisory_file_lock(self._lock_path):
             store = self._read_store()
             replay_events = store["events"].get(replay_scope)
             if replay_events is None:
@@ -234,20 +226,14 @@ def _normalize_events(raw_events: Mapping[object, object]) -> dict[str, dict[str
             if not isinstance(event_id, str) or not isinstance(record, Mapping):
                 raise _invalid_store_structure()
             record_mapping = cast("Mapping[object, object]", record)
-            if "delivered_at" not in record_mapping:
-                raise _invalid_store_structure()
             state = record_mapping.get("state")
             expires_at = record_mapping.get("expires_at")
-            delivered_at = record_mapping.get("delivered_at")
             if state not in {"in_progress", "delivered"} or not _is_json_int(expires_at):
-                raise _invalid_store_structure()
-            if delivered_at is not None and not _is_json_int(delivered_at):
                 raise _invalid_store_structure()
             event_state = cast("Literal['in_progress', 'delivered']", state)
             normalized_trigger_events[event_id] = {
                 "state": event_state,
                 "expires_at": expires_at,
-                "delivered_at": delivered_at,
             }
         if normalized_trigger_events:
             events[trigger_id] = normalized_trigger_events

@@ -8,10 +8,9 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import get_joined_rooms
-from mindroom.matrix.state import resolve_room_id
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Mapping
+    from collections.abc import Iterable, Mapping
 
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
@@ -26,32 +25,6 @@ class ExternalTriggerRuntimeCoordinator:
     runtime_paths: RuntimePaths
     api_enabled: bool = True
 
-    def _bind_from_started_bots(
-        self,
-        bots: Iterable[AgentBot | TeamBot],
-        *,
-        is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
-    ) -> None:
-        """Bind external trigger delivery runtime when the router client is ready."""
-        if not self.api_enabled:
-            return
-        for bot in bots:
-            if bot.agent_name != ROUTER_AGENT_NAME or bot.client is None:
-                continue
-            from mindroom.api import main as api_main  # noqa: PLC0415
-
-            api_main.bind_external_trigger_runtime(
-                api_main.app,
-                client=bot.client,
-                conversation_cache=bot._conversation_cache,
-                is_trigger_snapshot_ready=is_trigger_snapshot_ready,
-            )
-            return
-
-    def resolve_room_id(self, room_id_or_alias: str) -> str:
-        """Resolve one configured external trigger room reference when known."""
-        return resolve_room_id(room_id_or_alias, runtime_paths=self.runtime_paths)
-
     def bind_if_ready(
         self,
         config: Config | None,
@@ -63,14 +36,18 @@ class ExternalTriggerRuntimeCoordinator:
         if config is None:
             return
         router_bot = bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or not router_bot.running:
+        if router_bot is None or router_bot.client is None or not router_bot.running:
             return
 
         async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
             return await self.is_ready(snapshot, bots)
 
-        self._bind_from_started_bots(
-            (router_bot,),
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        api_main.bind_external_trigger_runtime(
+            api_main.app,
+            client=router_bot.client,
+            conversation_cache=router_bot._conversation_cache,
             is_trigger_snapshot_ready=is_trigger_snapshot_ready,
         )
 

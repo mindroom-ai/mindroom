@@ -1,8 +1,9 @@
 """API endpoints for Matrix operations."""
 
+from __future__ import annotations
+
 import asyncio
-from collections.abc import Mapping
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -21,17 +22,9 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/matrix", tags=["matrix"])
 
 
-class _RuntimeMatrixEntityConfig(Protocol):
-    """Runtime config fields needed by Matrix room endpoints."""
-
-    display_name: str
-
-
-class _RuntimeConfig(Protocol):
-    """Runtime config fields needed by Matrix room endpoints."""
-
-    agents: Mapping[str, _RuntimeMatrixEntityConfig]
-    teams: Mapping[str, _RuntimeMatrixEntityConfig]
+if TYPE_CHECKING:
+    from mindroom.config.agent import AgentConfig, TeamConfig
+    from mindroom.config.main import Config
 
 
 class RoomLeaveRequest(BaseModel):
@@ -84,7 +77,7 @@ def _get_configured_matrix_entity(
     return entities[entity_id]
 
 
-def _get_runtime_matrix_entities(config: _RuntimeConfig) -> dict[str, _RuntimeMatrixEntityConfig]:
+def _get_runtime_matrix_entities(config: Config) -> dict[str, AgentConfig | TeamConfig]:
     """Return runtime-validated agents and teams keyed by their Matrix entity ID."""
     return {
         **config.agents,
@@ -92,7 +85,7 @@ def _get_runtime_matrix_entities(config: _RuntimeConfig) -> dict[str, _RuntimeMa
     }
 
 
-def _get_runtime_matrix_entity(config: _RuntimeConfig, entity_id: str) -> _RuntimeMatrixEntityConfig:
+def _get_runtime_matrix_entity(config: Config, entity_id: str) -> AgentConfig | TeamConfig:
     """Return one runtime-validated Matrix entity or raise a 404."""
     entities = _get_runtime_matrix_entities(config)
     if entity_id not in entities:
@@ -165,15 +158,14 @@ async def get_all_agents_rooms(request: Request) -> AllAgentsRoomsResponse:
     and unconfigured rooms (joined but not in config) for each Matrix entity.
     """
     config, runtime_paths = read_committed_runtime_config(request)
-    runtime_config_view = cast("_RuntimeConfig", config)
-    entities = _get_runtime_matrix_entities(runtime_config_view)
+    entities = _get_runtime_matrix_entities(config)
 
     # Gather room information for all configured Matrix entities concurrently.
     tasks = [
         _get_agent_matrix_rooms(
             agent_id,
             entity.display_name,
-            get_rooms_for_entity(agent_id, runtime_config_view),
+            get_rooms_for_entity(agent_id, config),
             runtime_paths,
         )
         for agent_id, entity in entities.items()
@@ -199,12 +191,11 @@ async def get_agent_rooms(agent_id: str, request: Request) -> AgentRoomsResponse
 
     """
     config, runtime_paths = read_committed_runtime_config(request)
-    runtime_config_view = cast("_RuntimeConfig", config)
-    entity = _get_runtime_matrix_entity(runtime_config_view, agent_id)
+    entity = _get_runtime_matrix_entity(config, agent_id)
     return await _get_agent_matrix_rooms(
         agent_id,
         entity.display_name,
-        get_rooms_for_entity(agent_id, runtime_config_view),
+        get_rooms_for_entity(agent_id, config),
         runtime_paths,
     )
 

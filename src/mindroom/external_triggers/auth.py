@@ -101,14 +101,6 @@ def sign_trigger_request(
     private_key: Ed25519PrivateKey,
 ) -> dict[str, str]:
     """Sign an external trigger request and return its signature headers."""
-    signature_headers = TriggerSignatureHeaders(
-        key_id=key_id,
-        timestamp=timestamp,
-        nonce=nonce,
-        signature="",
-    )
-    signature_headers.validate()
-
     payload = canonical_trigger_signing_payload(
         method=method,
         path=path,
@@ -117,12 +109,14 @@ def sign_trigger_request(
         body=body,
     )
     signature = private_key.sign(payload)
-    return TriggerSignatureHeaders(
+    signature_headers = TriggerSignatureHeaders(
         key_id=key_id,
         timestamp=timestamp,
         nonce=nonce,
         signature=base64.b64encode(signature).decode("ascii"),
-    ).to_mapping()
+    )
+    signature_headers.validate()
+    return signature_headers.to_mapping()
 
 
 def verify_trigger_request(

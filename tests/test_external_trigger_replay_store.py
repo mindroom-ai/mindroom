@@ -202,27 +202,15 @@ def test_invalid_nested_nonce_record_fails_closed(tmp_path: Path, store_payload:
     [
         {
             "nonces": {},
-            "events": {"campground": {"availability-123": {"state": "bad", "expires_at": 1_300, "delivered_at": None}}},
+            "events": {"campground": {"availability-123": {"state": "bad", "expires_at": 1_300}}},
         },
         {
             "nonces": {},
             "events": {
                 "campground": {
-                    "availability-123": {"state": "delivered", "expires_at": "later", "delivered_at": 1_000},
+                    "availability-123": {"state": "delivered", "expires_at": "later"},
                 },
             },
-        },
-        {
-            "nonces": {},
-            "events": {
-                "campground": {
-                    "availability-123": {"state": "delivered", "expires_at": 1_300, "delivered_at": "bad"},
-                },
-            },
-        },
-        {
-            "nonces": {},
-            "events": {"campground": {"availability-123": {"state": "delivered", "expires_at": 1_300}}},
         },
         {"nonces": {}, "events": {"campground": ["availability-123"]}},
     ],

@@ -214,7 +214,7 @@ async def test_router_start_attempt_does_not_bind_external_trigger_runtime_befor
     router_bot = MagicMock(spec=AgentBot)
     router_bot.try_start = AsyncMock(return_value=True)
 
-    with patch.object(orchestrator._external_trigger_runtime, "_bind_from_started_bots") as mock_bind:
+    with patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind:
         started = await orchestrator._try_start_bot_once(ROUTER_AGENT_NAME, router_bot)
 
     assert started is True
@@ -230,6 +230,7 @@ def test_external_trigger_runtime_binds_router_with_live_readiness_gate(tmp_path
     router_bot.agent_name = ROUTER_AGENT_NAME
     router_bot.running = True
     router_bot.client = object()
+    router_bot._conversation_cache = object()
 
     target_bot = MagicMock(spec=AgentBot)
     target_bot.agent_name = "code"
@@ -240,11 +241,12 @@ def test_external_trigger_runtime_binds_router_with_live_readiness_gate(tmp_path
         "code": target_bot,
     }
 
-    with patch.object(orchestrator._external_trigger_runtime, "_bind_from_started_bots") as mock_bind:
+    with patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind:
         orchestrator._external_trigger_runtime.bind_if_ready(orchestrator.config, orchestrator.agent_bots)
 
     mock_bind.assert_called_once()
-    assert mock_bind.call_args.args == ((router_bot,),)
+    assert mock_bind.call_args.kwargs["client"] is router_bot.client
+    assert mock_bind.call_args.kwargs["conversation_cache"] is router_bot._conversation_cache
     assert callable(mock_bind.call_args.kwargs["is_trigger_snapshot_ready"])
 
 

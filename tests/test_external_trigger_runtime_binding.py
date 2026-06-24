@@ -73,13 +73,14 @@ def test_runtime_coordinator_binds_router_with_snapshot_readiness_gate(tmp_path:
     router_bot._conversation_cache = object()
     bots = {ROUTER_AGENT_NAME: router_bot}
 
-    with patch.object(coordinator, "_bind_from_started_bots") as mock_bind:
+    with patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind:
         coordinator.bind_if_ready(_config(), bots)
 
-    mock_bind.assert_called_once_with(
-        (router_bot,),
-        is_trigger_snapshot_ready=mock_bind.call_args.kwargs["is_trigger_snapshot_ready"],
-    )
+    mock_bind.assert_called_once()
+    assert mock_bind.call_args.args == (api_main.app,)
+    assert mock_bind.call_args.kwargs["client"] is router_bot.client
+    assert mock_bind.call_args.kwargs["conversation_cache"] is router_bot._conversation_cache
+    assert callable(mock_bind.call_args.kwargs["is_trigger_snapshot_ready"])
 
 
 @pytest.mark.asyncio

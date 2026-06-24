@@ -29,6 +29,8 @@ def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMo
     """Build a bot-shaped mock with the runtime state expected by config reloads."""
     bot = MagicMock(spec=AgentBot)
     bot.config = config
+    bot.client = None
+    bot._conversation_cache = object()
     bot.enable_streaming = enable_streaming
     bot.running = True
     bot._runtime_view = BotRuntimeState(
