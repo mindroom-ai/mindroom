@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+import time
 from pathlib import Path
+from queue import Empty
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from pydantic import ValidationError
@@ -17,11 +21,48 @@ from mindroom.external_triggers.replay_store import (
     ExternalTriggerReplayStoreError,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from multiprocessing.queues import Queue
+    from multiprocessing.synchronize import Event
+
 
 def _store_path(tmp_path: Path) -> Path:
     path = tmp_path / "external_triggers" / "replay.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _claim_nonce_with_slow_read_worker(
+    control_state_root: str,
+    start_event: Event,
+    result_queue: Queue[tuple[str, bool | str]],
+) -> None:
+    """Claim one nonce after slowing reads enough to expose missing cross-process locking."""
+    original_read_store = cast(
+        "Callable[[ExternalTriggerReplayStore], object]",
+        ExternalTriggerReplayStore._read_store,
+    )
+
+    def slow_read_store(self: ExternalTriggerReplayStore) -> object:
+        store = original_read_store(self)
+        time.sleep(0.1)
+        return store
+
+    ExternalTriggerReplayStore._read_store = slow_read_store
+    try:
+        if not start_event.wait(timeout=5):
+            result_queue.put(("error", "timed out waiting for start signal"))
+            return
+        claimed = ExternalTriggerReplayStore(Path(control_state_root)).claim_nonce(
+            "campground",
+            "nonce-1",
+            now=1_000,
+            ttl_seconds=300,
+        )
+        result_queue.put(("ok", claimed))
+    except BaseException as exc:
+        result_queue.put(("error", repr(exc)))
 
 
 def test_payload_rejects_target_override_fields_and_uses_isolated_data_dict() -> None:
@@ -95,6 +136,45 @@ def test_shared_store_instances_coordinate_nonce_and_event_claims(tmp_path: Path
     assert first_store.claim_event_id("campground", "availability-123", now=1_003, ttl_seconds=300) is (
         ExternalTriggerEventClaim.DELIVERED
     )
+
+
+def test_shared_store_processes_coordinate_nonce_claims(tmp_path: Path) -> None:
+    """Separate API processes should not both claim the same nonce from one filesystem store."""
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_claim_nonce_with_slow_read_worker,
+            args=(str(tmp_path), start_event, result_queue),
+        )
+        for _ in range(2)
+    ]
+
+    for process in processes:
+        process.start()
+    start_event.set()
+
+    results: list[bool] = []
+    try:
+        for _ in processes:
+            try:
+                status, payload = result_queue.get(timeout=10)
+            except Empty as exc:
+                msg = "timed out waiting for replay-store worker result"
+                raise AssertionError(msg) from exc
+            assert status == "ok", payload
+            assert isinstance(payload, bool), payload
+            results.append(payload)
+    finally:
+        for process in processes:
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+    assert [process.exitcode for process in processes] == [0, 0]
+    assert sorted(results) == [False, True]
 
 
 def test_release_after_send_failure_keeps_nonce_single_use_but_allows_event_retry(tmp_path: Path) -> None:

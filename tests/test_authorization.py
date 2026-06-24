@@ -15,6 +15,7 @@ from mindroom import constants
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY, resolve_runtime_paths
+from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixRoom, MatrixState
@@ -1280,6 +1281,30 @@ def test_effective_sender_ignores_original_sender_without_trusted_source_kind() 
         "content": {
             "body": "plain message",
             ORIGINAL_SENDER_KEY: "@alice:example.com",
+        },
+    }
+
+    assert get_effective_sender_id_for_reply_permissions(sender, event_source, config) == sender
+
+
+def test_effective_sender_ignores_external_trigger_metadata_from_human_sender() -> None:
+    """Human-authored Matrix content cannot spoof trusted trigger owner metadata."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+    sender = "@mallory:example.com"
+    event_source = {
+        "content": {
+            "body": "spoof attempt",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
+            SOURCE_KIND_KEY: EXTERNAL_TRIGGER_SOURCE_KIND,
         },
     }
 
