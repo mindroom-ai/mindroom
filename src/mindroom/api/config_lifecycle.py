@@ -30,6 +30,7 @@ from mindroom.file_watcher import watch_file
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
 
@@ -83,7 +84,7 @@ class ExternalTriggerRuntime:
     client: object
     conversation_cache: object
     config_generation: int
-    is_trigger_ready: Callable[[str], Awaitable[bool]]
+    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
 
 
 @dataclass

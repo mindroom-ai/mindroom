@@ -15719,7 +15719,6 @@ class TestMultiAgentOrchestrator:
         config.matrix_room_access = MagicMock()
         config.authorization = MagicMock()
         config.cache = MagicMock()
-        config.external_triggers = {}
         config.defaults.enable_streaming = True
 
         orchestrator.config = config
@@ -15738,6 +15737,7 @@ class TestMultiAgentOrchestrator:
                 return_value=set(),
             ),
             patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+            patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_runtime,
         ):
             updated = await orchestrator.config_reload.update_config()
@@ -16047,11 +16047,9 @@ class TestMultiAgentOrchestrator:
         current_config = MagicMock()
         current_config.authorization.global_users = []
         current_config.cache = MagicMock()
-        current_config.external_triggers = {}
         new_config = MagicMock()
         new_config.authorization.global_users = []
         new_config.cache = MagicMock()
-        new_config.external_triggers = {}
         new_config.defaults.enable_streaming = True
 
         orchestrator = _MultiAgentOrchestrator(
@@ -16079,6 +16077,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.load_plugins"),
             patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
             patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+            patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         ):
             updated = await orchestrator.config_reload.update_config()

@@ -182,27 +182,18 @@ def test_managed_entity_power_user_ids_for_room_includes_configured_teams(tmp_pa
     ]
 
 
-def test_get_rooms_for_entity_includes_external_trigger_target_rooms(tmp_path: Path) -> None:
-    """Trigger targets should join and listen in their configured Matrix rooms."""
+def test_get_rooms_for_entity_uses_authored_entity_rooms_only(tmp_path: Path) -> None:
+    """Tool-managed triggers should not widen static entity room membership."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["lobby"])},
-            external_triggers={
-                "campground": {
-                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                    "target": {
-                        "room_id": "!campground:example.org",
-                        "agent": "general",
-                    },
-                },
-            },
         ),
         runtime_paths,
     )
 
-    assert get_rooms_for_entity("general", config) == ["lobby", "!campground:example.org"]
-    assert set(get_rooms_for_entity(ROUTER_AGENT_NAME, config)) == {"lobby", "!campground:example.org"}
+    assert get_rooms_for_entity("general", config) == ["lobby"]
+    assert get_rooms_for_entity(ROUTER_AGENT_NAME, config) == ["lobby"]
 
 
 class _TestVectorDb:

@@ -27,6 +27,7 @@ _PYTHON_STRING_LITERAL_RE = re.compile(
     r"""(?P<prefix>[rubfRUBF]*)?(?P<quote>["'])(?P<value>[A-Z][A-Z0-9_]+)(?P=quote)""",
 )
 _PROJECTION_MATRIX_ENV_NAMES = (
+    runtime_env_policy.CONTROL_STATE_PATH_ENV,
     runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV,
     *runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY.values(),
     "GOOGLE_APPLICATION_CREDENTIALS",
@@ -39,6 +40,13 @@ _PROJECTION_MATRIX_ENV_NAMES = (
     "OPENAI_API_KEY",
 )
 _PROJECTION_MATRIX_EXPECTATIONS = {
+    runtime_env_policy.CONTROL_STATE_PATH_ENV: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
     runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: {
         "public_worker_startup_env": False,
         "isolated_worker_runtime_env": True,
@@ -176,6 +184,7 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
     """Public worker startup serialization keeps only non-secret runtime values."""
     env = {
         "MINDROOM_CONFIG_PATH": "/app/config.yaml",
+        "MINDROOM_CONTROL_STATE_PATH": "/app/control-state",
         "MINDROOM_STORAGE_PATH": "/app/storage",
         "MINDROOM_SANDBOX_PROXY_TOKEN": "proxy-secret",
         "MINDROOM_SANDBOX_PROXY_URL": "http://runner.example.invalid",

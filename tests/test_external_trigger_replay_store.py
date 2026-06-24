@@ -19,6 +19,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _store_path(tmp_path: Path) -> Path:
+    path = tmp_path / "external_triggers" / "replay.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def test_payload_rejects_target_override_fields_and_uses_isolated_data_dict() -> None:
     """Payloads should not accept target override fields and should not share data defaults."""
     with pytest.raises(ValidationError, match="room_id"):
@@ -162,7 +168,7 @@ def test_nonce_and_event_id_remain_claimed_at_exact_expiry_boundary(tmp_path: Pa
 @pytest.mark.parametrize("store_payload", [["not", "a", "dict"], {"nonces": {}}])
 def test_invalid_store_shape_fails_closed(tmp_path: Path, store_payload: object) -> None:
     """Malformed top-level store structure should not reset replay protection."""
-    store_path = tmp_path / "external_triggers.json"
+    store_path = _store_path(tmp_path)
     store_path.write_text(json.dumps(store_payload), encoding="utf-8")
 
     store = ExternalTriggerReplayStore(tmp_path)
@@ -182,7 +188,7 @@ def test_invalid_store_shape_fails_closed(tmp_path: Path, store_payload: object)
 )
 def test_invalid_nested_nonce_record_fails_closed(tmp_path: Path, store_payload: object) -> None:
     """Malformed nonce records should not be silently dropped."""
-    store_path = tmp_path / "external_triggers.json"
+    store_path = _store_path(tmp_path)
     store_path.write_text(json.dumps(store_payload), encoding="utf-8")
 
     store = ExternalTriggerReplayStore(tmp_path)
@@ -223,7 +229,7 @@ def test_invalid_nested_nonce_record_fails_closed(tmp_path: Path, store_payload:
 )
 def test_invalid_nested_event_record_fails_closed(tmp_path: Path, store_payload: object) -> None:
     """Malformed event records should not be silently dropped."""
-    store_path = tmp_path / "external_triggers.json"
+    store_path = _store_path(tmp_path)
     store_path.write_text(json.dumps(store_payload), encoding="utf-8")
 
     store = ExternalTriggerReplayStore(tmp_path)
@@ -234,7 +240,7 @@ def test_invalid_nested_event_record_fails_closed(tmp_path: Path, store_payload:
 
 def test_corrupt_json_store_fails_closed(tmp_path: Path) -> None:
     """Syntactically corrupt store JSON should not reset replay protection."""
-    store_path = tmp_path / "external_triggers.json"
+    store_path = _store_path(tmp_path)
     store_path.write_text("{not valid json", encoding="utf-8")
 
     store = ExternalTriggerReplayStore(tmp_path)

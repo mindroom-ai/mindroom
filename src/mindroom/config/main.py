@@ -32,7 +32,7 @@ from mindroom.agent_policy import (
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.external_triggers import ExternalTriggerConfig  # noqa: TC001
+from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import (
     CacheConfig,
@@ -92,9 +92,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
-_EXTERNAL_TRIGGER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 _RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user"})
-_DEFER_PROHIBITED_CONTROL_TOOLS = frozenset({"delegate", "dynamic_tools", "self_config"})
+_DEFER_PROHIBITED_CONTROL_TOOLS = frozenset({"delegate", "dynamic_tools", "external_trigger_manager", "self_config"})
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "shell",
     "coding",
@@ -144,9 +143,8 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_room_access",
     "matrix_space",
     "matrix_delivery",
-    "external_triggers",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "tool_approval")
+_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "external_trigger_policy", "tool_approval")
 
 
 class ConfigRuntimeValidationError(ValueError):
@@ -386,9 +384,9 @@ class Config(BaseModel):
         default_factory=dict,
         description="MCP server configurations keyed by server id",
     )
-    external_triggers: dict[str, ExternalTriggerConfig] = Field(
-        default_factory=dict,
-        description="Signed external trigger configurations keyed by trigger id",
+    external_trigger_policy: ExternalTriggerPolicyConfig = Field(
+        default_factory=ExternalTriggerPolicyConfig,
+        description="Global policy for tool-managed signed external triggers",
     )
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     tool_approval: ToolApprovalConfig = Field(
@@ -584,37 +582,6 @@ class Config(BaseModel):
                     raise ValueError(msg)
                 if target not in self.agents:
                     msg = f"Agent '{agent_name}' delegates to unknown agent '{target}'"
-                    raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def validate_external_trigger_targets(self) -> Config:
-        """Ensure external trigger targets reference configured agents or teams."""
-        known_entities = set(self.agents) | set(self.teams)
-        invalid_trigger_ids = sorted(
-            trigger_id
-            for trigger_id in self.external_triggers
-            if not _EXTERNAL_TRIGGER_ID_PATTERN.fullmatch(trigger_id)
-        )
-        if invalid_trigger_ids:
-            msg = (
-                "External trigger IDs must be path-safe alphanumeric, underscore, or hyphen values, got: "
-                f"{', '.join(invalid_trigger_ids)}"
-            )
-            raise ValueError(msg)
-        for trigger_id, trigger_config in self.external_triggers.items():
-            target_agent = trigger_config.target.agent
-            if target_agent not in known_entities:
-                msg = f"external_triggers.{trigger_id}.target.agent references unknown agent or team '{target_agent}'"
-                raise ValueError(msg)
-            if target_agent in self.agents:
-                private_targets = self.get_private_team_targets(target_agent)
-                if private_targets:
-                    msg = self.unsupported_team_agent_message(
-                        target_agent,
-                        prefix=f"external_triggers.{trigger_id}.target.agent",
-                        private_targets=private_targets,
-                    )
                     raise ValueError(msg)
         return self
 
@@ -1736,7 +1703,7 @@ class Config(BaseModel):
         """Extract all configured room references.
 
         Returns:
-            Set of all unique room references from room, agent, team, and trigger configurations
+            Set of all unique room references from room, agent, and team configurations
 
         """
         all_room_aliases = set(self.rooms)
@@ -1744,19 +1711,7 @@ class Config(BaseModel):
             all_room_aliases.update(agent_config.rooms)
         for team_config in self.teams.values():
             all_room_aliases.update(team_config.rooms)
-        for trigger_config in self.external_triggers.values():
-            if trigger_config.enabled:
-                all_room_aliases.add(trigger_config.target.room_id)
         return all_room_aliases
-
-    def get_external_trigger_rooms_for_entity(self, entity_name: str) -> list[str]:
-        """Return enabled external trigger rooms targeting one agent or team."""
-        rooms = (
-            trigger_config.target.room_id
-            for trigger_config in self.external_triggers.values()
-            if trigger_config.enabled and trigger_config.target.agent == entity_name
-        )
-        return list(dict.fromkeys(rooms))
 
     def get_entity_thread_mode(
         self,

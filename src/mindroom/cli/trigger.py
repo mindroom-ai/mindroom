@@ -22,6 +22,7 @@ from rich.markup import escape
 
 from mindroom.cli.config import console
 from mindroom.external_triggers.auth import sign_trigger_request
+from mindroom.external_triggers.store import public_key_fingerprint
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:8765"
 _DEFAULT_KEY_ID = "default"
@@ -38,8 +39,8 @@ trigger_app = typer.Typer(help="Send signed external triggers.")
 
 @trigger_app.command("keygen")
 def keygen(
-    private_key_file: Path = typer.Option(  # noqa: B008
-        ...,
+    private_key_file: Path | None = typer.Option(  # noqa: B008
+        None,
         "--private-key-file",
         help="Path where the base64 raw Ed25519 private key should be written.",
     ),
@@ -48,11 +49,16 @@ def keygen(
     private_key = Ed25519PrivateKey.generate()
     private_key_bytes = private_key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
     public_key_bytes = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    private_key_b64 = base64.b64encode(private_key_bytes).decode("ascii")
+    public_key_b64 = base64.b64encode(public_key_bytes).decode("ascii")
 
-    _write_private_key_file(private_key_file, base64.b64encode(private_key_bytes).decode("ascii"))
+    if private_key_file is not None:
+        _write_private_key_file(private_key_file, private_key_b64)
+        console.out(f"private_key_file={private_key_file}")
 
-    console.out(f"private_key_file={private_key_file}")
-    console.out(f"public_key={base64.b64encode(public_key_bytes).decode('ascii')}")
+    console.out(f"private_key={private_key_b64}")
+    console.out(f"public_key={public_key_b64}")
+    console.out(f"public_key_fingerprint={public_key_fingerprint(public_key_b64)}")
 
 
 def _write_private_key_file(private_key_file: Path, private_key_b64: str) -> None:

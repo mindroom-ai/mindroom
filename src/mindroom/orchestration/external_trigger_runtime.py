@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.external_triggers.store import TriggerDeliverySnapshot
 
 
 @dataclass
@@ -29,7 +30,7 @@ class ExternalTriggerRuntimeCoordinator:
         self,
         bots: Iterable[AgentBot | TeamBot],
         *,
-        is_trigger_ready: Callable[[str], Awaitable[bool]],
+        is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
     ) -> None:
         """Bind external trigger delivery runtime when the router client is ready."""
         if not self.api_enabled:
@@ -43,7 +44,7 @@ class ExternalTriggerRuntimeCoordinator:
                 api_main.app,
                 client=bot.client,
                 conversation_cache=bot._conversation_cache,
-                is_trigger_ready=is_trigger_ready,
+                is_trigger_snapshot_ready=is_trigger_snapshot_ready,
             )
             return
 
@@ -65,12 +66,12 @@ class ExternalTriggerRuntimeCoordinator:
         if router_bot is None or not router_bot.running:
             return
 
-        async def is_trigger_ready(trigger_id: str) -> bool:
-            return await self.is_ready(trigger_id, config, bots)
+        async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
+            return await self.is_ready(snapshot, bots)
 
         self._bind_from_started_bots(
             (router_bot,),
-            is_trigger_ready=is_trigger_ready,
+            is_trigger_snapshot_ready=is_trigger_snapshot_ready,
         )
 
     def unbind(self) -> None:
@@ -87,34 +88,25 @@ class ExternalTriggerRuntimeCoordinator:
         *configs: Config | None,
     ) -> None:
         """Clear trigger runtime before the router or a configured trigger target changes."""
+        del configs
         affected_entities = set(entity_names)
         if not affected_entities:
             return
         if ROUTER_AGENT_NAME in affected_entities:
             self.unbind()
             return
-        for config in configs:
-            if config is None:
-                continue
-            for trigger_config in config.external_triggers.values():
-                if trigger_config.enabled and trigger_config.target.agent in affected_entities:
-                    self.unbind()
-                    return
+        self.unbind()
 
     async def is_ready(
         self,
-        trigger_id: str,
-        config: Config | None,
+        snapshot: TriggerDeliverySnapshot,
         bots: Mapping[str, AgentBot | TeamBot],
     ) -> bool:
         """Return whether router and target clients are currently joined to one trigger room."""
-        if config is None:
-            return False
-        trigger_config = config.external_triggers.get(trigger_id)
-        if trigger_config is None or not trigger_config.enabled:
+        if not snapshot.enabled:
             return False
         router_bot = bots.get(ROUTER_AGENT_NAME)
-        target_bot = bots.get(trigger_config.target.agent)
+        target_bot = bots.get(snapshot.target.agent)
         if (
             router_bot is None
             or router_bot.client is None
@@ -124,23 +116,23 @@ class ExternalTriggerRuntimeCoordinator:
             or not target_bot.running
         ):
             return False
-        trigger_room_id = self.resolve_room_id(trigger_config.target.room_id)
         router_joined_room_ids = frozenset(await get_joined_rooms(router_bot.client) or ())
         target_joined_room_ids = frozenset(await get_joined_rooms(target_bot.client) or ())
-        return trigger_room_id in router_joined_room_ids and trigger_room_id in target_joined_room_ids
+        return (
+            snapshot.resolved_room_id in router_joined_room_ids and snapshot.resolved_room_id in target_joined_room_ids
+        )
 
     async def sync_api_config_snapshot(
         self,
-        current_config: Config,
+        _current_config: Config,
         new_config: Config,
     ) -> None:
         """Publish the current config to the bundled API before binding trigger runtime."""
         if not self.api_enabled:
             return
-        if not (current_config.external_triggers or new_config.external_triggers):
-            return
         from mindroom.api import main as api_main  # noqa: PLC0415
 
+        api_main.initialize_api_app(api_main.app, self.runtime_paths)
         published = await asyncio.to_thread(
             api_main.config_lifecycle._publish_runtime_config_into_app,
             new_config,

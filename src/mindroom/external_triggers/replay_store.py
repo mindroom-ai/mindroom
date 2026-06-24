@@ -12,6 +12,8 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Literal, TypedDict, TypeGuard, cast
 
+from mindroom.file_locks import advisory_file_lock
+
 
 class ExternalTriggerEventClaim(StrEnum):
     """State returned when claiming an external trigger event id."""
@@ -66,46 +68,48 @@ def _shared_store_state(store_path: Path) -> _ReplayStoreState:
 class ExternalTriggerReplayStore:
     """JSON-backed replay store for external trigger nonces and event ids."""
 
-    tracking_root: Path
+    control_state_root: Path
     _store_path: Path = field(init=False)
+    _lock_path: Path = field(init=False)
     _state: _ReplayStoreState = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Bind this store to its path-wide process lock."""
-        self._store_path = self.tracking_root / "external_triggers.json"
+        self._store_path = self.control_state_root / "external_triggers" / "replay.json"
+        self._lock_path = self._store_path.with_suffix(".json.lock")
         self._state = _shared_store_state(self._store_path)
 
-    def claim_nonce(self, trigger_id: str, nonce: str, *, now: int, ttl_seconds: int) -> bool:
+    def claim_nonce(self, replay_scope: str, nonce: str, *, now: int, ttl_seconds: int) -> bool:
         """Return True only for the first unexpired nonce claim."""
-        with self._state.lock:
+        with self._state.lock, advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
-            trigger_nonces = store["nonces"].setdefault(trigger_id, {})
-            if nonce in trigger_nonces:
+            replay_nonces = store["nonces"].setdefault(replay_scope, {})
+            if nonce in replay_nonces:
                 return False
-            trigger_nonces[nonce] = {"expires_at": now + ttl_seconds}
+            replay_nonces[nonce] = {"expires_at": now + ttl_seconds}
             self._write_store(store)
             return True
 
     def claim_event_id(
         self,
-        trigger_id: str,
+        replay_scope: str,
         event_id: str,
         *,
         now: int,
         ttl_seconds: int,
     ) -> ExternalTriggerEventClaim:
         """Claim one external event id and return its replay state."""
-        with self._state.lock:
+        with self._state.lock, advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
-            trigger_events = store["events"].setdefault(trigger_id, {})
-            event = trigger_events.get(event_id)
+            replay_events = store["events"].setdefault(replay_scope, {})
+            event = replay_events.get(event_id)
             if event is not None:
                 if event["state"] == "delivered":
                     return ExternalTriggerEventClaim.DELIVERED
                 return ExternalTriggerEventClaim.IN_PROGRESS
-            trigger_events[event_id] = {
+            replay_events[event_id] = {
                 "state": ExternalTriggerEventClaim.IN_PROGRESS.value,
                 "expires_at": now + ttl_seconds,
                 "delivered_at": None,
@@ -113,37 +117,29 @@ class ExternalTriggerReplayStore:
             self._write_store(store)
             return ExternalTriggerEventClaim.FRESH
 
-    def event_id_is_delivered(self, trigger_id: str, event_id: str, *, now: int) -> bool:
-        """Return whether one unexpired external event id was already delivered."""
-        with self._state.lock:
-            store = self._read_store()
-            _prune_expired(store, now=now)
-            event = store["events"].get(trigger_id, {}).get(event_id)
-            return event is not None and event["state"] == ExternalTriggerEventClaim.DELIVERED.value
-
-    def mark_event_delivered(self, trigger_id: str, event_id: str, *, now: int, ttl_seconds: int) -> None:
+    def mark_event_delivered(self, replay_scope: str, event_id: str, *, now: int, ttl_seconds: int) -> None:
         """Record that one external event id reached Matrix delivery."""
-        with self._state.lock:
+        with self._state.lock, advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
-            trigger_events = store["events"].setdefault(trigger_id, {})
-            trigger_events[event_id] = {
+            replay_events = store["events"].setdefault(replay_scope, {})
+            replay_events[event_id] = {
                 "state": ExternalTriggerEventClaim.DELIVERED.value,
                 "expires_at": now + ttl_seconds,
                 "delivered_at": now,
             }
             self._write_store(store)
 
-    def release_event_id(self, trigger_id: str, event_id: str) -> None:
+    def release_event_id(self, replay_scope: str, event_id: str) -> None:
         """Remove an event id claim after delivery failure."""
-        with self._state.lock:
+        with self._state.lock, advisory_file_lock(self._lock_path):
             store = self._read_store()
-            trigger_events = store["events"].get(trigger_id)
-            if trigger_events is None:
+            replay_events = store["events"].get(replay_scope)
+            if replay_events is None:
                 return
-            trigger_events.pop(event_id, None)
-            if not trigger_events:
-                store["events"].pop(trigger_id, None)
+            replay_events.pop(event_id, None)
+            if not replay_events:
+                store["events"].pop(replay_scope, None)
             self._write_store(store)
 
     def _read_store(self) -> _SerializedReplayStore:
@@ -157,23 +153,23 @@ class ExternalTriggerReplayStore:
         return _normalize_store(raw_store)
 
     def _write_store(self, store: _SerializedReplayStore) -> None:
-        self.tracking_root.mkdir(parents=True, exist_ok=True)
+        self._store_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = None
         try:
             with NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
-                dir=self.tracking_root,
+                dir=self._store_path.parent,
                 prefix=f"{self._store_path.name}.",
                 suffix=".tmp",
                 delete=False,
             ) as temp_file:
-                temp_path = self.tracking_root / Path(temp_file.name).name
+                temp_path = self._store_path.parent / Path(temp_file.name).name
                 json.dump(store, temp_file, indent=2, sort_keys=True)
                 temp_file.flush()
                 os.fsync(temp_file.fileno())
             temp_path.replace(self._store_path)
-            _fsync_directory(self.tracking_root)
+            _fsync_directory(self._store_path.parent)
         finally:
             if temp_path is not None and temp_path.exists():
                 temp_path.unlink()

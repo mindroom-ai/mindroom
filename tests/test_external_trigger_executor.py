@@ -8,10 +8,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.external_triggers import ExternalTriggerConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     is_automation_source_kind,
@@ -22,6 +21,7 @@ from mindroom.dispatch_source import (
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.external_triggers.executor import _build_external_trigger_text, execute_external_trigger
 from mindroom.external_triggers.models import ExternalTriggerPayload
+from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -43,22 +43,39 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
-def _trigger(
+def _snapshot(
     *,
     room_id: str = "!fixed:localhost",
+    resolved_room_id: str | None = None,
     new_thread: bool = False,
     thread_id: str | None = "$thread-root",
-) -> ExternalTriggerConfig:
-    return ExternalTriggerConfig.model_validate(
-        {
-            "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            "target": {
-                "room_id": room_id,
-                "thread_id": thread_id,
-                "agent": "research",
-                "new_thread": new_thread,
-            },
-        },
+) -> TriggerDeliverySnapshot:
+    return TriggerDeliverySnapshot(
+        trigger_id="campground",
+        uid="uid",
+        version=1,
+        auth_epoch=1,
+        config_generation=7,
+        enabled=True,
+        description="Campground",
+        owner_user_id="@owner:localhost",
+        created_by_agent_name="research",
+        created_in_room_id="!fixed:localhost",
+        target=ExternalTriggerTarget(
+            room_id=room_id,
+            thread_id=thread_id,
+            agent="research",
+            new_thread=new_thread,
+        ),
+        resolved_room_id=resolved_room_id or room_id,
+        auth="ed25519",
+        key_id="default",
+        public_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        public_key_fingerprint="sha256:test",
+        allowed_kinds=("campground.availability",),
+        replay_window_seconds=300,
+        max_body_bytes=65536,
+        replay_scope="uid:1",
     )
 
 
@@ -143,8 +160,7 @@ async def test_execute_external_trigger_sends_to_fixed_thread_target_with_source
 
     event_id = await execute_external_trigger(
         client=AsyncMock(),
-        trigger_id="campground",
-        trigger=_trigger(),
+        snapshot=_snapshot(),
         payload=_payload(),
         config=config,
         runtime_paths=runtime_paths_for(config),
@@ -165,6 +181,7 @@ async def test_execute_external_trigger_sends_to_fixed_thread_target_with_source
     assert content["m.relates_to"]["event_id"] == "$thread-root"
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
     assert content[SOURCE_KIND_KEY] == EXTERNAL_TRIGGER_SOURCE_KIND
+    assert content[ORIGINAL_SENDER_KEY] == "@owner:localhost"
     assert content["io.mindroom.external_trigger.id"] == "campground"
     assert content["io.mindroom.external_trigger.kind"] == "campground.availability"
     assert content["io.mindroom.external_trigger.event_id"] == "availability-42"
@@ -189,8 +206,7 @@ async def test_execute_external_trigger_resolves_configured_room_alias(
 
     await execute_external_trigger(
         client=AsyncMock(),
-        trigger_id="campground",
-        trigger=_trigger(room_id="lobby"),
+        snapshot=_snapshot(room_id="lobby", resolved_room_id="!resolved:localhost"),
         payload=_payload(),
         config=config,
         runtime_paths=runtime_paths,
@@ -221,8 +237,7 @@ async def test_execute_external_trigger_only_parses_configured_target_mention(
 
     await execute_external_trigger(
         client=AsyncMock(),
-        trigger_id="campground",
-        trigger=_trigger(),
+        snapshot=_snapshot(),
         payload=_payload_with_payload_controlled_mentions(),
         config=config,
         runtime_paths=runtime_paths,
@@ -254,8 +269,7 @@ async def test_execute_external_trigger_new_thread_sends_room_message_without_th
 
     event_id = await execute_external_trigger(
         client=AsyncMock(),
-        trigger_id="campground",
-        trigger=_trigger(new_thread=True),
+        snapshot=_snapshot(new_thread=True),
         payload=_payload(),
         config=config,
         runtime_paths=runtime_paths_for(config),

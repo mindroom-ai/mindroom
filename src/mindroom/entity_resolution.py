@@ -82,13 +82,11 @@ def configured_routable_entity_names_for_room(
     for agent_name, agent_config in config.agents.items():
         if agent_name == ROUTER_AGENT_NAME:
             continue
-        room_refs = [*agent_config.rooms, *config.get_external_trigger_rooms_for_entity(agent_name)]
-        if _room_refs_match(room_refs, room_identifiers, runtime_paths):
+        if _room_refs_match(agent_config.rooms, room_identifiers, runtime_paths):
             configured_names.append(agent_name)
 
     for team_name, team_config in config.teams.items():
-        room_refs = [*team_config.rooms, *config.get_external_trigger_rooms_for_entity(team_name)]
-        if _room_refs_match(room_refs, room_identifiers, runtime_paths):
+        if _room_refs_match(team_config.rooms, room_identifiers, runtime_paths):
             configured_names.append(team_name)
 
     return configured_names
@@ -175,10 +173,10 @@ def managed_entity_power_user_ids_for_room(
     entity_ids = [config_ids[ROUTER_AGENT_NAME].full_id]
 
     for agent_name, agent_config in config.agents.items():
-        if room_key in [*agent_config.rooms, *config.get_external_trigger_rooms_for_entity(agent_name)]:
+        if room_key in agent_config.rooms:
             entity_ids.append(config_ids[agent_name].full_id)
     for team_name, team_config in config.teams.items():
-        if room_key in [*team_config.rooms, *config.get_external_trigger_rooms_for_entity(team_name)]:
+        if room_key in team_config.rooms:
             entity_ids.append(config_ids[team_name].full_id)
     return entity_ids
 

@@ -14,6 +14,7 @@ from mindroom.api import main as api_main
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
@@ -63,26 +64,55 @@ def _config(tmp_path: Path, *, tool_name: str = "mcp_demo", command: str = "npx"
     )
 
 
-def _config_with_external_trigger(tmp_path: Path) -> Config:
-    return Config.validate_with_runtime(
-        {
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                },
-            },
-            "external_triggers": {
-                "campground": {
-                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                    "target": {
-                        "room_id": "!campground:example.org",
-                        "agent": "code",
-                    },
-                },
+def _config_with_code_agent(
+    tmp_path: Path,
+    *,
+    role: str = "Write code",
+    external_trigger_policy: dict[str, object] | None = None,
+) -> Config:
+    payload: dict[str, object] = {
+        "agents": {
+            "code": {
+                "display_name": "Code",
+                "role": role,
             },
         },
+    }
+    if external_trigger_policy is not None:
+        payload["external_trigger_policy"] = external_trigger_policy
+    return Config.validate_with_runtime(
+        payload,
         _runtime_paths(tmp_path),
+    )
+
+
+def _trigger_snapshot(
+    *,
+    trigger_id: str = "campground",
+    room_id: str = "!campground:example.org",
+    enabled: bool = True,
+) -> TriggerDeliverySnapshot:
+    return TriggerDeliverySnapshot(
+        trigger_id=trigger_id,
+        uid=f"{trigger_id}-uid",
+        version=1,
+        auth_epoch=1,
+        owner_user_id="@owner:example.org",
+        description="",
+        created_by_agent_name="code",
+        created_in_room_id=room_id,
+        target=ExternalTriggerTarget(room_id=room_id, agent="code"),
+        resolved_room_id=room_id,
+        auth="ed25519",
+        public_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        public_key_fingerprint="sha256:test",
+        key_id=f"{trigger_id}-main",
+        allowed_kinds=(),
+        replay_window_seconds=300,
+        max_body_bytes=65536,
+        enabled=enabled,
+        config_generation=1,
+        replay_scope=f"{trigger_id}:scope",
     )
 
 
@@ -103,40 +133,21 @@ def test_config_update_plan_restarts_only_entities_using_changed_mcp_server(tmp_
     assert "plain" not in plan.entities_to_restart
 
 
-def test_external_trigger_room_change_restarts_router_and_target_agent(tmp_path: Path) -> None:
-    """Trigger target room changes affect both router and target bot room membership."""
-
-    def config_with_trigger_room(room_id: str) -> Config:
-        return Config.validate_with_runtime(
-            {
-                "agents": {
-                    "code": {
-                        "display_name": "Code",
-                        "role": "Write code",
-                    },
-                },
-                "external_triggers": {
-                    "campground": {
-                        "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                        "target": {
-                            "room_id": room_id,
-                            "agent": "code",
-                        },
-                    },
-                },
-            },
-            _runtime_paths(tmp_path),
-        )
-
+def test_external_trigger_policy_change_does_not_restart_entities(tmp_path: Path) -> None:
+    """Trigger policy is support config, not bot room membership."""
     plan = build_config_update_plan(
-        current_config=config_with_trigger_room("!old:example.org"),
-        new_config=config_with_trigger_room("!new:example.org"),
+        current_config=_config_with_code_agent(tmp_path),
+        new_config=_config_with_code_agent(
+            tmp_path,
+            external_trigger_policy={"default_max_body_bytes": 4096, "max_body_bytes": 4096},
+        ),
         configured_entities={ROUTER_AGENT_NAME, "code"},
         existing_entities={ROUTER_AGENT_NAME, "code"},
         agent_bots={},
     )
 
-    assert {ROUTER_AGENT_NAME, "code"} <= plan.entities_to_restart
+    assert plan.entities_to_restart == set()
+    assert plan.only_support_service_changes is True
 
 
 def _manager_with_failed_server(*, required: bool) -> MagicMock:
@@ -213,7 +224,7 @@ async def test_router_start_attempt_does_not_bind_external_trigger_runtime_befor
 def test_external_trigger_runtime_binds_router_with_live_readiness_gate(tmp_path: Path) -> None:
     """Trigger delivery runtime should bind the router with a live readiness gate."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-    orchestrator.config = _config_with_external_trigger(tmp_path)
+    orchestrator.config = _config_with_code_agent(tmp_path)
 
     router_bot = MagicMock(spec=AgentBot)
     router_bot.agent_name = ROUTER_AGENT_NAME
@@ -234,40 +245,14 @@ def test_external_trigger_runtime_binds_router_with_live_readiness_gate(tmp_path
 
     mock_bind.assert_called_once()
     assert mock_bind.call_args.args == ((router_bot,),)
-    assert callable(mock_bind.call_args.kwargs["is_trigger_ready"])
+    assert callable(mock_bind.call_args.kwargs["is_trigger_snapshot_ready"])
 
 
 @pytest.mark.asyncio
 async def test_external_trigger_readiness_is_per_trigger_room(tmp_path: Path) -> None:
     """One ready trigger room should not make same-agent triggers in other rooms ready."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-    orchestrator.config = Config.validate_with_runtime(
-        {
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                },
-            },
-            "external_triggers": {
-                "campground": {
-                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                    "target": {
-                        "room_id": "!campground:example.org",
-                        "agent": "code",
-                    },
-                },
-                "campground_other": {
-                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                    "target": {
-                        "room_id": "!other:example.org",
-                        "agent": "code",
-                    },
-                },
-            },
-        },
-        _runtime_paths(tmp_path),
-    )
+    orchestrator.config = _config_with_code_agent(tmp_path)
     target_bot = MagicMock(spec=AgentBot)
     target_bot.agent_name = "code"
     target_bot.running = True
@@ -286,13 +271,11 @@ async def test_external_trigger_readiness_is_per_trigger_room(tmp_path: Path) ->
 
     with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms", side_effect=get_joined_room_ids):
         assert await orchestrator._external_trigger_runtime.is_ready(
-            "campground",
-            orchestrator.config,
+            _trigger_snapshot(trigger_id="campground", room_id="!campground:example.org"),
             orchestrator.agent_bots,
         )
         assert not await orchestrator._external_trigger_runtime.is_ready(
-            "campground_other",
-            orchestrator.config,
+            _trigger_snapshot(trigger_id="campground_other", room_id="!other:example.org"),
             orchestrator.agent_bots,
         )
 
@@ -301,7 +284,7 @@ async def test_external_trigger_readiness_is_per_trigger_room(tmp_path: Path) ->
 async def test_external_trigger_readiness_uses_matrix_joined_rooms(tmp_path: Path) -> None:
     """Trigger readiness should require both router and target joined rooms."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-    orchestrator.config = _config_with_external_trigger(tmp_path)
+    orchestrator.config = _config_with_code_agent(tmp_path)
     router_client = object()
     router_bot = MagicMock(spec=AgentBot)
     router_bot.agent_name = ROUTER_AGENT_NAME
@@ -322,8 +305,7 @@ async def test_external_trigger_readiness_uses_matrix_joined_rooms(tmp_path: Pat
 
     with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms", side_effect=get_joined_room_ids):
         assert await orchestrator._external_trigger_runtime.is_ready(
-            "campground",
-            orchestrator.config,
+            _trigger_snapshot(),
             orchestrator.agent_bots,
         )
 
@@ -332,7 +314,7 @@ async def test_external_trigger_readiness_uses_matrix_joined_rooms(tmp_path: Pat
 async def test_external_trigger_api_sync_skips_when_embedded_api_disabled(tmp_path: Path) -> None:
     """No-API runs should not touch the bundled API app for trigger delivery."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), api_enabled=False)
-    config = _config_with_external_trigger(tmp_path)
+    config = _config_with_code_agent(tmp_path)
     orchestrator.config = config
     router_bot = MagicMock(spec=AgentBot)
     router_bot.agent_name = ROUTER_AGENT_NAME
@@ -378,26 +360,10 @@ async def test_startup_room_setup_binds_external_trigger_runtime_after_setup(tmp
 async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_path: Path) -> None:
     """Trigger-only reloads should publish a runtime bound to the new config generation."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-    current_config = _config_with_external_trigger(tmp_path)
-    new_config = Config.validate_with_runtime(
-        {
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                },
-            },
-            "external_triggers": {
-                "campground": {
-                    "public_key": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
-                    "target": {
-                        "room_id": "!campground:example.org",
-                        "agent": "code",
-                    },
-                },
-            },
-        },
-        _runtime_paths(tmp_path),
+    current_config = _config_with_code_agent(tmp_path)
+    new_config = _config_with_code_agent(
+        tmp_path,
+        external_trigger_policy={"default_max_body_bytes": 4096, "max_body_bytes": 4096},
     )
     orchestrator.config = current_config
     orchestrator.agent_bots = {
@@ -440,49 +406,17 @@ async def test_trigger_support_only_reload_publishes_api_config_before_binding_r
     """Runtime binding should use the API generation for the config being applied."""
     runtime_paths = _runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    current_config = _config_with_external_trigger(tmp_path)
-    new_config = Config.validate_with_runtime(
-        {
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                },
-            },
-            "external_triggers": {
-                "campground": {
-                    "public_key": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
-                    "target": {
-                        "room_id": "!campground:example.org",
-                        "agent": "code",
-                    },
-                },
-            },
-        },
-        runtime_paths,
+    current_config = _config_with_code_agent(tmp_path)
+    new_config = _config_with_code_agent(
+        tmp_path,
+        external_trigger_policy={"default_max_body_bytes": 4096, "max_body_bytes": 4096},
     )
     runtime_paths.config_path.write_text(yaml.dump(current_config.authored_model_dump()), encoding="utf-8")
     api_main.initialize_api_app(api_main.app, runtime_paths)
     assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
-    file_race_config = Config.validate_with_runtime(
-        {
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                },
-            },
-            "external_triggers": {
-                "campground": {
-                    "public_key": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=",
-                    "target": {
-                        "room_id": "!campground:example.org",
-                        "agent": "code",
-                    },
-                },
-            },
-        },
-        runtime_paths,
+    file_race_config = _config_with_code_agent(
+        tmp_path,
+        external_trigger_policy={"default_max_body_bytes": 8192, "max_body_bytes": 8192},
     )
     runtime_paths.config_path.write_text(yaml.dump(file_race_config.authored_model_dump()), encoding="utf-8")
     orchestrator.config = current_config
@@ -524,7 +458,7 @@ async def test_trigger_support_only_reload_publishes_api_config_before_binding_r
     snapshot = config_lifecycle.require_api_state(api_main.app).snapshot
     runtime = config_lifecycle.app_state(api_main.app).external_trigger_runtime
     assert snapshot.runtime_config is not None
-    assert snapshot.runtime_config.external_triggers["campground"].public_key.startswith("BBBB")
+    assert snapshot.runtime_config.external_trigger_policy.default_max_body_bytes == 4096
     assert runtime is not None
     assert runtime.config_generation == snapshot.generation
 
@@ -533,8 +467,11 @@ async def test_trigger_support_only_reload_publishes_api_config_before_binding_r
 async def test_trigger_support_api_publish_runs_off_event_loop(tmp_path: Path) -> None:
     """Publishing trigger API snapshots does config IO off the orchestrator event loop."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-    current_config = _config_with_external_trigger(tmp_path)
-    new_config = _config_with_external_trigger(tmp_path)
+    current_config = _config_with_code_agent(tmp_path)
+    new_config = _config_with_code_agent(
+        tmp_path,
+        external_trigger_policy={"default_max_body_bytes": 4096, "max_body_bytes": 4096},
+    )
     orchestrator.config = current_config
 
     with patch(
@@ -556,26 +493,10 @@ async def test_trigger_support_api_publish_runs_off_event_loop(tmp_path: Path) -
 async def test_trigger_support_only_reload_unbinds_and_raises_when_api_publish_fails(tmp_path: Path) -> None:
     """Failed API snapshot publish must not leave trigger runtime bound to stale config."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-    current_config = _config_with_external_trigger(tmp_path)
-    new_config = Config.validate_with_runtime(
-        {
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                },
-            },
-            "external_triggers": {
-                "campground": {
-                    "public_key": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
-                    "target": {
-                        "room_id": "!campground:example.org",
-                        "agent": "code",
-                    },
-                },
-            },
-        },
-        _runtime_paths(tmp_path),
+    current_config = _config_with_code_agent(tmp_path)
+    new_config = _config_with_code_agent(
+        tmp_path,
+        external_trigger_policy={"default_max_body_bytes": 4096, "max_body_bytes": 4096},
     )
     orchestrator.config = current_config
     orchestrator.agent_bots = {
@@ -660,7 +581,7 @@ async def test_handle_mcp_catalog_change_restarts_dependent_entities(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_rebind(tmp_path: Path) -> None:
-    """MCP restarts refresh trigger target rooms before publishing trigger runtime."""
+    """MCP restarts refresh rooms before publishing trigger runtime."""
     runtime_paths = _runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = Config.validate_with_runtime(
@@ -676,15 +597,6 @@ async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_re
                     "display_name": "Code",
                     "role": "Write code",
                     "tools": ["mcp_demo"],
-                },
-            },
-            "external_triggers": {
-                "campground": {
-                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                    "target": {
-                        "room_id": "!campground:example.org",
-                        "agent": "code",
-                    },
                 },
             },
         },
@@ -787,7 +699,7 @@ async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_s
 async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_path: Path) -> None:
     """Restarting a trigger target should make trigger delivery fail closed until rooms are reconciled."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-    config = _config_with_external_trigger(tmp_path)
+    config = _config_with_code_agent(tmp_path)
     orchestrator.config = config
     orchestrator.agent_bots = {
         ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
@@ -840,95 +752,13 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_disabling_external_trigger_target_unbinds_runtime_before_stop(tmp_path: Path) -> None:
-    """Disabling a trigger should clear runtime before stopping its previous target bot."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-    current_config = _config_with_external_trigger(tmp_path)
-    new_config = Config.validate_with_runtime(
-        {
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                },
-            },
-            "external_triggers": {
-                "campground": {
-                    "enabled": False,
-                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                    "target": {
-                        "room_id": "!campground:example.org",
-                        "agent": "code",
-                    },
-                },
-            },
-        },
-        _runtime_paths(tmp_path),
-    )
-    orchestrator.config = current_config
-    orchestrator.agent_bots = {
-        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-        "code": MagicMock(spec=AgentBot),
-    }
-    external_trigger_runtime_bound = True
-    plan = ConfigUpdatePlan(
-        new_config=new_config,
-        changed_mcp_servers=set(),
-        configured_entities={ROUTER_AGENT_NAME, "code"},
-        entities_to_restart={"code"},
-        new_entities=set(),
-        removed_entities=set(),
-        mindroom_user_changed=False,
-        matrix_room_access_changed=False,
-        matrix_space_changed=False,
-        authorization_changed=False,
-    )
-
-    def unbind_external_trigger_runtime() -> None:
-        nonlocal external_trigger_runtime_bound
-        external_trigger_runtime_bound = False
-
-    async def fake_stop_entities(*_args: object, **_kwargs: object) -> None:
-        assert external_trigger_runtime_bound is False
-
-    with (
-        patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime),
-        patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=fake_stop_entities)),
-        patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(return_value=EntityStartResults())),
-    ):
-        await orchestrator._restart_changed_entities(plan)
-
-    assert external_trigger_runtime_bound is False
-
-
-@pytest.mark.asyncio
-async def test_apply_config_update_plan_unbinds_disabled_trigger_target_from_previous_config(
+async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_stop(
     tmp_path: Path,
 ) -> None:
-    """Config reload should use the previous config when deciding whether to unbind trigger delivery."""
+    """Config reload should fail closed before stopping a restarted entity."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-    current_config = _config_with_external_trigger(tmp_path)
-    new_config = Config.validate_with_runtime(
-        {
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                },
-            },
-            "external_triggers": {
-                "campground": {
-                    "enabled": False,
-                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                    "target": {
-                        "room_id": "!campground:example.org",
-                        "agent": "code",
-                    },
-                },
-            },
-        },
-        _runtime_paths(tmp_path),
-    )
+    current_config = _config_with_code_agent(tmp_path)
+    new_config = _config_with_code_agent(tmp_path, role="Write better code")
     orchestrator.config = current_config
     orchestrator.agent_bots = {
         ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),

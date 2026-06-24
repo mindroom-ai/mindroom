@@ -159,13 +159,13 @@ class TestMatrixOperations:
             assert data["unconfigured_rooms"] == ["!external_room:localhost"]
 
     @pytest.mark.asyncio
-    async def test_get_agent_rooms_treats_external_trigger_room_as_configured(
+    async def test_get_agent_rooms_treats_trigger_only_room_as_unconfigured(
         self,
         tmp_path: Path,
         mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
-        """External trigger target rooms should not appear as cleanup candidates."""
+        """Tool-managed trigger rooms should not widen authored room membership."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
             yaml.safe_dump(
@@ -176,15 +176,6 @@ class TestMatrixOperations:
                             "display_name": "Test Agent",
                             "role": "A test agent",
                             "rooms": ["test_room"],
-                        },
-                    },
-                    "external_triggers": {
-                        "campground": {
-                            "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                            "target": {
-                                "agent": "test_agent",
-                                "room_id": "!campground:localhost",
-                            },
                         },
                     },
                 },
@@ -207,8 +198,8 @@ class TestMatrixOperations:
 
         assert response.status_code == 200
         data = response.json()
-        assert data["configured_rooms"] == ["test_room", "!campground:localhost"]
-        assert data["unconfigured_rooms"] == ["!extra_room:localhost"]
+        assert data["configured_rooms"] == ["test_room"]
+        assert data["unconfigured_rooms"] == ["!campground:localhost", "!extra_room:localhost"]
 
     @pytest.mark.asyncio
     async def test_get_agent_rooms_not_found(self, test_client: TestClient) -> None:
