@@ -224,6 +224,11 @@ def entity_identity_registry(config: Config, runtime_paths: RuntimePaths) -> Ent
     return EntityIdentityRegistry(current_ids=current_ids)
 
 
+def current_entity_id(entity_name: str, runtime_paths: RuntimePaths) -> MatrixID:
+    """Return one persisted Matrix ID without resolving unrelated configured entities."""
+    return _persisted_entity_matrix_id(entity_name, _matrix_domain(runtime_paths), runtime_paths)
+
+
 def _persisted_entity_id_map(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
     domain = _matrix_domain(runtime_paths)
     return {
