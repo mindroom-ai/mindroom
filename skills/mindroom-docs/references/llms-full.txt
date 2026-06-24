@@ -17458,10 +17458,9 @@ Generate an Ed25519 signing key pair for an external trigger.
  Generate an Ed25519 trigger signing key.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --private-key-file          PATH  Path where the base64 raw Ed25519 private key     │
-│                                      should be written.                                │
-│                                      [required]                                        │
-│    --help              -h            Show this message and exit.                       │
+│ --private-key-file          PATH  Path where the base64 raw Ed25519 private key should │
+│                                   be written.                                          │
+│ --help              -h            Show this message and exit.                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

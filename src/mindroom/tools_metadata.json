@@ -7553,6 +7553,33 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Create and manage approval-gated external trigger endpoints",
+      "display_name": "External Trigger Manager",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "create_trigger",
+        "list_triggers",
+        "disable_trigger",
+        "delete_trigger",
+        "rotate_trigger_key"
+      ],
+      "helper_text": null,
+      "icon": "Webhook",
+      "icon_color": "text-emerald-500",
+      "name": "external_trigger_manager",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": "google_calendar",
       "category": "productivity",
       "config_fields": [
