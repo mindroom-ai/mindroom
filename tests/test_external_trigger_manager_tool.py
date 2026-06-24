@@ -179,6 +179,32 @@ def test_private_agent_create_trigger_accepts_current_dynamic_room(tmp_path: Pat
     }
 
 
+def test_shared_agent_create_trigger_rejects_current_dynamic_room(tmp_path: Path) -> None:
+    """Shared agents still need a configured target room, even when it is the current room."""
+    config = _config()
+    config.agents["watcher"].rooms = []
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(
+        _context(
+            tmp_path,
+            requester_id="@owner:example.org",
+            room_id="!private:example.org",
+            config=config,
+        ),
+    ):
+        payload = _payload(
+            tool.create_trigger(
+                "shared-dynamic-campground",
+                public_key=_PUBLIC_KEY,
+                key_id="campground-main",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "target room must already be configured" in payload["message"]
+
+
 def test_private_agent_create_trigger_rejects_other_dynamic_room(tmp_path: Path) -> None:
     """Private agents may not bind triggers to a different dynamic room."""
     config = _config(admin_users=["@admin:example.org"], private_watcher=True)
@@ -199,6 +225,34 @@ def test_private_agent_create_trigger_rejects_other_dynamic_room(tmp_path: Path)
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
                 target_room_id="!other:example.org",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "target room must already be configured" in payload["message"]
+
+
+def test_admin_cross_target_private_agent_rejects_current_dynamic_room(tmp_path: Path) -> None:
+    """Admins may not use a creator's dynamic room for a different private target agent."""
+    config = _config(admin_users=["@admin:example.org"], private_other=True)
+    config.agents["other"].rooms = []
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(
+        _context(
+            tmp_path,
+            requester_id="@admin:example.org",
+            room_id="!private:example.org",
+            config=config,
+        ),
+    ):
+        payload = _payload(
+            tool.create_trigger(
+                "private-cross-target-dynamic-room",
+                public_key=_PUBLIC_KEY,
+                key_id="campground-main",
+                target_agent="other",
+                target_room_id="!private:example.org",
             ),
         )
 
