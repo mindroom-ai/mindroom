@@ -24,6 +24,7 @@ from mindroom.external_triggers.auth import sign_trigger_request
 from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerTarget, TriggerDeliverySnapshot
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from httpx import Response
@@ -212,64 +213,49 @@ async def _owner_not_joined(*_args: object, **_kwargs: object) -> bool:
     return False
 
 
+def _trigger_api_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    private_research: bool = False,
+) -> Iterator[TriggerApiContext]:
+    private_key = Ed25519PrivateKey.generate()
+    config_path = tmp_path / "config.yaml"
+    config = _write_runtime_config(config_path, private_research=private_research)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+    _create_record(runtime_paths, config, _public_key_b64(private_key))
+    api_main.unbind_external_trigger_runtime(api_main.app)
+    ready_snapshots: list[TriggerDeliverySnapshot] = []
+    _bind_runtime(ready_snapshots)
+    monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
+
+    with TestClient(api_main.app) as client:
+        yield TriggerApiContext(
+            client=client,
+            private_key=private_key,
+            runtime_paths=runtime_paths,
+            ready_snapshots=ready_snapshots,
+        )
+
+    api_main.unbind_external_trigger_runtime(api_main.app)
+
+
 @pytest.fixture
-def trigger_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TriggerApiContext:
+def trigger_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TriggerApiContext]:
     """Return one initialized API app with a tool-managed trigger record."""
-    private_key = Ed25519PrivateKey.generate()
-    config_path = tmp_path / "config.yaml"
-    config = _write_runtime_config(config_path)
-    runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
-    )
-    api_main.initialize_api_app(api_main.app, runtime_paths)
-    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
-    _create_record(runtime_paths, config, _public_key_b64(private_key))
-    api_main.unbind_external_trigger_runtime(api_main.app)
-    ready_snapshots: list[TriggerDeliverySnapshot] = []
-    _bind_runtime(ready_snapshots)
-    monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
-
-    with TestClient(api_main.app) as client:
-        yield TriggerApiContext(
-            client=client,
-            private_key=private_key,
-            runtime_paths=runtime_paths,
-            ready_snapshots=ready_snapshots,
-        )
-
-    api_main.unbind_external_trigger_runtime(api_main.app)
+    yield from _trigger_api_context(tmp_path, monkeypatch)
 
 
 @pytest.fixture
-def private_trigger_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TriggerApiContext:
+def private_trigger_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TriggerApiContext]:
     """Return one initialized API app with a private target trigger record."""
-    private_key = Ed25519PrivateKey.generate()
-    config_path = tmp_path / "config.yaml"
-    config = _write_runtime_config(config_path, private_research=True)
-    runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
-    )
-    api_main.initialize_api_app(api_main.app, runtime_paths)
-    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
-    _create_record(runtime_paths, config, _public_key_b64(private_key))
-    api_main.unbind_external_trigger_runtime(api_main.app)
-    ready_snapshots: list[TriggerDeliverySnapshot] = []
-    _bind_runtime(ready_snapshots)
-    monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
-
-    with TestClient(api_main.app) as client:
-        yield TriggerApiContext(
-            client=client,
-            private_key=private_key,
-            runtime_paths=runtime_paths,
-            ready_snapshots=ready_snapshots,
-        )
-
-    api_main.unbind_external_trigger_runtime(api_main.app)
+    yield from _trigger_api_context(tmp_path, monkeypatch, private_research=True)
 
 
 def _post_signed(
