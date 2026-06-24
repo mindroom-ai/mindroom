@@ -287,7 +287,6 @@ def _with_primary_runtime_env(paths: RuntimePaths) -> RuntimePaths:
     normalized_process_env = dict(paths.process_env)
     normalized_process_env["MINDROOM_CONFIG_PATH"] = str(paths.config_path)
     normalized_process_env["MINDROOM_STORAGE_PATH"] = str(paths.storage_root)
-    assert paths.control_state_root is not None
     if normalized_process_env == dict(paths.process_env):
         return paths
     return RuntimePaths(
@@ -1150,6 +1149,11 @@ def safe_replace(tmp_path: Path, target_path: Path) -> None:
         tmp_path.replace(target_path)
     except OSError:
         shutil.copy2(tmp_path, target_path)
+        target_fd = os.open(target_path, os.O_RDONLY)
+        try:
+            os.fsync(target_fd)
+        finally:
+            os.close(target_fd)
         tmp_path.unlink(missing_ok=True)
 
 

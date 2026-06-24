@@ -23,7 +23,6 @@ from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent a
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
@@ -1525,7 +1524,6 @@ __all__ = [
     "enable_all_history_replay",
     "ensure_default_agent_workspaces",
     "get_agent_toolkit_names",
-    "get_rooms_for_entity",
     "remove_run_by_event_id",
     "resolve_runtime_worker_tools",
     "show_tool_calls_for_agent",

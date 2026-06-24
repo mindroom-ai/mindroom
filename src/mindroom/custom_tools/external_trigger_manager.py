@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from agno.tools import Toolkit
 
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -13,6 +15,13 @@ from mindroom.external_triggers.store import (
     public_key_fingerprint,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+class _ExternalTriggerManagerError(RuntimeError):
+    """Raised when the manager tool cannot run in the current tool context."""
 
 
 class ExternalTriggerManagerTools(Toolkit):
@@ -35,15 +44,26 @@ class ExternalTriggerManagerTools(Toolkit):
         return custom_tool_payload("external_trigger_manager", status, **fields)
 
     @classmethod
-    def _context(cls) -> ToolRuntimeContext | str:
+    def _context(cls) -> ToolRuntimeContext:
         context = get_tool_runtime_context()
         if context is None:
-            return cls._payload("error", message="External trigger manager requires live Matrix tool context.")
+            msg = "External trigger manager requires live Matrix tool context."
+            raise _ExternalTriggerManagerError(msg)
         if context.runtime_paths.control_state_root is None:
-            return cls._payload("error", message="External trigger manager requires primary control state.")
+            msg = "External trigger manager requires primary control state."
+            raise _ExternalTriggerManagerError(msg)
         if not context.requester_id or context.requester_id == context.client.user_id:
-            return cls._payload("error", message="External trigger owner must be a human Matrix requester.")
+            msg = "External trigger owner must be a human Matrix requester."
+            raise _ExternalTriggerManagerError(msg)
         return context
+
+    @classmethod
+    def _with_store(cls, action: Callable[[ToolRuntimeContext, ExternalTriggerStore], str]) -> str:
+        try:
+            context = cls._context()
+            return action(context, ExternalTriggerStore(context.runtime_paths))
+        except (_ExternalTriggerManagerError, ExternalTriggerStoreError) as exc:
+            return cls._payload("error", message=str(exc))
 
     @staticmethod
     def _is_admin(context: ToolRuntimeContext) -> bool:
@@ -122,10 +142,8 @@ class ExternalTriggerManagerTools(Toolkit):
             max_body_bytes: Optional body cap capped by config policy.
 
         """
-        context = self._context()
-        if isinstance(context, str):
-            return context
-        try:
+
+        def create(context: ToolRuntimeContext, store: ExternalTriggerStore) -> str:
             target = self._target(
                 context,
                 target_agent=target_agent,
@@ -133,7 +151,7 @@ class ExternalTriggerManagerTools(Toolkit):
                 target_thread_id=target_thread_id,
                 new_thread=new_thread,
             )
-            record = ExternalTriggerStore(context.runtime_paths).create_record(
+            record = store.create_record(
                 trigger_id=trigger_id,
                 owner_user_id=context.requester_id,
                 created_by_agent_name=context.agent_name,
@@ -148,81 +166,73 @@ class ExternalTriggerManagerTools(Toolkit):
                 max_body_bytes=max_body_bytes,
                 config=context.config,
             )
-        except ExternalTriggerStoreError as exc:
-            return self._payload("error", message=str(exc))
-        return self._payload(
-            "ok",
-            action="create",
-            trigger=self._record_payload(record),
-            endpoint_path=f"/api/triggers/{record.trigger_id}",
-            public_key_fingerprint=record.public_key_fingerprint,
-        )
+            return self._payload(
+                "ok",
+                action="create",
+                trigger=self._record_payload(record),
+                endpoint_path=f"/api/triggers/{record.trigger_id}",
+                public_key_fingerprint=record.public_key_fingerprint,
+            )
+
+        return self._with_store(create)
 
     def list_triggers(self) -> str:
         """List external triggers owned by the requester, or all triggers for admins."""
-        context = self._context()
-        if isinstance(context, str):
-            return context
-        try:
+
+        def list_records(context: ToolRuntimeContext, store: ExternalTriggerStore) -> str:
             owner_user_id = None if self._is_admin(context) else context.requester_id
-            records = ExternalTriggerStore(context.runtime_paths).list_records(owner_user_id=owner_user_id)
-        except ExternalTriggerStoreError as exc:
-            return self._payload("error", message=str(exc))
-        return self._payload(
-            "ok",
-            action="list",
-            triggers=[self._record_payload(record) for record in records],
-        )
+            records = store.list_records(owner_user_id=owner_user_id)
+            return self._payload(
+                "ok",
+                action="list",
+                triggers=[self._record_payload(record) for record in records],
+            )
+
+        return self._with_store(list_records)
 
     def disable_trigger(self, trigger_id: str, enabled: bool = False) -> str:
         """Enable or disable a trigger owned by the requester, unless requester is admin."""
-        context = self._context()
-        if isinstance(context, str):
-            return context
-        try:
-            record = ExternalTriggerStore(context.runtime_paths).set_enabled(
+
+        def set_enabled(context: ToolRuntimeContext, store: ExternalTriggerStore) -> str:
+            record = store.set_enabled(
                 trigger_id,
                 enabled=enabled,
                 actor_user_id=context.requester_id,
                 config=context.config,
             )
-        except ExternalTriggerStoreError as exc:
-            return self._payload("error", message=str(exc))
-        return self._payload("ok", action="set_enabled", trigger=self._record_payload(record))
+            return self._payload("ok", action="set_enabled", trigger=self._record_payload(record))
+
+        return self._with_store(set_enabled)
 
     def delete_trigger(self, trigger_id: str) -> str:
         """Delete a trigger owned by the requester, unless requester is admin."""
-        context = self._context()
-        if isinstance(context, str):
-            return context
-        try:
-            ExternalTriggerStore(context.runtime_paths).delete_record(
+
+        def delete(context: ToolRuntimeContext, store: ExternalTriggerStore) -> str:
+            store.delete_record(
                 trigger_id,
                 actor_user_id=context.requester_id,
                 config=context.config,
             )
-        except ExternalTriggerStoreError as exc:
-            return self._payload("error", message=str(exc))
-        return self._payload("ok", action="delete", trigger_id=trigger_id)
+            return self._payload("ok", action="delete", trigger_id=trigger_id)
+
+        return self._with_store(delete)
 
     def rotate_trigger_key(self, trigger_id: str, public_key: str, key_id: str = "default") -> str:
         """Rotate a trigger public key without accepting or returning private key material."""
-        context = self._context()
-        if isinstance(context, str):
-            return context
-        try:
-            record = ExternalTriggerStore(context.runtime_paths).rotate_key(
+
+        def rotate(context: ToolRuntimeContext, store: ExternalTriggerStore) -> str:
+            record = store.rotate_key(
                 trigger_id,
                 public_key=public_key,
                 key_id=key_id,
                 actor_user_id=context.requester_id,
                 config=context.config,
             )
-        except ExternalTriggerStoreError as exc:
-            return self._payload("error", message=str(exc))
-        return self._payload(
-            "ok",
-            action="rotate_key",
-            trigger=self._record_payload(record),
-            public_key_fingerprint=public_key_fingerprint(public_key),
-        )
+            return self._payload(
+                "ok",
+                action="rotate_key",
+                trigger=self._record_payload(record),
+                public_key_fingerprint=public_key_fingerprint(public_key),
+            )
+
+        return self._with_store(rotate)

@@ -328,7 +328,7 @@ async def test_external_trigger_api_sync_skips_when_embedded_api_disabled(tmp_pa
         patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app") as mock_publish,
         patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind,
     ):
-        await orchestrator._external_trigger_runtime.sync_api_config_snapshot(config, config)
+        await orchestrator._external_trigger_runtime.sync_api_config_snapshot(config)
         orchestrator._external_trigger_runtime.bind_if_ready(orchestrator.config, orchestrator.agent_bots)
 
     mock_publish.assert_not_called()
@@ -480,7 +480,7 @@ async def test_trigger_support_api_publish_runs_off_event_loop(tmp_path: Path) -
         "mindroom.orchestration.external_trigger_runtime.asyncio.to_thread",
         new=AsyncMock(return_value=True),
     ) as mock_to_thread:
-        await orchestrator._external_trigger_runtime.sync_api_config_snapshot(current_config, new_config)
+        await orchestrator._external_trigger_runtime.sync_api_config_snapshot(new_config)
 
     mock_to_thread.assert_awaited_once()
     assert mock_to_thread.await_args.args == (

@@ -239,7 +239,7 @@ class ExternalTriggerStore:
         _validate_trigger_id(trigger_id)
         policy = config.external_trigger_policy
         now = int(time.time())
-        normalized_public_key = _normalize_public_key(public_key)
+        normalized_public_key, public_key_bytes = _normalize_public_key(public_key)
         record = ExternalTriggerRecord(
             trigger_id=trigger_id,
             uid=uuid.uuid4().hex,
@@ -254,7 +254,7 @@ class ExternalTriggerStore:
             target=target,
             key_id=key_id,
             public_key=normalized_public_key,
-            public_key_fingerprint=public_key_fingerprint(normalized_public_key),
+            public_key_fingerprint=_public_key_fingerprint_from_bytes(public_key_bytes),
             allowed_kinds=tuple(allowed_kinds),
             replay_window_seconds=min(
                 replay_window_seconds or policy.default_replay_window_seconds,
@@ -309,7 +309,7 @@ class ExternalTriggerStore:
         config: Config,
     ) -> ExternalTriggerRecord:
         """Rotate one trigger public key and advance the replay scope."""
-        normalized_public_key = _normalize_public_key(public_key)
+        normalized_public_key, public_key_bytes = _normalize_public_key(public_key)
         with advisory_file_lock(self._lock_path):
             records = self._read_records()
             record = self._require_owned_record(records, trigger_id, actor_user_id, config)
@@ -319,7 +319,7 @@ class ExternalTriggerStore:
                         "auth_epoch": record.auth_epoch + 1,
                         "key_id": non_empty_stripped(key_id, field_name="key_id"),
                         "public_key": normalized_public_key,
-                        "public_key_fingerprint": public_key_fingerprint(normalized_public_key),
+                        "public_key_fingerprint": _public_key_fingerprint_from_bytes(public_key_bytes),
                         "version": record.version + 1,
                         "updated_at": int(time.time()),
                     },
@@ -432,7 +432,7 @@ def _validate_trigger_id(trigger_id: str) -> str:
     return normalized
 
 
-def _normalize_public_key(public_key: str) -> str:
+def _normalize_public_key(public_key: str) -> tuple[str, bytes]:
     """Validate and normalize one base64 Ed25519 public key."""
     normalized = non_empty_stripped(public_key, field_name="public_key")
     try:
@@ -443,13 +443,16 @@ def _normalize_public_key(public_key: str) -> str:
     if len(public_key_bytes) != _ED25519_PUBLIC_KEY_BYTES:
         msg = "public_key must decode to 32 raw Ed25519 public key bytes"
         raise ExternalTriggerStoreError(msg)
-    return normalized
+    return normalized, public_key_bytes
 
 
 def public_key_fingerprint(public_key: str) -> str:
     """Return the stable fingerprint for one base64 Ed25519 public key."""
-    normalized = _normalize_public_key(public_key)
-    public_key_bytes = base64.b64decode(normalized, validate=True)
+    _normalized, public_key_bytes = _normalize_public_key(public_key)
+    return _public_key_fingerprint_from_bytes(public_key_bytes)
+
+
+def _public_key_fingerprint_from_bytes(public_key_bytes: bytes) -> str:
     return f"sha256:{hashlib.sha256(public_key_bytes).hexdigest()}"
 
 

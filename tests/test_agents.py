@@ -30,7 +30,6 @@ from mindroom.agents import (
     build_agent_toolkit,
     create_agent,
     get_agent_toolkit_names,
-    get_rooms_for_entity,
 )
 from mindroom.config.agent import (
     AgentConfig,
@@ -45,6 +44,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
+from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.history import close_team_runtime_state_dbs
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability

@@ -69,7 +69,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
 from . import constants, interactive
-from .agents import create_agent, get_rooms_for_entity, show_tool_calls_for_agent
+from .agents import create_agent, show_tool_calls_for_agent
 from .authorization import is_authorized_sender
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
@@ -86,6 +86,7 @@ from .delivery_gateway import (
     SendTextRequest,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
+from .entity_rooms import get_rooms_for_entity
 from .inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, InboundTurnNormalizerDeps
 from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .knowledge import KnowledgeAccessSupport

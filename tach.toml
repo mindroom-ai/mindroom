@@ -2678,7 +2678,6 @@ expose = [
     "describe_agent",
     "enable_all_history_replay",
     "ensure_default_agent_workspaces",
-    "get_rooms_for_entity",
     "show_tool_calls_for_agent",
     "build_agent_toolkit",
     "get_agent_toolkit_names",

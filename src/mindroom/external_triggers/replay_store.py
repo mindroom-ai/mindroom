@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -42,23 +41,6 @@ class _SerializedReplayStore(TypedDict):
     events: dict[str, dict[str, _SerializedEvent]]
 
 
-_STORE_STATES: dict[str, threading.RLock] = {}
-_STORE_STATES_LOCK = threading.Lock()
-# NOTE: The thread lock serializes same-process callers before the advisory
-# file lock serializes cross-process writers. Deploy with a file-lock-capable
-# filesystem, or a single writer, until this moves to a database.
-
-
-def _shared_store_state(store_path: Path) -> threading.RLock:
-    key = str(store_path.absolute())
-    with _STORE_STATES_LOCK:
-        state = _STORE_STATES.get(key)
-        if state is None:
-            state = threading.RLock()
-            _STORE_STATES[key] = state
-        return state
-
-
 @dataclass
 class ExternalTriggerReplayStore:
     """JSON-backed replay store for external trigger nonces and event ids."""
@@ -66,17 +48,15 @@ class ExternalTriggerReplayStore:
     control_state_root: Path
     _store_path: Path = field(init=False)
     _lock_path: Path = field(init=False)
-    _state: threading.RLock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Bind this store to its path-wide process lock."""
+        """Bind this store to its durable state path."""
         self._store_path = self.control_state_root / "external_triggers" / "replay.json"
         self._lock_path = self._store_path.with_suffix(".json.lock")
-        self._state = _shared_store_state(self._store_path)
 
     def claim_nonce(self, replay_scope: str, nonce: str, *, now: int, ttl_seconds: int) -> bool:
         """Return True only for the first unexpired nonce claim."""
-        with self._state, advisory_file_lock(self._lock_path):
+        with advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
             replay_nonces = store["nonces"].setdefault(replay_scope, {})
@@ -95,7 +75,7 @@ class ExternalTriggerReplayStore:
         ttl_seconds: int,
     ) -> ExternalTriggerEventClaim:
         """Claim one external event id and return its replay state."""
-        with self._state, advisory_file_lock(self._lock_path):
+        with advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
             replay_events = store["events"].setdefault(replay_scope, {})
@@ -113,7 +93,7 @@ class ExternalTriggerReplayStore:
 
     def mark_event_delivered(self, replay_scope: str, event_id: str, *, now: int, ttl_seconds: int) -> None:
         """Record that one external event id reached Matrix delivery."""
-        with self._state, advisory_file_lock(self._lock_path):
+        with advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
             replay_events = store["events"].setdefault(replay_scope, {})
@@ -125,7 +105,7 @@ class ExternalTriggerReplayStore:
 
     def release_event_id(self, replay_scope: str, event_id: str) -> None:
         """Remove an event id claim after delivery failure."""
-        with self._state, advisory_file_lock(self._lock_path):
+        with advisory_file_lock(self._lock_path):
             store = self._read_store()
             replay_events = store["events"].get(replay_scope)
             if replay_events is None:

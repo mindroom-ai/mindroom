@@ -59,11 +59,11 @@ class ExternalTriggerRuntimeCoordinator:
 
         api_main.unbind_external_trigger_runtime(api_main.app)
 
-    def unbind_if_delivery_affected(
+    def unbind_for_entity_changes(
         self,
         entity_names: Iterable[str],
     ) -> None:
-        """Clear trigger runtime before the router or a configured trigger target changes."""
+        """Clear trigger runtime before any entity lifecycle changes."""
         affected_entities = set(entity_names)
         if not affected_entities:
             return
@@ -96,7 +96,6 @@ class ExternalTriggerRuntimeCoordinator:
 
     async def sync_api_config_snapshot(
         self,
-        _current_config: Config,
         new_config: Config,
     ) -> None:
         """Publish the current config to the bundled API before binding trigger runtime."""

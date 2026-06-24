@@ -170,7 +170,7 @@ async def test_runtime_coordinator_sync_api_config_snapshot_runs_for_policy_chan
         "mindroom.orchestration.external_trigger_runtime.asyncio.to_thread",
         new=AsyncMock(return_value=True),
     ) as mock_to_thread:
-        await coordinator.sync_api_config_snapshot(config, config)
+        await coordinator.sync_api_config_snapshot(config)
 
     mock_to_thread.assert_awaited_once_with(
         api_main.config_lifecycle._publish_runtime_config_into_app,

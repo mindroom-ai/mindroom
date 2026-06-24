@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from mindroom.constants import safe_replace
 from mindroom.durable_write import _fsync_directory
 from mindroom.external_triggers.models import ExternalTriggerAcceptedResponse, ExternalTriggerPayload
 from mindroom.external_triggers.replay_store import (
@@ -15,9 +16,6 @@ from mindroom.external_triggers.replay_store import (
     ExternalTriggerReplayStore,
     ExternalTriggerReplayStoreError,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _store_path(tmp_path: Path) -> Path:
@@ -298,6 +296,46 @@ def test_replay_store_write_uses_bind_mount_safe_replace(
     assert json.loads(store_path.read_text(encoding="utf-8"))["nonces"]["campground"]["nonce-1"] == {
         "expires_at": 1_300,
     }
+
+
+def test_safe_replace_copy_fallback_fsyncs_target_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bind-mount fallback should flush copied target bytes, not only the temp file."""
+    temp_path = tmp_path / "state.json.tmp"
+    target_path = tmp_path / "state.json"
+    temp_path.write_text('{"ok": true}', encoding="utf-8")
+    original_replace = type(temp_path).replace
+    opened_paths: dict[int, Path] = {}
+    fsynced_paths: list[Path] = []
+    closed_fds: list[int] = []
+
+    def raise_busy_on_replace(path: Path, target: Path) -> Path:
+        if path == temp_path and target == target_path:
+            msg = "Device or resource busy"
+            raise OSError(msg)
+        return original_replace(path, target)
+
+    def record_open(path: Path, _flags: int) -> int:
+        fd = 100 + len(opened_paths)
+        opened_paths[fd] = Path(path)
+        return fd
+
+    def record_fsync(fd: int) -> None:
+        fsynced_paths.append(opened_paths[fd])
+
+    monkeypatch.setattr(type(temp_path), "replace", raise_busy_on_replace)
+    monkeypatch.setattr("mindroom.constants.os.open", record_open)
+    monkeypatch.setattr("mindroom.constants.os.fsync", record_fsync)
+    monkeypatch.setattr("mindroom.constants.os.close", closed_fds.append)
+
+    safe_replace(temp_path, target_path)
+
+    assert target_path.read_text(encoding="utf-8") == '{"ok": true}'
+    assert fsynced_paths == [target_path]
+    assert closed_fds == [100]
+    assert not temp_path.exists()
 
 
 def test_fsync_directory_ignores_unsupported_directory_fsync(
