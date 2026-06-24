@@ -9,7 +9,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND
 from mindroom.hooks.sender import send_and_track_message
 from mindroom.matrix.client_room_admin import get_room_members
-from mindroom.matrix.mentions import parse_mentions_in_text
+from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 
 if TYPE_CHECKING:
@@ -63,8 +63,8 @@ async def execute_external_trigger(
             caller_label="external_trigger",
         )
 
-    plain_target, mentioned_user_ids, markdown_target = parse_mentions_in_text(
-        f"@{snapshot.target.agent}",
+    plain_target, mentioned_user_ids, markdown_target = format_entity_mention(
+        snapshot.target.agent,
         config,
         runtime_paths,
     )

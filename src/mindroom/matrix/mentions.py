@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import current_entity_id, entity_identity_registry
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix_identifiers import unnamespaced_agent_name_from_username_localpart
@@ -101,6 +101,20 @@ def resolve_mentioned_user_ids_from_text(
         allow_generated_agent_localparts=False,
     )
     return _mentioned_user_ids_from_replacements(replacements)
+
+
+def format_entity_mention(
+    entity_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, list[str], str]:
+    """Return one configured entity mention without resolving unrelated entities."""
+    resolution = _entity_mention_resolution_from_user_id(
+        entity_name,
+        current_entity_id(entity_name, runtime_paths).full_id,
+        config=config,
+    )
+    return resolution.plain_text, [resolution.user_id], resolution.markdown_text
 
 
 def _mentioned_user_ids_from_replacements(replacements: list[_MentionReplacement]) -> list[str]:
@@ -278,8 +292,21 @@ def _entity_mention_resolution(
     config: Config,
 ) -> _MentionResolution:
     """Return rendering data for one resolved local agent or team mention."""
+    return _entity_mention_resolution_from_user_id(
+        entity_name,
+        registry.current_id(entity_name).full_id,
+        config=config,
+    )
+
+
+def _entity_mention_resolution_from_user_id(
+    entity_name: str,
+    resolved_user_id: str,
+    *,
+    config: Config,
+) -> _MentionResolution:
+    """Return rendering data for one resolved entity user ID."""
     entity_config = config.agents.get(entity_name) or config.teams[entity_name]
-    resolved_user_id = registry.current_id(entity_name).full_id
     return _MentionResolution(
         plain_text=resolved_user_id,
         markdown_text=f"[@{entity_config.display_name}](https://matrix.to/#/{resolved_user_id})",

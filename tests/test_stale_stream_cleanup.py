@@ -22,13 +22,16 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedThread,
     auto_resume_interrupted_threads,
     cleanup_stale_streaming_messages,
 )
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_projection import latest_visible_thread_event_id_by_thread
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.streaming import build_restart_interrupted_body
@@ -696,6 +699,46 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
     assert second_content["m.relates_to"]["event_id"] == "$thread-two"
     assert second_content[ORIGINAL_SENDER_KEY] == USER_ID
     mock_sleep.assert_awaited_once_with(2.0)
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_target_mention_ignores_unprepared_unrelated_entity(tmp_path: Path) -> None:
+    """Auto-resume should mention the target without resolving every configured entity."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    config.agents["stale"] = config.agents["other"].model_copy(update={"display_name": "Stale Agent"})
+    state = MatrixState.load(runtime_paths)
+    state.accounts.pop(managed_account_key("stale"), None)
+    state.save(runtime_paths)
+    with pytest.raises(MissingManagedEntityAccountError, match="stale"):
+        entity_identity_registry(config, runtime_paths)
+    client = AsyncMock(spec=nio.AsyncClient)
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-one",
+            target_event_id="$target-one",
+            partial_text="One",
+            agent_name="test_agent",
+            original_sender_id=USER_ID,
+        ),
+    ]
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message_result",
+        new=AsyncMock(return_value=delivered_matrix_event("$resume1")),
+    ) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+    assert resumed_count == 1
+    content = mock_send.await_args.args[2]
+    assert content["body"] == f"@Test Agent {AUTO_RESUME_MESSAGE}"
+    assert content["m.mentions"] == {"user_ids": [BOT_USER_ID]}
 
 
 def test_select_threads_to_resume_returns_all_unique_threads_when_unlimited() -> None:

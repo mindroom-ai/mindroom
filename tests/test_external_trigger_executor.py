@@ -18,11 +18,12 @@ from mindroom.dispatch_source import (
     source_kind_bypasses_coalescing,
     source_kind_from_content,
 )
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import MissingManagedEntityAccountError, current_entity_id, entity_identity_registry
 from mindroom.external_triggers.executor import _build_external_trigger_text, execute_external_trigger
 from mindroom.external_triggers.models import ExternalTriggerPayload
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -41,6 +42,25 @@ def _config(tmp_path: Path) -> Config:
         ),
         test_runtime_paths(tmp_path),
     )
+
+
+def _config_with_unprepared_stale_agent(tmp_path: Path) -> Config:
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "research": AgentConfig(display_name="Research"),
+                "ops": AgentConfig(display_name="Ops"),
+                "mindtest": AgentConfig(display_name="MindTest"),
+            },
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths)
+    state.accounts.pop(managed_account_key("mindtest"))
+    state.save(runtime_paths)
+    return config
 
 
 def _snapshot(
@@ -252,6 +272,37 @@ async def test_execute_external_trigger_only_parses_configured_target_mention(
     assert "@ops" in content["formatted_body"]
     assert "(at)ops" not in content["body"]
     assert "(at)ops" not in content["formatted_body"]
+
+
+@pytest.mark.asyncio
+async def test_execute_external_trigger_target_mention_ignores_unprepared_unrelated_entity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delivery should not resolve every configured entity when mentioning the exact target."""
+    config = _config_with_unprepared_stale_agent(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    with pytest.raises(MissingManagedEntityAccountError, match="mindtest"):
+        entity_identity_registry(config, runtime_paths)
+    send_and_track_message = AsyncMock(
+        return_value=DeliveredMatrixEvent(event_id="$matrix-event", content_sent={}),
+    )
+    monkeypatch.setattr("mindroom.external_triggers.executor.send_and_track_message", send_and_track_message)
+
+    event_id = await execute_external_trigger(
+        client=AsyncMock(),
+        snapshot=_snapshot(),
+        payload=_payload(),
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_cache=_conversation_cache(),
+    )
+
+    assert event_id == "$matrix-event"
+    content: dict[str, Any] = send_and_track_message.await_args.args[2]
+    assert content["m.mentions"]["user_ids"] == [current_entity_id("research", runtime_paths).full_id]
+    assert "mindtest" not in content["body"]
+    assert "mindtest" not in content["formatted_body"]
 
 
 @pytest.mark.asyncio

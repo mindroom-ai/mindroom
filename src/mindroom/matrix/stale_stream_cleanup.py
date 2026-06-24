@@ -23,7 +23,12 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
 )
-from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
+from mindroom.entity_resolution import (
+    MissingManagedEntityAccountError,
+    current_entity_id,
+    current_internal_sender_ids,
+    entity_identity_registry,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.client_room_admin import get_joined_rooms
@@ -1559,8 +1564,7 @@ def _build_auto_resume_content(
     runtime_paths: RuntimePaths,
 ) -> dict[str, object]:
     """Build the router-authored visible resume relay for one interrupted agent."""
-    matrix_id = entity_identity_registry(config, runtime_paths).current_ids.get(interrupted_thread.agent_name)
-    target_user_id = matrix_id.full_id if matrix_id is not None else None
+    target_user_id = _current_configured_entity_user_id(interrupted_thread.agent_name, config, runtime_paths)
     display_name = _entity_display_name(interrupted_thread.agent_name, config)
 
     body = _AUTO_RESUME_MESSAGE
@@ -1587,6 +1591,21 @@ def _build_auto_resume_content(
         latest_thread_event_id=interrupted_thread.target_event_id,
         extra_content=extra_content,
     )
+
+
+def _current_configured_entity_user_id(
+    entity_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return one configured entity user ID without resolving unrelated entities."""
+    if entity_name not in config.agents and entity_name not in config.teams:
+        return None
+    try:
+        return current_entity_id(entity_name, runtime_paths).full_id
+    except MissingManagedEntityAccountError:
+        logger.debug("auto_resume_target_entity_account_unavailable", entity_name=entity_name)
+        return None
 
 
 def _entity_display_name(agent_name: str, config: Config) -> str:
