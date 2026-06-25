@@ -752,6 +752,7 @@ class ToolValidationInfo:
     config_fields: tuple[ConfigField, ...] = ()
     agent_override_fields: tuple[ConfigField, ...] = ()
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
+    requires_room_context: bool = False
     runtime_loadable: bool = True
     unavailable_due_to_plugin_load_error: bool = False
 
@@ -768,6 +769,7 @@ class ToolMetadata:
     setup_type: SetupType = SetupType.NONE
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY
     consumes_workspace_paths: bool = False
+    requires_room_context: bool = False
     icon: str | None = None  # Icon identifier for frontend
     icon_color: str | None = None  # Tailwind color class like "text-blue-500"
     config_fields: list[ConfigField] | None = None  # Detailed field definitions
@@ -801,6 +803,7 @@ def register_tool_with_metadata(
     setup_type: SetupType = SetupType.NONE,
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY,
     consumes_workspace_paths: bool = False,
+    requires_room_context: bool = False,
     icon: str | None = None,
     icon_color: str | None = None,
     config_fields: list[ConfigField] | None = None,
@@ -827,6 +830,7 @@ def register_tool_with_metadata(
         setup_type: Type of setup required
         default_execution_target: Default runtime location for the tool
         consumes_workspace_paths: Whether tool functions can consume files saved into the execution workspace
+        requires_room_context: Whether tool functions require a live Matrix room context
         icon: Icon identifier for frontend
         icon_color: CSS color class for the icon
         config_fields: List of configuration fields
@@ -855,6 +859,7 @@ def register_tool_with_metadata(
             setup_type=setup_type,
             default_execution_target=default_execution_target,
             consumes_workspace_paths=consumes_workspace_paths,
+            requires_room_context=requires_room_context,
             icon=icon,
             icon_color=icon_color,
             config_fields=config_fields,
@@ -1154,6 +1159,7 @@ def _tool_validation_snapshot_from_state(
             config_fields=tuple(metadata.config_fields or ()),
             agent_override_fields=tuple(metadata.agent_override_fields or ()),
             authored_override_validator=metadata.authored_override_validator,
+            requires_room_context=metadata.requires_room_context,
             runtime_loadable=tool_name in tool_registry,
             unavailable_due_to_plugin_load_error=tool_name in unavailable_plugin_tool_names,
         )
@@ -1254,6 +1260,7 @@ def serialize_tool_validation_snapshot(
             "config_fields": [asdict(field) for field in info.config_fields],
             "agent_override_fields": [asdict(field) for field in info.agent_override_fields],
             "authored_override_validator": info.authored_override_validator.value,
+            "requires_room_context": info.requires_room_context,
             "runtime_loadable": info.runtime_loadable,
             "unavailable_due_to_plugin_load_error": info.unavailable_due_to_plugin_load_error,
         }
@@ -1316,6 +1323,10 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 "unavailable_due_to_plugin_load_error to a boolean."
             )
             raise TypeError(msg)
+        raw_requires_room_context = raw_info_mapping.get("requires_room_context", False)
+        if not isinstance(raw_requires_room_context, bool):
+            msg = f"Tool validation snapshot entry for '{tool_name}' must set requires_room_context to a boolean."
+            raise TypeError(msg)
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
@@ -1327,6 +1338,7 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 field_name=f"{tool_name}.agent_override_fields",
             ),
             authored_override_validator=authored_override_validator,
+            requires_room_context=raw_requires_room_context,
             runtime_loadable=raw_runtime_loadable,
             unavailable_due_to_plugin_load_error=raw_unavailable_due_to_plugin_load_error,
         )

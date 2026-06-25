@@ -4014,10 +4014,6 @@ tavily = [
 telegram = [
     { name = "httpx" },
 ]
-todo = [
-    { name = "jinja2" },
-    { name = "pyyaml" },
-]
 todoist = [
     { name = "todoist-api-python" },
 ]
@@ -4167,7 +4163,6 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'whatsapp'", specifier = ">=0.27" },
     { name = "humanize", specifier = ">=4.12.3" },
     { name = "jinja2", specifier = ">=3.1" },
-    { name = "jinja2", marker = "extra == 'todo'", specifier = ">=3.1" },
     { name = "jira", marker = "extra == 'jira'", specifier = ">=3.10.5" },
     { name = "json5", specifier = ">=0.13" },
     { name = "linkup-sdk", marker = "extra == 'linkup'", specifier = ">=0.2.8" },
@@ -4212,7 +4207,6 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6" },
     { name = "pyyaml", marker = "extra == 'config-manager'", specifier = ">=6" },
     { name = "pyyaml", marker = "extra == 'self-config'", specifier = ">=6" },
-    { name = "pyyaml", marker = "extra == 'todo'", specifier = ">=6" },
     { name = "redshift-connector", marker = "extra == 'redshift'" },
     { name = "replicate", marker = "extra == 'replicate'", specifier = ">=1.0.7" },
     { name = "reportlab", marker = "extra == 'file-generation'" },

@@ -365,10 +365,7 @@ telegram = [
 thread_model = []
 thread_summary = []
 thread_tags = []
-todo = [
-  "jinja2>=3.1",
-  "pyyaml>=6",
-]
+todo = []
 todoist = [
   "todoist-api-python",
 ]

@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import yaml
 from agno.agent import Agent
@@ -19,19 +19,10 @@ from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError
 from jinja2.sandbox import SandboxedEnvironment, SecurityError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from mindroom.file_locks import advisory_file_lock
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - exercised on non-POSIX platforms.
-    fcntl = None  # ty: ignore[invalid-assignment]
-
-try:
-    import msvcrt
-except ImportError:  # pragma: no cover - exercised on Windows.
-    msvcrt = None  # ty: ignore[invalid-assignment]
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -39,18 +30,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _T = TypeVar("_T")
-
-
-class _LockFile(Protocol):
-    def fileno(self) -> int: ...
-
-    def seek(self, offset: int, _whence: int = 0, /) -> int: ...
-
-    def tell(self) -> int: ...
-
-    def write(self, text: str, /) -> int: ...
-
-    def flush(self) -> None: ...
 
 
 _VALID_PRIORITIES = {"low", "medium", "high", "critical"}
@@ -202,68 +181,27 @@ def _lock_path(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".lock")
 
 
-def _lock_file(lock_file: _LockFile, *, exclusive: bool) -> None:
-    if fcntl is not None:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-        return
-
-    if msvcrt is not None:
-        lock_file.seek(0, 2)
-        if lock_file.tell() == 0:
-            lock_file.write("\0")
-            lock_file.flush()
-        lock_file.seek(0)
-        mode = msvcrt.LK_LOCK if exclusive else msvcrt.LK_RLCK
-        msvcrt.locking(lock_file.fileno(), mode, 1)
-        return
-
-    msg = "Todo state locking requires fcntl or msvcrt."
-    raise RuntimeError(msg)
-
-
-def _unlock_file(lock_file: _LockFile) -> None:
-    if fcntl is not None:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        return
-
-    if msvcrt is not None:
-        lock_file.seek(0)
-        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-
-
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
 
-    lock_path = _lock_path(path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        _lock_file(lock_file, exclusive=False)
-        try:
-            if not path.exists():
-                return {}
-            return json.loads(path.read_text(encoding="utf-8"))
-        finally:
-            _unlock_file(lock_file)
+    with advisory_file_lock(_lock_path(path), exclusive=False):
+        if not path.exists():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _locked_update_json(path: Path, mutate: Callable[[dict[str, Any]], _T | _NoWriteResult]) -> _T:
-    lock_path = _lock_path(path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        _lock_file(lock_file, exclusive=True)
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-            result = mutate(data)
-            if isinstance(result, _NoWriteResult):
-                return result.value
-            temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-            temp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            temp_path.replace(path)
-            return result
-        finally:
-            _unlock_file(lock_file)
+    with advisory_file_lock(_lock_path(path), exclusive=True):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        result = mutate(data)
+        if isinstance(result, _NoWriteResult):
+            return result.value
+        temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temp_path.replace(path)
+        return result
 
 
 def _state_root(runtime_paths: RuntimePaths) -> Path:
@@ -706,8 +644,7 @@ def _default_assignee(agent: Agent | Team, context_agent_name: str) -> str:
 class TodoTools(Toolkit):
     """Tools for managing per-thread work plans with dependencies."""
 
-    def __init__(self, runtime_paths: RuntimePaths | None = None) -> None:
-        del runtime_paths
+    def __init__(self) -> None:
         super().__init__(
             name="todo",
             instructions=(
@@ -831,11 +768,6 @@ class TodoTools(Toolkit):
                 "updated_at": now,
                 "completed_at": None,
             }
-
-            items_by_id[new_id] = item
-            for dep_id in dep_ids:
-                if _would_create_cycle(items_by_id, new_id, dep_id):
-                    return _no_write(f"Adding dependency `{dep_id}` would create a cycle.")
 
             data["items"].append(item)
             data["updated_at"] = now

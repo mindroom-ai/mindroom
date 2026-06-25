@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.metadata import (
     SetupType,
     ToolCategory,
-    ToolManagedInitArg,
     ToolStatus,
     register_tool_with_metadata,
 )
@@ -25,7 +24,7 @@ if TYPE_CHECKING:
     setup_type=SetupType.NONE,
     icon="ListTodo",
     icon_color="text-blue-500",
-    dependencies=["jinja2", "pyyaml"],
+    requires_room_context=True,
     docs_url="https://github.com/mindroom-ai/mindroom",
     function_names=(
         "add_todo",
@@ -36,7 +35,6 @@ if TYPE_CHECKING:
         "plan",
         "update_todo",
     ),
-    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
 )
 def todo_tools() -> type[TodoTools]:
     """Return built-in todo tools."""

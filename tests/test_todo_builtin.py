@@ -13,7 +13,6 @@ from agno.team.team import Team as AgnoTeam
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.custom_tools import todo as todo_module
 from mindroom.custom_tools.todo import _thread_key
 from mindroom.tool_schema_cache import process_function_schema_for_prompt
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
@@ -97,6 +96,7 @@ def test_todo_is_registered_as_builtin_tool(tmp_path: Path) -> None:
     metadata = TOOL_METADATA["todo"]
     assert metadata.display_name == "Todo"
     assert metadata.setup_type == "none"
+    assert metadata.requires_room_context is True
     assert set(metadata.function_names) == {
         "add_todo",
         "complete_todo",
@@ -171,33 +171,6 @@ def test_add_todo_rejects_empty_title(tmp_path: Path) -> None:
 
     assert result == "Title cannot be empty."
     assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
-
-
-def test_todo_storage_uses_windows_lock_fallback_when_fcntl_is_unavailable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Todo storage should still lock and persist on platforms without fcntl."""
-    config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
-
-    class FakeMsvcrt:
-        LK_LOCK = 1
-        LK_RLCK = 2
-        LK_UNLCK = 3
-
-        def locking(self, _fd: int, _mode: int, _nbytes: int) -> None:
-            return None
-
-    monkeypatch.setattr(todo_module, "fcntl", None)
-    monkeypatch.setattr(todo_module, "msvcrt", FakeMsvcrt())
-
-    with tool_runtime_context(_tool_context(config)):
-        result = tool.plan(agent=_agent(), tasks="Fallback lock")
-        listing = tool.list_todos(agent=_agent())
-
-    assert "Created 1 item" in result
-    assert "Fallback lock" in listing
 
 
 def test_todo_defaults_to_member_agent_inside_team_context(tmp_path: Path) -> None:
@@ -304,6 +277,28 @@ def test_update_todo_validates_before_mutating_and_can_clear_dependencies(tmp_pa
     assert cleared["items"][1]["depends_on"] == []  # type: ignore[index]
 
 
+def test_update_todo_rejects_runtime_dependency_cycle(tmp_path: Path) -> None:
+    """Runtime dependency edits should reject cycles and leave existing state unchanged."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.plan(agent=_agent(), tasks="Root\nChild")
+    state = _read_todos(config)
+    root_id = state["items"][0]["id"]  # type: ignore[index]
+    child_id = state["items"][1]["id"]  # type: ignore[index]
+
+    with tool_runtime_context(_tool_context(config)):
+        set_child_dep = tool.update_todo(agent=_agent(), todo_id=child_id, depends_on=root_id)
+        cycle_result = tool.update_todo(agent=_agent(), todo_id=root_id, depends_on=child_id)
+
+    assert "depends_on" in set_child_dep
+    assert cycle_result == f"Adding dependency `{child_id}` would create a cycle."
+    updated = _read_todos(config)
+    assert updated["items"][0]["depends_on"] == []  # type: ignore[index]
+    assert updated["items"][1]["depends_on"] == [root_id]  # type: ignore[index]
+
+
 def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
     """Built-in templates should ship with the package and create dependent todos."""
     config = _config(tmp_path)
@@ -314,18 +309,20 @@ def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
         preview = tool.apply_template(
             agent=_agent(),
             name="mindroom-dev",
-            params={"ISSUE_REF": "ISSUE-1", "REPO": "mindroom"},
+            params={"ISSUE_REF": "ISSUE-9", "REPO": "mindroom"},
             dry_run=True,
         )
         result = tool.apply_template(
             agent=_agent(),
             name="mindroom-dev",
-            params={"ISSUE_REF": "ISSUE-1", "REPO": "mindroom"},
+            params={"ISSUE_REF": "ISSUE-9", "REPO": "mindroom"},
         )
 
     assert "`mindroom-dev`" in listing
     assert "Preview:" in preview
-    assert "ISSUE-1" in preview
+    assert "ISSUE-9" in preview
+    assert "- `BRANCH`: `issue-9`" in preview
+    assert "- `BASE`: `origin/main`" in preview
     assert "Applied template `mindroom-dev`" in result
     state = _read_todos(config)
     items = state["items"]
@@ -346,12 +343,82 @@ def test_parallel_review_loop_template_allows_unanimous_approval_exit(tmp_path: 
         )
 
     items = _read_todos(config)["items"]
-    rerun_or_noop = next(item for item in items if "mark complete immediately as no-op" in item["title"])
-    final_gate = items[-1]
+    decision = items[-1]
 
-    assert "unanimous approve" in rerun_or_noop["title"]
-    assert "same current revision" in final_gate["title"]
-    assert final_gate["depends_on"] == [rerun_or_noop["id"]]
+    assert len(items) == 5
+    assert "re-apply this template" in decision["title"]
+    assert "approve the same current revision" in decision["title"]
+    assert decision["depends_on"] == [items[3]["id"]]
+
+
+def test_mindroom_dev_template_rejects_unknown_param(tmp_path: Path) -> None:
+    """Built-in template params should be schema-checked with extra values forbidden."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+
+    with (
+        tool_runtime_context(_tool_context(config)),
+        pytest.raises(ValueError, match="UNKNOWN: Extra inputs are not permitted"),
+    ):
+        tool.apply_template(
+            agent=_agent(),
+            name="mindroom-dev",
+            params={"ISSUE_REF": "ISSUE-9", "REPO": "mindroom", "UNKNOWN": "x"},
+        )
+
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+def test_workspace_template_rejects_out_of_range_depends_on(tmp_path: Path) -> None:
+    """Template depends_on indexes should point at existing authored items."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "bad-dependency-index",
+        """name: bad-dependency-index
+version: "1"
+description: Bad dependency index.
+todos:
+  - title: One
+    depends_on: [2]
+""",
+    )
+
+    with (
+        tool_runtime_context(_tool_context(config)),
+        pytest.raises(ValueError, match=r"depends_on index 2 is out of range 1\.\.1"),
+    ):
+        tool.apply_template(agent=_agent(), name="bad-dependency-index", params={})
+
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+def test_workspace_template_rejects_dependency_cycle(tmp_path: Path) -> None:
+    """Template expansion should reject cyclic dependency graphs before writing state."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "cyclic-template",
+        """name: cyclic-template
+version: "1"
+description: Cyclic template.
+todos:
+  - title: A
+    depends_on: [2]
+  - title: B
+    depends_on: [1]
+""",
+    )
+
+    with (
+        tool_runtime_context(_tool_context(config)),
+        pytest.raises(ValueError, match="dependency cycle"),
+    ):
+        tool.apply_template(agent=_agent(), name="cyclic-template", params={})
+
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
 
 
 def test_workspace_template_root_symlink_escape_is_rejected(tmp_path: Path) -> None:

@@ -79,7 +79,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)
-_OPENAI_COMPAT_CONTEXT_BOUND_TOOLKITS = frozenset({"todo"})
 
 _DEFAULT_MIND_AGENT_NAME = "mind"
 _DEFAULT_MIND_CONTEXT_FILES = (
@@ -690,7 +689,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 agent_name,
             )
             return None
-        hidden_tool_names = _openai_compat_hidden_toolkits(execution_identity)
+        hidden_tool_names = _context_hidden_toolkits(execution_identity)
         if not _visible_deferred_tool_names(config, agent_name, hidden_tool_names=hidden_tool_names):
             logger.warning(
                 "Skipping 'dynamic_tools' tool for agent '%s': no compatible deferred tools are available",
@@ -781,10 +780,10 @@ def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) ->
     return learning is not False
 
 
-def _openai_compat_hidden_toolkits(execution_identity: ToolExecutionIdentity | None) -> frozenset[str]:
-    if execution_identity is None or execution_identity.channel != "openai_compat":
+def _context_hidden_toolkits(execution_identity: ToolExecutionIdentity | None) -> frozenset[str]:
+    if execution_identity is None or execution_identity.room_id is not None:
         return frozenset()
-    return _OPENAI_COMPAT_CONTEXT_BOUND_TOOLKITS
+    return frozenset(tool_name for tool_name, metadata in TOOL_METADATA.items() if metadata.requires_room_context)
 
 
 def _visible_deferred_tool_names(
@@ -1046,9 +1045,6 @@ def _prune_openai_incompatible_tools(
     if execution_identity is None or execution_identity.channel != "openai_compat":
         return toolkit
 
-    if toolkit.name in _OPENAI_COMPAT_CONTEXT_BOUND_TOOLKITS:
-        return None
-
     hidden_tool_names = {
         tool_name
         for tool_name in (*toolkit.functions, *toolkit.async_functions)
@@ -1282,7 +1278,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         session_id=session_id,
         delegation_depth=delegation_depth,
     )
-    openai_compat_hidden_toolkits = _openai_compat_hidden_toolkits(execution_identity)
+    context_hidden_toolkits = _context_hidden_toolkits(execution_identity)
     resolved_tool_configs = {
         entry.name: entry.tool_config_overrides for entry in dynamic_tool_selection.runtime_tool_configs
     }
@@ -1294,11 +1290,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             for tool_name, overrides in resolved_tool_configs.items()
             if tool_name not in disabled_tool_names
         }
-    if openai_compat_hidden_toolkits:
+    if context_hidden_toolkits:
         resolved_tool_configs = {
             tool_name: overrides
             for tool_name, overrides in resolved_tool_configs.items()
-            if tool_name not in openai_compat_hidden_toolkits
+            if tool_name not in context_hidden_toolkits
         }
     loaded_tools = (
         ()
@@ -1306,7 +1302,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         else tuple(
             tool_name
             for tool_name in dynamic_tool_selection.loaded_tools
-            if tool_name not in disabled_tool_names and tool_name not in openai_compat_hidden_toolkits
+            if tool_name not in disabled_tool_names and tool_name not in context_hidden_toolkits
         )
     )
     with agent_create_timing("resolve_worker_tools"):
@@ -1438,7 +1434,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             config,
             agent_name,
             enable_dynamic_tools_manager=session_id is not None,
-            hidden_tool_names=openai_compat_hidden_toolkits,
+            hidden_tool_names=context_hidden_toolkits,
         )
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
@@ -1468,7 +1464,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             agent_name,
             loaded_tools=loaded_tools,
             enable_dynamic_tools_manager=session_id is not None,
-            hidden_tool_names=openai_compat_hidden_toolkits,
+            hidden_tool_names=context_hidden_toolkits,
         )
     if dynamic_tooling_state_suffix is not None:
         instructions.append(dynamic_tooling_state_suffix)
