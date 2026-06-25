@@ -19,6 +19,7 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.session import AgentSession
+from agno.tools import Toolkit
 from agno.tools.function import Function
 from pydantic import ValidationError
 
@@ -3428,6 +3429,45 @@ def test_openai_agent_caps_provider_visible_tools_before_request(tmp_path: Path)
     assert [tool.name for tool in tools] == [f"tool_{index:03}" for index in range(128)]
 
 
+def test_openai_agent_splits_large_toolkit_at_provider_visible_tool_cap(tmp_path: Path) -> None:
+    """Large toolkits, such as MCP servers, must be capped by their provider-visible functions."""
+    config = _bind_runtime_paths(_test_config(), _runtime_paths(tmp_path))
+    agent = _create_agent_for_test("general", config)
+    agent.tools = [
+        Toolkit(
+            name="large_toolkit",
+            tools=[
+                Function(
+                    name=f"tool_{index:03}",
+                    description=f"Tool {index}",
+                    entrypoint=lambda index=index: str(index),
+                )
+                for index in range(130)
+            ],
+        ),
+    ]
+    run_output = RunOutput(
+        run_id="run-openai-toolkit-cap",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-openai-toolkit-cap",
+        input="hello",
+        content="ok",
+    )
+    run_context = RunContext(run_id="run-openai-toolkit-cap", session_id="session-openai-toolkit-cap")
+    session = AgentSession(
+        session_id="session-openai-toolkit-cap",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    tools = [tool for tool in agent.get_tools(run_output, run_context, session) if isinstance(tool, Function)]
+
+    assert len(tools) == 128
+    assert [tool.name for tool in tools] == [f"tool_{index:03}" for index in range(128)]
+
+
 @pytest.mark.anyio
 async def test_async_openai_agent_caps_provider_visible_tools_before_request(tmp_path: Path) -> None:
     """The streaming Matrix path resolves async tools and must apply the same OpenAI cap."""
@@ -3452,6 +3492,46 @@ async def test_async_openai_agent_caps_provider_visible_tools_before_request(tmp
     run_context = RunContext(run_id="run-async-openai-tool-cap", session_id="session-async-openai-tool-cap")
     session = AgentSession(
         session_id="session-async-openai-tool-cap",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    tools = [tool for tool in await agent.aget_tools(run_output, run_context, session) if isinstance(tool, Function)]
+
+    assert len(tools) == 128
+    assert [tool.name for tool in tools] == [f"tool_{index:03}" for index in range(128)]
+
+
+@pytest.mark.anyio
+async def test_async_openai_agent_splits_large_toolkit_at_provider_visible_tool_cap(tmp_path: Path) -> None:
+    """The async streaming path must also cap oversized toolkit functions before dispatch."""
+    config = _bind_runtime_paths(_test_config(), _runtime_paths(tmp_path))
+    agent = _create_agent_for_test("general", config)
+    agent.tools = [
+        Toolkit(
+            name="large_toolkit",
+            tools=[
+                Function(
+                    name=f"tool_{index:03}",
+                    description=f"Tool {index}",
+                    entrypoint=lambda index=index: str(index),
+                )
+                for index in range(130)
+            ],
+        ),
+    ]
+    run_output = RunOutput(
+        run_id="run-async-openai-toolkit-cap",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-async-openai-toolkit-cap",
+        input="hello",
+        content="ok",
+    )
+    run_context = RunContext(run_id="run-async-openai-toolkit-cap", session_id="session-async-openai-toolkit-cap")
+    session = AgentSession(
+        session_id="session-async-openai-toolkit-cap",
         agent_id="general",
         created_at=1,
         updated_at=1,
