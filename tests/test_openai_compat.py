@@ -440,8 +440,8 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
         )
 
     exposed_tool_names = {
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "functions", {})),
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "async_functions", {})),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.functions),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
     }
     assert "run_shell_command" not in exposed_tool_names
     assert "check_shell_command" in exposed_tool_names
@@ -485,8 +485,8 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -
         )
 
     exposed_tool_names = {
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "functions", {})),
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "async_functions", {})),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.functions),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
     }
     assert "todo" not in {toolkit.name for toolkit in agent.tools}
     assert (
@@ -597,8 +597,8 @@ def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, t
         )
 
     exposed_tool_names = {
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "functions", {})),
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "async_functions", {})),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.functions),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
     }
     assert "run_shell_command" not in exposed_tool_names
 

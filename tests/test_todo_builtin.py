@@ -13,6 +13,7 @@ from agno.team.team import Team as AgnoTeam
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.custom_tools import todo as todo_module
 from mindroom.custom_tools.todo import _thread_key
 from mindroom.tool_schema_cache import process_function_schema_for_prompt
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
@@ -34,6 +35,10 @@ def _config(tmp_path: Path) -> Config:
         Config(agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])}),
         runtime_paths=test_runtime_paths(tmp_path),
     )
+
+
+def _agent() -> AgnoAgent:
+    return AgnoAgent(name="Code", id="code")
 
 
 def _tool_context(
@@ -132,7 +137,7 @@ def test_todo_plan_and_complete_persist_under_current_thread(tmp_path: Path) -> 
     tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
 
     with tool_runtime_context(_tool_context(config)):
-        result = tool.plan(agent=MagicMock(), tasks="[high] Design API\nImplement storage")
+        result = tool.plan(agent=_agent(), tasks="[high] Design API\nImplement storage")
 
     assert "Created 2 item" in result
     state = _read_todos(config)
@@ -145,14 +150,15 @@ def test_todo_plan_and_complete_persist_under_current_thread(tmp_path: Path) -> 
     first_id = state["items"][0]["id"]
     second_id = state["items"][1]["id"]
     with tool_runtime_context(_tool_context(config)):
-        dep_result = tool.update_todo(agent=MagicMock(), todo_id=second_id, depends_on=first_id)
-        complete_result = tool.complete_todo(agent=MagicMock(), todo_id=first_id)
+        dep_result = tool.update_todo(agent=_agent(), todo_id=second_id, depends_on=first_id)
+        complete_result = tool.complete_todo(agent=_agent(), todo_id=first_id)
 
     assert "depends_on" in dep_result
     assert "Now unblocked" in complete_result
     updated = _read_todos(config)
     assert updated["items"][0]["status"] == "done"
     assert updated["items"][1]["depends_on"] == [first_id]
+    assert updated["items"][0]["completed_at"] == updated["items"][0]["updated_at"] == updated["updated_at"]
 
 
 def test_add_todo_rejects_empty_title(tmp_path: Path) -> None:
@@ -161,10 +167,37 @@ def test_add_todo_rejects_empty_title(tmp_path: Path) -> None:
     tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
 
     with tool_runtime_context(_tool_context(config)):
-        result = tool.add_todo(agent=MagicMock(), title="   ")
+        result = tool.add_todo(agent=_agent(), title="   ")
 
     assert result == "Title cannot be empty."
     assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+def test_todo_storage_uses_windows_lock_fallback_when_fcntl_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Todo storage should still lock and persist on platforms without fcntl."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+
+    class FakeMsvcrt:
+        LK_LOCK = 1
+        LK_RLCK = 2
+        LK_UNLCK = 3
+
+        def locking(self, _fd: int, _mode: int, _nbytes: int) -> None:
+            return None
+
+    monkeypatch.setattr(todo_module, "fcntl", None)
+    monkeypatch.setattr(todo_module, "msvcrt", FakeMsvcrt())
+
+    with tool_runtime_context(_tool_context(config)):
+        result = tool.plan(agent=_agent(), tasks="Fallback lock")
+        listing = tool.list_todos(agent=_agent())
+
+    assert "Created 1 item" in result
+    assert "Fallback lock" in listing
 
 
 def test_todo_defaults_to_member_agent_inside_team_context(tmp_path: Path) -> None:
@@ -221,9 +254,9 @@ def test_todo_thread_storage_keys_do_not_collide_for_similar_ids(tmp_path: Path)
     )
 
     with tool_runtime_context(_tool_context(config, room_id=first_room)):
-        tool.plan(agent=MagicMock(), tasks="First room item")
+        tool.plan(agent=_agent(), tasks="First room item")
     with tool_runtime_context(_tool_context(config, room_id=second_room)):
-        tool.plan(agent=MagicMock(), tasks="Second room item")
+        tool.plan(agent=_agent(), tasks="Second room item")
 
     first_state = _read_todos(config, room_id=first_room)
     second_state = _read_todos(config, room_id=second_room)
@@ -237,14 +270,14 @@ def test_update_todo_validates_before_mutating_and_can_clear_dependencies(tmp_pa
     tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
 
     with tool_runtime_context(_tool_context(config)):
-        tool.plan(agent=MagicMock(), tasks="Root\nChild")
+        tool.plan(agent=_agent(), tasks="Root\nChild")
     state = _read_todos(config)
     root_id = state["items"][0]["id"]  # type: ignore[index]
     child_id = state["items"][1]["id"]  # type: ignore[index]
 
     with tool_runtime_context(_tool_context(config)):
         invalid_result = tool.update_todo(
-            agent=MagicMock(),
+            agent=_agent(),
             todo_id=child_id,
             title="Mutated title",
             depends_on="missing",
@@ -255,15 +288,15 @@ def test_update_todo_validates_before_mutating_and_can_clear_dependencies(tmp_pa
     assert unchanged["items"][1]["title"] == "Child"  # type: ignore[index]
 
     with tool_runtime_context(_tool_context(config)):
-        blank_title_result = tool.update_todo(agent=MagicMock(), todo_id=child_id, title="   ")
+        blank_title_result = tool.update_todo(agent=_agent(), todo_id=child_id, title="   ")
 
     assert blank_title_result == "Title cannot be empty."
     unchanged = _read_todos(config)
     assert unchanged["items"][1]["title"] == "Child"  # type: ignore[index]
 
     with tool_runtime_context(_tool_context(config)):
-        set_result = tool.update_todo(agent=MagicMock(), todo_id=child_id, depends_on=root_id)
-        clear_result = tool.update_todo(agent=MagicMock(), todo_id=child_id, depends_on="")
+        set_result = tool.update_todo(agent=_agent(), todo_id=child_id, depends_on=root_id)
+        clear_result = tool.update_todo(agent=_agent(), todo_id=child_id, depends_on="")
 
     assert "depends_on" in set_result
     assert "depends_on=[]" in clear_result
@@ -277,15 +310,15 @@ def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
     tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
 
     with tool_runtime_context(_tool_context(config)):
-        listing = tool.list_templates(agent=MagicMock())
+        listing = tool.list_templates(agent=_agent())
         preview = tool.apply_template(
-            agent=MagicMock(),
+            agent=_agent(),
             name="mindroom-dev",
             params={"ISSUE_REF": "ISSUE-1", "REPO": "mindroom"},
             dry_run=True,
         )
         result = tool.apply_template(
-            agent=MagicMock(),
+            agent=_agent(),
             name="mindroom-dev",
             params={"ISSUE_REF": "ISSUE-1", "REPO": "mindroom"},
         )
@@ -307,7 +340,7 @@ def test_parallel_review_loop_template_allows_unanimous_approval_exit(tmp_path: 
 
     with tool_runtime_context(_tool_context(config)):
         tool.apply_template(
-            agent=MagicMock(),
+            agent=_agent(),
             name="parallel-review-loop",
             params={"N_REVIEWERS": 8},
         )
@@ -332,7 +365,34 @@ def test_workspace_template_root_symlink_escape_is_rejected(tmp_path: Path) -> N
     template_dir.symlink_to(outside, target_is_directory=True)
 
     with tool_runtime_context(_tool_context(config)), pytest.raises(ValueError, match="escapes workspace"):
-        tool.list_templates(agent=MagicMock())
+        tool.list_templates(agent=_agent())
+
+
+def test_list_templates_skips_malformed_workspace_template(tmp_path: Path) -> None:
+    """One broken workspace template should not hide valid workspace or built-in templates."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "valid-workspace",
+        """name: valid-workspace
+version: "1"
+description: Valid workspace template.
+todos:
+  - title: Workspace task
+""",
+    )
+    (_workspace_template_dir(config) / "broken.yaml.j2").write_text(
+        'name: broken\nversion: "1"\ndescription: Broken\ntodos: [\n',
+        encoding="utf-8",
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert "`valid-workspace`" in listing
+    assert "`mindroom-dev`" in listing
+    assert "`broken`" not in listing
 
 
 def test_workspace_template_shadow_uses_workspace_params_schema(tmp_path: Path) -> None:
@@ -351,15 +411,15 @@ todos:
     )
 
     with tool_runtime_context(_tool_context(config)):
-        listing = tool.list_templates(agent=MagicMock())
+        listing = tool.list_templates(agent=_agent())
         preview = tool.apply_template(
-            agent=MagicMock(),
+            agent=_agent(),
             name="mindroom-dev",
             params={"CUSTOM": "workspace"},
             dry_run=True,
         )
         result = tool.apply_template(
-            agent=MagicMock(),
+            agent=_agent(),
             name="mindroom-dev",
             params={"CUSTOM": "workspace"},
         )
@@ -408,10 +468,10 @@ def test_missing_todo_read_and_error_paths_do_not_create_thread_state(tmp_path: 
     path = _todos_path(config, room_id="!room:localhost", thread_id="$thread-root")
 
     with tool_runtime_context(_tool_context(config)):
-        list_result = tool.list_todos(agent=MagicMock())
-        complete_result = tool.complete_todo(agent=MagicMock(), todo_id="missing")
-        update_result = tool.update_todo(agent=MagicMock(), todo_id="missing", title="Still missing")
-        add_result = tool.add_todo(agent=MagicMock(), title="Blocked item", depends_on="missing")
+        list_result = tool.list_todos(agent=_agent())
+        complete_result = tool.complete_todo(agent=_agent(), todo_id="missing")
+        update_result = tool.update_todo(agent=_agent(), todo_id="missing", title="Still missing")
+        add_result = tool.add_todo(agent=_agent(), title="Blocked item", depends_on="missing")
 
     assert list_result == "No items in this thread's work plan."
     assert complete_result == "Todo `missing` not found."
@@ -454,7 +514,7 @@ todos:
     )
 
     with tool_runtime_context(_tool_context(config)):
-        tool.apply_template(agent=MagicMock(), name="parent-flow", params={})
+        tool.apply_template(agent=_agent(), name="parent-flow", params={})
 
     state = _read_todos(config)
     by_title = {item["title"]: item for item in state["items"]}  # type: ignore[union-attr]
@@ -486,7 +546,7 @@ todos:
     )
 
     with tool_runtime_context(_tool_context(config)):
-        result = tool.apply_template(agent=MagicMock(), name="bad-assignee", params={})
+        result = tool.apply_template(agent=_agent(), name="bad-assignee", params={})
 
     assert "Unknown agent 'missing'" in result
     assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()

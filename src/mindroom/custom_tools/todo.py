@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import re
@@ -10,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 
 import yaml
 from agno.agent import Agent
@@ -24,12 +23,35 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on non-POSIX platforms.
+    fcntl = None  # ty: ignore[invalid-assignment]
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - exercised on Windows.
+    msvcrt = None  # ty: ignore[invalid-assignment]
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from mindroom.constants import RuntimePaths
 
 _T = TypeVar("_T")
+
+
+class _LockFile(Protocol):
+    def fileno(self) -> int: ...
+
+    def seek(self, offset: int, _whence: int = 0, /) -> int: ...
+
+    def tell(self) -> int: ...
+
+    def write(self, text: str, /) -> int: ...
+
+    def flush(self) -> None: ...
+
 
 _VALID_PRIORITIES = {"low", "medium", "high", "critical"}
 _TERMINAL_STATUSES = {"done", "cancelled"}
@@ -180,6 +202,35 @@ def _lock_path(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".lock")
 
 
+def _lock_file(lock_file: _LockFile, *, exclusive: bool) -> None:
+    if fcntl is not None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        return
+
+    if msvcrt is not None:
+        lock_file.seek(0, 2)
+        if lock_file.tell() == 0:
+            lock_file.write("\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        mode = msvcrt.LK_LOCK if exclusive else msvcrt.LK_RLCK
+        msvcrt.locking(lock_file.fileno(), mode, 1)
+        return
+
+    msg = "Todo state locking requires fcntl or msvcrt."
+    raise RuntimeError(msg)
+
+
+def _unlock_file(lock_file: _LockFile) -> None:
+    if fcntl is not None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        return
+
+    if msvcrt is not None:
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -187,20 +238,20 @@ def _read_json(path: Path) -> dict[str, Any]:
     lock_path = _lock_path(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+        _lock_file(lock_file, exclusive=False)
         try:
             if not path.exists():
                 return {}
             return json.loads(path.read_text(encoding="utf-8"))
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            _unlock_file(lock_file)
 
 
 def _locked_update_json(path: Path, mutate: Callable[[dict[str, Any]], _T | _NoWriteResult]) -> _T:
     lock_path = _lock_path(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        _lock_file(lock_file, exclusive=True)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -212,7 +263,7 @@ def _locked_update_json(path: Path, mutate: Callable[[dict[str, Any]], _T | _NoW
             temp_path.replace(path)
             return result
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            _unlock_file(lock_file)
 
 
 def _state_root(runtime_paths: RuntimePaths) -> Path:
@@ -819,10 +870,11 @@ class TodoTools(Toolkit):
                 if item["id"] == todo_id:
                     if item["status"] in _TERMINAL_STATUSES:
                         return _no_write(f"Item `{todo_id}` is already {item['status']}.")
+                    now = _now_iso()
                     item["status"] = "done"
-                    item["completed_at"] = _now_iso()
-                    item["updated_at"] = _now_iso()
-                    data["updated_at"] = _now_iso()
+                    item["completed_at"] = now
+                    item["updated_at"] = now
+                    data["updated_at"] = now
                     unblocked = _newly_unblocked(data["items"], todo_id)
                     message = f"Completed: **{item['title']}** (`{todo_id}`)"
                     if unblocked:
@@ -1038,7 +1090,12 @@ class TodoTools(Toolkit):
                 if not resolved_path.is_relative_to(templates_root):
                     msg = f"Template '{path.name}' escapes templates dir via symlink"
                     raise ValueError(msg)
-                metadata = _load_template_metadata(path)
+                try:
+                    metadata = _load_template_metadata(path)
+                except (OSError, ValueError):
+                    if template_root.source == "workspace":
+                        continue
+                    raise
                 if metadata["name"] in seen_names:
                     continue
                 seen_names.add(metadata["name"])
