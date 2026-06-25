@@ -3394,6 +3394,75 @@ def test_agent_knowledge_search_tool_description_excludes_unavailable_sources(tm
     assert "legal" not in description
 
 
+def test_openai_agent_caps_provider_visible_tools_before_request(tmp_path: Path) -> None:
+    """OpenAI rejects requests with more than 128 tools, so cap before model dispatch."""
+    config = _bind_runtime_paths(_test_config(), _runtime_paths(tmp_path))
+    agent = _create_agent_for_test("general", config)
+    agent.tools = [
+        Function(
+            name=f"tool_{index:03}",
+            description=f"Tool {index}",
+            entrypoint=lambda index=index: str(index),
+        )
+        for index in range(130)
+    ]
+    run_output = RunOutput(
+        run_id="run-openai-tool-cap",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-openai-tool-cap",
+        input="hello",
+        content="ok",
+    )
+    run_context = RunContext(run_id="run-openai-tool-cap", session_id="session-openai-tool-cap")
+    session = AgentSession(
+        session_id="session-openai-tool-cap",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    tools = [tool for tool in agent.get_tools(run_output, run_context, session) if isinstance(tool, Function)]
+
+    assert len(tools) == 128
+    assert [tool.name for tool in tools] == [f"tool_{index:03}" for index in range(128)]
+
+
+@pytest.mark.anyio
+async def test_async_openai_agent_caps_provider_visible_tools_before_request(tmp_path: Path) -> None:
+    """The streaming Matrix path resolves async tools and must apply the same OpenAI cap."""
+    config = _bind_runtime_paths(_test_config(), _runtime_paths(tmp_path))
+    agent = _create_agent_for_test("general", config)
+    agent.tools = [
+        Function(
+            name=f"tool_{index:03}",
+            description=f"Tool {index}",
+            entrypoint=lambda index=index: str(index),
+        )
+        for index in range(130)
+    ]
+    run_output = RunOutput(
+        run_id="run-async-openai-tool-cap",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-async-openai-tool-cap",
+        input="hello",
+        content="ok",
+    )
+    run_context = RunContext(run_id="run-async-openai-tool-cap", session_id="session-async-openai-tool-cap")
+    session = AgentSession(
+        session_id="session-async-openai-tool-cap",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    tools = [tool for tool in await agent.aget_tools(run_output, run_context, session) if isinstance(tool, Function)]
+
+    assert len(tools) == 128
+    assert [tool.name for tool in tools] == [f"tool_{index:03}" for index in range(128)]
+
+
 def test_agent_accepts_custom_knowledge_protocol_without_source_metadata(tmp_path: Path) -> None:
     """Custom knowledge implementations need not expose Agno Knowledge metadata fields."""
 
