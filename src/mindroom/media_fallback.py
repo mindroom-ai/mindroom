@@ -40,9 +40,7 @@ _INLINE_MEDIA_FIELD_PATTERN = re.compile(
 )
 _INLINE_MEDIA_MIME_MISMATCH_PATTERN = re.compile(r"image was specified using the .* media type")
 _INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN = re.compile(r"(?:inline media|media input) is not supported")
-_OPENAI_AUDIO_FORMAT_VALIDATION_PATTERN = re.compile(
-    r"(?:input_audio\.format|invalid value: ['\"][^'\"]+['\"].*supported values are: ['\"]wav['\"] and ['\"]mp3['\"])",
-)
+_OPENAI_AUDIO_FORMAT_VALIDATION_PATTERN = re.compile(r"\binput_audio\.format\b")
 _MEDIA_KIND_PATTERN = r"audio|image|video|file|document"
 _INLINE_MEDIA_UNSUPPORTED_PATTERNS = (
     re.compile(rf"(?P<kind>{_MEDIA_KIND_PATTERN}) input is not supported"),

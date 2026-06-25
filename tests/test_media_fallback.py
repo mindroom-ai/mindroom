@@ -155,6 +155,20 @@ def test_openai_invalid_audio_format_error_retries_without_caching() -> None:
     assert filtered.media_inputs == media
 
 
+def test_openai_supported_audio_values_without_audio_field_does_not_retry() -> None:
+    """Wav/mp3 validation text alone should not be treated as an audio input failure."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+    error = "Invalid value: 'bin'. Supported values are: 'wav' and 'mp3'. parameter=output_format"
+
+    decision = retry_media_inputs_after_failure(route, error, media)
+
+    assert decision.should_retry is False
+    assert decision.media_inputs == media
+    assert filter_media_inputs_for_route(route, media).media_inputs == media
+
+
 def test_context_media_kinds_enable_retry_without_current_turn_media() -> None:
     """Media pinned to history messages should still trigger retry and teach the cache."""
     reset_model_media_capability_cache()
