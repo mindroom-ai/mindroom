@@ -155,6 +155,25 @@ def test_openai_invalid_audio_format_error_retries_without_caching() -> None:
     assert filtered.media_inputs == media
 
 
+def test_openai_invalid_audio_format_message_without_field_retries_without_caching() -> None:
+    """LiteLLM can omit OpenAI's input_audio.format field from the surfaced message."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+    error = (
+        "litellm.BadRequestError: OpenAIException - Invalid value: 'bin'. "
+        "Supported values are: 'wav' and 'mp3'.. Received Model Group=gpt-5.5"
+    )
+
+    decision = retry_media_inputs_after_failure(route, error, media)
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"audio"})
+    assert decision.media_inputs.audio == ()
+    assert decision.media_inputs.images == media.images
+    assert filter_media_inputs_for_route(route, media).media_inputs == media
+
+
 def test_openai_supported_audio_values_without_audio_field_does_not_retry() -> None:
     """Wav/mp3 validation text alone should not be treated as an audio input failure."""
     reset_model_media_capability_cache()
