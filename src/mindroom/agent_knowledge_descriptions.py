@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 _KNOWLEDGE_SEARCH_TOOL_NAME = "search_knowledge_base"
 _OPENAI_PROVIDER_VISIBLE_TOOL_LIMIT = 128
+_OPENAI_TOOL_LIMIT_PROVIDERS = frozenset({"azure", "azure chat", "openai", "openai chat"})
 
 logger = get_logger(__name__)
 
@@ -71,7 +72,7 @@ def _annotate_knowledge_search_tool(tools: list[Any], sources: tuple[KnowledgeSo
 def _uses_openai_tool_limit(model: Model | None) -> bool:
     if model is None:
         return False
-    return "openai" in model.get_provider().lower()
+    return model.get_provider().casefold() in _OPENAI_TOOL_LIMIT_PROVIDERS
 
 
 def _dict_tool_name(tool: dict[Any, Any]) -> str:
@@ -84,14 +85,9 @@ def _dict_tool_name(tool: dict[Any, Any]) -> str:
     return name if isinstance(name, str) else ""
 
 
-def _toolkit_new_functions(
-    toolkit: Toolkit,
-    *,
-    seen_function_names: set[str],
-    async_mode: bool,
-) -> list[tuple[str, Function]]:
+def _toolkit_functions(toolkit: Toolkit, *, async_mode: bool) -> list[tuple[str, Function]]:
     functions = toolkit.get_async_functions() if async_mode else toolkit.get_functions()
-    return [(name, function) for name, function in functions.items() if name not in seen_function_names]
+    return list(functions.items())
 
 
 def _append_toolkit_with_cap(
@@ -102,22 +98,22 @@ def _append_toolkit_with_cap(
     *,
     async_mode: bool,
 ) -> None:
-    new_functions = _toolkit_new_functions(
-        toolkit,
-        seen_function_names=seen_function_names,
-        async_mode=async_mode,
-    )
-    if len(seen_function_names) + len(new_functions) <= _OPENAI_PROVIDER_VISIBLE_TOOL_LIMIT:
+    functions = _toolkit_functions(toolkit, async_mode=async_mode)
+    has_duplicate_functions = any(name in seen_function_names for name, _function in functions)
+    if not has_duplicate_functions and len(seen_function_names) + len(functions) <= _OPENAI_PROVIDER_VISIBLE_TOOL_LIMIT:
         limited_tools.append(toolkit)
-        seen_function_names.update(name for name, _function in new_functions)
+        seen_function_names.update(name for name, _function in functions)
         return
 
-    remaining = _OPENAI_PROVIDER_VISIBLE_TOOL_LIMIT - len(seen_function_names)
-    if remaining > 0:
-        kept_functions = new_functions[:remaining]
-        limited_tools.extend(function for _name, function in kept_functions)
-        seen_function_names.update(name for name, _function in kept_functions)
-    omitted_function_names.extend(name for name, _function in new_functions[remaining:])
+    for name, function in functions:
+        if name in seen_function_names:
+            omitted_function_names.append(name)
+            continue
+        if len(seen_function_names) < _OPENAI_PROVIDER_VISIBLE_TOOL_LIMIT:
+            limited_tools.append(function)
+            seen_function_names.add(name)
+            continue
+        omitted_function_names.append(name)
 
 
 def _standalone_tool_function_name(tool: object) -> str:
@@ -136,7 +132,7 @@ def _append_standalone_tool_with_cap(
 ) -> None:
     function_name = _standalone_tool_function_name(tool)
     if function_name and function_name in seen_function_names:
-        limited_tools.append(tool)
+        omitted_function_names.append(function_name)
         return
     if len(seen_function_names) < _OPENAI_PROVIDER_VISIBLE_TOOL_LIMIT:
         limited_tools.append(tool)

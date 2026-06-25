@@ -3429,6 +3429,50 @@ def test_openai_agent_caps_provider_visible_tools_before_request(tmp_path: Path)
     assert [tool.name for tool in tools] == [f"tool_{index:03}" for index in range(128)]
 
 
+def test_azure_openai_agent_caps_provider_visible_tools_before_request(tmp_path: Path) -> None:
+    """Azure OpenAI uses the same provider-visible tool cap as OpenAI."""
+    config = _test_config()
+    config.models["default"] = ModelConfig(
+        provider="azure",
+        id="team-chat-deployment",
+        extra_kwargs={
+            "api_key": "sk-test",
+            "azure_endpoint": "https://example-resource.openai.azure.com",
+            "api_version": "2024-10-21",
+        },
+    )
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    agent = _create_agent_for_test("general", config)
+    agent.tools = [
+        Function(
+            name=f"tool_{index:03}",
+            description=f"Tool {index}",
+            entrypoint=lambda index=index: str(index),
+        )
+        for index in range(130)
+    ]
+    run_output = RunOutput(
+        run_id="run-azure-openai-tool-cap",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-azure-openai-tool-cap",
+        input="hello",
+        content="ok",
+    )
+    run_context = RunContext(run_id="run-azure-openai-tool-cap", session_id="session-azure-openai-tool-cap")
+    session = AgentSession(
+        session_id="session-azure-openai-tool-cap",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    tools = [tool for tool in agent.get_tools(run_output, run_context, session) if isinstance(tool, Function)]
+
+    assert len(tools) == 128
+    assert [tool.name for tool in tools] == [f"tool_{index:03}" for index in range(128)]
+
+
 def test_openai_agent_splits_large_toolkit_at_provider_visible_tool_cap(tmp_path: Path) -> None:
     """Large toolkits, such as MCP servers, must be capped by their provider-visible functions."""
     config = _bind_runtime_paths(_test_config(), _runtime_paths(tmp_path))
@@ -3466,6 +3510,56 @@ def test_openai_agent_splits_large_toolkit_at_provider_visible_tool_cap(tmp_path
 
     assert len(tools) == 128
     assert [tool.name for tool in tools] == [f"tool_{index:03}" for index in range(128)]
+
+
+def test_openai_agent_omits_duplicate_names_and_counts_unnamed_tools(tmp_path: Path) -> None:
+    """Duplicate named tools are redundant, while unnamed tool schemas still consume cap slots."""
+    config = _bind_runtime_paths(_test_config(), _runtime_paths(tmp_path))
+    agent = _create_agent_for_test("general", config)
+    agent.tools = [
+        *[
+            Function(
+                name=f"tool_{index:03}",
+                description=f"Tool {index}",
+                entrypoint=lambda index=index: str(index),
+            )
+            for index in range(127)
+        ],
+        Function(
+            name="tool_005",
+            description="Duplicate tool",
+            entrypoint=lambda: "duplicate",
+        ),
+        {"type": "function", "function": {"description": "Unnamed tool"}},
+        {"type": "function", "function": {"description": "Second unnamed tool"}},
+    ]
+    run_output = RunOutput(
+        run_id="run-openai-duplicate-tool-cap",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-openai-duplicate-tool-cap",
+        input="hello",
+        content="ok",
+    )
+    run_context = RunContext(run_id="run-openai-duplicate-tool-cap", session_id="session-openai-duplicate-tool-cap")
+    session = AgentSession(
+        session_id="session-openai-duplicate-tool-cap",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    tools = agent.get_tools(run_output, run_context, session)
+    function_names = [tool.name for tool in tools if isinstance(tool, Function)]
+    unnamed_tool_count = sum(
+        1
+        for tool in tools
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict) and "name" not in tool["function"]
+    )
+
+    assert len(tools) == 128
+    assert function_names.count("tool_005") == 1
+    assert unnamed_tool_count == 1
 
 
 @pytest.mark.anyio
