@@ -131,6 +131,30 @@ def test_generic_media_error_retries_without_caching() -> None:
     assert filtered.media_inputs == media
 
 
+def test_openai_invalid_audio_format_error_retries_without_caching() -> None:
+    """OpenAI audio format validation errors should drop audio for the retry only."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+    error = (
+        "litellm.BadRequestError: OpenAIException - Invalid value: 'bin'. "
+        "Supported values are: 'wav' and 'mp3'.. Received Model Group=gpt-5.5 "
+        "messages[3].content[1].input_audio.format"
+    )
+
+    decision = retry_media_inputs_after_failure(route, error, media)
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"audio"})
+    assert decision.media_inputs.audio == ()
+    assert decision.media_inputs.images == media.images
+    assert decision.media_inputs.files == media.files
+    assert decision.media_inputs.videos == media.videos
+
+    filtered = filter_media_inputs_for_route(route, media)
+    assert filtered.media_inputs == media
+
+
 def test_context_media_kinds_enable_retry_without_current_turn_media() -> None:
     """Media pinned to history messages should still trigger retry and teach the cache."""
     reset_model_media_capability_cache()

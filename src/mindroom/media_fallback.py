@@ -40,6 +40,9 @@ _INLINE_MEDIA_FIELD_PATTERN = re.compile(
 )
 _INLINE_MEDIA_MIME_MISMATCH_PATTERN = re.compile(r"image was specified using the .* media type")
 _INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN = re.compile(r"(?:inline media|media input) is not supported")
+_OPENAI_AUDIO_FORMAT_VALIDATION_PATTERN = re.compile(
+    r"(?:input_audio\.format|invalid value: ['\"][^'\"]+['\"].*supported values are: ['\"]wav['\"] and ['\"]mp3['\"])",
+)
 _MEDIA_KIND_PATTERN = r"audio|image|video|file|document"
 _INLINE_MEDIA_UNSUPPORTED_PATTERNS = (
     re.compile(rf"(?P<kind>{_MEDIA_KIND_PATTERN}) input is not supported"),
@@ -231,6 +234,8 @@ def _media_validation_kinds_from_error(error_text: str) -> frozenset[MediaKind]:
     }
     if _INLINE_MEDIA_MIME_MISMATCH_PATTERN.search(lowered_error_text):
         kinds.add("image")
+    if _OPENAI_AUDIO_FORMAT_VALIDATION_PATTERN.search(lowered_error_text):
+        kinds.add("audio")
     return frozenset(kinds)
 
 
