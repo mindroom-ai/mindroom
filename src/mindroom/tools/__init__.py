@@ -125,6 +125,7 @@ from mindroom.tools.telegram import telegram_tools
 from mindroom.tools.thread_model import thread_model_tools
 from mindroom.tools.thread_summary import register_thread_summary_tools
 from mindroom.tools.thread_tags import thread_tags_tools
+from mindroom.tools.todo import todo_tools
 from mindroom.tools.todoist import todoist_tools
 from mindroom.tools.trafilatura import trafilatura_tools
 from mindroom.tools.trello import trello_tools
@@ -248,6 +249,7 @@ __all__ = [
     "telegram_tools",
     "thread_model_tools",
     "thread_tags_tools",
+    "todo_tools",
     "todoist_tools",
     "trafilatura_tools",
     "trello_tools",

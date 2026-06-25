@@ -488,6 +488,7 @@ Below is a representative selection:
 
 ### Productivity Tools
 - **scheduler** - Schedule recurring tasks (included by default)
+- **todo** - Create persistent per-thread work plans with dependencies and templates
 - **gmail** - Gmail integration (requires Google OAuth)
 - **google_calendar** - Calendar management (requires Google OAuth)
 - **google_drive** - Google Drive file search and reading (requires Google OAuth)

@@ -21,7 +21,7 @@ icon: lucide/box
 | **Media & Content** | youtube, spotify, giphy, moviepy, unsplash, brandfetch | [→ media-and-content](media-and-content.md) |
 | **Matrix & Attachments** | matrix_message, thread_tags, thread_summary, thread_model, matrix_api, attachments | [→ matrix-and-attachments](matrix-and-attachments.md) |
 | **Messaging & Social** | gmail, slack, discord, telegram, whatsapp, email, x, reddit | [→ messaging-and-social](messaging-and-social.md) |
-| **Project Management** | github, jira, linear, clickup, notion, trello, todoist | [→ project-management](project-management.md) |
+| **Project Management** | github, jira, linear, clickup, notion, trello, todo, todoist | [→ project-management](project-management.md) |
 | **Calendar & Scheduling** | google_calendar, cal_com, scheduler | [→ calendar-and-scheduling](calendar-and-scheduling.md) |
 | **Memory & Storage** | memory, mem0, zep | [→ memory-and-storage](memory-and-storage.md) |
 | **Agent Orchestration** | subagents, delegate, dynamic_workflow, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](agent-orchestration.md) |

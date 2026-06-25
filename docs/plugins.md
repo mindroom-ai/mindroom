@@ -569,5 +569,5 @@ plugins:
 | --- | --- |
 | [thread-snooze-plugin](https://github.com/mindroom-ai/thread-snooze-plugin) | Snooze and unsnooze threads — temporarily resolves a thread and wakes it at a specified time. |
 | [thread-goal-plugin](https://github.com/mindroom-ai/thread-goal-plugin) | Persistent per-thread goals stored in Matrix room state that survive context compaction and restarts. |
-| [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Autonomous work plans with dependencies, priorities, auto-poke, and template-driven task creation. |
+| [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Optional hook package for workloop-style auto-poke behavior; core per-thread work plans are now built in as the `todo` tool. |
 | [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Long-term memory via [OpenViking](https://github.com/volcengine/OpenViking) — automatic memory extraction, recall, and compaction archiving. |

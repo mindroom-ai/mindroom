@@ -8459,6 +8459,36 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "jinja2",
+        "pyyaml"
+      ],
+      "description": "Create and manage per-thread work plans with dependencies",
+      "display_name": "Todo",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "add_todo",
+        "apply_template",
+        "complete_todo",
+        "list_templates",
+        "list_todos",
+        "plan",
+        "update_todo"
+      ],
+      "helper_text": null,
+      "icon": "ListTodo",
+      "icon_color": "text-blue-500",
+      "name": "todo",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [
         {
           "authored_override": true,
