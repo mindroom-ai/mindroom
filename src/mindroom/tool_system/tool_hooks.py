@@ -445,42 +445,15 @@ async def _emit_after_call(
     await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
 
 
-async def _blocked_tool_result(
-    *,
-    hook_registry: HookRegistry,
-    resolved_context: _ResolvedToolContext,
-    hook_arguments: dict[str, Any] | None,
-    args: dict[str, Any],
-    tool_name: str,
-    reason: str,
-    has_after_hooks: bool,
-    started_at: float,
-) -> str:
-    result = _format_declined_result(tool_name, reason)
-    if has_after_hooks:
-        await _emit_after_call(
-            hook_registry=hook_registry,
-            resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
-            args=args,
-            tool_name=tool_name,
-            result=result,
-            error=None,
-            blocked=True,
-            duration_ms=(time.perf_counter() - started_at) * 1000,
-        )
-    return result
+def _blocked_tool_result(*, tool_name: str, reason: str) -> str:
+    return _format_declined_result(tool_name, reason)
 
 
 async def _maybe_block_for_tool_approval(
     *,
-    hook_registry: HookRegistry,
     resolved_context: _ResolvedToolContext,
-    hook_arguments: dict[str, Any] | None,
     args: dict[str, Any],
     tool_name: str,
-    has_after_hooks: bool,
-    started_at: float,
     workflow_origin: ToolCallWorkflowOrigin | None,
 ) -> str | None:
     if resolved_context.config is None or resolved_context.runtime_paths is None:
@@ -502,29 +475,17 @@ async def _maybe_block_for_tool_approval(
         )
     except ToolApprovalScriptError:
         logger.warning("Tool approval policy failed", exc_info=True)
-        return await _blocked_tool_result(
-            hook_registry=hook_registry,
-            resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
-            args=args,
+        return _blocked_tool_result(
             tool_name=tool_name,
             reason=_APPROVAL_POLICY_FAILURE_REASON,
-            has_after_hooks=has_after_hooks,
-            started_at=started_at,
         )
 
     if approval_decision is None or approval_decision.status == "approved":
         return None
 
-    return await _blocked_tool_result(
-        hook_registry=hook_registry,
-        resolved_context=resolved_context,
-        hook_arguments=hook_arguments,
-        args=args,
+    return _blocked_tool_result(
         tool_name=tool_name,
         reason=_approval_status_reason(approval_decision.status, approval_decision.reason),
-        has_after_hooks=has_after_hooks,
-        started_at=started_at,
     )
 
 
@@ -536,8 +497,6 @@ async def _maybe_block_for_before_hooks(
     args: dict[str, Any],
     tool_name: str,
     has_before_hooks: bool,
-    has_after_hooks: bool,
-    started_at: float,
 ) -> str | None:
     if not has_before_hooks:
         return None
@@ -565,16 +524,44 @@ async def _maybe_block_for_before_hooks(
     if not before_context.declined:
         return None
 
-    return await _blocked_tool_result(
+    return _blocked_tool_result(
+        tool_name=tool_name,
+        reason=before_context.decline_reason,
+    )
+
+
+async def _finish_blocked_tool_call(
+    *,
+    timing: _ToolBridgeTiming,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    hook_arguments: dict[str, Any] | None,
+    args: dict[str, Any],
+    tool_name: str,
+    blocked_result: str,
+    has_after_hooks: bool,
+    outcome: str,
+) -> str:
+    duration_ms = timing.mark_result_ready()
+    await _maybe_emit_after_call_timed(
+        has_after_hooks=has_after_hooks,
+        timing=timing,
         hook_registry=hook_registry,
         resolved_context=resolved_context,
         hook_arguments=hook_arguments,
         args=args,
         tool_name=tool_name,
-        reason=before_context.decline_reason,
-        has_after_hooks=has_after_hooks,
-        started_at=started_at,
+        result=blocked_result,
+        error=None,
+        blocked=True,
+        duration_ms=duration_ms,
     )
+    timing.emit_finish(
+        tool_name=tool_name,
+        agent_name=resolved_context.agent_name or None,
+        outcome=outcome,
+    )
+    return blocked_result
 
 
 @dataclass(slots=True)
@@ -715,38 +702,42 @@ async def _execute_bridge(
         args=args,
         tool_name=tool_name,
         has_before_hooks=has_before_hooks,
-        has_after_hooks=has_after_hooks,
-        started_at=started_at,
     )
     if has_before_hooks:
         timing.before_hooks_ms = elapsed_ms_since(before_hooks_started_at, clock=time.perf_counter, ndigits=2)
     if blocked_result is not None:
-        timing.emit_finish(
+        return await _finish_blocked_tool_call(
+            timing=timing,
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
             tool_name=tool_name,
-            agent_name=resolved_context.agent_name or None,
+            blocked_result=blocked_result,
+            has_after_hooks=has_after_hooks,
             outcome="blocked_before_hooks",
         )
-        return blocked_result
 
     approval_started_at = time.perf_counter()
     blocked_result = await _maybe_block_for_tool_approval(
-        hook_registry=hook_registry,
         resolved_context=resolved_context,
-        hook_arguments=hook_arguments,
         args=args,
         tool_name=tool_name,
-        has_after_hooks=has_after_hooks,
-        started_at=started_at,
         workflow_origin=workflow_origin,
     )
     timing.approval_ms = elapsed_ms_since(approval_started_at, clock=time.perf_counter, ndigits=2)
     if blocked_result is not None:
-        timing.emit_finish(
+        return await _finish_blocked_tool_call(
+            timing=timing,
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
             tool_name=tool_name,
-            agent_name=resolved_context.agent_name or None,
+            blocked_result=blocked_result,
+            has_after_hooks=has_after_hooks,
             outcome="blocked_approval",
         )
-        return blocked_result
 
     result: _ToolHookResult = None
     error: BaseException | None = None
