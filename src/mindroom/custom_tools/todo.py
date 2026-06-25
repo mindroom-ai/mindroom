@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import yaml
 from agno.agent import Agent
+from agno.team.team import Team  # noqa: TC002 - Agno resolves tool annotations at runtime.
 from agno.tools import Toolkit
 from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError
 from jinja2.sandbox import SandboxedEnvironment, SecurityError
@@ -25,8 +26,6 @@ from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
-
-    from agno.team.team import Team
 
     from mindroom.constants import RuntimePaths
 

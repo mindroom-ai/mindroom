@@ -13,6 +13,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.todo import _thread_key
+from mindroom.tool_schema_cache import process_function_schema_for_prompt
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
@@ -100,6 +101,24 @@ def test_todo_is_registered_as_builtin_tool(tmp_path: Path) -> None:
 
     assert tool.__class__.__name__ == "TodoTools"
     assert tool.name == "todo"
+
+
+def test_todo_tool_schemas_include_model_visible_arguments(tmp_path: Path) -> None:
+    """Runtime annotations should resolve so Agno exposes tool-call arguments."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    for function in tool.functions.values():
+        process_function_schema_for_prompt(function, strict=False)
+
+    plan_params = tool.functions["plan"].parameters["properties"]
+    add_params = tool.functions["add_todo"].parameters["properties"]
+    complete_params = tool.functions["complete_todo"].parameters["properties"]
+    apply_template_params = tool.functions["apply_template"].parameters["properties"]
+
+    assert "tasks" in plan_params
+    assert "title" in add_params
+    assert "todo_id" in complete_params
+    assert {"name", "params"}.issubset(apply_template_params)
 
 
 def test_todo_plan_and_complete_persist_under_current_thread(tmp_path: Path) -> None:
