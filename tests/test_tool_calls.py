@@ -439,7 +439,6 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
         arguments={"api_key": "secret"},
         result={"authorization": "Bearer hidden-token", "ok": True},
         duration_ms=5.0,
-        tool_call_id="call-1",
         timing=ToolCallTiming(
             before_hooks_ms=1.111,
             approval_ms=2.222,
@@ -475,7 +474,6 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
     assert success_record.success is True
     assert success_record.result == {"authorization": "***redacted***", "ok": True}
     assert success_record.reply_to_event_id == "$reply"
-    assert success_record.tool_call_id == "call-1"
     assert success_record.timing == ToolCallTiming(
         before_hooks_ms=1.111,
         approval_ms=2.222,
@@ -489,7 +487,6 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
     assert len(records) == 2
     assert records[0]["success"] is True
     assert records[0]["reply_to_event_id"] == "$reply"
-    assert records[0]["tool_call_id"] == "call-1"
     assert records[0]["timing"] == {
         "approval_ms": 2.22,
         "before_hooks_ms": 1.11,
@@ -500,8 +497,55 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
     assert records[1]["success"] is False
     assert records[1]["reply_to_event_id"] == "$reply"
     assert records[1]["error_type"] == "RuntimeError"
+    assert "timing" not in records[1]
     for key in ("agent_name", "channel", "room_id", "thread_id", "requester_id", "session_id", "correlation_id"):
         assert records[0][key] == records[1][key]
+
+
+def test_tool_call_records_omit_timing_when_none(tmp_path: Path) -> None:
+    """Tool-call rows should omit timing when no phases were measured."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    log_path = tracking_dir(runtime_paths) / "tool_calls.jsonl"
+
+    success_record = record_tool_success(
+        tool_name="echo",
+        arguments={},
+        result="ok",
+        duration_ms=1.0,
+        timing=None,
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$resolved-thread",
+        reply_to_event_id="$reply-success",
+        requester_id="@user:localhost",
+        session_id="session-1",
+        correlation_id="corr-no-timing",
+        execution_identity=_execution_identity(),
+        runtime_paths=runtime_paths,
+    )
+    failure_record = record_tool_failure(
+        tool_name="explode",
+        arguments={},
+        error=RuntimeError("boom"),
+        duration_ms=2.0,
+        timing=None,
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$resolved-thread",
+        reply_to_event_id="$reply-failure",
+        requester_id="@user:localhost",
+        session_id="session-1",
+        correlation_id="corr-no-timing",
+        execution_identity=_execution_identity(),
+        runtime_paths=runtime_paths,
+    )
+
+    assert "timing" not in success_record.as_dict()
+    assert "timing" not in failure_record.as_dict()
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert len(records) == 2
+    assert all("timing" not in record for record in records)
 
 
 def test_record_tool_failure_logs_secondary_write_errors(tmp_path: Path) -> None:

@@ -42,7 +42,6 @@ class _ToolCallRecordDict(TypedDict, total=False):
 
     timestamp: str
     tool_name: str
-    tool_call_id: str
     agent_name: str | None
     channel: str | None
     room_id: str | None
@@ -87,7 +86,6 @@ class _ToolCallRecord:
 
     timestamp: str
     tool_name: str
-    tool_call_id: str | None
     agent_name: str | None
     channel: str | None
     room_id: str | None
@@ -116,8 +114,6 @@ class _ToolCallRecord:
             "arguments": self.arguments,
             "success": self.success,
         }
-        if self.tool_call_id is not None:
-            record["tool_call_id"] = self.tool_call_id
         context_fields: dict[str, str | None] = {
             "agent_name": self.agent_name,
             "channel": self.channel,
@@ -193,7 +189,6 @@ def _build_tool_failure_record(
     arguments: dict[str, object],
     error: BaseException,
     duration_ms: float,
-    tool_call_id: str | None = None,
     timing: ToolCallTiming | None = None,
     agent_name: str | None,
     channel: str | None,
@@ -208,7 +203,6 @@ def _build_tool_failure_record(
     return _ToolCallRecord(
         timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         tool_name=tool_name,
-        tool_call_id=tool_call_id,
         agent_name=agent_name,
         channel=channel,
         room_id=room_id,
@@ -233,7 +227,6 @@ def _build_tool_success_record(
     arguments: dict[str, object],
     result: object,
     duration_ms: float,
-    tool_call_id: str | None = None,
     timing: ToolCallTiming | None = None,
     agent_name: str | None,
     channel: str | None,
@@ -248,7 +241,6 @@ def _build_tool_success_record(
     return _ToolCallRecord(
         timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         tool_name=tool_name,
-        tool_call_id=tool_call_id,
         agent_name=agent_name,
         channel=channel,
         room_id=room_id,
@@ -303,7 +295,6 @@ def record_tool_failure(
     arguments: dict[str, object],
     error: BaseException,
     duration_ms: float,
-    tool_call_id: str | None = None,
     timing: ToolCallTiming | None = None,
     agent_name: str | None,
     room_id: str | None,
@@ -321,7 +312,6 @@ def record_tool_failure(
         arguments=arguments,
         error=error,
         duration_ms=duration_ms,
-        tool_call_id=tool_call_id,
         timing=timing,
         agent_name=agent_name,
         channel=execution_identity.channel if execution_identity is not None else None,
@@ -356,7 +346,6 @@ def record_tool_success(
     arguments: dict[str, object],
     result: object,
     duration_ms: float,
-    tool_call_id: str | None = None,
     timing: ToolCallTiming | None = None,
     agent_name: str | None,
     room_id: str | None,
@@ -374,7 +363,6 @@ def record_tool_success(
         arguments=arguments,
         result=result,
         duration_ms=duration_ms,
-        tool_call_id=tool_call_id,
         timing=timing,
         agent_name=agent_name,
         channel=execution_identity.channel if execution_identity is not None else None,

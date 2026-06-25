@@ -587,6 +587,7 @@ class _ToolBridgeTiming:
     after_hooks_ms: float | None = None
 
     def record_timing(self) -> ToolCallTiming:
+        """Return phases persisted to tool_calls.jsonl; after hooks stay debug-event only."""
         return ToolCallTiming(
             before_hooks_ms=self.before_hooks_ms,
             approval_ms=self.approval_ms,
@@ -595,7 +596,7 @@ class _ToolBridgeTiming:
         )
 
     def mark_result_ready(self) -> float:
-        duration_ms = (time.perf_counter() - self.started_at) * 1000
+        duration_ms = elapsed_ms_since(self.started_at, clock=time.perf_counter, ndigits=2)
         self.result_ready_ms = duration_ms
         return duration_ms
 
