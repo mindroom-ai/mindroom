@@ -250,6 +250,13 @@ def test_update_todo_validates_before_mutating_and_can_clear_dependencies(tmp_pa
     assert unchanged["items"][1]["title"] == "Child"  # type: ignore[index]
 
     with tool_runtime_context(_tool_context(config)):
+        blank_title_result = tool.update_todo(agent=MagicMock(), todo_id=child_id, title="   ")
+
+    assert blank_title_result == "Title cannot be empty."
+    unchanged = _read_todos(config)
+    assert unchanged["items"][1]["title"] == "Child"  # type: ignore[index]
+
+    with tool_runtime_context(_tool_context(config)):
         set_result = tool.update_todo(agent=MagicMock(), todo_id=child_id, depends_on=root_id)
         clear_result = tool.update_todo(agent=MagicMock(), todo_id=child_id, depends_on="")
 

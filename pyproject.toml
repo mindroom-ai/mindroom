@@ -451,7 +451,6 @@ dev = [
 packages = [ "src/mindroom" ]
 [tool.hatch.build.targets.wheel.force-include]
 skills = "mindroom/_bundled_skills"
-"src/mindroom/custom_tools/todo_templates" = "mindroom/custom_tools/todo_templates"
 [tool.hatch.build.targets.wheel.hooks.custom]
 [tool.hatch.version]
 source = "vcs"

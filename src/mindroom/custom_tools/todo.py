@@ -862,6 +862,9 @@ class TodoTools(Toolkit):
             unknown_agent = _unknown_assigned_agent_message(assigned_agent.strip(), _configured_agent_names())
             if unknown_agent is not None:
                 return unknown_agent
+        clean_title = title.strip() if title else ""
+        if title and not clean_title:
+            return "Title cannot be empty."
 
         def do_update(data: dict[str, Any]) -> str:  # noqa: C901, PLR0912
             _ensure_thread_state(data, room_id, thread_id)
@@ -882,9 +885,9 @@ class TodoTools(Toolkit):
                         return f"Adding dependency `{dep_id}` would create a cycle."
 
             changes: list[str] = []
-            if title:
-                item["title"] = title
-                changes.append(f"title='{title}'")
+            if clean_title:
+                item["title"] = clean_title
+                changes.append(f"title='{clean_title}'")
             if priority:
                 item["priority"] = priority.lower()
                 changes.append(f"priority={priority.lower()}")
