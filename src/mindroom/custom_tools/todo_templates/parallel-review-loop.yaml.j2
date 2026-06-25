@@ -15,9 +15,9 @@ todos:
   - title: "Triage review findings into real blockers, scoped improvements, and rejected noise"
     depends_on: [3]
     priority: high
-  - title: "If changes are required, send triaged findings to implementer and wait for a new revision"
+  - title: "If all {{ N_REVIEWERS }} reviewers approve the same current revision, mark this branch done; otherwise send triaged findings to implementer and wait for a new revision"
     depends_on: [4]
-  - title: "Rerun reviewer round when a new revision exists"
+  - title: "If step 5 produced a new revision, rerun reviewer round; otherwise mark complete immediately as no-op because step 5 was unanimous approve"
     depends_on: [5]
   - title: "Mark review loop complete only after all reviewers approve the same current revision"
     depends_on: [6]

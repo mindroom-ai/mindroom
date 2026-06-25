@@ -300,6 +300,27 @@ def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
     assert any(item["depends_on"] for item in items)
 
 
+def test_parallel_review_loop_template_allows_unanimous_approval_exit(tmp_path: Path) -> None:
+    """The review-loop template should not force a rerun after first-round approval."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.apply_template(
+            agent=MagicMock(),
+            name="parallel-review-loop",
+            params={"N_REVIEWERS": 8},
+        )
+
+    items = _read_todos(config)["items"]
+    rerun_or_noop = next(item for item in items if "mark complete immediately as no-op" in item["title"])
+    final_gate = items[-1]
+
+    assert "unanimous approve" in rerun_or_noop["title"]
+    assert "same current revision" in final_gate["title"]
+    assert final_gate["depends_on"] == [rerun_or_noop["id"]]
+
+
 def test_workspace_template_root_symlink_escape_is_rejected(tmp_path: Path) -> None:
     """Workspace template discovery should fail closed if the template dir escapes the workspace."""
     config = _config(tmp_path)
