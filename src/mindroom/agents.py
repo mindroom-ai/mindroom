@@ -690,6 +690,13 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 agent_name,
             )
             return None
+        hidden_tool_names = _openai_compat_hidden_toolkits(execution_identity)
+        if not _visible_deferred_tool_names(config, agent_name, hidden_tool_names=hidden_tool_names):
+            logger.warning(
+                "Skipping 'dynamic_tools' tool for agent '%s': no compatible deferred tools are available",
+                agent_name,
+            )
+            return None
         if session_id is None:
             logger.warning(
                 "Skipping 'dynamic_tools' tool for agent '%s': no stable session_id is available",
@@ -702,6 +709,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 config=config,
                 session_id=session_id,
                 stop_after_tool_call=dynamic_tool_continuation,
+                hidden_tool_names=hidden_tool_names,
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
@@ -773,6 +781,25 @@ def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) ->
     return learning is not False
 
 
+def _openai_compat_hidden_toolkits(execution_identity: ToolExecutionIdentity | None) -> frozenset[str]:
+    if execution_identity is None or execution_identity.channel != "openai_compat":
+        return frozenset()
+    return _OPENAI_COMPAT_CONTEXT_BOUND_TOOLKITS
+
+
+def _visible_deferred_tool_names(
+    config: Config,
+    agent_name: str,
+    *,
+    hidden_tool_names: frozenset[str] = frozenset(),
+) -> list[str]:
+    return [
+        entry.name
+        for entry in config.get_agent_authored_deferred_tool_configs(agent_name)
+        if entry.name not in hidden_tool_names
+    ]
+
+
 def _resolve_agent_learning(
     agent_config: AgentConfig,
     defaults: DefaultsConfig,
@@ -797,13 +824,22 @@ def _build_dynamic_tooling_instruction_block(
     agent_name: str,
     *,
     enable_dynamic_tools_manager: bool,
+    hidden_tool_names: frozenset[str] = frozenset(),
 ) -> str | None:
     """Return static prompt guidance for per-tool dynamic loading."""
     if not enable_dynamic_tools_manager or not has_deferred_tools(config, agent_name):
         return None
 
     catalog_lines: list[str] = []
-    for entry in deferred_tool_catalog_entries(agent_name=agent_name, config=config, loaded_tools=[]):
+    deferred_entries = [
+        entry
+        for entry in deferred_tool_catalog_entries(agent_name=agent_name, config=config, loaded_tools=[])
+        if entry.name not in hidden_tool_names
+    ]
+    if not deferred_entries:
+        return None
+
+    for entry in deferred_entries:
         description = entry.description.strip()
         if description:
             catalog_lines.append(f"{entry.name} - {description}")
@@ -822,15 +858,21 @@ def _build_dynamic_tooling_state_suffix(
     *,
     loaded_tools: tuple[str, ...],
     enable_dynamic_tools_manager: bool,
+    hidden_tool_names: frozenset[str] = frozenset(),
 ) -> str | None:
     """Return the small volatile dynamic-tool state suffix for the final instruction slot."""
     if not enable_dynamic_tools_manager or not has_deferred_tools(config, agent_name):
         return None
+    if not _visible_deferred_tool_names(config, agent_name, hidden_tool_names=hidden_tool_names):
+        return None
 
     initial_tools = [
-        entry.name for entry in config.get_agent_authored_deferred_tool_configs(agent_name) if entry.initial
+        entry.name
+        for entry in config.get_agent_authored_deferred_tool_configs(agent_name)
+        if entry.initial and entry.name not in hidden_tool_names
     ]
-    current_tools = ", ".join(loaded_tools) if loaded_tools else "(none)"
+    visible_loaded_tools = tuple(tool_name for tool_name in loaded_tools if tool_name not in hidden_tool_names)
+    current_tools = ", ".join(visible_loaded_tools) if visible_loaded_tools else "(none)"
     sticky_tools = ", ".join(initial_tools) if initial_tools else "(none)"
     return "\n".join(
         (
@@ -1240,6 +1282,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         session_id=session_id,
         delegation_depth=delegation_depth,
     )
+    openai_compat_hidden_toolkits = _openai_compat_hidden_toolkits(execution_identity)
     resolved_tool_configs = {
         entry.name: entry.tool_config_overrides for entry in dynamic_tool_selection.runtime_tool_configs
     }
@@ -1251,11 +1294,19 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             for tool_name, overrides in resolved_tool_configs.items()
             if tool_name not in disabled_tool_names
         }
+    if openai_compat_hidden_toolkits:
+        resolved_tool_configs = {
+            tool_name: overrides
+            for tool_name, overrides in resolved_tool_configs.items()
+            if tool_name not in openai_compat_hidden_toolkits
+        }
     loaded_tools = (
         ()
         if disable_runtime_capabilities
         else tuple(
-            tool_name for tool_name in dynamic_tool_selection.loaded_tools if tool_name not in disabled_tool_names
+            tool_name
+            for tool_name in dynamic_tool_selection.loaded_tools
+            if tool_name not in disabled_tool_names and tool_name not in openai_compat_hidden_toolkits
         )
     )
     with agent_create_timing("resolve_worker_tools"):
@@ -1387,6 +1438,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             config,
             agent_name,
             enable_dynamic_tools_manager=session_id is not None,
+            hidden_tool_names=openai_compat_hidden_toolkits,
         )
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
@@ -1416,6 +1468,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             agent_name,
             loaded_tools=loaded_tools,
             enable_dynamic_tools_manager=session_id is not None,
+            hidden_tool_names=openai_compat_hidden_toolkits,
         )
     if dynamic_tooling_state_suffix is not None:
         instructions.append(dynamic_tooling_state_suffix)

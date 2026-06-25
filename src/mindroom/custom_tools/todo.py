@@ -142,6 +142,17 @@ class _ExpandedTemplateIndex:
     terminals: tuple[int, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _NoWriteResult:
+    """Mutation result that should not persist a state file."""
+
+    value: Any
+
+
+def _no_write(value: _T) -> _NoWriteResult:
+    return _NoWriteResult(value)
+
+
 def _safe_slug(value: str) -> str:
     return re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9]", "_", value)).strip("_")
 
@@ -170,6 +181,9 @@ def _lock_path(path: Path) -> Path:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+
     lock_path = _lock_path(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
@@ -182,7 +196,7 @@ def _read_json(path: Path) -> dict[str, Any]:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def _locked_update_json(path: Path, mutate: Callable[[dict[str, Any]], _T]) -> _T:
+def _locked_update_json(path: Path, mutate: Callable[[dict[str, Any]], _T | _NoWriteResult]) -> _T:
     lock_path = _lock_path(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
@@ -191,6 +205,8 @@ def _locked_update_json(path: Path, mutate: Callable[[dict[str, Any]], _T]) -> _
             path.parent.mkdir(parents=True, exist_ok=True)
             data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
             result = mutate(data)
+            if isinstance(result, _NoWriteResult):
+                return result.value
             temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
             temp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             temp_path.replace(path)
@@ -200,9 +216,7 @@ def _locked_update_json(path: Path, mutate: Callable[[dict[str, Any]], _T]) -> _
 
 
 def _state_root(runtime_paths: RuntimePaths) -> Path:
-    path = runtime_paths.storage_root / "todo"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return runtime_paths.storage_root / "todo"
 
 
 def _todos_path(state_root: Path, room_id: str, thread_id: str | None) -> Path:
@@ -285,19 +299,23 @@ def _template_path(name: str, template_dir: Path | None = None) -> Path:
     return path
 
 
-def _current_agent_workspace_root() -> Path | None:
+def _current_agent_workspace_root(agent: Agent | Team | None = None) -> Path | None:
     ctx = get_tool_runtime_context()
     if ctx is None:
         return None
 
-    agent_config = ctx.config.agents.get(ctx.agent_name)
+    agent_name = ctx.agent_name
+    if isinstance(agent, Agent) and agent.name in ctx.config.agents:
+        agent_name = agent.name
+
+    agent_config = ctx.config.agents.get(agent_name)
     if agent_config is None:
         return None
 
     if agent_config.private is not None:
         execution_identity = build_execution_identity_from_runtime_context(ctx)
         agent_runtime = resolve_agent_runtime(
-            ctx.agent_name,
+            agent_name,
             ctx.config,
             ctx.runtime_paths,
             execution_identity=execution_identity,
@@ -307,12 +325,12 @@ def _current_agent_workspace_root() -> Path | None:
             return None
         return agent_runtime.workspace.root
 
-    return agent_workspace_root_path(ctx.runtime_paths.storage_root, ctx.agent_name)
+    return agent_workspace_root_path(ctx.runtime_paths.storage_root, agent_name)
 
 
-def _visible_template_roots() -> tuple[_TemplateRoot, ...]:
+def _visible_template_roots(agent: Agent | Team | None = None) -> tuple[_TemplateRoot, ...]:
     roots: list[_TemplateRoot] = []
-    workspace_root = _current_agent_workspace_root()
+    workspace_root = _current_agent_workspace_root(agent)
     if workspace_root is not None:
         resolved_workspace_root = workspace_root.resolve()
         workspace_template_root = (resolved_workspace_root / _WORKSPACE_TEMPLATE_RELATIVE_DIR).resolve()
@@ -729,12 +747,12 @@ class TodoTools(Toolkit):
         if unknown_agent is not None:
             return unknown_agent
 
-        def create_item(data: dict[str, Any]) -> dict[str, Any] | str:
+        def create_item(data: dict[str, Any]) -> dict[str, Any] | str | _NoWriteResult:
             _ensure_thread_state(data, room_id, thread_id)
             items_by_id = {item["id"]: item for item in data["items"]}
             for dep_id in dep_ids:
                 if dep_id not in items_by_id:
-                    return f"Dependency `{dep_id}` not found."
+                    return _no_write(f"Dependency `{dep_id}` not found.")
 
             existing_ids = {item["id"] for item in data["items"]}
             new_id = _short_id(existing_ids)
@@ -755,11 +773,14 @@ class TodoTools(Toolkit):
             items_by_id[new_id] = item
             for dep_id in dep_ids:
                 if _would_create_cycle(items_by_id, new_id, dep_id):
-                    return f"Adding dependency `{dep_id}` would create a cycle."
+                    return _no_write(f"Adding dependency `{dep_id}` would create a cycle.")
 
             data["items"].append(item)
             data["updated_at"] = now
             return item
+
+        if dep_ids and not path.exists():
+            return f"Dependency `{dep_ids[0]}` not found."
 
         result = _locked_update_json(path, create_item)
         if isinstance(result, str):
@@ -778,13 +799,15 @@ class TodoTools(Toolkit):
         del agent
         state_root, room_id, thread_id, _agent_name = _current_scope()
         path = _todos_path(state_root, room_id, thread_id)
+        if not path.exists():
+            return f"Todo `{todo_id}` not found."
 
-        def mark_done(data: dict[str, Any]) -> str:
+        def mark_done(data: dict[str, Any]) -> str | _NoWriteResult:
             _ensure_thread_state(data, room_id, thread_id)
             for item in data["items"]:
                 if item["id"] == todo_id:
                     if item["status"] in _TERMINAL_STATUSES:
-                        return f"Item `{todo_id}` is already {item['status']}."
+                        return _no_write(f"Item `{todo_id}` is already {item['status']}.")
                     item["status"] = "done"
                     item["completed_at"] = _now_iso()
                     item["updated_at"] = _now_iso()
@@ -797,7 +820,7 @@ class TodoTools(Toolkit):
                         )
                         message += f"\nNow unblocked: {names}"
                     return message
-            return f"Todo `{todo_id}` not found."
+            return _no_write(f"Todo `{todo_id}` not found.")
 
         return _locked_update_json(path, mark_done)
 
@@ -870,12 +893,14 @@ class TodoTools(Toolkit):
         clean_title = title.strip() if title else ""
         if title and not clean_title:
             return "Title cannot be empty."
+        if not path.exists():
+            return f"Todo `{todo_id}` not found."
 
-        def do_update(data: dict[str, Any]) -> str:  # noqa: C901, PLR0912
+        def do_update(data: dict[str, Any]) -> str | _NoWriteResult:  # noqa: C901, PLR0912
             _ensure_thread_state(data, room_id, thread_id)
             items_by_id = {item["id"]: item for item in data["items"]}
             if todo_id not in items_by_id:
-                return f"Todo `{todo_id}` not found."
+                return _no_write(f"Todo `{todo_id}` not found.")
 
             item = items_by_id[todo_id]
             dep_ids: list[str] | None = None
@@ -883,11 +908,11 @@ class TodoTools(Toolkit):
                 dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()]
                 for dep_id in dep_ids:
                     if dep_id not in items_by_id:
-                        return f"Dependency `{dep_id}` not found."
+                        return _no_write(f"Dependency `{dep_id}` not found.")
                     if dep_id == todo_id:
-                        return "Cannot depend on itself."
+                        return _no_write("Cannot depend on itself.")
                     if _would_create_cycle(items_by_id, todo_id, dep_id):
-                        return f"Adding dependency `{dep_id}` would create a cycle."
+                        return _no_write(f"Adding dependency `{dep_id}` would create a cycle.")
 
             changes: list[str] = []
             if clean_title:
@@ -908,7 +933,7 @@ class TodoTools(Toolkit):
                 item["assigned_agent"] = assigned_agent.strip()
                 changes.append(f"assigned={assigned_agent.strip()}")
             if not changes:
-                return "No fields to update."
+                return _no_write("No fields to update.")
 
             item["updated_at"] = _now_iso()
             data["updated_at"] = _now_iso()
@@ -932,7 +957,7 @@ class TodoTools(Toolkit):
         dry_run: bool = False,
     ) -> str:
         """Apply a named todo template to the current thread's work plan."""
-        template_roots = _visible_template_roots()
+        template_roots = _visible_template_roots(agent)
         rendered_template = _render_template_definition(name, params, template_roots=template_roots)
         if dry_run:
             return _format_template_preview(
@@ -991,10 +1016,9 @@ class TodoTools(Toolkit):
 
     def list_templates(self, agent: Agent | Team) -> str:
         """List available todo templates."""
-        del agent
         templates: list[dict[str, Any]] = []
         seen_names: set[str] = set()
-        for template_root in _visible_template_roots():
+        for template_root in _visible_template_roots(agent):
             templates_root = template_root.path.resolve()
             if not templates_root.is_dir():
                 continue

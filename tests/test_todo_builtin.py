@@ -349,6 +349,57 @@ todos:
     assert "Custom workspace" in result
 
 
+def test_team_member_context_uses_member_workspace_templates(tmp_path: Path) -> None:
+    """Team member calls should resolve workspace templates from the member agent, not the team context."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    member_agent = AgnoAgent(name="code")
+    _write_workspace_template(
+        config,
+        "team-member-template",
+        """name: team-member-template
+version: "1"
+description: Member workspace template.
+todos:
+  - title: Member workspace task
+""",
+    )
+
+    with tool_runtime_context(_tool_context(config, agent_name="dev_team")):
+        listing = tool.list_templates(agent=member_agent)
+        result = tool.apply_template(
+            agent=member_agent,
+            name="team-member-template",
+            params={},
+        )
+
+    assert "| `workspace` | `team-member-template` | `1` | Member workspace template. | - |" in listing
+    assert "Applied template `team-member-template`" in result
+    state = _read_todos(config)
+    assert state["items"][0]["title"] == "Member workspace task"  # type: ignore[index]
+    assert state["items"][0]["assigned_agent"] == "code"  # type: ignore[index]
+
+
+def test_missing_todo_read_and_error_paths_do_not_create_thread_state(tmp_path: Path) -> None:
+    """Read-only and missing-item failures should not create empty per-thread state files."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    path = _todos_path(config, room_id="!room:localhost", thread_id="$thread-root")
+
+    with tool_runtime_context(_tool_context(config)):
+        list_result = tool.list_todos(agent=MagicMock())
+        complete_result = tool.complete_todo(agent=MagicMock(), todo_id="missing")
+        update_result = tool.update_todo(agent=MagicMock(), todo_id="missing", title="Still missing")
+        add_result = tool.add_todo(agent=MagicMock(), title="Blocked item", depends_on="missing")
+
+    assert list_result == "No items in this thread's work plan."
+    assert complete_result == "Todo `missing` not found."
+    assert update_result == "Todo `missing` not found."
+    assert add_result == "Dependency `missing` not found."
+    assert not path.exists()
+    assert not path.parent.exists()
+
+
 def test_template_includes_depend_on_all_roots_and_unblock_after_all_terminals(tmp_path: Path) -> None:
     """Nested templates should preserve multi-root and multi-leaf dependency boundaries."""
     config = _config(tmp_path)
