@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.team.team import Team as AgnoTeam
 
@@ -73,8 +74,12 @@ def _read_todos(
     return json.loads(_todos_path(config, room_id=room_id, thread_id=thread_id).read_text(encoding="utf-8"))
 
 
+def _workspace_template_dir(config: Config) -> Path:
+    return runtime_paths_for(config).storage_root / "agents" / "code" / "workspace" / "todo" / "templates"
+
+
 def _write_workspace_template(config: Config, name: str, text: str) -> None:
-    template_dir = runtime_paths_for(config).storage_root / "agents" / "code" / "workspace" / "todo" / "templates"
+    template_dir = _workspace_template_dir(config)
     template_dir.mkdir(parents=True, exist_ok=True)
     (template_dir / f"{name}.yaml.j2").write_text(text, encoding="utf-8")
 
@@ -293,6 +298,55 @@ def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
     items = state["items"]
     assert len(items) > 1
     assert any(item["depends_on"] for item in items)
+
+
+def test_workspace_template_root_symlink_escape_is_rejected(tmp_path: Path) -> None:
+    """Workspace template discovery should fail closed if the template dir escapes the workspace."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    outside = tmp_path / "outside-templates"
+    outside.mkdir()
+    template_dir = _workspace_template_dir(config)
+    template_dir.parent.mkdir(parents=True, exist_ok=True)
+    template_dir.symlink_to(outside, target_is_directory=True)
+
+    with tool_runtime_context(_tool_context(config)), pytest.raises(ValueError, match="escapes workspace"):
+        tool.list_templates(agent=MagicMock())
+
+
+def test_workspace_template_shadow_uses_workspace_params_schema(tmp_path: Path) -> None:
+    """A workspace template that shadows a built-in name should not inherit the built-in schema."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "mindroom-dev",
+        """name: mindroom-dev
+version: "custom"
+description: Custom workspace shadow.
+todos:
+  - title: Custom {{ CUSTOM }}
+""",
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=MagicMock())
+        preview = tool.apply_template(
+            agent=MagicMock(),
+            name="mindroom-dev",
+            params={"CUSTOM": "workspace"},
+            dry_run=True,
+        )
+        result = tool.apply_template(
+            agent=MagicMock(),
+            name="mindroom-dev",
+            params={"CUSTOM": "workspace"},
+        )
+
+    assert "| `workspace` | `mindroom-dev` | `custom` | Custom workspace shadow. | - |" in listing
+    assert "ISSUE_REF" not in listing
+    assert "Custom workspace" in preview
+    assert "Custom workspace" in result
 
 
 def test_template_includes_depend_on_all_roots_and_unblock_after_all_terminals(tmp_path: Path) -> None:

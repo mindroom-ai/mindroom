@@ -448,6 +448,61 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
     assert "kill_shell_command" in exposed_tool_names
 
 
+def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -> None:
+    """OpenAI-compatible agent construction should hide Matrix-context-bound todo tools."""
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    config = Config(
+        agents={
+            "code": AgentConfig(
+                display_name="CodeAgent",
+                role="Generate code and manage files",
+                tools=["todo"],
+                rooms=[],
+            ),
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+    )
+    persist_entity_accounts(config, runtime_paths)
+    execution_identity = build_tool_execution_identity(
+        channel="openai_compat",
+        agent_name="code",
+        runtime_paths=runtime_paths,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="openai-session",
+    )
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+        agent = create_agent(
+            "code",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            include_openai_compat_guidance=True,
+        )
+
+    exposed_tool_names = {
+        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "functions", {})),
+        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "async_functions", {})),
+    }
+    assert "todo" not in {toolkit.name for toolkit in agent.tools}
+    assert (
+        not {
+            "add_todo",
+            "apply_template",
+            "complete_todo",
+            "list_templates",
+            "list_todos",
+            "plan",
+            "update_todo",
+        }
+        & exposed_tool_names
+    )
+
+
 def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, tmp_path: Path) -> None:
     """Script-based approval rules should also hide matching /v1 tools."""
     runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})

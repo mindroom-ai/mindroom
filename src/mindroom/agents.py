@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)
+_OPENAI_COMPAT_CONTEXT_BOUND_TOOLKITS = frozenset({"todo"})
 
 _DEFAULT_MIND_AGENT_NAME = "mind"
 _DEFAULT_MIND_CONTEXT_FILES = (
@@ -993,15 +994,18 @@ def _build_agent_tool_hook_bridge(
     )
 
 
-def _prune_openai_approval_gated_tools(
+def _prune_openai_incompatible_tools(
     toolkit: Toolkit,
     *,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
 ) -> Toolkit | None:
-    """Hide approval-gated tool functions from OpenAI-compatible agents."""
+    """Hide tools from OpenAI-compatible agents when `/v1` cannot run them."""
     if execution_identity is None or execution_identity.channel != "openai_compat":
         return toolkit
+
+    if toolkit.name in _OPENAI_COMPAT_CONTEXT_BOUND_TOOLKITS:
+        return None
 
     hidden_tool_names = {
         tool_name
@@ -1284,7 +1288,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                     dynamic_tool_continuation=dynamic_tool_continuation,
                 )
             if toolkit:
-                toolkit = _prune_openai_approval_gated_tools(
+                toolkit = _prune_openai_incompatible_tools(
                     toolkit,
                     config=config,
                     execution_identity=execution_identity,

@@ -314,7 +314,12 @@ def _visible_template_roots() -> tuple[_TemplateRoot, ...]:
     roots: list[_TemplateRoot] = []
     workspace_root = _current_agent_workspace_root()
     if workspace_root is not None:
-        roots.append(_TemplateRoot(path=workspace_root / _WORKSPACE_TEMPLATE_RELATIVE_DIR, source="workspace"))
+        resolved_workspace_root = workspace_root.resolve()
+        workspace_template_root = (resolved_workspace_root / _WORKSPACE_TEMPLATE_RELATIVE_DIR).resolve()
+        if not workspace_template_root.is_relative_to(resolved_workspace_root):
+            msg = "Workspace todo template directory escapes workspace"
+            raise ValueError(msg)
+        roots.append(_TemplateRoot(path=workspace_template_root, source="workspace"))
     roots.append(_TemplateRoot(path=_templates_dir(), source="builtin"))
     return tuple(roots)
 
@@ -450,11 +455,11 @@ def _render_template_definition(
         msg = f"Template recursion depth exceeded while expanding '{name}'"
         raise ValueError(msg)
 
-    path, _template_root = _resolve_template_path(name, template_roots)
+    path, template_root = _resolve_template_path(name, template_roots)
     raw_text = path.read_text(encoding="utf-8")
     raw_template = _load_template_document(path, raw_text)
     _validate_template_document(raw_template, path)
-    schema = _PARAMS_SCHEMAS.get(name)
+    schema = _PARAMS_SCHEMAS.get(name) if template_root.source == "builtin" else None
     if schema is None:
         resolved_params = dict(params)
     else:
@@ -1002,7 +1007,7 @@ class TodoTools(Toolkit):
                 if metadata["name"] in seen_names:
                     continue
                 seen_names.add(metadata["name"])
-                schema = _PARAMS_SCHEMAS.get(metadata["name"])
+                schema = _PARAMS_SCHEMAS.get(metadata["name"]) if template_root.source == "builtin" else None
                 templates.append(
                     {
                         "source": template_root.source,
