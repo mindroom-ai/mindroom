@@ -502,12 +502,12 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
         assert records[0][key] == records[1][key]
 
 
-def test_tool_call_records_omit_timing_when_none(tmp_path: Path) -> None:
+def test_tool_call_records_omit_timing_without_measured_phases(tmp_path: Path) -> None:
     """Tool-call rows should omit timing when no phases were measured."""
     runtime_paths = test_runtime_paths(tmp_path)
     log_path = tracking_dir(runtime_paths) / "tool_calls.jsonl"
 
-    success_record = record_tool_success(
+    none_success_record = record_tool_success(
         tool_name="echo",
         arguments={},
         result="ok",
@@ -523,7 +523,7 @@ def test_tool_call_records_omit_timing_when_none(tmp_path: Path) -> None:
         execution_identity=_execution_identity(),
         runtime_paths=runtime_paths,
     )
-    failure_record = record_tool_failure(
+    none_failure_record = record_tool_failure(
         tool_name="explode",
         arguments={},
         error=RuntimeError("boom"),
@@ -539,12 +539,46 @@ def test_tool_call_records_omit_timing_when_none(tmp_path: Path) -> None:
         execution_identity=_execution_identity(),
         runtime_paths=runtime_paths,
     )
+    empty_success_record = record_tool_success(
+        tool_name="empty-timing",
+        arguments={},
+        result="ok",
+        duration_ms=3.0,
+        timing=ToolCallTiming(),
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$resolved-thread",
+        reply_to_event_id="$reply-empty-success",
+        requester_id="@user:localhost",
+        session_id="session-1",
+        correlation_id="corr-empty-timing",
+        execution_identity=_execution_identity(),
+        runtime_paths=runtime_paths,
+    )
+    empty_failure_record = record_tool_failure(
+        tool_name="empty-timing-failure",
+        arguments={},
+        error=RuntimeError("boom"),
+        duration_ms=4.0,
+        timing=ToolCallTiming(),
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$resolved-thread",
+        reply_to_event_id="$reply-empty-failure",
+        requester_id="@user:localhost",
+        session_id="session-1",
+        correlation_id="corr-empty-timing",
+        execution_identity=_execution_identity(),
+        runtime_paths=runtime_paths,
+    )
 
-    assert "timing" not in success_record.as_dict()
-    assert "timing" not in failure_record.as_dict()
+    assert "timing" not in none_success_record.as_dict()
+    assert "timing" not in none_failure_record.as_dict()
+    assert "timing" not in empty_success_record.as_dict()
+    assert "timing" not in empty_failure_record.as_dict()
 
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
-    assert len(records) == 2
+    assert len(records) == 4
     assert all("timing" not in record for record in records)
 
 
