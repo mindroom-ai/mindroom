@@ -13,8 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import yaml
-from agno.agent import Agent  # noqa: TC002 - Agno inspects this runtime annotation.
-from agno.team.team import Team  # noqa: TC002 - Agno inspects this runtime annotation.
+from agno.agent import Agent
 from agno.tools import Toolkit
 from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError
 from jinja2.sandbox import SandboxedEnvironment, SecurityError
@@ -26,6 +25,8 @@ from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+
+    from agno.team.team import Team
 
     from mindroom.constants import RuntimePaths
 
@@ -603,10 +604,19 @@ def _configured_agent_names() -> set[str]:
 
 
 def _unknown_assigned_agent_message(agent_name: str, configured: set[str]) -> str | None:
-    if configured and agent_name not in configured:
+    if agent_name and configured and agent_name not in configured:
         available = ", ".join(sorted(configured)) or "none"
         return f"Unknown agent '{agent_name}'. Available: {available}"
     return None
+
+
+def _default_assignee(agent: Agent | Team, context_agent_name: str) -> str:
+    configured = _configured_agent_names()
+    if isinstance(agent, Agent) and agent.name in configured:
+        return agent.name
+    if context_agent_name in configured:
+        return context_agent_name
+    return ""
 
 
 class TodoTools(Toolkit):
@@ -634,8 +644,8 @@ class TodoTools(Toolkit):
 
     def plan(self, agent: Agent | Team, tasks: str) -> str:
         """Create a multi-step work plan for the current thread."""
-        del agent
         state_root, room_id, thread_id, agent_name = _current_scope()
+        assigned_agent = _default_assignee(agent, agent_name)
         path = _todos_path(state_root, room_id, thread_id)
 
         lines = [line.strip() for line in tasks.strip().splitlines() if line.strip()]
@@ -672,7 +682,7 @@ class TodoTools(Toolkit):
                     "status": "open",
                     "priority": priority,
                     "depends_on": [],
-                    "assigned_agent": agent_name,
+                    "assigned_agent": assigned_agent,
                     "event_id": None,
                     "created_at": now,
                     "updated_at": now,
@@ -699,16 +709,18 @@ class TodoTools(Toolkit):
         assigned_agent: str = "",
     ) -> str:
         """Add a single todo item to the current thread's work plan."""
-        del agent
         state_root, room_id, thread_id, agent_name = _current_scope()
         path = _todos_path(state_root, room_id, thread_id)
+        clean_title = title.strip()
+        if not clean_title:
+            return "Title cannot be empty."
 
         priority = priority.lower()
         if priority not in _VALID_PRIORITIES:
             return f"Invalid priority '{priority}'. Must be: low, medium, high, critical."
 
         dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()] if depends_on else []
-        resolved_agent = assigned_agent.strip() or agent_name
+        resolved_agent = assigned_agent.strip() or _default_assignee(agent, agent_name)
         unknown_agent = _unknown_assigned_agent_message(resolved_agent, _configured_agent_names())
         if unknown_agent is not None:
             return unknown_agent
@@ -725,7 +737,7 @@ class TodoTools(Toolkit):
             now = _now_iso()
             item = {
                 "id": new_id,
-                "title": title,
+                "title": clean_title,
                 "status": "open",
                 "priority": priority,
                 "depends_on": dep_ids,
@@ -750,7 +762,7 @@ class TodoTools(Toolkit):
             return result
 
         marker = _PRIORITY_EMOJI.get(priority, "")
-        message = f"Created: {marker} `{result['id']}` **{title}** [{priority}]"
+        message = f"Created: {marker} `{result['id']}` **{clean_title}** [{priority}]"
         if dep_ids:
             message += f" (depends on {', '.join(f'`{dep_id}`' for dep_id in dep_ids)})"
         if resolved_agent:
@@ -913,7 +925,6 @@ class TodoTools(Toolkit):
         dry_run: bool = False,
     ) -> str:
         """Apply a named todo template to the current thread's work plan."""
-        del agent
         template_roots = _visible_template_roots()
         rendered_template = _render_template_definition(name, params, template_roots=template_roots)
         if dry_run:
@@ -926,9 +937,10 @@ class TodoTools(Toolkit):
 
         state_root, room_id, thread_id, agent_name = _current_scope()
         path = _todos_path(state_root, room_id, thread_id)
+        default_assignee = _default_assignee(agent, agent_name)
         configured_agents = _configured_agent_names()
         for template_todo in rendered_template["todos"]:
-            resolved_agent = template_todo.get("assigned_agent") or agent_name
+            resolved_agent = template_todo.get("assigned_agent") or default_assignee
             unknown_agent = _unknown_assigned_agent_message(resolved_agent, configured_agents)
             if unknown_agent is not None:
                 return unknown_agent
@@ -947,7 +959,7 @@ class TodoTools(Toolkit):
                     "status": "open",
                     "priority": template_todo.get("priority", "medium"),
                     "depends_on": [],
-                    "assigned_agent": template_todo.get("assigned_agent") or agent_name,
+                    "assigned_agent": template_todo.get("assigned_agent") or default_assignee,
                     "event_id": None,
                     "created_at": now,
                     "updated_at": now,

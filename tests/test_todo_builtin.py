@@ -6,6 +6,9 @@ import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
+from agno.agent import Agent as AgnoAgent
+from agno.team.team import Team as AgnoTeam
+
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -34,12 +37,13 @@ def _config(tmp_path: Path) -> Config:
 def _tool_context(
     config: Config,
     *,
+    agent_name: str = "code",
     room_id: str = "!room:localhost",
     thread_id: str | None = None,
     resolved_thread_id: str | None = "$thread-root",
 ) -> ToolRuntimeContext:
     return ToolRuntimeContext(
-        agent_name="code",
+        agent_name=agent_name,
         room_id=room_id,
         thread_id=thread_id,
         resolved_thread_id=resolved_thread_id,
@@ -125,6 +129,58 @@ def test_todo_plan_and_complete_persist_under_current_thread(tmp_path: Path) -> 
     updated = _read_todos(config)
     assert updated["items"][0]["status"] == "done"
     assert updated["items"][1]["depends_on"] == [first_id]
+
+
+def test_add_todo_rejects_empty_title(tmp_path: Path) -> None:
+    """A blank title should not create an actionable item."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+
+    with tool_runtime_context(_tool_context(config)):
+        result = tool.add_todo(agent=MagicMock(), title="   ")
+
+    assert result == "Title cannot be empty."
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+def test_todo_defaults_to_member_agent_inside_team_context(tmp_path: Path) -> None:
+    """Team-scoped calls should not use the team id as an invalid assignee."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    member_agent = AgnoAgent(name="code")
+
+    with tool_runtime_context(_tool_context(config, agent_name="dev_team")):
+        plan_result = tool.plan(agent=member_agent, tasks="Team plan")
+        add_result = tool.add_todo(agent=member_agent, title="  Team item  ")
+        template_result = tool.apply_template(
+            agent=member_agent,
+            name="mindroom-dev",
+            params={"ISSUE_REF": "ISSUE-1", "REPO": "mindroom"},
+        )
+
+    assert "Created 1 item" in plan_result
+    assert "Created" in add_result
+    assert "Applied template `mindroom-dev`" in template_result
+    state = _read_todos(config)
+    by_title = {item["title"]: item for item in state["items"]}  # type: ignore[union-attr]
+    assert by_title["Team plan"]["assigned_agent"] == "code"
+    assert by_title["Team item"]["title"] == "Team item"
+    assert by_title["Team item"]["assigned_agent"] == "code"
+    assert "dev_team" not in {item["assigned_agent"] for item in state["items"]}  # type: ignore[union-attr]
+
+
+def test_todo_team_object_default_assignee_is_unassigned(tmp_path: Path) -> None:
+    """If Agno passes the team object, the team id should not be stored as an assignee."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    team = AgnoTeam(name="dev_team", members=[AgnoAgent(name="code")])
+
+    with tool_runtime_context(_tool_context(config, agent_name="dev_team")):
+        result = tool.add_todo(agent=team, title="Team-owned item")
+
+    assert "Created" in result
+    state = _read_todos(config)
+    assert state["items"][0]["assigned_agent"] == ""  # type: ignore[index]
 
 
 def test_todo_thread_storage_keys_do_not_collide_for_similar_ids(tmp_path: Path) -> None:
