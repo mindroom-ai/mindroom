@@ -299,14 +299,25 @@ def _template_path(name: str, template_dir: Path | None = None) -> Path:
     return path
 
 
+def _agent_config_key(agent: Agent | Team | None, configured_agents: set[str]) -> str | None:
+    if not isinstance(agent, Agent):
+        return None
+    if isinstance(agent.id, str) and agent.id in configured_agents:
+        return agent.id
+    if agent.name in configured_agents:
+        return agent.name
+    return None
+
+
 def _current_agent_workspace_root(agent: Agent | Team | None = None) -> Path | None:
     ctx = get_tool_runtime_context()
     if ctx is None:
         return None
 
     agent_name = ctx.agent_name
-    if isinstance(agent, Agent) and agent.name in ctx.config.agents:
-        agent_name = agent.name
+    member_agent_name = _agent_config_key(agent, set(ctx.config.agents))
+    if member_agent_name is not None:
+        agent_name = member_agent_name
 
     agent_config = ctx.config.agents.get(agent_name)
     if agent_config is None:
@@ -634,8 +645,8 @@ def _unknown_assigned_agent_message(agent_name: str, configured: set[str]) -> st
 
 def _default_assignee(agent: Agent | Team, context_agent_name: str) -> str:
     configured = _configured_agent_names()
-    if isinstance(agent, Agent) and agent.name in configured:
-        return agent.name
+    if agent_config_key := _agent_config_key(agent, configured):
+        return agent_config_key
     if context_agent_name in configured:
         return context_agent_name
     return ""

@@ -171,7 +171,7 @@ def test_todo_defaults_to_member_agent_inside_team_context(tmp_path: Path) -> No
     """Team-scoped calls should not use the team id as an invalid assignee."""
     config = _config(tmp_path)
     tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
-    member_agent = AgnoAgent(name="code")
+    member_agent = AgnoAgent(name="Code", id="code")
 
     with tool_runtime_context(_tool_context(config, agent_name="dev_team")):
         plan_result = tool.plan(agent=member_agent, tasks="Team plan")
@@ -353,7 +353,7 @@ def test_team_member_context_uses_member_workspace_templates(tmp_path: Path) -> 
     """Team member calls should resolve workspace templates from the member agent, not the team context."""
     config = _config(tmp_path)
     tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
-    member_agent = AgnoAgent(name="code")
+    member_agent = AgnoAgent(name="Code", id="code")
     _write_workspace_template(
         config,
         "team-member-template",
