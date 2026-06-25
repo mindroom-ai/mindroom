@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.custom_tools.todo import _thread_key
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
@@ -55,10 +55,6 @@ def _tool_context(
     )
 
 
-def _thread_key(room_id: str, thread_id: str) -> str:
-    return re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9]", "_", f"{room_id}_{thread_id}")).strip("_")
-
-
 def _todos_path(config: Config, *, room_id: str, thread_id: str) -> Path:
     return runtime_paths_for(config).storage_root / "todo" / "threads" / _thread_key(room_id, thread_id) / "todos.json"
 
@@ -70,6 +66,12 @@ def _read_todos(
     thread_id: str = "$thread-root",
 ) -> dict[str, object]:
     return json.loads(_todos_path(config, room_id=room_id, thread_id=thread_id).read_text(encoding="utf-8"))
+
+
+def _write_workspace_template(config: Config, name: str, text: str) -> None:
+    template_dir = runtime_paths_for(config).storage_root / "agents" / "code" / "workspace" / "todo" / "templates"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    (template_dir / f"{name}.yaml.j2").write_text(text, encoding="utf-8")
 
 
 def test_todo_is_registered_as_builtin_tool(tmp_path: Path) -> None:
@@ -125,6 +127,63 @@ def test_todo_plan_and_complete_persist_under_current_thread(tmp_path: Path) -> 
     assert updated["items"][1]["depends_on"] == [first_id]
 
 
+def test_todo_thread_storage_keys_do_not_collide_for_similar_ids(tmp_path: Path) -> None:
+    """Matrix IDs that normalize to the same slug should still use separate state files."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    first_room = "!room-a:localhost"
+    second_room = "!room_a:localhost"
+
+    assert _todos_path(config, room_id=first_room, thread_id="$thread-root") != _todos_path(
+        config,
+        room_id=second_room,
+        thread_id="$thread-root",
+    )
+
+    with tool_runtime_context(_tool_context(config, room_id=first_room)):
+        tool.plan(agent=MagicMock(), tasks="First room item")
+    with tool_runtime_context(_tool_context(config, room_id=second_room)):
+        tool.plan(agent=MagicMock(), tasks="Second room item")
+
+    first_state = _read_todos(config, room_id=first_room)
+    second_state = _read_todos(config, room_id=second_room)
+    assert first_state["items"][0]["title"] == "First room item"  # type: ignore[index]
+    assert second_state["items"][0]["title"] == "Second room item"  # type: ignore[index]
+
+
+def test_update_todo_validates_before_mutating_and_can_clear_dependencies(tmp_path: Path) -> None:
+    """Rejected updates should not persist earlier field changes, and empty depends_on clears deps."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.plan(agent=MagicMock(), tasks="Root\nChild")
+    state = _read_todos(config)
+    root_id = state["items"][0]["id"]  # type: ignore[index]
+    child_id = state["items"][1]["id"]  # type: ignore[index]
+
+    with tool_runtime_context(_tool_context(config)):
+        invalid_result = tool.update_todo(
+            agent=MagicMock(),
+            todo_id=child_id,
+            title="Mutated title",
+            depends_on="missing",
+        )
+
+    assert "Dependency `missing` not found" in invalid_result
+    unchanged = _read_todos(config)
+    assert unchanged["items"][1]["title"] == "Child"  # type: ignore[index]
+
+    with tool_runtime_context(_tool_context(config)):
+        set_result = tool.update_todo(agent=MagicMock(), todo_id=child_id, depends_on=root_id)
+        clear_result = tool.update_todo(agent=MagicMock(), todo_id=child_id, depends_on="")
+
+    assert "depends_on" in set_result
+    assert "depends_on=[]" in clear_result
+    cleared = _read_todos(config)
+    assert cleared["items"][1]["depends_on"] == []  # type: ignore[index]
+
+
 def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
     """Built-in templates should ship with the package and create dependent todos."""
     config = _config(tmp_path)
@@ -152,3 +211,74 @@ def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
     items = state["items"]
     assert len(items) > 1
     assert any(item["depends_on"] for item in items)
+
+
+def test_template_includes_depend_on_all_roots_and_unblock_after_all_terminals(tmp_path: Path) -> None:
+    """Nested templates should preserve multi-root and multi-leaf dependency boundaries."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "multi-child",
+        """name: multi-child
+version: "1"
+description: Child graph with two roots and one terminal.
+todos:
+  - title: Child root A
+  - title: Child root B
+  - title: Child join
+    depends_on: [1, 2]
+""",
+    )
+    _write_workspace_template(
+        config,
+        "parent-flow",
+        """name: parent-flow
+version: "1"
+description: Parent graph using nested child graph.
+todos:
+  - title: Setup
+  - sub_template: multi-child
+    depends_on: [1]
+  - title: After child
+    depends_on: [2]
+""",
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.apply_template(agent=MagicMock(), name="parent-flow", params={})
+
+    state = _read_todos(config)
+    by_title = {item["title"]: item for item in state["items"]}  # type: ignore[union-attr]
+    setup_id = by_title["Setup"]["id"]
+    child_root_a_id = by_title["Child root A"]["id"]
+    child_root_b_id = by_title["Child root B"]["id"]
+    child_join_id = by_title["Child join"]["id"]
+
+    assert by_title["Child root A"]["depends_on"] == [setup_id]
+    assert by_title["Child root B"]["depends_on"] == [setup_id]
+    assert by_title["Child join"]["depends_on"] == [child_root_a_id, child_root_b_id]
+    assert by_title["After child"]["depends_on"] == [child_join_id]
+
+
+def test_apply_template_rejects_unknown_assigned_agent(tmp_path: Path) -> None:
+    """Templates should not write assignees outside the configured agent set."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "bad-assignee",
+        """name: bad-assignee
+version: "1"
+description: Invalid assignee.
+todos:
+  - title: Owned elsewhere
+    assigned_agent: missing
+""",
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        result = tool.apply_template(agent=MagicMock(), name="bad-assignee", params={})
+
+    assert "Unknown agent 'missing'" in result
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()

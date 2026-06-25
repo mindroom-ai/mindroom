@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import re
 import uuid
@@ -53,7 +54,7 @@ class MindroomDevParams(BaseModel):
     REPO: Literal["mindroom", "cinny", "nixos", "tuwunel"]
     BRANCH: str = ""
     N_REVIEWERS: int = Field(default=8, ge=1)
-    IMPLEMENTER_AGENT: str = "codex"
+    IMPLEMENTER_AGENT: str = ""
     IS_PR: bool = True
     BASE: Literal["origin/main", "main"] = "origin/main"
 
@@ -133,13 +134,24 @@ class _TemplateRoot:
     source: str
 
 
-def _sanitize(value: str) -> str:
+@dataclass(frozen=True, slots=True)
+class _ExpandedTemplateIndex:
+    """Expanded roots and terminal leaves for one authored template item."""
+
+    roots: tuple[int, ...]
+    terminals: tuple[int, ...]
+
+
+def _safe_slug(value: str) -> str:
     return re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9]", "_", value)).strip("_")
 
 
 def _thread_key(room_id: str, thread_id: str | None) -> str:
     resolved = thread_id or "main"
-    return f"{_sanitize(room_id)}_{_sanitize(resolved)}"
+    digest = hashlib.sha256(f"{room_id}\0{resolved}".encode()).hexdigest()[:16]
+    room_slug = _safe_slug(room_id) or "room"
+    thread_slug = _safe_slug(resolved) or "thread"
+    return f"{room_slug}_{thread_slug}_{digest}"
 
 
 def _now_iso() -> str:
@@ -153,21 +165,35 @@ def _short_id(existing_ids: set[str]) -> str:
             return candidate
 
 
+def _lock_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".lock")
+
+
 def _read_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    lock_path = _lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+        try:
+            if not path.exists():
+                return {}
+            return json.loads(path.read_text(encoding="utf-8"))
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _locked_update_json(path: Path, mutate: Callable[[dict[str, Any]], _T]) -> _T:
-    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path = _lock_path(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
             result = mutate(data)
-            path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+            temp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            temp_path.replace(path)
             return result
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -395,6 +421,24 @@ def _validate_depends_on_indexes(todos: list[dict[str, Any]], *, path: Path) -> 
                 raise _template_value_error(path, f"depends_on index {dep} is out of range 1..{total_items}")
 
 
+def _expanded_template_index(
+    expanded: list[dict[str, Any]],
+    *,
+    start_index: int,
+    end_index: int,
+) -> _ExpandedTemplateIndex:
+    indexes = set(range(start_index, end_index + 1))
+    roots: list[int] = []
+    referenced: set[int] = set()
+    for index in range(start_index, end_index + 1):
+        internal_deps = [dep for dep in expanded[index - 1].get("depends_on", []) if dep in indexes]
+        if not internal_deps:
+            roots.append(index)
+        referenced.update(internal_deps)
+    terminals = tuple(index for index in range(start_index, end_index + 1) if index not in referenced)
+    return _ExpandedTemplateIndex(roots=tuple(roots), terminals=terminals)
+
+
 def _render_template_definition(
     name: str,
     params: dict[str, Any],
@@ -443,7 +487,7 @@ def _expand_template_todos(
     depth: int,
 ) -> list[dict[str, Any]]:
     expanded: list[dict[str, Any]] = []
-    index_map: dict[int, tuple[int, int]] = {}
+    index_map: dict[int, _ExpandedTemplateIndex] = {}
 
     for original_index, entry in enumerate(todos, start=1):
         if entry.get("title") is not None:
@@ -457,7 +501,7 @@ def _expand_template_todos(
                 },
             )
             flat_index = len(expanded)
-            index_map[original_index] = (flat_index, flat_index)
+            index_map[original_index] = _ExpandedTemplateIndex(roots=(flat_index,), terminals=(flat_index,))
             continue
 
         child_template = _render_template_definition(
@@ -477,14 +521,15 @@ def _expand_template_todos(
             }
             for child in child_template["todos"]
         )
-        first_child = offset + 1
-        last_child = len(expanded)
-        index_map[original_index] = (first_child, last_child)
+        child_index = _expanded_template_index(expanded, start_index=offset + 1, end_index=len(expanded))
+        index_map[original_index] = child_index
         if entry.get("depends_on"):
-            expanded[first_child - 1]["_parent_depends_on"].extend(entry["depends_on"])
+            for root_index in child_index.roots:
+                expanded[root_index - 1]["_parent_depends_on"].extend(entry["depends_on"])
 
     for item in expanded:
-        item["depends_on"].extend(index_map[dep][1] for dep in item.pop("_parent_depends_on"))
+        for dep in item.pop("_parent_depends_on"):
+            item["depends_on"].extend(index_map[dep].terminals)
 
     return expanded
 
@@ -555,6 +600,13 @@ def _configured_agent_names() -> set[str]:
     if ctx is None:
         return set()
     return set((ctx.config.agents or {}).keys())
+
+
+def _unknown_assigned_agent_message(agent_name: str, configured: set[str]) -> str | None:
+    if configured and agent_name not in configured:
+        available = ", ".join(sorted(configured)) or "none"
+        return f"Unknown agent '{agent_name}'. Available: {available}"
+    return None
 
 
 class TodoTools(Toolkit):
@@ -657,10 +709,9 @@ class TodoTools(Toolkit):
 
         dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()] if depends_on else []
         resolved_agent = assigned_agent.strip() or agent_name
-        configured = _configured_agent_names()
-        if resolved_agent and configured and resolved_agent not in configured:
-            available = ", ".join(sorted(configured)) or "none"
-            return f"Unknown agent '{resolved_agent}'. Available: {available}"
+        unknown_agent = _unknown_assigned_agent_message(resolved_agent, _configured_agent_names())
+        if unknown_agent is not None:
+            return unknown_agent
 
         def create_item(data: dict[str, Any]) -> dict[str, Any] | str:
             _ensure_thread_state(data, room_id, thread_id)
@@ -784,7 +835,7 @@ class TodoTools(Toolkit):
         title: str = "",
         priority: str = "",
         status: str = "",
-        depends_on: str = "",
+        depends_on: str | None = None,
         assigned_agent: str = "",
     ) -> str:
         """Update fields on an existing todo item."""
@@ -797,10 +848,9 @@ class TodoTools(Toolkit):
         if status and status.lower() not in {"open", "done", "cancelled"}:
             return f"Invalid status '{status}'. Must be: open, done, cancelled."
         if assigned_agent and assigned_agent.strip():
-            configured = _configured_agent_names()
-            if configured and assigned_agent.strip() not in configured:
-                available = ", ".join(sorted(configured)) or "none"
-                return f"Unknown agent '{assigned_agent.strip()}'. Available: {available}"
+            unknown_agent = _unknown_assigned_agent_message(assigned_agent.strip(), _configured_agent_names())
+            if unknown_agent is not None:
+                return unknown_agent
 
         def do_update(data: dict[str, Any]) -> str:  # noqa: C901, PLR0912
             _ensure_thread_state(data, room_id, thread_id)
@@ -809,6 +859,17 @@ class TodoTools(Toolkit):
                 return f"Todo `{todo_id}` not found."
 
             item = items_by_id[todo_id]
+            dep_ids: list[str] | None = None
+            if depends_on is not None:
+                dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()]
+                for dep_id in dep_ids:
+                    if dep_id not in items_by_id:
+                        return f"Dependency `{dep_id}` not found."
+                    if dep_id == todo_id:
+                        return "Cannot depend on itself."
+                    if _would_create_cycle(items_by_id, todo_id, dep_id):
+                        return f"Adding dependency `{dep_id}` would create a cycle."
+
             changes: list[str] = []
             if title:
                 item["title"] = title
@@ -821,15 +882,7 @@ class TodoTools(Toolkit):
                 item["status"] = new_status
                 item["completed_at"] = _now_iso() if new_status == "done" else None
                 changes.append(f"status={new_status}")
-            if depends_on:
-                dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()]
-                for dep_id in dep_ids:
-                    if dep_id not in items_by_id:
-                        return f"Dependency `{dep_id}` not found."
-                    if dep_id == todo_id:
-                        return "Cannot depend on itself."
-                    if _would_create_cycle(items_by_id, todo_id, dep_id):
-                        return f"Adding dependency `{dep_id}` would create a cycle."
+            if dep_ids is not None:
                 item["depends_on"] = dep_ids
                 changes.append(f"depends_on={dep_ids}")
             if assigned_agent:
@@ -873,6 +926,12 @@ class TodoTools(Toolkit):
 
         state_root, room_id, thread_id, agent_name = _current_scope()
         path = _todos_path(state_root, room_id, thread_id)
+        configured_agents = _configured_agent_names()
+        for template_todo in rendered_template["todos"]:
+            resolved_agent = template_todo.get("assigned_agent") or agent_name
+            unknown_agent = _unknown_assigned_agent_message(resolved_agent, configured_agents)
+            if unknown_agent is not None:
+                return unknown_agent
 
         def apply_template(data: dict[str, Any]) -> list[dict[str, Any]]:
             _ensure_thread_state(data, room_id, thread_id)
