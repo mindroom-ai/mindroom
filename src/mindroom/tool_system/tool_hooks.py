@@ -445,10 +445,6 @@ async def _emit_after_call(
     await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
 
 
-def _blocked_tool_result(*, tool_name: str, reason: str) -> str:
-    return _format_declined_result(tool_name, reason)
-
-
 async def _maybe_block_for_tool_approval(
     *,
     resolved_context: _ResolvedToolContext,
@@ -475,17 +471,14 @@ async def _maybe_block_for_tool_approval(
         )
     except ToolApprovalScriptError:
         logger.warning("Tool approval policy failed", exc_info=True)
-        return _blocked_tool_result(
-            tool_name=tool_name,
-            reason=_APPROVAL_POLICY_FAILURE_REASON,
-        )
+        return _format_declined_result(tool_name, _APPROVAL_POLICY_FAILURE_REASON)
 
     if approval_decision is None or approval_decision.status == "approved":
         return None
 
-    return _blocked_tool_result(
-        tool_name=tool_name,
-        reason=_approval_status_reason(approval_decision.status, approval_decision.reason),
+    return _format_declined_result(
+        tool_name,
+        _approval_status_reason(approval_decision.status, approval_decision.reason),
     )
 
 
@@ -524,10 +517,7 @@ async def _maybe_block_for_before_hooks(
     if not before_context.declined:
         return None
 
-    return _blocked_tool_result(
-        tool_name=tool_name,
-        reason=before_context.decline_reason,
-    )
+    return _format_declined_result(tool_name, before_context.decline_reason)
 
 
 async def _finish_blocked_tool_call(
