@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import tempfile
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,6 +23,8 @@ from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
+from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
+from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team as AgnoTeam
 from agno.team._run import _cleanup_and_store
 from agno.utils.message import get_text_from_message
@@ -54,6 +57,7 @@ from mindroom.team_exact_members import (
 from mindroom.teams import (
     TeamMode,
     _materialize_team_members,
+    _PreparedMaterializedTeamExecution,
     _team_response_stream_raw,
     build_materialized_team_instance,
     materialize_exact_team_members,
@@ -1987,6 +1991,160 @@ async def test_team_response_stream_records_hidden_interrupted_tool_state() -> N
         "  result: /app\n\n"
         "[interrupted]"
     )
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_marks_tool_call_timing_for_agent_and_team_tools() -> None:
+    """Streaming team tool events should emit the same debug timing marks as agent streams."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+    timing_events: list[tuple[str, dict[str, object]]] = []
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[fake_agent],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield AgentToolCallStartedEvent(
+            agent_name="GeneralAgent",
+            tool=ToolExecution(
+                tool_name="run_shell_command",
+                tool_args={"cmd": "pwd"},
+                tool_call_id="agent-call-1",
+            ),
+        )
+        yield AgentToolCallCompletedEvent(
+            agent_name="GeneralAgent",
+            tool=ToolExecution(
+                tool_name="run_shell_command",
+                tool_args={"cmd": "pwd"},
+                tool_call_id="agent-call-1",
+                result="/app",
+            ),
+        )
+        yield TeamToolCallStartedEvent(
+            tool=ToolExecution(
+                tool_name="delegate_task",
+                tool_args={"agent": "general"},
+                tool_call_id="team-call-1",
+            ),
+        )
+        yield TeamToolCallCompletedEvent(
+            tool=ToolExecution(
+                tool_name="delegate_task",
+                tool_args={"agent": "general"},
+                tool_call_id="team-call-1",
+                result="delegated",
+            ),
+        )
+        yield TeamRunContentEvent(content="Done")
+
+    team_agent_ids = [
+        fixture_entity_matrix_id(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+
+    with (
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams.open_bound_scope_session_context", return_value=nullcontext(None)),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch(
+            "mindroom.teams.prepare_materialized_team_execution",
+            new=AsyncMock(
+                return_value=_PreparedMaterializedTeamExecution(
+                    messages=(Message(role="user", content="Analyze this."),),
+                    run_metadata={},
+                    unseen_event_ids=[],
+                ),
+            ),
+        ),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch(
+            "mindroom.teams.emit_timing_event",
+            side_effect=lambda event_name, **event_data: timing_events.append((event_name, event_data)),
+            create=True,
+        ),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=team_agent_ids,
+                message="Analyze this.",
+                turn_recorder=TurnRecorder(user_message="Analyze this."),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                mode=TeamMode.COORDINATE,
+                session_id="session-team-stream",
+                run_id="run-456",
+                reply_to_event_id="e1",
+                show_tool_calls=True,
+            )
+        ]
+
+    assert chunks
+    assert timing_events == [
+        (
+            "Dispatch tool-call timing",
+            {
+                "phase": "agno_tool_call_started",
+                "team_name": "Team (GeneralAgent)",
+                "tool_scope": "member",
+                "agent_name": "GeneralAgent",
+                "tool_name": "run_shell_command",
+                "tool_call_id": "agent-call-1",
+                "show_tool_calls": True,
+            },
+        ),
+        (
+            "Dispatch tool-call timing",
+            {
+                "phase": "agno_tool_call_completed",
+                "team_name": "Team (GeneralAgent)",
+                "tool_scope": "member",
+                "agent_name": "GeneralAgent",
+                "tool_name": "run_shell_command",
+                "tool_call_id": "agent-call-1",
+                "show_tool_calls": True,
+            },
+        ),
+        (
+            "Dispatch tool-call timing",
+            {
+                "phase": "agno_tool_call_started",
+                "team_name": "Team (GeneralAgent)",
+                "tool_scope": "team",
+                "agent_name": None,
+                "tool_name": "delegate_task",
+                "tool_call_id": "team-call-1",
+                "show_tool_calls": True,
+            },
+        ),
+        (
+            "Dispatch tool-call timing",
+            {
+                "phase": "agno_tool_call_completed",
+                "team_name": "Team (GeneralAgent)",
+                "tool_scope": "team",
+                "agent_name": None,
+                "tool_name": "delegate_task",
+                "tool_call_id": "team-call-1",
+                "show_tool_calls": True,
+            },
+        ),
+    ]
 
 
 @pytest.mark.asyncio
