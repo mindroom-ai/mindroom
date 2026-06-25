@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import nio
 import pytest
 from agno.models.response import ToolExecution
-from agno.run.agent import ToolCallStartedEvent
+from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import ai as ai_module
 from mindroom.config.main import Config
@@ -36,14 +36,28 @@ def _record_timing_event(
 
 @pytest.mark.asyncio
 async def test_stream_processing_marks_tool_call_started() -> None:
-    """AI stream processing should mark the handoff from model stream to tool dispatch."""
+    """AI stream processing should mark tool dispatch start and completion."""
     timing_events: list[tuple[str, dict[str, object]]] = []
 
     async def stream() -> AsyncIterator[object]:
+        tool = ToolExecution(
+            tool_name="run_shell_command",
+            tool_args={"cmd": "date +%s.%N"},
+            tool_call_id="call-1",
+        )
+        yield ToolCallStartedEvent(tool=tool)
         yield ToolCallStartedEvent(
             tool=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "date +%s.%N"},
+            ),
+        )
+        yield ToolCallCompletedEvent(
+            tool=ToolExecution(
+                tool_name="run_shell_command",
+                tool_args={"cmd": "date +%s.%N"},
+                tool_call_id="call-1",
+                result="ok",
             ),
         )
 
@@ -66,7 +80,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
             )
         ]
 
-    assert len(chunks) == 1
+    assert len(chunks) == 3
     assert timing_events == [
         (
             "Dispatch tool-call timing",
@@ -74,7 +88,27 @@ async def test_stream_processing_marks_tool_call_started() -> None:
                 "phase": "agno_tool_call_started",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
+                "tool_call_id": "call-1",
+                "show_tool_calls": True,
+            },
+        ),
+        (
+            "Dispatch tool-call timing",
+            {
+                "phase": "agno_tool_call_started",
+                "agent_name": "code",
+                "tool_name": "run_shell_command",
                 "tool_call_id": None,
+                "show_tool_calls": True,
+            },
+        ),
+        (
+            "Dispatch tool-call timing",
+            {
+                "phase": "agno_tool_call_completed",
+                "agent_name": "code",
+                "tool_name": "run_shell_command",
+                "tool_call_id": "call-1",
                 "show_tool_calls": True,
             },
         ),
@@ -295,9 +329,18 @@ async def test_tool_hook_bridge_marks_hook_and_tool_entry() -> None:
         ("Tool hook dispatch timing", "before_hooks_start"),
         ("Tool hook dispatch timing", "before_hooks_finish"),
         ("Tool hook dispatch timing", "tool_entry"),
+        ("Tool hook dispatch timing", "bridge_finish"),
     ]
     before_finish = timing_events[2][1]
     assert before_finish["tool_name"] == "echo"
     assert before_finish["agent_name"] == "code"
     assert before_finish["declined"] is False
     assert isinstance(before_finish["duration_ms"], float)
+    bridge_finish = timing_events[-1][1]
+    assert bridge_finish["tool_name"] == "echo"
+    assert bridge_finish["agent_name"] == "code"
+    assert bridge_finish["outcome"] == "success"
+    assert isinstance(bridge_finish["result_ready_ms"], float)
+    assert isinstance(bridge_finish["total_bridge_ms"], float)
+    assert isinstance(bridge_finish["before_hooks_ms"], float)
+    assert isinstance(bridge_finish["tool_body_ms"], float)

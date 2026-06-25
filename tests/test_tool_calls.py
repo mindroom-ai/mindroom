@@ -12,6 +12,7 @@ import pytest
 from mindroom.constants import tracking_dir
 from mindroom.tool_system import tool_calls
 from mindroom.tool_system.tool_calls import (
+    ToolCallTiming,
     _build_tool_failure_record,
     _build_tool_success_record,
     record_tool_failure,
@@ -438,6 +439,13 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
         arguments={"api_key": "secret"},
         result={"authorization": "Bearer hidden-token", "ok": True},
         duration_ms=5.0,
+        tool_call_id="call-1",
+        timing=ToolCallTiming(
+            before_hooks_ms=1.111,
+            approval_ms=2.222,
+            tool_body_ms=3.333,
+            result_ready_ms=6.666,
+        ),
         agent_name="code",
         room_id="!room:localhost",
         thread_id="$resolved-thread",
@@ -467,6 +475,13 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
     assert success_record.success is True
     assert success_record.result == {"authorization": "***redacted***", "ok": True}
     assert success_record.reply_to_event_id == "$reply"
+    assert success_record.tool_call_id == "call-1"
+    assert success_record.timing == ToolCallTiming(
+        before_hooks_ms=1.111,
+        approval_ms=2.222,
+        tool_body_ms=3.333,
+        result_ready_ms=6.666,
+    )
     assert failure_record.success is False
     assert failure_record.reply_to_event_id == "$reply"
 
@@ -474,6 +489,13 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
     assert len(records) == 2
     assert records[0]["success"] is True
     assert records[0]["reply_to_event_id"] == "$reply"
+    assert records[0]["tool_call_id"] == "call-1"
+    assert records[0]["timing"] == {
+        "approval_ms": 2.22,
+        "before_hooks_ms": 1.11,
+        "result_ready_ms": 6.67,
+        "tool_body_ms": 3.33,
+    }
     assert records[0]["result"] == {"authorization": "***redacted***", "ok": True}
     assert records[1]["success"] is False
     assert records[1]["reply_to_event_id"] == "$reply"

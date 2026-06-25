@@ -42,6 +42,7 @@ class _ToolCallRecordDict(TypedDict, total=False):
 
     timestamp: str
     tool_name: str
+    tool_call_id: str
     agent_name: str | None
     channel: str | None
     room_id: str | None
@@ -54,9 +55,30 @@ class _ToolCallRecordDict(TypedDict, total=False):
     arguments: _JsonValue
     success: bool
     result: _JsonValue
+    timing: _JsonValue
     error_type: str
     error_message: str
     traceback: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallTiming:
+    """Optional phase timing breakdown for one tool call."""
+
+    before_hooks_ms: float | None = None
+    approval_ms: float | None = None
+    tool_body_ms: float | None = None
+    result_ready_ms: float | None = None
+
+    def as_dict(self) -> dict[str, float]:
+        """Return JSON-safe timing fields, omitting phases that were not measured."""
+        fields = {
+            "approval_ms": self.approval_ms,
+            "before_hooks_ms": self.before_hooks_ms,
+            "result_ready_ms": self.result_ready_ms,
+            "tool_body_ms": self.tool_body_ms,
+        }
+        return {key: _sanitize_duration_ms(value) for key, value in fields.items() if value is not None}
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +87,7 @@ class _ToolCallRecord:
 
     timestamp: str
     tool_name: str
+    tool_call_id: str | None
     agent_name: str | None
     channel: str | None
     room_id: str | None
@@ -76,6 +99,7 @@ class _ToolCallRecord:
     duration_ms: float
     arguments: _JsonValue
     success: bool
+    timing: ToolCallTiming | None = None
     result: _JsonValue | None = None
     error_type: str | None = None
     error_message: str | None = None
@@ -92,18 +116,21 @@ class _ToolCallRecord:
             "arguments": self.arguments,
             "success": self.success,
         }
-        if self.agent_name is not None:
-            record["agent_name"] = self.agent_name
-        if self.channel is not None:
-            record["channel"] = self.channel
-        if self.room_id is not None:
-            record["room_id"] = self.room_id
-        if self.thread_id is not None:
-            record["thread_id"] = self.thread_id
-        if self.requester_id is not None:
-            record["requester_id"] = self.requester_id
-        if self.session_id is not None:
-            record["session_id"] = self.session_id
+        if self.tool_call_id is not None:
+            record["tool_call_id"] = self.tool_call_id
+        context_fields: dict[str, str | None] = {
+            "agent_name": self.agent_name,
+            "channel": self.channel,
+            "room_id": self.room_id,
+            "thread_id": self.thread_id,
+            "requester_id": self.requester_id,
+            "session_id": self.session_id,
+        }
+        record.update({key: value for key, value in context_fields.items() if value is not None})
+        if self.timing is not None:
+            timing = self.timing.as_dict()
+            if timing:
+                record["timing"] = cast("_JsonValue", timing)
         if self.success or self.result is not None:
             record["result"] = self.result
         optional_fields: tuple[tuple[str, str | None], ...] = (
@@ -166,6 +193,8 @@ def _build_tool_failure_record(
     arguments: dict[str, object],
     error: BaseException,
     duration_ms: float,
+    tool_call_id: str | None = None,
+    timing: ToolCallTiming | None = None,
     agent_name: str | None,
     channel: str | None,
     room_id: str | None,
@@ -179,6 +208,7 @@ def _build_tool_failure_record(
     return _ToolCallRecord(
         timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         tool_name=tool_name,
+        tool_call_id=tool_call_id,
         agent_name=agent_name,
         channel=channel,
         room_id=room_id,
@@ -190,6 +220,7 @@ def _build_tool_failure_record(
         duration_ms=_sanitize_duration_ms(duration_ms),
         arguments=sanitize_failure_value(arguments),
         success=False,
+        timing=timing,
         error_type=type(error).__name__,
         error_message=_safe_error_message(error),
         traceback=_safe_traceback(error),
@@ -202,6 +233,8 @@ def _build_tool_success_record(
     arguments: dict[str, object],
     result: object,
     duration_ms: float,
+    tool_call_id: str | None = None,
+    timing: ToolCallTiming | None = None,
     agent_name: str | None,
     channel: str | None,
     room_id: str | None,
@@ -215,6 +248,7 @@ def _build_tool_success_record(
     return _ToolCallRecord(
         timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         tool_name=tool_name,
+        tool_call_id=tool_call_id,
         agent_name=agent_name,
         channel=channel,
         room_id=room_id,
@@ -226,6 +260,7 @@ def _build_tool_success_record(
         duration_ms=_sanitize_duration_ms(duration_ms),
         arguments=sanitize_failure_value(arguments),
         success=True,
+        timing=timing,
         result=sanitize_failure_value(result),
     )
 
@@ -268,6 +303,8 @@ def record_tool_failure(
     arguments: dict[str, object],
     error: BaseException,
     duration_ms: float,
+    tool_call_id: str | None = None,
+    timing: ToolCallTiming | None = None,
     agent_name: str | None,
     room_id: str | None,
     thread_id: str | None,
@@ -284,6 +321,8 @@ def record_tool_failure(
         arguments=arguments,
         error=error,
         duration_ms=duration_ms,
+        tool_call_id=tool_call_id,
+        timing=timing,
         agent_name=agent_name,
         channel=execution_identity.channel if execution_identity is not None else None,
         room_id=room_id,
@@ -317,6 +356,8 @@ def record_tool_success(
     arguments: dict[str, object],
     result: object,
     duration_ms: float,
+    tool_call_id: str | None = None,
+    timing: ToolCallTiming | None = None,
     agent_name: str | None,
     room_id: str | None,
     thread_id: str | None,
@@ -333,6 +374,8 @@ def record_tool_success(
         arguments=arguments,
         result=result,
         duration_ms=duration_ms,
+        tool_call_id=tool_call_id,
+        timing=timing,
         agent_name=agent_name,
         channel=execution_identity.channel if execution_identity is not None else None,
         room_id=room_id,

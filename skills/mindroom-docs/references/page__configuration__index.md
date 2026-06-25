@@ -549,6 +549,8 @@ When enabled, MindRoom writes JSONL request records under `debug.llm_request_log
 Those records include prompts, messages, tool schemas, model parameters, correlation IDs, requester metadata, and source Matrix event metadata.
 The same flag also records successful tool-call rows in `mindroom_data/tracking/tool_calls.jsonl` so tool activity can be correlated with LLM request logs.
 Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled.
+Tool-call rows include a `timing` object with result-ready, before-hook, approval, and tool-body durations when those phases are measured.
+Set `MINDROOM_TIMING=1` to emit additional structured debug timing events for stream-visible tool-call start, stream-visible tool-call completion, and full bridge completion.
 Audit logging remains enabled.
 Credential-bearing fields such as tokens, cookies, passwords, API keys, and authorization headers are redacted before log records are emitted.
 These artifacts can still contain sensitive non-credential prompt, argument, and result data.
