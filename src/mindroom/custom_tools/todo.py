@@ -216,10 +216,11 @@ def _todos_path(state_root: Path, room_id: str, thread_id: str | None) -> Path:
 def _ensure_thread_state(data: dict[str, Any], room_id: str, thread_id: str | None) -> None:
     resolved = thread_id or "main"
     if "items" not in data:
+        now = _now_iso()
         data["room_id"] = room_id
         data["thread_id"] = resolved
-        data["created_at"] = _now_iso()
-        data["updated_at"] = _now_iso()
+        data["created_at"] = now
+        data["updated_at"] = now
         data["items"] = []
 
 
