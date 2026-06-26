@@ -52,7 +52,7 @@ from mindroom.history import (
     team_tool_definition_payloads_for_logging,
     update_scope_seen_event_ids,
 )
-from mindroom.history.interrupted_replay import split_interrupted_tool_trace
+from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
@@ -76,6 +76,7 @@ from mindroom.team_exact_members import (
     resolve_live_shared_agent_names,
     resolve_team_materializable_agent_names,
 )
+from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import (
     StreamingToolTracker,
     StructuredStreamChunk,
@@ -2298,6 +2299,24 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     tool=tool,
                 )
 
+            def _emit_tool_timing(
+                *,
+                phase: str,
+                tool_scope: Literal["member", "team"],
+                agent_name: str | None,
+                tool: ToolExecution | None,
+            ) -> None:
+                emit_timing_event(
+                    "Dispatch tool-call timing",
+                    phase=phase,
+                    team_name=configured_team_name or team_label,
+                    tool_scope=tool_scope,
+                    agent_name=agent_name,
+                    tool_name=tool.tool_name if tool is not None else None,
+                    tool_call_id=tool_execution_call_id(tool),
+                    show_tool_calls=show_tool_calls,
+                )
+
             try:
                 for retried_after_media_fallback in (False, True):
                     canonical_per_member = dict.fromkeys(display_names, "")
@@ -2471,10 +2490,22 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                         elif isinstance(event, AgentToolCallStartedEvent):
                             member_name = event.agent_name
                             if member_name:
+                                _emit_tool_timing(
+                                    phase="agno_tool_call_started",
+                                    tool_scope="member",
+                                    agent_name=member_name,
+                                    tool=event.tool,
+                                )
                                 _start_tool_for_member(member_name, event.tool)
                         elif isinstance(event, AgentToolCallCompletedEvent):
                             member_name = event.agent_name
                             if member_name:
+                                _emit_tool_timing(
+                                    phase="agno_tool_call_completed",
+                                    tool_scope="member",
+                                    agent_name=member_name,
+                                    tool=event.tool,
+                                )
                                 _complete_tool_for_member(member_name, event.tool)
                         elif isinstance(event, TeamRunContentEvent):
                             if event.content:
@@ -2484,12 +2515,24 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                             else:
                                 logger.debug("Empty team consensus event received")
                         elif isinstance(event, TeamToolCallStartedEvent):
+                            _emit_tool_timing(
+                                phase="agno_tool_call_started",
+                                tool_scope="team",
+                                agent_name=None,
+                                tool=event.tool,
+                            )
                             _start_tool(
                                 scope_key="team",
                                 apply_visible_text=_append_to_visible_consensus,
                                 tool=event.tool,
                             )
                         elif isinstance(event, TeamToolCallCompletedEvent):
+                            _emit_tool_timing(
+                                phase="agno_tool_call_completed",
+                                tool_scope="team",
+                                agent_name=None,
+                                tool=event.tool,
+                            )
                             _complete_tool(
                                 scope_key="team",
                                 get_visible_text=_get_visible_consensus,

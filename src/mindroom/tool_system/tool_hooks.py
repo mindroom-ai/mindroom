@@ -42,7 +42,7 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     resolve_tool_runtime_hook_bindings,
 )
-from mindroom.tool_system.tool_calls import record_tool_failure, record_tool_success
+from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure, record_tool_success
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -253,6 +253,7 @@ def _record_debug_tool_success(
     arguments: dict[str, object],
     result: object,
     duration_ms: float,
+    timing: ToolCallTiming | None,
     resolved_context: _ResolvedToolContext,
     dispatch_context: ToolDispatchContext | None,
 ) -> None:
@@ -263,6 +264,7 @@ def _record_debug_tool_success(
         arguments=arguments,
         result=result,
         duration_ms=duration_ms,
+        timing=timing,
         agent_name=resolved_context.agent_name or None,
         room_id=resolved_context.room_id,
         thread_id=resolved_context.thread_id,
@@ -443,42 +445,11 @@ async def _emit_after_call(
     await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
 
 
-async def _blocked_tool_result(
-    *,
-    hook_registry: HookRegistry,
-    resolved_context: _ResolvedToolContext,
-    hook_arguments: dict[str, Any] | None,
-    args: dict[str, Any],
-    tool_name: str,
-    reason: str,
-    has_after_hooks: bool,
-    started_at: float,
-) -> str:
-    result = _format_declined_result(tool_name, reason)
-    if has_after_hooks:
-        await _emit_after_call(
-            hook_registry=hook_registry,
-            resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
-            args=args,
-            tool_name=tool_name,
-            result=result,
-            error=None,
-            blocked=True,
-            duration_ms=(time.perf_counter() - started_at) * 1000,
-        )
-    return result
-
-
 async def _maybe_block_for_tool_approval(
     *,
-    hook_registry: HookRegistry,
     resolved_context: _ResolvedToolContext,
-    hook_arguments: dict[str, Any] | None,
     args: dict[str, Any],
     tool_name: str,
-    has_after_hooks: bool,
-    started_at: float,
     workflow_origin: ToolCallWorkflowOrigin | None,
 ) -> str | None:
     if resolved_context.config is None or resolved_context.runtime_paths is None:
@@ -500,29 +471,14 @@ async def _maybe_block_for_tool_approval(
         )
     except ToolApprovalScriptError:
         logger.warning("Tool approval policy failed", exc_info=True)
-        return await _blocked_tool_result(
-            hook_registry=hook_registry,
-            resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
-            args=args,
-            tool_name=tool_name,
-            reason=_APPROVAL_POLICY_FAILURE_REASON,
-            has_after_hooks=has_after_hooks,
-            started_at=started_at,
-        )
+        return _format_declined_result(tool_name, _APPROVAL_POLICY_FAILURE_REASON)
 
     if approval_decision is None or approval_decision.status == "approved":
         return None
 
-    return await _blocked_tool_result(
-        hook_registry=hook_registry,
-        resolved_context=resolved_context,
-        hook_arguments=hook_arguments,
-        args=args,
-        tool_name=tool_name,
-        reason=_approval_status_reason(approval_decision.status, approval_decision.reason),
-        has_after_hooks=has_after_hooks,
-        started_at=started_at,
+    return _format_declined_result(
+        tool_name,
+        _approval_status_reason(approval_decision.status, approval_decision.reason),
     )
 
 
@@ -534,8 +490,6 @@ async def _maybe_block_for_before_hooks(
     args: dict[str, Any],
     tool_name: str,
     has_before_hooks: bool,
-    has_after_hooks: bool,
-    started_at: float,
 ) -> str | None:
     if not has_before_hooks:
         return None
@@ -563,15 +517,135 @@ async def _maybe_block_for_before_hooks(
     if not before_context.declined:
         return None
 
-    return await _blocked_tool_result(
+    return _format_declined_result(tool_name, before_context.decline_reason)
+
+
+async def _finish_blocked_tool_call(
+    *,
+    timing: _ToolBridgeTiming,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    hook_arguments: dict[str, Any] | None,
+    args: dict[str, Any],
+    tool_name: str,
+    blocked_result: str,
+    has_after_hooks: bool,
+    outcome: str,
+) -> str:
+    duration_ms = timing.mark_result_ready()
+    await _maybe_emit_after_call_timed(
+        has_after_hooks=has_after_hooks,
+        timing=timing,
         hook_registry=hook_registry,
         resolved_context=resolved_context,
         hook_arguments=hook_arguments,
         args=args,
         tool_name=tool_name,
-        reason=before_context.decline_reason,
-        has_after_hooks=has_after_hooks,
-        started_at=started_at,
+        result=blocked_result,
+        error=None,
+        blocked=True,
+        duration_ms=duration_ms,
+    )
+    timing.emit_finish(
+        tool_name=tool_name,
+        agent_name=resolved_context.agent_name or None,
+        outcome=outcome,
+    )
+    return blocked_result
+
+
+@dataclass(slots=True)
+class _ToolBridgeTiming:
+    started_at: float
+    before_hooks_ms: float | None = None
+    approval_ms: float | None = None
+    tool_body_ms: float | None = None
+    result_ready_ms: float | None = None
+    after_hooks_ms: float | None = None
+
+    def record_timing(self) -> ToolCallTiming:
+        """Return phases persisted to tool_calls.jsonl; after hooks stay debug-event only."""
+        return ToolCallTiming(
+            before_hooks_ms=self.before_hooks_ms,
+            approval_ms=self.approval_ms,
+            tool_body_ms=self.tool_body_ms,
+            result_ready_ms=self.result_ready_ms,
+        )
+
+    def mark_result_ready(self) -> float:
+        duration_ms = elapsed_ms_since(self.started_at, clock=time.perf_counter, ndigits=2)
+        self.result_ready_ms = duration_ms
+        return duration_ms
+
+    def emit_finish(self, *, tool_name: str, agent_name: str | None, outcome: str) -> None:
+        emit_timing_event(
+            "Tool hook dispatch timing",
+            phase="bridge_finish",
+            tool_name=tool_name,
+            agent_name=agent_name,
+            outcome=outcome,
+            before_hooks_ms=self.before_hooks_ms,
+            approval_ms=self.approval_ms,
+            tool_body_ms=self.tool_body_ms,
+            result_ready_ms=self.result_ready_ms,
+            after_hooks_ms=self.after_hooks_ms,
+            total_bridge_ms=elapsed_ms_since(self.started_at, clock=time.perf_counter, ndigits=2),
+        )
+
+
+async def _emit_after_call_timed(
+    *,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    hook_arguments: dict[str, Any] | None,
+    args: dict[str, Any],
+    tool_name: str,
+    result: _ToolHookResult,
+    error: BaseException | None,
+    blocked: bool,
+    duration_ms: float,
+) -> float:
+    started_at = time.perf_counter()
+    await _emit_after_call(
+        hook_registry=hook_registry,
+        resolved_context=resolved_context,
+        hook_arguments=hook_arguments,
+        args=args,
+        tool_name=tool_name,
+        result=result,
+        error=error,
+        blocked=blocked,
+        duration_ms=duration_ms,
+    )
+    return elapsed_ms_since(started_at, clock=time.perf_counter, ndigits=2)
+
+
+async def _maybe_emit_after_call_timed(
+    *,
+    has_after_hooks: bool,
+    timing: _ToolBridgeTiming,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    hook_arguments: dict[str, Any] | None,
+    args: dict[str, Any],
+    tool_name: str,
+    result: _ToolHookResult,
+    error: BaseException | None,
+    blocked: bool,
+    duration_ms: float,
+) -> None:
+    if not has_after_hooks:
+        return
+    timing.after_hooks_ms = await _emit_after_call_timed(
+        hook_registry=hook_registry,
+        resolved_context=resolved_context,
+        hook_arguments=hook_arguments,
+        args=args,
+        tool_name=tool_name,
+        result=result,
+        error=error,
+        blocked=blocked,
+        duration_ms=duration_ms,
     )
 
 
@@ -590,6 +664,7 @@ async def _execute_bridge(
     workflow_origin: ToolCallWorkflowOrigin | None,
 ) -> _ToolHookResult:
     started_at = time.perf_counter()
+    timing = _ToolBridgeTiming(started_at=started_at)
     effective_dispatch_context = _explicit_bridge_dispatch_context(dispatch_context) or _ambient_tool_dispatch_context()
     bridge_context = _ToolHookBridgeContext(
         agent_name=agent_name,
@@ -609,6 +684,7 @@ async def _execute_bridge(
         has_after_hooks=has_after_hooks,
     )
     hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks else None
+    before_hooks_started_at = time.perf_counter()
     blocked_result = await _maybe_block_for_before_hooks(
         hook_registry=hook_registry,
         resolved_context=resolved_context,
@@ -616,27 +692,46 @@ async def _execute_bridge(
         args=args,
         tool_name=tool_name,
         has_before_hooks=has_before_hooks,
-        has_after_hooks=has_after_hooks,
-        started_at=started_at,
     )
+    if has_before_hooks:
+        timing.before_hooks_ms = elapsed_ms_since(before_hooks_started_at, clock=time.perf_counter, ndigits=2)
     if blocked_result is not None:
-        return blocked_result
+        return await _finish_blocked_tool_call(
+            timing=timing,
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
+            tool_name=tool_name,
+            blocked_result=blocked_result,
+            has_after_hooks=has_after_hooks,
+            outcome="blocked_before_hooks",
+        )
 
+    approval_started_at = time.perf_counter()
     blocked_result = await _maybe_block_for_tool_approval(
-        hook_registry=hook_registry,
         resolved_context=resolved_context,
-        hook_arguments=hook_arguments,
         args=args,
         tool_name=tool_name,
-        has_after_hooks=has_after_hooks,
-        started_at=started_at,
         workflow_origin=workflow_origin,
     )
+    timing.approval_ms = elapsed_ms_since(approval_started_at, clock=time.perf_counter, ndigits=2)
     if blocked_result is not None:
-        return blocked_result
+        return await _finish_blocked_tool_call(
+            timing=timing,
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
+            tool_name=tool_name,
+            blocked_result=blocked_result,
+            has_after_hooks=has_after_hooks,
+            outcome="blocked_approval",
+        )
 
     result: _ToolHookResult = None
     error: BaseException | None = None
+    tool_body_started_at = time.perf_counter()
     try:
         result = await _call_tool(
             func,
@@ -644,39 +739,50 @@ async def _execute_bridge(
             tool_name=tool_name,
             agent_name=resolved_context.agent_name or None,
         )
+        timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
     except OAuthConnectionRequired as exc:
+        timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
         result = oauth_connection_required_payload(exc)
-        duration_ms = (time.perf_counter() - started_at) * 1000
+        duration_ms = timing.mark_result_ready()
         _record_debug_tool_success(
             tool_name=tool_name,
             arguments=args,
             result=result,
             duration_ms=duration_ms,
+            timing=timing.record_timing(),
             resolved_context=resolved_context,
             dispatch_context=effective_dispatch_context,
         )
-        if has_after_hooks:
-            after_context = ToolAfterCallContext(
-                **resolved_context.hook_context_kwargs(
-                    hook_arguments if hook_arguments is not None else deepcopy(args),
-                ),
-                tool_name=tool_name,
-                result=result,
-                error=None,
-                blocked=False,
-                duration_ms=duration_ms,
-            )
-            await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
+        await _maybe_emit_after_call_timed(
+            has_after_hooks=has_after_hooks,
+            timing=timing,
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
+            tool_name=tool_name,
+            result=result,
+            error=None,
+            blocked=False,
+            duration_ms=duration_ms,
+        )
+        timing.emit_finish(
+            tool_name=tool_name,
+            agent_name=resolved_context.agent_name or None,
+            outcome="oauth_connection_required",
+        )
         return result
     except BaseException as exc:
         error = exc
-        duration_ms = (time.perf_counter() - started_at) * 1000
+        timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
+        duration_ms = timing.mark_result_ready()
         try:
             failure_record = record_tool_failure(
                 tool_name=tool_name,
                 arguments=args,
                 error=error,
                 duration_ms=duration_ms,
+                timing=timing.record_timing(),
                 agent_name=resolved_context.agent_name or None,
                 room_id=resolved_context.room_id,
                 thread_id=resolved_context.thread_id,
@@ -706,41 +812,54 @@ async def _execute_bridge(
                 correlation_id=resolved_context.correlation_id,
                 channel=resolved_context.channel,
             )
-        if has_after_hooks:
-            await _emit_after_call(
-                hook_registry=hook_registry,
-                resolved_context=resolved_context,
-                hook_arguments=hook_arguments,
-                args=args,
-                tool_name=tool_name,
-                result=None,
-                error=error,
-                blocked=False,
-                duration_ms=duration_ms,
-            )
-        raise
-
-    duration_ms = (time.perf_counter() - started_at) * 1000
-    _record_debug_tool_success(
-        tool_name=tool_name,
-        arguments=args,
-        result=result,
-        duration_ms=duration_ms,
-        resolved_context=resolved_context,
-        dispatch_context=effective_dispatch_context,
-    )
-    if has_after_hooks:
-        await _emit_after_call(
+        await _maybe_emit_after_call_timed(
+            has_after_hooks=has_after_hooks,
+            timing=timing,
             hook_registry=hook_registry,
             resolved_context=resolved_context,
             hook_arguments=hook_arguments,
             args=args,
             tool_name=tool_name,
-            result=result,
+            result=None,
             error=error,
             blocked=False,
             duration_ms=duration_ms,
         )
+        timing.emit_finish(
+            tool_name=tool_name,
+            agent_name=resolved_context.agent_name or None,
+            outcome="error",
+        )
+        raise
+
+    duration_ms = timing.mark_result_ready()
+    _record_debug_tool_success(
+        tool_name=tool_name,
+        arguments=args,
+        result=result,
+        duration_ms=duration_ms,
+        timing=timing.record_timing(),
+        resolved_context=resolved_context,
+        dispatch_context=effective_dispatch_context,
+    )
+    await _maybe_emit_after_call_timed(
+        has_after_hooks=has_after_hooks,
+        timing=timing,
+        hook_registry=hook_registry,
+        resolved_context=resolved_context,
+        hook_arguments=hook_arguments,
+        args=args,
+        tool_name=tool_name,
+        result=result,
+        error=error,
+        blocked=False,
+        duration_ms=duration_ms,
+    )
+    timing.emit_finish(
+        tool_name=tool_name,
+        agent_name=resolved_context.agent_name or None,
+        outcome="success",
+    )
     return result
 
 

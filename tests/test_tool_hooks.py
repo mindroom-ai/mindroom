@@ -528,6 +528,7 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
         "success",
         "error_type",
         "error_message",
+        "timing",
         "traceback",
     }
     assert records[0]["tool_name"] == "explode"
@@ -541,6 +542,9 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
     assert records[0]["correlation_id"] == "corr-runtime"
     assert records[0]["success"] is False
     assert records[0]["error_type"] == "ValueError"
+    assert isinstance(records[0]["timing"]["approval_ms"], float)
+    assert isinstance(records[0]["timing"]["result_ready_ms"], float)
+    assert isinstance(records[0]["timing"]["tool_body_ms"], float)
     assert records[0]["arguments"] == {
         "api_key": "***redacted***",
         "nested": [{"refresh_token": "***redacted***"}],

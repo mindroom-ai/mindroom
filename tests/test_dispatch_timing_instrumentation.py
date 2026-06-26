@@ -10,16 +10,24 @@ from unittest.mock import AsyncMock, Mock, patch
 import nio
 import pytest
 from agno.models.response import ToolExecution
-from agno.run.agent import ToolCallStartedEvent
+from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import ai as ai_module
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.hooks import (
+    EVENT_TOOL_AFTER_CALL,
+    EVENT_TOOL_BEFORE_CALL,
+    HookRegistry,
+    ToolAfterCallContext,
+    ToolBeforeCallContext,
+    hook,
+)
 from mindroom.matrix.cache.thread_writes import ThreadOutboundWritePolicy
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.media_inputs import MediaInputs
 from mindroom.streaming import _queue_delivery_request
+from mindroom.tool_system import tool_hooks as tool_hooks_module
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
 
 if TYPE_CHECKING:
@@ -36,14 +44,28 @@ def _record_timing_event(
 
 @pytest.mark.asyncio
 async def test_stream_processing_marks_tool_call_started() -> None:
-    """AI stream processing should mark the handoff from model stream to tool dispatch."""
+    """AI stream processing should mark tool dispatch start and completion."""
     timing_events: list[tuple[str, dict[str, object]]] = []
 
     async def stream() -> AsyncIterator[object]:
+        tool = ToolExecution(
+            tool_name="run_shell_command",
+            tool_args={"cmd": "date +%s.%N"},
+            tool_call_id="call-1",
+        )
+        yield ToolCallStartedEvent(tool=tool)
         yield ToolCallStartedEvent(
             tool=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "date +%s.%N"},
+            ),
+        )
+        yield ToolCallCompletedEvent(
+            tool=ToolExecution(
+                tool_name="run_shell_command",
+                tool_args={"cmd": "date +%s.%N"},
+                tool_call_id="call-1",
+                result="ok",
             ),
         )
 
@@ -66,7 +88,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
             )
         ]
 
-    assert len(chunks) == 1
+    assert len(chunks) == 3
     assert timing_events == [
         (
             "Dispatch tool-call timing",
@@ -74,7 +96,27 @@ async def test_stream_processing_marks_tool_call_started() -> None:
                 "phase": "agno_tool_call_started",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
+                "tool_call_id": "call-1",
+                "show_tool_calls": True,
+            },
+        ),
+        (
+            "Dispatch tool-call timing",
+            {
+                "phase": "agno_tool_call_started",
+                "agent_name": "code",
+                "tool_name": "run_shell_command",
                 "tool_call_id": None,
+                "show_tool_calls": True,
+            },
+        ),
+        (
+            "Dispatch tool-call timing",
+            {
+                "phase": "agno_tool_call_completed",
+                "agent_name": "code",
+                "tool_name": "run_shell_command",
+                "tool_call_id": "call-1",
                 "show_tool_calls": True,
             },
         ),
@@ -295,9 +337,80 @@ async def test_tool_hook_bridge_marks_hook_and_tool_entry() -> None:
         ("Tool hook dispatch timing", "before_hooks_start"),
         ("Tool hook dispatch timing", "before_hooks_finish"),
         ("Tool hook dispatch timing", "tool_entry"),
+        ("Tool hook dispatch timing", "bridge_finish"),
     ]
     before_finish = timing_events[2][1]
     assert before_finish["tool_name"] == "echo"
     assert before_finish["agent_name"] == "code"
     assert before_finish["declined"] is False
     assert isinstance(before_finish["duration_ms"], float)
+    bridge_finish = timing_events[-1][1]
+    assert bridge_finish["tool_name"] == "echo"
+    assert bridge_finish["agent_name"] == "code"
+    assert bridge_finish["outcome"] == "success"
+    assert isinstance(bridge_finish["result_ready_ms"], float)
+    assert isinstance(bridge_finish["total_bridge_ms"], float)
+    assert isinstance(bridge_finish["before_hooks_ms"], float)
+    assert isinstance(bridge_finish["tool_body_ms"], float)
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_bridge_times_blocked_after_hooks_separately(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Blocked calls should not attribute after-hook latency to the blocking phase."""
+    timing_events: list[tuple[str, dict[str, object]]] = []
+    after_seen: list[tuple[bool, object | None, float]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        ctx.decline("policy blocked the tool")
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        after_seen.append((ctx.blocked, ctx.result, ctx.duration_ms))
+
+    registry = HookRegistry.from_plugins(
+        [
+            SimpleNamespace(
+                name="tool-policy",
+                discovered_hooks=(before, after),
+                entry_config=PluginEntryConfig(path="./plugins/tool-policy", settings={}),
+                plugin_order=0,
+            ),
+        ],
+    )
+    bridge = build_tool_hook_bridge(registry, agent_name="code")
+    next_func = AsyncMock(return_value="should not run")
+    perf_counter = Mock(
+        side_effect=[
+            100.000,  # bridge start
+            100.001,  # outer before-hooks start
+            100.002,  # before-hooks timing event start
+            100.003,  # before-hooks timing event finish
+            100.004,  # outer before-hooks finish
+            100.005,  # result ready
+            100.006,  # after-hooks start
+            100.026,  # after-hooks finish
+            100.027,  # bridge finish
+        ],
+    )
+    monkeypatch.setattr(tool_hooks_module.time, "perf_counter", perf_counter)
+
+    with patch(
+        "mindroom.tool_system.tool_hooks.emit_timing_event",
+        side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
+    ):
+        result = await bridge("read_file", next_func, {"path": "secret.txt"})
+
+    assert next_func.await_count == 0
+    assert after_seen == [(True, result, 5.0)]
+    bridge_finish = next(
+        event_data
+        for event_name, event_data in timing_events
+        if event_name == "Tool hook dispatch timing" and event_data["phase"] == "bridge_finish"
+    )
+    assert bridge_finish["outcome"] == "blocked_before_hooks"
+    assert bridge_finish["before_hooks_ms"] == 3.0
+    assert bridge_finish["result_ready_ms"] == 5.0
+    assert bridge_finish["after_hooks_ms"] == 20.0
+    assert bridge_finish["approval_ms"] is None
+    assert bridge_finish["tool_body_ms"] is None
