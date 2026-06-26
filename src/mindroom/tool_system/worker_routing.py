@@ -41,6 +41,7 @@ _LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
         "google_drive",
         "google_sheets",
         "homeassistant",
+        "todo",
     },
 )
 

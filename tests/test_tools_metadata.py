@@ -837,6 +837,22 @@ def test_deserialize_tool_validation_snapshot_rejects_non_boolean_runtime_loadab
         )
 
 
+def test_deserialize_tool_validation_snapshot_rejects_non_boolean_room_context() -> None:
+    """Validation snapshot payloads should type-check room-context requirements strictly."""
+    with pytest.raises(TypeError, match="requires_room_context to a boolean"):
+        deserialize_tool_validation_snapshot(
+            {
+                "todo": {
+                    "config_fields": [],
+                    "agent_override_fields": [],
+                    "authored_override_validator": "default",
+                    "requires_room_context": "yes",
+                    "runtime_loadable": True,
+                },
+            },
+        )
+
+
 def test_get_tool_by_name_rejects_invalid_mcp_assignment_overrides(tmp_path: Path) -> None:
     """Direct tool construction must enforce the same MCP-specific override rules as config loading."""
     config_path = tmp_path / "config.yaml"

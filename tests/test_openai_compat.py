@@ -46,7 +46,7 @@ from mindroom.api.openai_compat import (
 from mindroom.api.openai_request_parsing import _extract_content_text
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
@@ -440,12 +440,120 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
         )
 
     exposed_tool_names = {
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "functions", {})),
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "async_functions", {})),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.functions),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
     }
     assert "run_shell_command" not in exposed_tool_names
     assert "check_shell_command" in exposed_tool_names
     assert "kill_shell_command" in exposed_tool_names
+
+
+def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -> None:
+    """OpenAI-compatible agent construction should hide Matrix-context-bound todo tools."""
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    config = Config(
+        agents={
+            "code": AgentConfig(
+                display_name="CodeAgent",
+                role="Generate code and manage files",
+                tools=["todo"],
+                rooms=[],
+            ),
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+    )
+    persist_entity_accounts(config, runtime_paths)
+    execution_identity = build_tool_execution_identity(
+        channel="openai_compat",
+        agent_name="code",
+        runtime_paths=runtime_paths,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="openai-session",
+    )
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+        agent = create_agent(
+            "code",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            include_openai_compat_guidance=True,
+        )
+
+    exposed_tool_names = {
+        *(function_name for toolkit in agent.tools for function_name in toolkit.functions),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
+    }
+    assert "todo" not in {toolkit.name for toolkit in agent.tools}
+    assert (
+        not {
+            "add_todo",
+            "apply_template",
+            "list_templates",
+            "list_todos",
+            "plan",
+            "update_todo",
+        }
+        & exposed_tool_names
+    )
+
+
+def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_path: Path) -> None:
+    """OpenAI-compatible dynamic tooling should not advertise or load context-bound todo."""
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    config = Config(
+        agents={
+            "code": AgentConfig(
+                display_name="CodeAgent",
+                role="Generate code and manage files",
+                tools=[
+                    ToolConfigEntry(name="todo", defer=True),
+                    ToolConfigEntry(name="sleep", defer=True),
+                ],
+                rooms=[],
+            ),
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+    )
+    persist_entity_accounts(config, runtime_paths)
+    execution_identity = build_tool_execution_identity(
+        channel="openai_compat",
+        agent_name="code",
+        runtime_paths=runtime_paths,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="openai-session",
+    )
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+        agent = create_agent(
+            "code",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            session_id="openai-session",
+            include_openai_compat_guidance=True,
+        )
+
+    toolkits = {toolkit.name: toolkit for toolkit in agent.tools}
+    assert "todo" not in toolkits
+    dynamic_tools = toolkits["dynamic_tools"]
+    listing = json.loads(dynamic_tools.list_tools())
+    search_result = json.loads(dynamic_tools.tool_search("todo"))
+    load_result = json.loads(dynamic_tools.load_tool("todo"))
+
+    assert [tool["name"] for tool in listing["tools"]] == ["sleep"]
+    assert listing["loaded_tools"] == []
+    assert search_result["matches"] == []
+    assert load_result["status"] == "unknown"
+    assert load_result["available_tools"] == ["sleep"]
 
 
 def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, tmp_path: Path) -> None:
@@ -488,8 +596,8 @@ def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, t
         )
 
     exposed_tool_names = {
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "functions", {})),
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "async_functions", {})),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.functions),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
     }
     assert "run_shell_command" not in exposed_tool_names
 

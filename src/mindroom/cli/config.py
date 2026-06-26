@@ -903,6 +903,7 @@ agents:
       - website
       - browser
       - scheduler
+      - todo
       - subagents
       - matrix_message
       - thread_tags

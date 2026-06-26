@@ -40,10 +40,12 @@ class DynamicToolsToolkit(Toolkit):
         config: Config,
         session_id: str | None,
         stop_after_tool_call: bool = False,
+        hidden_tool_names: frozenset[str] = frozenset(),
     ) -> None:
         self._agent_name = agent_name
         self._config = config
         self._session_id = session_id
+        self._hidden_tool_names = hidden_tool_names
         super().__init__(
             name="dynamic_tools",
             instructions=config.get_prompt("DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS"),
@@ -62,27 +64,38 @@ class DynamicToolsToolkit(Toolkit):
         return json.dumps(payload, sort_keys=True)
 
     def _loaded_tools(self) -> list[str]:
-        return get_loaded_tools_for_session(
-            agent_name=self._agent_name,
-            config=self._config,
-            session_id=self._session_id,
+        return self._filter_visible_tool_names(
+            get_loaded_tools_for_session(
+                agent_name=self._agent_name,
+                config=self._config,
+                session_id=self._session_id,
+            ),
         )
+
+    def _filter_visible_tool_names(self, tool_names: list[str] | tuple[str, ...]) -> list[str]:
+        return [tool_name for tool_name in tool_names if tool_name not in self._hidden_tool_names]
 
     def _deferred_entries(self, loaded_tools: list[str] | None = None) -> list[DeferredToolCatalogEntry]:
-        return deferred_tool_catalog_entries(
-            agent_name=self._agent_name,
-            config=self._config,
-            loaded_tools=loaded_tools if loaded_tools is not None else self._loaded_tools(),
-        )
+        return [
+            entry
+            for entry in deferred_tool_catalog_entries(
+                agent_name=self._agent_name,
+                config=self._config,
+                loaded_tools=loaded_tools if loaded_tools is not None else self._loaded_tools(),
+            )
+            if entry.name not in self._hidden_tool_names
+        ]
 
     def _deferred_tool_names(self) -> list[str]:
-        return [entry.name for entry in self._config.get_agent_authored_deferred_tool_configs(self._agent_name)]
+        return self._filter_visible_tool_names(
+            [entry.name for entry in self._config.get_agent_authored_deferred_tool_configs(self._agent_name)],
+        )
 
     def _initial_tools(self) -> set[str]:
         return {
             entry.name
             for entry in self._config.get_agent_authored_deferred_tool_configs(self._agent_name)
-            if entry.initial
+            if entry.initial and entry.name not in self._hidden_tool_names
         }
 
     def _mcp_load_validation_failure(self, loaded_tools: list[str]) -> LoadToolValidationFailure | None:
@@ -125,14 +138,14 @@ class DynamicToolsToolkit(Toolkit):
         return self._payload("error", **payload)
 
     def _load_tool_response(self, tool_name: str, result: LoadToolResult) -> str:
-        loaded_tools = list(result.loaded_tools)
+        loaded_tools = self._filter_visible_tool_names(result.loaded_tools)
         if result.status == "unknown":
             response = self._payload(
                 "unknown",
                 tool_name=tool_name,
                 loaded_tools=loaded_tools,
                 message=f"Unknown deferred tool '{tool_name}'.",
-                available_tools=list(result.available_tools),
+                available_tools=self._filter_visible_tool_names(result.available_tools),
             )
         elif result.status == "scope_incompatible":
             scope_label = self._config.get_agent_scope_label(self._agent_name)
@@ -206,6 +219,15 @@ class DynamicToolsToolkit(Toolkit):
         The tool becomes callable once it appears in the agent's available
         tools; it is never callable in the same parallel batch as this call.
         """
+        if tool_name in self._hidden_tool_names:
+            return self._payload(
+                "unknown",
+                tool_name=tool_name,
+                loaded_tools=self._loaded_tools(),
+                message=f"Unknown deferred tool '{tool_name}'.",
+                available_tools=self._deferred_tool_names(),
+            )
+
         result = load_tool_for_session(
             agent_name=self._agent_name,
             config=self._config,
@@ -256,7 +278,7 @@ class DynamicToolsToolkit(Toolkit):
         return self._payload(
             "unloaded",
             tool_name=tool_name,
-            loaded_tools=saved_loaded_tools,
+            loaded_tools=self._filter_visible_tool_names(saved_loaded_tools),
             message=f"Tool '{tool_name}' is now unloaded for this session.",
         )
 

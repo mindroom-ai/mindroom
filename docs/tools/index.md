@@ -51,7 +51,7 @@ See [MCP](../mcp.md) for the `mcp_servers` config and naming rules.
 - [Media & Content](media-and-content.md) - Media processing, brand/media retrieval, and Spotify.
 - [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging, thread tags, summaries, and model overrides, low-level Matrix API access, and attachment-aware workflows.
 - [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
-- [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, and task managers.
+- [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](memory-and-storage.md) - Explicit memory tools and external memory providers.
 - [Agent Orchestration](agent-orchestration.md) - Subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
