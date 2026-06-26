@@ -22,6 +22,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import HandledTurnState
@@ -1073,6 +1074,7 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
+        VOICE_TRANSCRIPT_KEY: True,
     }
 
 
@@ -1255,6 +1257,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
+        VOICE_TRANSCRIPT_KEY: True,
     }
     turn_store.record_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(

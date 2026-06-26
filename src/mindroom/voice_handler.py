@@ -23,6 +23,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
@@ -311,6 +312,8 @@ def _build_prepared_voice_message(
         extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
     if raw_audio_fallback:
         extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+    else:
+        extra_content[VOICE_TRANSCRIPT_KEY] = True
     original_content = event.source.get("content") if isinstance(event.source, dict) else None
     inherited_mentions = original_content.get("m.mentions") if isinstance(original_content, dict) else None
     if isinstance(inherited_mentions, dict):

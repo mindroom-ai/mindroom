@@ -23,8 +23,9 @@ It should say that MindRoom has already transcribed the voice message, that the 
 ## Data Flow
 
 Voice normalization keeps setting `SOURCE_KIND_KEY`, `ATTACHMENT_IDS_KEY`, and `VOICE_RAW_AUDIO_FALLBACK_KEY` on synthetic voice events.
+Successful STT turns also set `VOICE_TRANSCRIPT_KEY`, which is hidden Matrix content metadata trusted only from MindRoom-owned events.
 Response payload assembly already receives trusted current attachment IDs and resolves them to current-turn attachment records.
-The attachment prompt builder can render a voice transcript guidance block when current records include audio and the event was a successful voice transcript.
+The attachment prompt builder can render a voice transcript guidance block when current records include audio and trusted payload metadata says the event was a successful voice transcript.
 Raw audio fallback turns skip this guidance because those turns genuinely need the attachment as the primary content.
 
 ## Testing
@@ -35,6 +36,6 @@ The fallback test should assert that the normal attachment prompt remains availa
 
 ## Scope
 
-No Matrix event shape changes are required.
-No changes are required to router visible echo behavior.
+MindRoom-owned synthetic and relay events gain one hidden Matrix content key.
+No user-visible Matrix message behavior changes are required.
 No changes are required to attachment storage or tool access.

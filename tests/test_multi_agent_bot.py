@@ -8443,6 +8443,84 @@ class TestAgentBot:
         assert "att_image" in payload.model_prompt
 
     @pytest.mark.asyncio
+    async def test_voice_transcript_payload_adds_hidden_audio_guidance(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Successful voice transcripts should explain that raw audio is optional."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        current_attachment_id = "att_current_audio"
+        current_path = _register_payload_media_attachment(
+            tmp_path,
+            kind="audio",
+            attachment_id=current_attachment_id,
+            filename="voice.ogg",
+            content=b"audio bytes",
+            thread_id=None,
+        )
+
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!test:localhost",
+                prompt="🎤 Please summarize the standup.",
+                current_attachment_ids=[current_attachment_id],
+                thread_id=None,
+                media_thread_id=None,
+                thread_history=[],
+                raw_audio_fallback=False,
+                voice_transcript=True,
+            ),
+        )
+
+        assert payload.prompt == "🎤 Please summarize the standup."
+        assert payload.model_prompt is not None
+        assert "MindRoom already transcribed the current voice message." in payload.model_prompt
+        assert current_attachment_id in payload.model_prompt
+        assert "Only inspect or re-transcribe" in payload.model_prompt
+        assert [audio.id for audio in payload.media.audio] == [current_attachment_id]
+        assert payload.media.audio[0].filepath == current_path
+
+    @pytest.mark.asyncio
+    async def test_raw_voice_fallback_payload_does_not_claim_audio_was_transcribed(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Raw voice fallback should leave audio transcription up to the agent."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        current_attachment_id = "att_raw_audio"
+        _register_payload_media_attachment(
+            tmp_path,
+            kind="audio",
+            attachment_id=current_attachment_id,
+            filename="voice.ogg",
+            content=b"audio bytes",
+            thread_id=None,
+        )
+
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!test:localhost",
+                prompt="🎤 [Attached voice message]",
+                current_attachment_ids=[current_attachment_id],
+                thread_id=None,
+                media_thread_id=None,
+                thread_history=[],
+                raw_audio_fallback=True,
+                voice_transcript=False,
+            ),
+        )
+
+        assert payload.model_prompt is not None
+        assert "Attachments sent with the current message" in payload.model_prompt
+        assert "MindRoom already transcribed the current voice message." not in payload.model_prompt
+
+    @pytest.mark.asyncio
     async def test_message_enrichment_appends_to_existing_model_prompt(
         self,
         mock_agent_user: AgentMatrixUser,

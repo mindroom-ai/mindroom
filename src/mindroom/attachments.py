@@ -238,6 +238,20 @@ def format_attachments_prompt(current_records: list[AttachmentRecord]) -> str | 
     return "\n".join(lines)
 
 
+def format_voice_transcript_attachment_guidance(current_records: list[AttachmentRecord]) -> str | None:
+    """Render model-only guidance for raw audio that already has a transcript."""
+    audio_attachment_ids = [record.attachment_id for record in current_records if record.kind == "audio"]
+    if not audio_attachment_ids:
+        return None
+    rendered_ids = ", ".join(audio_attachment_ids)
+    return (
+        "MindRoom already transcribed the current voice message. "
+        f"The raw audio attachment ID is available for verification or deeper audio work: {rendered_ids}. "
+        "Only inspect or re-transcribe the raw audio if the user asks, the transcript seems wrong, "
+        "or the task specifically requires audio-level analysis."
+    )
+
+
 def format_attachment_annotation(attachment_records: list[AttachmentRecord]) -> str | None:
     """Render a compact inline annotation for attachments carried by one message."""
     if not attachment_records:

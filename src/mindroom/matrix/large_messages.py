@@ -28,6 +28,7 @@ from mindroom.constants import (
     STREAM_WARMUP_SUFFIX_KEY,
     TOOL_TRACE_CONTENT_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import upload_content_uri, upload_media_bytes
@@ -52,6 +53,7 @@ _PASSTHROUGH_CONTENT_KEYS = frozenset(
         STREAM_STATUS_KEY,
         STREAM_WARMUP_SUFFIX_KEY,
         VOICE_RAW_AUDIO_FALLBACK_KEY,
+        VOICE_TRANSCRIPT_KEY,
     },
 )
 _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(

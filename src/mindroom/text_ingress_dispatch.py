@@ -9,7 +9,13 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.commands.parsing import command_parser
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
+)
 from mindroom.dispatch_handoff import (
     DispatchEvent,
     DispatchIngressMetadata,
@@ -323,6 +329,8 @@ def _attachment_parts(
         extra_content[ORIGINAL_SENDER_KEY] = payload_metadata.original_sender
     if payload_metadata is not None and payload_metadata.raw_audio_fallback:
         extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+    if payload_metadata is not None and payload_metadata.voice_transcript:
+        extra_content[VOICE_TRANSCRIPT_KEY] = True
     if media_events and ORIGINAL_SENDER_KEY not in extra_content:
         extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
     return message_attachment_ids, trusted_attachment_ids, extra_content
@@ -368,6 +376,12 @@ async def _apply_turn_plan(
         message_attachment_ids=tuple(message_attachment_ids),
         trusted_attachment_ids=tuple(trusted_attachment_ids),
         media_events=tuple(media_events or ()),
+        raw_audio_fallback=(
+            prepared.payload_metadata.raw_audio_fallback is True if prepared.payload_metadata is not None else False
+        ),
+        voice_transcript=(
+            prepared.payload_metadata.voice_transcript is True if prepared.payload_metadata is not None else False
+        ),
     )
 
     # The inbox handoff is complete once the runner takes the conversation's

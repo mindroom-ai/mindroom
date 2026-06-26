@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.attachment_media import attachment_records_to_media, resolve_scoped_attachments
 from mindroom.attachments import (
     format_attachments_prompt,
+    format_voice_transcript_attachment_guidance,
     merge_attachment_ids,
     parse_attachment_ids_from_thread_history,
     register_matrix_media_attachment,
@@ -109,6 +110,8 @@ class DispatchPayloadWithAttachmentsRequest:
     thread_history: Sequence[ResolvedVisibleMessage]
     fallback_images: list[Image] | None = None
     trusted_current_attachment_ids: list[str] = field(default_factory=list)
+    raw_audio_fallback: bool = False
+    voice_transcript: bool = False
 
 
 @dataclass(frozen=True)
@@ -403,7 +406,10 @@ class InboundTurnNormalizer:
         )
         if request.fallback_images:
             attachment_images = [*attachment_images, *request.fallback_images]
-        attachment_prompt = format_attachments_prompt(current_records)
+        attachment_prompt_blocks = [format_attachments_prompt(current_records)]
+        if request.voice_transcript and not request.raw_audio_fallback:
+            attachment_prompt_blocks.append(format_voice_transcript_attachment_guidance(current_records))
+        attachment_prompt = "\n\n".join(block for block in attachment_prompt_blocks if block) or None
         resolved_attachment_ids = [record.attachment_id for record in resolved_records]
         return DispatchPayload(
             prompt=request.prompt,

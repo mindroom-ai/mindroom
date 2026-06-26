@@ -178,6 +178,8 @@ Set `voice.visible_router_echo: false` to suppress the display-only echo without
 The original audio is always registered as a context-scoped attachment before dispatch continues.
 That means the responding agent or team can inspect the file directly, use audio-capable models, or fetch it later with the `attachments` tool.
 This is true whether the prompt came from a transcript, a fallback message, or a router handoff.
+For successful STT turns, MindRoom adds hidden model-facing guidance that says the `🎤` text is already the transcript and the raw audio attachment is optional.
+For raw fallback turns, MindRoom does not add that guidance because the audio attachment remains the primary content.
 
 ## Matrix Integration
 

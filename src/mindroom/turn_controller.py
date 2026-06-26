@@ -32,6 +32,7 @@ from mindroom.constants import (
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
     RuntimePaths,
 )
 from mindroom.delivery_gateway import SendTextRequest
@@ -1000,6 +1001,8 @@ class TurnController:
             extra_content[ATTACHMENT_IDS_KEY] = list(payload_metadata.attachment_ids)
         if payload_metadata.raw_audio_fallback:
             extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+        if payload_metadata.voice_transcript:
+            extra_content[VOICE_TRANSCRIPT_KEY] = True
         return extra_content
 
     async def _prepare_dispatch(

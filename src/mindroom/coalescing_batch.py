@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
-from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY, VOICE_TRANSCRIPT_KEY
 from .dispatch_handoff import (
     DispatchEvent,
     MediaDispatchEvent,
@@ -89,6 +89,7 @@ class CoalescedBatch:
     media_events: list[MediaDispatchEvent]
     original_sender: str | None = None
     raw_audio_fallback: bool = False
+    voice_transcript: bool = False
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
 
@@ -137,9 +138,10 @@ def _coalesced_prompt_for_events(ordered_pending_events: list[PendingEvent]) -> 
     )
 
 
-def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, bool]:
+def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, bool, bool]:
     original_sender: str | None = None
     raw_audio_fallback = False
+    voice_transcript = False
     for pending_event in pending_events:
         if not _pending_event_trusts_internal_payload(pending_event):
             continue
@@ -152,9 +154,11 @@ def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, boo
                 original_sender = content_original_sender
         if content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True:
             raw_audio_fallback = True
-        if original_sender is not None and raw_audio_fallback:
+        if content.get(VOICE_TRANSCRIPT_KEY) is True:
+            voice_transcript = True
+        if original_sender is not None and raw_audio_fallback and voice_transcript:
             break
-    return original_sender, raw_audio_fallback
+    return original_sender, raw_audio_fallback, voice_transcript
 
 
 _SOURCE_KIND_PRIORITY: dict[str, int] = {
@@ -232,7 +236,7 @@ def build_coalesced_batch(
     """Build one normalized dispatch batch from queued pending events."""
     ordered_pending_events = list(pending_events)
     primary_pending_event = ordered_pending_events[-1]
-    original_sender, raw_audio_fallback = _batch_metadata(ordered_pending_events)
+    original_sender, raw_audio_fallback, voice_transcript = _batch_metadata(ordered_pending_events)
     return CoalescedBatch(
         coalescing_key=key,
         room=primary_pending_event.room,
@@ -260,5 +264,6 @@ def build_coalesced_batch(
         ],
         original_sender=original_sender,
         raw_audio_fallback=raw_audio_fallback,
+        voice_transcript=voice_transcript,
         dispatch_metadata=_batch_dispatch_metadata(ordered_pending_events),
     )

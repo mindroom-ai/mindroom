@@ -33,6 +33,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import (
@@ -6323,6 +6324,52 @@ async def test_trusted_voice_normalized_payload_metadata_reaches_envelope_and_pa
             ATTACHMENT_IDS_KEY: ["voice-attachment"],
             ORIGINAL_SENDER_KEY: "@user:localhost",
             VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_trusted_voice_transcript_metadata_reaches_envelope_and_payload(
+    tmp_path: Path,
+) -> None:
+    """Successful voice transcript metadata should survive handoff as hidden payload guidance."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    bot.config.agents["test_agent"].thread_mode = "room"
+    room = _make_room()
+    voice_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice-transcript",
+        body="voice transcript",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "voice transcript",
+                ATTACHMENT_IDS_KEY: ["voice-attachment"],
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                VOICE_TRANSCRIPT_KEY: True,
+            },
+        },
+        server_timestamp=1000,
+        source_kind_override="voice",
+    )
+    captured_extra_content: list[object] = []
+
+    envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [(voice_event, "voice", None, {"trust_internal_payload_metadata": True})],
+        captured_plan_extra_content=captured_extra_content,
+    )
+
+    assert envelopes[0].source_kind == "voice"
+    assert payload_requests[0].current_attachment_ids == ["voice-attachment"]
+    assert payload_requests[0].trusted_current_attachment_ids == ["voice-attachment"]
+    assert payload_requests[0].voice_transcript is True
+    assert captured_extra_content == [
+        {
+            ATTACHMENT_IDS_KEY: ["voice-attachment"],
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            VOICE_TRANSCRIPT_KEY: True,
         },
     ]
 

@@ -43,6 +43,8 @@ class DispatchPayloadInputs:
     message_attachment_ids: tuple[str, ...]
     trusted_attachment_ids: tuple[str, ...]
     media_events: tuple[MediaDispatchEvent, ...]
+    raw_audio_fallback: bool = False
+    voice_transcript: bool = False
 
 
 @dataclass(frozen=True)
@@ -165,6 +167,8 @@ class ResponsePayloadPreparer:
                     media_thread_id=media_thread_id,
                     thread_history=thread_history,
                     fallback_images=fallback_images,
+                    raw_audio_fallback=payload_inputs.raw_audio_fallback,
+                    voice_transcript=payload_inputs.voice_transcript,
                 ),
             )
             payload_builder_outcome = "success"
