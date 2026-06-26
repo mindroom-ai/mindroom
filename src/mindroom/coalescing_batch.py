@@ -156,8 +156,6 @@ def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, boo
             raw_audio_fallback = True
         if content.get(VOICE_TRANSCRIPT_KEY) is True:
             voice_transcript = True
-        if original_sender is not None and raw_audio_fallback and voice_transcript:
-            break
     return original_sender, raw_audio_fallback, voice_transcript
 
 

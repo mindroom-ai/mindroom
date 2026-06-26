@@ -25,6 +25,7 @@ from mindroom.attachments import (
     filter_attachments_for_context,
     format_attachment_annotation,
     format_attachments_prompt,
+    format_voice_transcript_attachment_guidance,
     load_attachment,
     merge_attachment_ids,
     parse_attachment_ids_from_event_source,
@@ -400,6 +401,23 @@ def test_format_attachments_prompt_omits_missing_provenance_fields() -> None:
         "Attachments sent with the current message (use tool calls to inspect or process them by ID):\n"
         "- att_bare (file)"
     )
+
+
+def test_format_voice_transcript_attachment_guidance_pluralizes_audio_ids() -> None:
+    """Voice transcript guidance should name every raw audio attachment ID exactly."""
+    records = [
+        AttachmentRecord(attachment_id="att_voice_1", local_path=Path("media/voice1.ogg"), kind="audio"),
+        AttachmentRecord(attachment_id="att_voice_2", local_path=Path("media/voice2.ogg"), kind="audio"),
+        AttachmentRecord(attachment_id="att_image", local_path=Path("media/image.png"), kind="image"),
+    ]
+
+    guidance = format_voice_transcript_attachment_guidance(records)
+
+    assert guidance is not None
+    assert "current voice messages" in guidance
+    assert "raw audio attachment IDs are available" in guidance
+    assert "att_voice_1, att_voice_2" in guidance
+    assert "att_image" not in guidance
 
 
 def test_format_attachment_annotation_renders_compact_references() -> None:

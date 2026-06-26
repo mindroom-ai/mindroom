@@ -244,9 +244,13 @@ def format_voice_transcript_attachment_guidance(current_records: list[Attachment
     if not audio_attachment_ids:
         return None
     rendered_ids = ", ".join(audio_attachment_ids)
+    message_label = "message" if len(audio_attachment_ids) == 1 else "messages"
+    id_label = "ID" if len(audio_attachment_ids) == 1 else "IDs"
+    verb = "is" if len(audio_attachment_ids) == 1 else "are"
     return (
-        "MindRoom already transcribed the current voice message. "
-        f"The raw audio attachment ID is available for verification or deeper audio work: {rendered_ids}. "
+        f"MindRoom already transcribed the current voice {message_label}. "
+        f"The raw audio attachment {id_label} {verb} available for verification or deeper audio work: "
+        f"{rendered_ids}. "
         "Only inspect or re-transcribe the raw audio if the user asks, the transcript seems wrong, "
         "or the task specifically requires audio-level analysis."
     )
