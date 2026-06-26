@@ -655,7 +655,6 @@ class TodoTools(Toolkit):
             tools=[
                 self.plan,
                 self.add_todo,
-                self.complete_todo,
                 self.list_todos,
                 self.update_todo,
                 self.apply_template,
@@ -786,37 +785,6 @@ class TodoTools(Toolkit):
             message += f" assigned to {resolved_agent}"
         return message
 
-    def complete_todo(self, agent: Agent | Team, todo_id: str) -> str:
-        """Mark a todo item as completed."""
-        del agent
-        state_root, room_id, thread_id, _agent_name = _current_scope()
-        path = _todos_path(state_root, room_id, thread_id)
-        if not path.exists():
-            return f"Todo `{todo_id}` not found."
-
-        def mark_done(data: dict[str, Any]) -> str | _NoWriteResult:
-            _ensure_thread_state(data, room_id, thread_id)
-            for item in data["items"]:
-                if item["id"] == todo_id:
-                    if item["status"] in _TERMINAL_STATUSES:
-                        return _no_write(f"Item `{todo_id}` is already {item['status']}.")
-                    now = _now_iso()
-                    item["status"] = "done"
-                    item["completed_at"] = now
-                    item["updated_at"] = now
-                    data["updated_at"] = now
-                    unblocked = _newly_unblocked(data["items"], todo_id)
-                    message = f"Completed: **{item['title']}** (`{todo_id}`)"
-                    if unblocked:
-                        names = ", ".join(
-                            f"`{unblocked_item['id']}` {unblocked_item['title']}" for unblocked_item in unblocked
-                        )
-                        message += f"\nNow unblocked: {names}"
-                    return message
-            return _no_write(f"Todo `{todo_id}` not found.")
-
-        return _locked_update_json(path, mark_done)
-
     def list_todos(self, agent: Agent | Team, show_all: bool = False) -> str:
         """List todo items in the current thread's work plan."""
         del agent
@@ -897,6 +865,7 @@ class TodoTools(Toolkit):
 
             item = items_by_id[todo_id]
             dep_ids: list[str] | None = None
+            now = _now_iso()
             if depends_on is not None:
                 dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()]
                 for dep_id in dep_ids:
@@ -915,10 +884,9 @@ class TodoTools(Toolkit):
                 item["priority"] = priority.lower()
                 changes.append(f"priority={priority.lower()}")
             if status:
-                new_status = status.lower()
-                item["status"] = new_status
-                item["completed_at"] = _now_iso() if new_status == "done" else None
-                changes.append(f"status={new_status}")
+                item["status"] = status.lower()
+                item["completed_at"] = now if item["status"] == "done" else None
+                changes.append(f"status={item['status']}")
             if dep_ids is not None:
                 item["depends_on"] = dep_ids
                 changes.append(f"depends_on={dep_ids}")
@@ -928,8 +896,8 @@ class TodoTools(Toolkit):
             if not changes:
                 return _no_write("No fields to update.")
 
-            item["updated_at"] = _now_iso()
-            data["updated_at"] = _now_iso()
+            item["updated_at"] = now
+            data["updated_at"] = now
             unblocked_message = ""
             if status and status.lower() in _TERMINAL_STATUSES:
                 unblocked = _newly_unblocked(data["items"], todo_id)

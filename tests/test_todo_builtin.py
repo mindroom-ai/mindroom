@@ -99,7 +99,6 @@ def test_todo_is_registered_as_builtin_tool(tmp_path: Path) -> None:
     assert metadata.requires_room_context is True
     assert set(metadata.function_names) == {
         "add_todo",
-        "complete_todo",
         "list_todos",
         "plan",
         "update_todo",
@@ -122,12 +121,12 @@ def test_todo_tool_schemas_include_model_visible_arguments(tmp_path: Path) -> No
 
     plan_params = tool.functions["plan"].parameters["properties"]
     add_params = tool.functions["add_todo"].parameters["properties"]
-    complete_params = tool.functions["complete_todo"].parameters["properties"]
+    update_params = tool.functions["update_todo"].parameters["properties"]
     apply_template_params = tool.functions["apply_template"].parameters["properties"]
 
     assert "tasks" in plan_params
     assert "title" in add_params
-    assert "todo_id" in complete_params
+    assert {"todo_id", "status"}.issubset(update_params)
     assert {"name", "params"}.issubset(apply_template_params)
 
 
@@ -151,7 +150,7 @@ def test_todo_plan_and_complete_persist_under_current_thread(tmp_path: Path) -> 
     second_id = state["items"][1]["id"]
     with tool_runtime_context(_tool_context(config)):
         dep_result = tool.update_todo(agent=_agent(), todo_id=second_id, depends_on=first_id)
-        complete_result = tool.complete_todo(agent=_agent(), todo_id=first_id)
+        complete_result = tool.update_todo(agent=_agent(), todo_id=first_id, status="done")
 
     assert "depends_on" in dep_result
     assert "Now unblocked" in complete_result
@@ -536,7 +535,7 @@ def test_missing_todo_read_and_error_paths_do_not_create_thread_state(tmp_path: 
 
     with tool_runtime_context(_tool_context(config)):
         list_result = tool.list_todos(agent=_agent())
-        complete_result = tool.complete_todo(agent=_agent(), todo_id="missing")
+        complete_result = tool.update_todo(agent=_agent(), todo_id="missing", status="done")
         update_result = tool.update_todo(agent=_agent(), todo_id="missing", title="Still missing")
         add_result = tool.add_todo(agent=_agent(), title="Blocked item", depends_on="missing")
 

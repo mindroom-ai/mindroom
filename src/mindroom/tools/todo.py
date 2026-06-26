@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     function_names=(
         "add_todo",
         "apply_template",
-        "complete_todo",
         "list_templates",
         "list_todos",
         "plan",

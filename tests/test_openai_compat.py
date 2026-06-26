@@ -493,7 +493,6 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -
         not {
             "add_todo",
             "apply_template",
-            "complete_todo",
             "list_templates",
             "list_todos",
             "plan",
