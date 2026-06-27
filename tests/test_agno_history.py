@@ -6429,10 +6429,11 @@ async def test_prepare_agent_and_prompt_keeps_prior_request_message_prefix_byte_
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_preserves_timestamped_current_turn_without_duplication(
+async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplication(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path, num_history_runs=10)
+    config.timezone = "America/Los_Angeles"
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     recording_model = RecordingModel(id="recording-model", provider="fake")
     recorded_requests: list[list[dict[str, str]]] = []
@@ -6452,18 +6453,14 @@ async def test_prepare_agent_and_prompt_preserves_timestamped_current_turn_witho
         ),
     }
     model_prompt_by_prompt = {
-        "First prompt": (
-            "[2026-03-20 08:15 PDT] First prompt\n\n"
-            "Available attachment IDs: att_1. Use tool calls to inspect or process them."
-        ),
-        "Second prompt": (
-            "[2026-03-20 08:16 PDT] Second prompt\n\n"
-            "Available attachment IDs: att_2. Use tool calls to inspect or process them."
-        ),
-        "Third prompt": (
-            "[2026-03-20 08:17 PDT] Third prompt\n\n"
-            "Available attachment IDs: att_3. Use tool calls to inspect or process them."
-        ),
+        "First prompt": "First prompt\n\nAvailable attachment IDs: att_1. Use tool calls to inspect or process them.",
+        "Second prompt": "Second prompt\n\nAvailable attachment IDs: att_2. Use tool calls to inspect or process them.",
+        "Third prompt": "Third prompt\n\nAvailable attachment IDs: att_3. Use tool calls to inspect or process them.",
+    }
+    timestamp_by_prompt = {
+        "First prompt": 1_774_019_700_000,
+        "Second prompt": 1_774_019_760_000,
+        "Third prompt": 1_774_019_820_000,
     }
 
     async def fake_build_memory_prompt_parts(
@@ -6498,6 +6495,7 @@ async def test_prepare_agent_and_prompt_preserves_timestamped_current_turn_witho
                 config,
                 session_id="session-1",
                 model_prompt=model_prompt_by_prompt[prompt],
+                current_timestamp_ms=timestamp_by_prompt[prompt],
             )
             await prepared_run.agent.arun(prepared_run.run_input, session_id="session-1")
             recorded_requests.append(

@@ -82,6 +82,7 @@ depends_on = [
     "mindroom.metadata_merge",
     "mindroom.timing",
     "mindroom.tool_system.events",
+    "mindroom.user_turn_time",
 ]
 
 [[modules]]
@@ -1130,6 +1131,7 @@ depends_on = [
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.user_turn_time",
 ]
 
 [[modules]]
@@ -1268,6 +1270,11 @@ depends_on = [
     "mindroom.memory.functions",
     "mindroom.memory._prompting",
 ]
+
+[[modules]]
+path = "mindroom.user_turn_time"
+depends_on = ["mindroom.memory"]
+visibility = ["mindroom.ai", "mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.memory._policy"

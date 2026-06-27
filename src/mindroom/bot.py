@@ -2195,7 +2195,6 @@ class TeamBot(AgentBot):
                 config=self.config,
                 runtime_paths=self.runtime_paths,
                 model_prompt=model_prompt,
-                current_timestamp_ms=current_timestamp_ms,
             )
         )
 

@@ -80,6 +80,7 @@ from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed
 from mindroom.tool_system.events import StreamingToolTracker, complete_pending_tool_block, format_tool_combined
+from mindroom.user_turn_time import prefix_user_turn_time
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
@@ -122,31 +123,32 @@ def _compose_current_turn_prompt(
     raw_prompt: str,
     model_prompt: str | None,
     prompt_parts: MemoryPromptParts,
+    timezone: str,
+    current_timestamp_ms: float | None = None,
 ) -> str:
     """Build the current-turn user message without rewriting persisted history."""
     prompt_chunks: list[str] = []
-    user_turn_time_prefix = _user_turn_time_prefix_from_model_prompt(model_prompt)
     if raw_prompt:
-        prompt_chunks.append(f"{user_turn_time_prefix}{raw_prompt}")
+        prompt_chunks.append(
+            prefix_user_turn_time(
+                raw_prompt,
+                timezone=timezone,
+                timestamp_ms=current_timestamp_ms,
+            ),
+        )
     if prompt_parts.turn_context:
         prompt_chunks.append(prompt_parts.turn_context)
     model_prompt_tail = _model_prompt_tail_after_raw_prompt(raw_prompt=raw_prompt, model_prompt=model_prompt)
     if model_prompt_tail:
         if not raw_prompt:
-            model_prompt_tail = f"{user_turn_time_prefix}{model_prompt_tail}"
+            model_prompt_tail = prefix_user_turn_time(
+                model_prompt_tail,
+                timezone=timezone,
+                timestamp_ms=current_timestamp_ms,
+            )
         prompt_chunks.append(model_prompt_tail)
 
     return "\n\n".join(prompt_chunks)
-
-
-def _user_turn_time_prefix_from_model_prompt(model_prompt: str | None) -> str:
-    """Return the timestamp prefix already attached to a model-facing current turn."""
-    if not model_prompt:
-        return ""
-    stripped_model_prompt = strip_user_turn_time_prefix(model_prompt)
-    if stripped_model_prompt == model_prompt:
-        return ""
-    return model_prompt[: len(model_prompt) - len(stripped_model_prompt)]
 
 
 def _model_prompt_tail_after_raw_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
@@ -170,6 +172,7 @@ class _DynamicContinuationRunState:
     original_prompt: str
     active_prompt: str
     active_model_prompt: str | None
+    active_current_timestamp_ms: float | None
     active_run_id: str | None
     continuation_model_prompt_tail: str
 
@@ -179,12 +182,14 @@ class _DynamicContinuationRunState:
         *,
         prompt: str,
         model_prompt: str | None,
+        current_timestamp_ms: float | None,
         run_id: str | None,
     ) -> _DynamicContinuationRunState:
         return cls(
             original_prompt=prompt,
             active_prompt=prompt,
             active_model_prompt=model_prompt,
+            active_current_timestamp_ms=current_timestamp_ms,
             active_run_id=run_id,
             continuation_model_prompt_tail=_model_prompt_tail_after_raw_prompt(
                 raw_prompt=prompt,
@@ -202,6 +207,7 @@ class _DynamicContinuationRunState:
             self,
             active_prompt=continuation_prompt,
             active_model_prompt=self.continuation_model_prompt_tail or None,
+            active_current_timestamp_ms=None,
             active_run_id=ai_runtime.next_retry_run_id(previous_run_id),
         )
 
@@ -1162,6 +1168,7 @@ async def _prepare_agent_and_prompt(
     include_openai_compat_guidance: bool = False,
     timing_scope: str | None = None,
     model_prompt: str | None = None,
+    current_timestamp_ms: float | None = None,
     current_sender_id: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedAgentRun:
@@ -1185,6 +1192,8 @@ async def _prepare_agent_and_prompt(
         raw_prompt=prompt,
         model_prompt=model_prompt,
         prompt_parts=prompt_parts,
+        timezone=config.timezone,
+        current_timestamp_ms=current_timestamp_ms,
     )
     _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
 
@@ -1318,6 +1327,7 @@ async def _prepare_agent_run_context(
     system_enrichment_items: Sequence[EnrichmentItem],
     timing_scope: str,
     model_prompt: str | None,
+    current_timestamp_ms: float | None,
     user_id: str | None,
     requester_id: str | None,
     correlation_id: str,
@@ -1351,6 +1361,7 @@ async def _prepare_agent_run_context(
         include_openai_compat_guidance=include_openai_compat_guidance,
         timing_scope=timing_scope,
         model_prompt=model_prompt,
+        current_timestamp_ms=current_timestamp_ms,
         **_current_sender_id_kwargs(
             user_id,
             include_openai_compat_guidance=include_openai_compat_guidance,
@@ -1410,6 +1421,7 @@ async def ai_response(  # noqa: C901, PLR0915
     config: Config,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_prompt: str | None = None,
+    current_timestamp_ms: float | None = None,
     thread_id: str | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
@@ -1446,6 +1458,7 @@ async def ai_response(  # noqa: C901, PLR0915
         config: Application configuration
         thread_history: Optional thread history
         model_prompt: Optional model-facing current-turn prompt additions.
+        current_timestamp_ms: Optional source Matrix event timestamp in milliseconds.
         thread_id: Optional resolved Matrix thread ID for request-log correlation and run metadata.
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
@@ -1503,6 +1516,7 @@ async def ai_response(  # noqa: C901, PLR0915
                 config=config,
                 thread_history=thread_history,
                 model_prompt=model_prompt,
+                current_timestamp_ms=current_timestamp_ms,
                 thread_id=thread_id,
                 room_id=room_id,
                 knowledge=knowledge,
@@ -1586,6 +1600,7 @@ async def ai_response(  # noqa: C901, PLR0915
                     system_enrichment_items=system_enrichment_items,
                     timing_scope=timing_scope,
                     model_prompt=continuation_state.active_model_prompt,
+                    current_timestamp_ms=continuation_state.active_current_timestamp_ms,
                     user_id=user_id,
                     requester_id=resolved_requester_id,
                     correlation_id=resolved_correlation_id,
@@ -1736,6 +1751,7 @@ async def ai_response(  # noqa: C901, PLR0915
             continuation_state = _DynamicContinuationRunState.initial(
                 prompt=prompt,
                 model_prompt=model_prompt,
+                current_timestamp_ms=current_timestamp_ms,
                 run_id=run_id,
             )
             for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
@@ -2010,6 +2026,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     config: Config,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_prompt: str | None = None,
+    current_timestamp_ms: float | None = None,
     thread_id: str | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
@@ -2044,6 +2061,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         config: Application configuration
         thread_history: Optional thread history
         model_prompt: Optional model-facing current-turn prompt additions.
+        current_timestamp_ms: Optional source Matrix event timestamp in milliseconds.
         thread_id: Optional resolved Matrix thread ID for request-log correlation and run metadata.
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
@@ -2147,6 +2165,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     system_enrichment_items=system_enrichment_items,
                     timing_scope=timing_scope,
                     model_prompt=continuation_state.active_model_prompt,
+                    current_timestamp_ms=continuation_state.active_current_timestamp_ms,
                     user_id=user_id,
                     requester_id=resolved_requester_id,
                     correlation_id=resolved_correlation_id,
@@ -2400,6 +2419,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             continuation_state = _DynamicContinuationRunState.initial(
                 prompt=prompt,
                 model_prompt=model_prompt,
+                current_timestamp_ms=current_timestamp_ms,
                 run_id=run_id,
             )
             for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):

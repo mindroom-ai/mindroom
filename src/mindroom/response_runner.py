@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
 from agno.db.base import SessionType
 from agno.session.agent import AgentSession
@@ -63,6 +61,7 @@ from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity, stream_with_tool_execution_identity
+from mindroom.user_turn_time import prefix_user_turn_time
 
 from .delivery_gateway import (
     CancelledVisibleNoteRequest,
@@ -183,21 +182,6 @@ def _append_matrix_prompt_context(
     return f"{prompt.rstrip()}\n\n{metadata_block}"
 
 
-def _prefix_user_turn_time(
-    prompt: str,
-    *,
-    timezone: str,
-    timestamp_ms: float | None = None,
-) -> str:
-    """Prefix one user-authored turn with local date and time."""
-    if not prompt.strip() or strip_user_turn_time_prefix(prompt) != prompt:
-        return prompt
-    tz = ZoneInfo(timezone)
-    current = datetime.now(tz) if timestamp_ms is None else datetime.fromtimestamp(timestamp_ms / 1000, tz)
-    timezone_abbrev = current.tzname() or timezone
-    return f"[{current.strftime('%Y-%m-%d %H:%M')} {timezone_abbrev}] {prompt}"
-
-
 def _timestamp_thread_history_user_turns(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -216,7 +200,7 @@ def _timestamp_thread_history_user_turns(
             timestamped_history.append(message)
             continue
 
-        timestamped_body = _prefix_user_turn_time(
+        timestamped_body = prefix_user_turn_time(
             message.body,
             timezone=config.timezone,
             timestamp_ms=message.timestamp,
@@ -232,7 +216,6 @@ def prepare_memory_and_model_context(
     config: Config,
     runtime_paths: RuntimePaths,
     model_prompt: str | None = None,
-    current_timestamp_ms: float | None = None,
 ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
     """Return raw memory inputs alongside timestamped model-facing context."""
     model_prompt_content = model_prompt or prompt
@@ -249,17 +232,12 @@ def prepare_memory_and_model_context(
             model_prompt_content = model_prompt
         else:
             model_prompt_content = f"{prompt}\n\n{model_prompt}"
-    model_prompt_text = _prefix_user_turn_time(
-        model_prompt_content,
-        timezone=config.timezone,
-        timestamp_ms=current_timestamp_ms,
-    )
     model_thread_history = _timestamp_thread_history_user_turns(
         thread_history,
         config=config,
         runtime_paths=runtime_paths,
     )
-    return prompt, thread_history, model_prompt_text, model_thread_history
+    return prompt, thread_history, model_prompt_content, model_thread_history
 
 
 @dataclass(frozen=True)
@@ -961,7 +939,6 @@ class ResponseRunner:
                 config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
                 model_prompt=request.model_prompt,
-                current_timestamp_ms=request.current_timestamp_ms,
             )
         )
         model_name = select_model_for_team(
@@ -988,10 +965,14 @@ class ResponseRunner:
             _agent_has_matrix_messaging_tool(self.deps.runtime.config, name, resolved_target.session_id)
             for name in agent_names
         )
-        model_message = _append_matrix_prompt_context(
-            prepared_prompt,
-            target=resolved_target,
-            include_context=include_matrix_prompt_context,
+        model_message = prefix_user_turn_time(
+            _append_matrix_prompt_context(
+                prepared_prompt,
+                target=resolved_target,
+                include_context=include_matrix_prompt_context,
+            ),
+            timezone=self.deps.runtime.config.timezone,
+            timestamp_ms=request.current_timestamp_ms,
         )
         resolved_request = self._request_with_locked_target(
             replace(
@@ -1623,6 +1604,7 @@ class ResponseRunner:
                 config=self.deps.runtime.config,
                 thread_history=request.thread_history,
                 model_prompt=runtime.model_prompt,
+                current_timestamp_ms=request.current_timestamp_ms,
                 thread_id=runtime.resolved_target.resolved_thread_id,
                 room_id=request.room_id,
                 knowledge=knowledge_resolution.knowledge,
@@ -1715,6 +1697,7 @@ class ResponseRunner:
             config=self.deps.runtime.config,
             thread_history=request.thread_history,
             model_prompt=runtime.model_prompt,
+            current_timestamp_ms=request.current_timestamp_ms,
             thread_id=runtime.resolved_target.resolved_thread_id,
             room_id=request.room_id,
             knowledge=knowledge_resolution.knowledge,
@@ -2155,7 +2138,6 @@ class ResponseRunner:
                 config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
                 model_prompt=request.model_prompt,
-                current_timestamp_ms=request.current_timestamp_ms,
             )
         )
         normalized_request = replace(

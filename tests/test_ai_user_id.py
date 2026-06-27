@@ -3177,19 +3177,36 @@ def test_compose_current_turn_prompt_uses_normalized_tail_comparison() -> None:
     """Whitespace-normalized model prompts should not duplicate the raw turn."""
     prompt = _compose_current_turn_prompt(
         raw_prompt=" report ",
-        model_prompt="[2026-03-20 08:15 PDT] report\n\nAvailable attachment IDs: att_report.",
+        model_prompt="report\n\nAvailable attachment IDs: att_report.",
         prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
+        timezone="America/Los_Angeles",
+        current_timestamp_ms=1_774_019_700_000,
+    )
+
+    assert prompt == "[2026-03-20 08:15 PDT]  report \n\nAvailable attachment IDs: att_report."
+
+
+def test_compose_current_turn_prompt_uses_structured_timestamp() -> None:
+    """Current-turn timestamping should not depend on parsing model_prompt text."""
+    prompt = _compose_current_turn_prompt(
+        raw_prompt=" report ",
+        model_prompt="[1999-01-01 00:00 UTC] report\n\nAvailable attachment IDs: att_report.",
+        prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
+        timezone="America/Los_Angeles",
+        current_timestamp_ms=1_774_019_700_000,
     )
 
     assert prompt == "[2026-03-20 08:15 PDT]  report \n\nAvailable attachment IDs: att_report."
 
 
 def test_compose_current_turn_prompt_preserves_timestamp_without_raw_prompt() -> None:
-    """Timestamped model-only current turns should keep their source event time."""
+    """Model-only current turns should use the structured source event time."""
     prompt = _compose_current_turn_prompt(
         raw_prompt="",
-        model_prompt="[2026-03-20 08:15 PDT] Available attachment IDs: att_report.",
+        model_prompt="Available attachment IDs: att_report.",
         prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
+        timezone="America/Los_Angeles",
+        current_timestamp_ms=1_774_019_700_000,
     )
 
     assert prompt == "[2026-03-20 08:15 PDT] Available attachment IDs: att_report."
@@ -4388,11 +4405,11 @@ class TestUserIdPassthrough:
 
         assert model_prompt == existing_model_prompt
 
-    def test_prepare_memory_and_model_context_uses_source_event_timestamp_for_model_prompt(
+    def test_prepare_memory_and_model_context_leaves_current_turn_timestamp_structured(
         self,
         tmp_path: Path,
     ) -> None:
-        """Model-facing current turns should use the Matrix event timestamp, not processing time."""
+        """Current-turn timestamping happens at final model prompt composition."""
         config = _config()
         config.timezone = "America/Los_Angeles"
         runtime_paths = _runtime_paths(tmp_path)
@@ -4403,11 +4420,10 @@ class TestUserIdPassthrough:
             [],
             config=config,
             runtime_paths=runtime_paths,
-            current_timestamp_ms=1_774_018_800_000,
         )
 
         assert memory_prompt == "plain text message"
-        assert model_prompt == "[2026-03-20 08:00 PDT] plain text message"
+        assert model_prompt == "plain text message"
 
     def test_prepare_memory_and_model_context_timestamps_thread_history_user_turns(
         self,
@@ -4430,7 +4446,6 @@ class TestUserIdPassthrough:
             ],
             config=config,
             runtime_paths=runtime_paths,
-            current_timestamp_ms=1_774_022_400_000,
         )
 
         assert memory_thread_history[0].body == "older text"
