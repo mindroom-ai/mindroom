@@ -30,6 +30,7 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.ingress_lanes import LaneDelivery
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 
 if TYPE_CHECKING:
@@ -852,6 +853,42 @@ async def test_failed_lane_ready_task_does_not_block_later_lane_work() -> None:
 
     await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$later:localhost"]])
     assert voice_slot.settled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_lane_admission_does_not_wait_for_its_own_unsettled_slot() -> None:
+    """A lane-admitted event is already ready and must not wait for its own slot to settle."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
+    ready = ReadyPendingEvent(
+        pending_event=_pending(_text_event("$lane:localhost", "lane text", 1_000_002)),
+    )
+    delivery = LaneDelivery(
+        key=key,
+        source_event_id="$lane:localhost",
+        source_kind=MESSAGE_SOURCE_KIND,
+        ready_result=ready,
+        ready_task=None,
+        received_at=1_000.0,
+    )
+
+    try:
+        await gate._admit_from_lane(slot, delivery, ready)
+        await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$lane:localhost"]])
+        assert not slot.settled.is_set()
+    finally:
+        gate.release_lane_slot(slot)
+        await gate.drain_all()
 
 
 @pytest.mark.asyncio

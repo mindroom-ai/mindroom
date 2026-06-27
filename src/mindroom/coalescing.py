@@ -74,6 +74,7 @@ class _QueuedEvent:
     source_event_id: str | None
     source_kind: str
     ready_result: ReadyPendingEvent
+    lane_slot: LaneSlot | None = None
 
     @property
     def pending_event(self) -> PendingEvent:
@@ -270,6 +271,7 @@ class CoalescingGate:
             receipt_time=slot.receipt_time,
             source_event_id=delivery.source_event_id,
             source_kind=delivery.source_kind,
+            lane_slot=slot,
         )
 
     def _remove_gate(self, key: CoalescingKey) -> None:
@@ -579,6 +581,7 @@ class CoalescingGate:
         receipt_time: float | None = None,
         source_event_id: str | None = None,
         source_kind: str = "pending",
+        lane_slot: LaneSlot | None = None,
     ) -> None:
         """Admit one ready, conversation-assigned event under its coalescing key.
 
@@ -594,6 +597,7 @@ class CoalescingGate:
             source_event_id=source_event_id,
             source_kind=source_kind,
             ready_result=ready_result,
+            lane_slot=lane_slot,
         )
         self._insert_queued_event(gate, admission)
         self._schedule_drain(key, gate)
@@ -857,10 +861,12 @@ class CoalescingGate:
         debounce_result: _DebounceWaitResult,
     ) -> None:
         if not is_active_follow_up_coalescing_key(key):
+            admitted_lane_slot_ids = {id(queued.lane_slot) for queued in gate.queue if queued.lane_slot is not None}
             window_slots = self._lanes.undelivered_in_window(
                 key.room_id,
                 key.requester_user_id,
                 before_or_at_receipt_time=debounce_result.quiet_deadline,
+                exclude_slot_ids=admitted_lane_slot_ids,
             )
             if window_slots:
                 await self._wait_for_lane_slots(gate, window_slots)

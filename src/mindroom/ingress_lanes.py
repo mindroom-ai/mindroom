@@ -149,13 +149,17 @@ class IngressLanes:
         sender_id: str,
         *,
         before_or_at_receipt_time: float,
+        exclude_slot_ids: set[int] | None = None,
     ) -> list[LaneSlot]:
         """Return undelivered slots for one sender received inside an open burst window."""
         lane = self._lanes.get((room_id, sender_id), ())
         return [
             slot
             for slot in lane
-            if not slot.released and not slot.settled.is_set() and slot.receipt_time <= before_or_at_receipt_time
+            if not slot.released
+            and not slot.settled.is_set()
+            and slot.receipt_time <= before_or_at_receipt_time
+            and (exclude_slot_ids is None or id(slot) not in exclude_slot_ids)
         ]
 
     def unsettled_slots(self) -> list[LaneSlot]:
