@@ -18,6 +18,7 @@ from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.tool_schema_cache import process_function_schema_for_prompt
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -138,6 +139,22 @@ class TestDelegateTools:
         assert "research" in instructions
         assert "Generate code" in instructions
         assert "Research topics" in instructions
+
+    def test_model_facing_tool_description_lists_allowed_targets(self, tools: DelegateTools) -> None:
+        """Test that the model-visible function description includes delegation targets."""
+        function = tools.async_functions["delegate_task"].model_copy(deep=True)
+
+        process_function_schema_for_prompt(function, strict=False)
+
+        assert function.description is not None
+        description = function.description
+        assert "Allowed delegate targets for this caller:" in description
+        for target in ("code", "research"):
+            assert target in description
+        assert "Do not use any other agent names." in description
+        assert "Use this when" in description
+        assert "delegated agent runs independently" in description
+        assert "no shared conversation history" in description
 
     @pytest.mark.asyncio
     async def test_delegate_to_unknown_agent(self, tools: DelegateTools) -> None:

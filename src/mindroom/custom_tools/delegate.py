@@ -57,6 +57,7 @@ class DelegateTools(Toolkit):
             instructions=self._build_instructions(),
             tools=[self.delegate_task],
         )
+        self.async_functions["delegate_task"].description = self._build_delegate_task_description()
 
     def _build_instructions(self) -> str:
         """Build toolkit instructions listing available delegation targets."""
@@ -69,11 +70,22 @@ class DelegateTools(Toolkit):
             agent_descriptions="\n\n".join(lines),
         )
 
-    async def delegate_task(self, agent_name: str, task: str) -> str:
-        """Delegate a task to another agent and return its response.
+    def _build_delegate_task_description(self) -> str:
+        """Build the model-facing function description with this caller's allowlist."""
+        available_targets = ", ".join(self._delegate_to)
+        return (
+            "Delegate a task to one allowed agent and return its response.\n"
+            f"Allowed delegate targets for this caller: {available_targets}.\n"
+            "Do not use any other agent names.\n"
+            "Use this when you need one listed specialist agent to handle a specific subtask.\n"
+            "The delegated agent runs independently with no shared conversation history."
+        )
 
-        Use this when you need a specialist agent to handle a specific subtask.
-        The delegated agent runs independently with no shared history.
+    async def delegate_task(self, agent_name: str, task: str) -> str:
+        """Delegate a task to one allowed agent and return its response.
+
+        The runtime-generated tool description lists caller-specific allowed
+        targets and model guidance.
 
         Args:
             agent_name: Name of the agent to delegate to (must be one of your configured targets).
