@@ -1801,12 +1801,7 @@ class AgentBot:
                     self.config,
                     self.runtime_paths,
                 ).current_entity_name_for_user_id(event.sender)
-                tracked_target = self.stop_manager.get_tracked_target(event.reacts_to)
-                if (
-                    not sender_agent_name
-                    and tracked_target is not None
-                    and await self.stop_manager.handle_stop_reaction(event.reacts_to)
-                ):
+                if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
                     self.logger.info(
                         "Stop requested for message",
                         message_id=event.reacts_to,

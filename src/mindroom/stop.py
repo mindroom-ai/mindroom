@@ -129,13 +129,6 @@ class StopManager:
             return None
         return tracked
 
-    def get_tracked_target(self, message_id: str) -> MessageTarget | None:
-        """Return the tracked delivery target for one message when available."""
-        tracked = self.tracked_messages.get(message_id)
-        if tracked is None:
-            return None
-        return tracked.target
-
     async def _probe_graceful_cancel(self, message_id: str, run_id: str, deadline: float) -> str:
         """Request Agno run cancellation for one known run during the post-cancel probe window."""
         tracked = self.tracked_messages.get(message_id)
@@ -345,7 +338,7 @@ class StopManager:
                 **target_log,
             )
         else:
-            logger.warning("Stop reaction for untracked message", message_id=message_id)
+            logger.debug("Stop reaction for untracked message", message_id=message_id)
         return False
 
     async def add_stop_button(
