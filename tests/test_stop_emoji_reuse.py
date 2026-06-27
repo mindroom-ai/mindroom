@@ -122,6 +122,7 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
 
         # Should NOT have called interactive.handle_reaction since it was handled as stop
         mock_handle_reaction.assert_not_called()
+        bot._send_response.assert_not_awaited()
 
         # The task should have been cancelled
         task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
@@ -179,15 +180,12 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
     task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
-    bot._send_response.assert_awaited_once_with(
-        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
-        response_text="⏹️ Stopping generation...",
-    )
+    bot._send_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_stop_emoji_acknowledgement_stays_in_thread(tmp_path: Path) -> None:
-    """Threaded stop acknowledgements should preserve the tracked thread target."""
+async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Path) -> None:
+    """Threaded stop reactions should not send a separate acknowledgement message."""
     config = _stop_test_config(tmp_path)
     agent_user = _stop_test_agent_user(config)
 
@@ -237,10 +235,7 @@ async def test_stop_emoji_acknowledgement_stays_in_thread(tmp_path: Path) -> Non
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
     task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
-    bot._send_response.assert_awaited_once_with(
-        target=MessageTarget.resolve("!test:example.com", "$thread:example.com", "$message:example.com"),
-        response_text="⏹️ Stopping generation...",
-    )
+    bot._send_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio

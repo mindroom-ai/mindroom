@@ -143,7 +143,6 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 
 # Constants
 _SYNC_TIMEOUT_MS = 30000
-_STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 
 
 @dataclass(frozen=True, slots=True)
@@ -1817,10 +1816,6 @@ class AgentBot:
                         self.client,
                         event.reacts_to,
                         notify_outbound_redaction=self._conversation_cache.notify_outbound_redaction,
-                    )
-                    await self._send_response(
-                        target=tracked_target,
-                        response_text=_STOPPING_RESPONSE_TEXT,
                     )
                     return
 
