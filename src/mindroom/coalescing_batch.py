@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 from xml.sax.saxutils import quoteattr as xml_quoteattr
@@ -34,6 +35,9 @@ class CoalescingKey(NamedTuple):
     room_id: str
     thread_id: str | None
     requester_user_id: str
+
+
+type TimestampFormatter = Callable[[int | float | None], str | None]
 
 
 _ACTIVE_FOLLOW_UP_OWNER_PREFIX = "__mindroom_active_follow_up__"
@@ -109,17 +113,39 @@ def coalesced_prompt(message_bodies: list[str]) -> str:
     )
 
 
-def _active_follow_up_message(pending_event: PendingEvent) -> str:
+def _event_timestamp_attribute(
+    pending_event: PendingEvent,
+    timestamp_formatter: TimestampFormatter | None,
+) -> str:
+    if timestamp_formatter is None:
+        return ""
+    formatted_timestamp = timestamp_formatter(pending_event.event.server_timestamp)
+    return f" ts={xml_quoteattr(formatted_timestamp)}" if formatted_timestamp is not None else ""
+
+
+def _tagged_pending_message(
+    pending_event: PendingEvent,
+    *,
+    timestamp_formatter: TimestampFormatter | None,
+) -> str:
     safe_body = dispatch_prompt_for_event(pending_event.event).replace("]]>", "]]]]><![CDATA[>")
     sender = pending_event.requester_user_id or pending_event.event.sender
     return (
         f"<msg event_id={xml_quoteattr(pending_event.event.event_id)} "
-        f"from={xml_quoteattr(sender)}><![CDATA[{safe_body}]]></msg>"
+        f"from={xml_quoteattr(sender)}"
+        f"{_event_timestamp_attribute(pending_event, timestamp_formatter)}><![CDATA[{safe_body}]]></msg>"
     )
 
 
-def _active_follow_up_prompt(pending_events: list[PendingEvent]) -> str:
-    rendered_messages = "\n".join(_active_follow_up_message(pending_event) for pending_event in pending_events)
+def _active_follow_up_prompt(
+    pending_events: list[PendingEvent],
+    *,
+    timestamp_formatter: TimestampFormatter | None,
+) -> str:
+    rendered_messages = "\n".join(
+        _tagged_pending_message(pending_event, timestamp_formatter=timestamp_formatter)
+        for pending_event in pending_events
+    )
     return (
         "Messages arrived while the previous response was still running. "
         "They are in chat timeline order. Respond once to the combined context:\n\n"
@@ -127,12 +153,37 @@ def _active_follow_up_prompt(pending_events: list[PendingEvent]) -> str:
     )
 
 
-def _coalesced_prompt_for_events(ordered_pending_events: list[PendingEvent]) -> str:
+def _tagged_coalesced_prompt(
+    ordered_pending_events: list[PendingEvent],
+    *,
+    timestamp_formatter: TimestampFormatter,
+) -> str:
+    rendered_messages = "\n".join(
+        _tagged_pending_message(pending_event, timestamp_formatter=timestamp_formatter)
+        for pending_event in ordered_pending_events
+    )
+    return (
+        "The user sent the following messages in quick succession. "
+        "Treat them as one turn and respond once:\n\n"
+        f"<messages>\n{rendered_messages}\n</messages>"
+    )
+
+
+def _coalesced_prompt_for_events(
+    ordered_pending_events: list[PendingEvent],
+    *,
+    timestamp_formatter: TimestampFormatter | None,
+) -> str:
     if (
         len(ordered_pending_events) > 1
         and _batch_dispatch_policy_source_kind(ordered_pending_events) == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     ):
-        return _active_follow_up_prompt(ordered_pending_events)
+        return _active_follow_up_prompt(
+            ordered_pending_events,
+            timestamp_formatter=timestamp_formatter,
+        )
+    if len(ordered_pending_events) > 1 and timestamp_formatter is not None:
+        return _tagged_coalesced_prompt(ordered_pending_events, timestamp_formatter=timestamp_formatter)
     return coalesced_prompt(
         [dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events],
     )
@@ -230,6 +281,8 @@ def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> d
 def build_coalesced_batch(
     key: CoalescingKey,
     pending_events: list[PendingEvent],
+    *,
+    timestamp_formatter: TimestampFormatter | None = None,
 ) -> CoalescedBatch:
     """Build one normalized dispatch batch from queued pending events."""
     ordered_pending_events = list(pending_events)
@@ -241,7 +294,10 @@ def build_coalesced_batch(
         primary_event=primary_pending_event.event,
         requester_user_id=primary_pending_event.requester_user_id or key.requester_user_id,
         pending_events=tuple(ordered_pending_events),
-        prompt=_coalesced_prompt_for_events(ordered_pending_events),
+        prompt=_coalesced_prompt_for_events(
+            ordered_pending_events,
+            timestamp_formatter=timestamp_formatter,
+        ),
         source_kind=_batch_source_kind(ordered_pending_events),
         dispatch_policy_source_kind=_batch_dispatch_policy_source_kind(ordered_pending_events),
         hook_source=_batch_hook_source(ordered_pending_events),

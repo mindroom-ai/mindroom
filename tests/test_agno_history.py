@@ -6496,6 +6496,7 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
                 session_id="session-1",
                 model_prompt=model_prompt_by_prompt[prompt],
                 current_timestamp_ms=timestamp_by_prompt[prompt],
+                current_sender_id="@alice:localhost",
             )
             await prepared_run.agent.arun(prepared_run.run_input, session_id="session-1")
             recorded_requests.append(
@@ -6513,7 +6514,8 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
 
     assert stable_serialize(second_request) == stable_serialize(third_request[: len(second_request)])
     assert third_request[-1]["content"] == (
-        "[2026-03-20 08:17 PDT] Third prompt\n\n"
+        'Current message:\n<msg from="@alice:localhost" ts="2026-03-20 08:17 PDT"><![CDATA['
+        "Third prompt\n\n"
         "turn context three\n\n"
-        "Available attachment IDs: att_3. Use tool calls to inspect or process them."
+        "Available attachment IDs: att_3. Use tool calls to inspect or process them.]]></msg>"
     )

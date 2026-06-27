@@ -835,6 +835,7 @@ depends_on = [
     "mindroom.history",
     "mindroom.matrix.client_visible_messages",
     "mindroom.streaming",
+    "mindroom.timestamp_formatting",
 ]
 
 [[modules]]
@@ -1273,8 +1274,17 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.user_turn_time"
-depends_on = ["mindroom.memory"]
+depends_on = ["mindroom.memory", "mindroom.timestamp_formatting"]
 visibility = ["mindroom.ai", "mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.timestamp_formatting"
+depends_on = []
+visibility = [
+    "mindroom.bot",
+    "mindroom.execution_preparation",
+    "mindroom.user_turn_time",
+]
 
 [[modules]]
 path = "mindroom.memory._policy"
@@ -1952,6 +1962,7 @@ depends_on = [
     "mindroom.response_runner",
     "mindroom.scheduling",
     "mindroom.sync_restart_retry",
+    "mindroom.timestamp_formatting",
     "mindroom.teams",
     "mindroom.tool_approval",
     "mindroom.tool_system.dynamic_toolkits",

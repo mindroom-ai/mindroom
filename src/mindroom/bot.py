@@ -63,6 +63,7 @@ from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN, GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
+from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_approval import is_process_active_approval_card
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
@@ -383,6 +384,10 @@ class AgentBot:
             wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
             room_scope_is_single_conversation=self._room_scope_is_single_conversation,
             dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
+            timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
+                timestamp_ms,
+                timezone=self.config.timezone,
+            ),
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,

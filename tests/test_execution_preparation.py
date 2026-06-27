@@ -22,6 +22,7 @@ from mindroom.execution_preparation import (
     _build_thread_history_messages,
     _build_unseen_context_messages,
     _fallback_static_token_budget,
+    _messages_with_current_prompt,
     _prepare_execution_context_common,
     _ThreadAttachmentContext,
     prepare_agent_execution_context,
@@ -366,6 +367,24 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
     assert messages[0].content == f"@alice:localhost: {'x' * 199}…"
     assert long_body not in str(messages[0].content)
     assert messages[1].content == "Current request"
+
+
+def test_current_matrix_message_renders_timestamp_as_msg_attribute() -> None:
+    """Current Matrix messages should carry time as metadata, not body text."""
+    config = _config()
+    config.timezone = "America/Los_Angeles"
+
+    messages = _messages_with_current_prompt(
+        "Hello <world>",
+        current_sender_id="@alice:localhost",
+        current_timestamp_ms=1_774_019_700_000,
+        config=config,
+    )
+
+    assert len(messages) == 1
+    assert messages[0].content == (
+        'Current message:\n<msg from="@alice:localhost" ts="2026-03-20 08:15 PDT"><![CDATA[Hello <world>]]></msg>'
+    )
 
 
 def test_fallback_thread_history_pins_attachments_to_their_messages(tmp_path: Path) -> None:

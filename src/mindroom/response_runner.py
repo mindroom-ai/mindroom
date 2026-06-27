@@ -965,14 +965,10 @@ class ResponseRunner:
             _agent_has_matrix_messaging_tool(self.deps.runtime.config, name, resolved_target.session_id)
             for name in agent_names
         )
-        model_message = prefix_user_turn_time(
-            _append_matrix_prompt_context(
-                prepared_prompt,
-                target=resolved_target,
-                include_context=include_matrix_prompt_context,
-            ),
-            timezone=self.deps.runtime.config.timezone,
-            timestamp_ms=request.current_timestamp_ms,
+        model_message = _append_matrix_prompt_context(
+            prepared_prompt,
+            target=resolved_target,
+            include_context=include_matrix_prompt_context,
         )
         resolved_request = self._request_with_locked_target(
             replace(
@@ -1100,6 +1096,7 @@ class ResponseRunner:
                             run_id_callback=_note_attempt_run_id,
                             user_id=requester_user_id,
                             reply_to_event_id=request.reply_to_event_id,
+                            current_timestamp_ms=request.current_timestamp_ms,
                             correlation_id=resolved_correlation_id,
                             active_event_ids=active_event_ids,
                             response_sender_id=self.deps.matrix_full_id,
@@ -1196,6 +1193,7 @@ class ResponseRunner:
                                     run_id_callback=_note_attempt_run_id,
                                     user_id=requester_user_id,
                                     reply_to_event_id=request.reply_to_event_id,
+                                    current_timestamp_ms=request.current_timestamp_ms,
                                     correlation_id=resolved_correlation_id,
                                     active_event_ids=active_event_ids,
                                     response_sender_id=self.deps.matrix_full_id,

@@ -3179,37 +3179,31 @@ def test_compose_current_turn_prompt_uses_normalized_tail_comparison() -> None:
         raw_prompt=" report ",
         model_prompt="report\n\nAvailable attachment IDs: att_report.",
         prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
-        timezone="America/Los_Angeles",
-        current_timestamp_ms=1_774_019_700_000,
     )
 
-    assert prompt == "[2026-03-20 08:15 PDT]  report \n\nAvailable attachment IDs: att_report."
+    assert prompt == " report \n\nAvailable attachment IDs: att_report."
 
 
-def test_compose_current_turn_prompt_uses_structured_timestamp() -> None:
-    """Current-turn timestamping should not depend on parsing model_prompt text."""
+def test_compose_current_turn_prompt_strips_stale_model_timestamp_before_tail_comparison() -> None:
+    """Current-turn composition should not reuse timestamp text from model prompts."""
     prompt = _compose_current_turn_prompt(
         raw_prompt=" report ",
         model_prompt="[1999-01-01 00:00 UTC] report\n\nAvailable attachment IDs: att_report.",
         prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
-        timezone="America/Los_Angeles",
-        current_timestamp_ms=1_774_019_700_000,
     )
 
-    assert prompt == "[2026-03-20 08:15 PDT]  report \n\nAvailable attachment IDs: att_report."
+    assert prompt == " report \n\nAvailable attachment IDs: att_report."
 
 
-def test_compose_current_turn_prompt_preserves_timestamp_without_raw_prompt() -> None:
-    """Model-only current turns should use the structured source event time."""
+def test_compose_current_turn_prompt_keeps_model_only_tail_without_timestamp() -> None:
+    """Model-only current turns should leave timestamp rendering to the message wrapper."""
     prompt = _compose_current_turn_prompt(
         raw_prompt="",
         model_prompt="Available attachment IDs: att_report.",
         prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
-        timezone="America/Los_Angeles",
-        current_timestamp_ms=1_774_019_700_000,
     )
 
-    assert prompt == "[2026-03-20 08:15 PDT] Available attachment IDs: att_report."
+    assert prompt == "Available attachment IDs: att_report."
 
 
 @pytest.mark.asyncio

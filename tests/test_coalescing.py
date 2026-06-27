@@ -32,6 +32,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.ingress_lanes import LaneDelivery
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.timestamp_formatting import format_timestamp_ms
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -121,6 +122,40 @@ def _voice_pending(event_id: str, body: str, origin_server_ts: int) -> PendingEv
         event=_text_event(event_id, body, origin_server_ts),
         room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind=VOICE_SOURCE_KIND,
+    )
+
+
+def test_active_follow_up_prompt_renders_timestamp_attributes() -> None:
+    """Queued message tags should carry per-message local timestamps."""
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    batch = build_coalesced_batch(
+        key,
+        [
+            PendingEvent(
+                event=_text_event("$a1:localhost", "first", 1_774_019_700_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@alice:localhost",
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+            PendingEvent(
+                event=_text_event("$a2:localhost", "second", 1_774_019_760_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@alice:localhost",
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+        ],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    assert batch.prompt == (
+        "Messages arrived while the previous response was still running. "
+        "They are in chat timeline order. Respond once to the combined context:\n\n"
+        "<queued_messages>\n"
+        '<msg event_id="$a1:localhost" from="@alice:localhost" ts="2026-03-20 08:15 PDT"><![CDATA[first]]></msg>\n'
+        '<msg event_id="$a2:localhost" from="@alice:localhost" ts="2026-03-20 08:16 PDT"><![CDATA[second]]></msg>\n'
+        "</queued_messages>"
     )
 
 

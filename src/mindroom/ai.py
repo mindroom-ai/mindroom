@@ -80,7 +80,6 @@ from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed
 from mindroom.tool_system.events import StreamingToolTracker, complete_pending_tool_block, format_tool_combined
-from mindroom.user_turn_time import prefix_user_turn_time
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
@@ -123,29 +122,15 @@ def _compose_current_turn_prompt(
     raw_prompt: str,
     model_prompt: str | None,
     prompt_parts: MemoryPromptParts,
-    timezone: str,
-    current_timestamp_ms: float | None = None,
 ) -> str:
     """Build the current-turn user message without rewriting persisted history."""
     prompt_chunks: list[str] = []
     if raw_prompt:
-        prompt_chunks.append(
-            prefix_user_turn_time(
-                raw_prompt,
-                timezone=timezone,
-                timestamp_ms=current_timestamp_ms,
-            ),
-        )
+        prompt_chunks.append(raw_prompt)
     if prompt_parts.turn_context:
         prompt_chunks.append(prompt_parts.turn_context)
     model_prompt_tail = _model_prompt_tail_after_raw_prompt(raw_prompt=raw_prompt, model_prompt=model_prompt)
     if model_prompt_tail:
-        if not raw_prompt:
-            model_prompt_tail = prefix_user_turn_time(
-                model_prompt_tail,
-                timezone=timezone,
-                timestamp_ms=current_timestamp_ms,
-            )
         prompt_chunks.append(model_prompt_tail)
 
     return "\n\n".join(prompt_chunks)
@@ -1192,8 +1177,6 @@ async def _prepare_agent_and_prompt(
         raw_prompt=prompt,
         model_prompt=model_prompt,
         prompt_parts=prompt_parts,
-        timezone=config.timezone,
-        current_timestamp_ms=current_timestamp_ms,
     )
     _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
 
@@ -1260,6 +1243,7 @@ async def _prepare_agent_and_prompt(
         compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
         current_sender_id=current_sender_id,
+        current_timestamp_ms=current_timestamp_ms,
         include_openai_compat_guidance=include_openai_compat_guidance,
         timing_scope=timing_scope,
         pipeline_timing=pipeline_timing,
