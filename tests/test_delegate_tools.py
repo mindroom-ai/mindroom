@@ -147,8 +147,14 @@ class TestDelegateTools:
         process_function_schema_for_prompt(function, strict=False)
 
         assert function.description is not None
-        assert "Allowed delegate targets for this caller: code, research." in function.description
-        assert "Do not use any other agent names." in function.description
+        description = function.description
+        assert "Allowed delegate targets for this caller:" in description
+        for target in ("code", "research"):
+            assert target in description
+        assert "Do not use any other agent names." in description
+        assert "Use this when" in description
+        assert "delegated agent runs independently" in description
+        assert "no shared conversation history" in description
 
     @pytest.mark.asyncio
     async def test_delegate_to_unknown_agent(self, tools: DelegateTools) -> None:
