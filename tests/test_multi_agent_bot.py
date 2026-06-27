@@ -5960,8 +5960,9 @@ class TestAgentBot:
             config: Config,
             runtime_paths: RuntimePaths,
             model_prompt: str | None = None,
+            current_timestamp_ms: float | None = None,
         ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
-            _ = config, runtime_paths
+            _ = config, runtime_paths, current_timestamp_ms
             return prompt, thread_history, model_prompt or prompt, list(thread_history)
 
         stale_history = [
@@ -11852,8 +11853,9 @@ class TestAgentBot:
             config: Config,
             runtime_paths: RuntimePaths,
             model_prompt: str | None = None,
+            current_timestamp_ms: float | None = None,
         ) -> tuple[str, Sequence[ResolvedVisibleMessage], str | None, Sequence[ResolvedVisibleMessage]]:
-            del config, runtime_paths
+            del config, runtime_paths, current_timestamp_ms
             return prompt, thread_history, model_prompt, thread_history
 
         with (

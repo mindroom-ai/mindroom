@@ -329,6 +329,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
     event = SimpleNamespace(
         event_id="$event:localhost",
         body="hello",
+        server_timestamp=1234567890,
         source={},
     )
     dispatch = PreparedDispatch(

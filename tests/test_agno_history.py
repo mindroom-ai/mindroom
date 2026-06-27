@@ -6429,7 +6429,7 @@ async def test_prepare_agent_and_prompt_keeps_prior_request_message_prefix_byte_
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_strips_timestamped_current_turn_duplication_from_model_prompt(
+async def test_prepare_agent_and_prompt_preserves_timestamped_current_turn_without_duplication(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path, num_history_runs=10)
@@ -6515,7 +6515,7 @@ async def test_prepare_agent_and_prompt_strips_timestamped_current_turn_duplicat
 
     assert stable_serialize(second_request) == stable_serialize(third_request[: len(second_request)])
     assert third_request[-1]["content"] == (
-        "Third prompt\n\n"
+        "[2026-03-20 08:17 PDT] Third prompt\n\n"
         "turn context three\n\n"
         "Available attachment IDs: att_3. Use tool calls to inspect or process them."
     )

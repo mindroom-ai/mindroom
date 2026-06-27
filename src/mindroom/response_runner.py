@@ -232,6 +232,7 @@ def prepare_memory_and_model_context(
     config: Config,
     runtime_paths: RuntimePaths,
     model_prompt: str | None = None,
+    current_timestamp_ms: float | None = None,
 ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
     """Return raw memory inputs alongside timestamped model-facing context."""
     model_prompt_content = model_prompt or prompt
@@ -251,6 +252,7 @@ def prepare_memory_and_model_context(
     model_prompt_text = _prefix_user_turn_time(
         model_prompt_content,
         timezone=config.timezone,
+        timestamp_ms=current_timestamp_ms,
     )
     model_thread_history = _timestamp_thread_history_user_turns(
         thread_history,
@@ -278,6 +280,7 @@ class ResponseRequest:
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     requires_model_history_refresh: bool = False
     payload_preparation: ResponsePayloadPreparation | None = None
+    current_timestamp_ms: float | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
@@ -958,6 +961,7 @@ class ResponseRunner:
                 config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
                 model_prompt=request.model_prompt,
+                current_timestamp_ms=request.current_timestamp_ms,
             )
         )
         model_name = select_model_for_team(
@@ -2151,6 +2155,7 @@ class ResponseRunner:
                 config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
                 model_prompt=request.model_prompt,
+                current_timestamp_ms=request.current_timestamp_ms,
             )
         )
         normalized_request = replace(

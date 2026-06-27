@@ -1638,6 +1638,11 @@ class TurnController:
                 dispatch_timing.note(**dispatch.context.thread_history.diagnostics)
 
             self.deps.logger.info(processing_log, event_id=event.event_id)
+            current_timestamp_ms = (
+                event.server_timestamp
+                if isinstance(event.server_timestamp, int | float) and not isinstance(event.server_timestamp, bool)
+                else None
+            )
             payload_preparation = ResponsePayloadPreparation(
                 dispatch=dispatch,
                 prompt=event.body,
@@ -1679,6 +1684,7 @@ class TurnController:
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                             payload_preparation=payload_preparation,
+                            current_timestamp_ms=current_timestamp_ms,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
@@ -1698,6 +1704,7 @@ class TurnController:
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                             payload_preparation=payload_preparation,
+                            current_timestamp_ms=current_timestamp_ms,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,

@@ -125,15 +125,28 @@ def _compose_current_turn_prompt(
 ) -> str:
     """Build the current-turn user message without rewriting persisted history."""
     prompt_chunks: list[str] = []
+    user_turn_time_prefix = _user_turn_time_prefix_from_model_prompt(model_prompt)
     if raw_prompt:
-        prompt_chunks.append(raw_prompt)
+        prompt_chunks.append(f"{user_turn_time_prefix}{raw_prompt}")
     if prompt_parts.turn_context:
         prompt_chunks.append(prompt_parts.turn_context)
     model_prompt_tail = _model_prompt_tail_after_raw_prompt(raw_prompt=raw_prompt, model_prompt=model_prompt)
     if model_prompt_tail:
+        if not raw_prompt:
+            model_prompt_tail = f"{user_turn_time_prefix}{model_prompt_tail}"
         prompt_chunks.append(model_prompt_tail)
 
     return "\n\n".join(prompt_chunks)
+
+
+def _user_turn_time_prefix_from_model_prompt(model_prompt: str | None) -> str:
+    """Return the timestamp prefix already attached to a model-facing current turn."""
+    if not model_prompt:
+        return ""
+    stripped_model_prompt = strip_user_turn_time_prefix(model_prompt)
+    if stripped_model_prompt == model_prompt:
+        return ""
+    return model_prompt[: len(model_prompt) - len(stripped_model_prompt)]
 
 
 def _model_prompt_tail_after_raw_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:

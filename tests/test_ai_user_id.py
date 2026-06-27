@@ -128,7 +128,7 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
-from tests.conftest import make_event_cache_mock, message_origin, request_envelope
+from tests.conftest import make_event_cache_mock, make_visible_message, message_origin, request_envelope
 from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -3181,7 +3181,18 @@ def test_compose_current_turn_prompt_uses_normalized_tail_comparison() -> None:
         prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
     )
 
-    assert prompt == " report \n\nAvailable attachment IDs: att_report."
+    assert prompt == "[2026-03-20 08:15 PDT]  report \n\nAvailable attachment IDs: att_report."
+
+
+def test_compose_current_turn_prompt_preserves_timestamp_without_raw_prompt() -> None:
+    """Timestamped model-only current turns should keep their source event time."""
+    prompt = _compose_current_turn_prompt(
+        raw_prompt="",
+        model_prompt="[2026-03-20 08:15 PDT] Available attachment IDs: att_report.",
+        prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
+    )
+
+    assert prompt == "[2026-03-20 08:15 PDT] Available attachment IDs: att_report."
 
 
 @pytest.mark.asyncio
@@ -4376,6 +4387,54 @@ class TestUserIdPassthrough:
         )
 
         assert model_prompt == existing_model_prompt
+
+    def test_prepare_memory_and_model_context_uses_source_event_timestamp_for_model_prompt(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Model-facing current turns should use the Matrix event timestamp, not processing time."""
+        config = _config()
+        config.timezone = "America/Los_Angeles"
+        runtime_paths = _runtime_paths(tmp_path)
+        persist_entity_accounts(config, runtime_paths)
+
+        memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = prepare_memory_and_model_context(
+            "plain text message",
+            [],
+            config=config,
+            runtime_paths=runtime_paths,
+            current_timestamp_ms=1_774_018_800_000,
+        )
+
+        assert memory_prompt == "plain text message"
+        assert model_prompt == "[2026-03-20 08:00 PDT] plain text message"
+
+    def test_prepare_memory_and_model_context_timestamps_thread_history_user_turns(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Model-facing thread context should expose the Matrix timestamp for user messages."""
+        config = _config()
+        config.timezone = "America/Los_Angeles"
+        runtime_paths = _runtime_paths(tmp_path)
+        persist_entity_accounts(config, runtime_paths)
+
+        _memory_prompt, memory_thread_history, _model_prompt, model_thread_history = prepare_memory_and_model_context(
+            "current",
+            [
+                make_visible_message(
+                    sender="@alice:localhost",
+                    body="older text",
+                    timestamp=1_774_018_800_000,
+                ),
+            ],
+            config=config,
+            runtime_paths=runtime_paths,
+            current_timestamp_ms=1_774_022_400_000,
+        )
+
+        assert memory_thread_history[0].body == "older text"
+        assert model_thread_history[0].body == "[2026-03-20 08:00 PDT] older text"
 
     @pytest.mark.asyncio
     async def test_non_streaming_passes_user_id(self, tmp_path: Path) -> None:
