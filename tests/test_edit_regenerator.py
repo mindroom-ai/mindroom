@@ -212,6 +212,7 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     assert call_kwargs["user_id"] == USER_ID
     assert call_kwargs["correlation_id"] == EDIT_EVENT_ID
     assert call_kwargs["matrix_run_metadata"] == RUN_METADATA
+    assert call_kwargs["current_timestamp_ms"] == float(event.server_timestamp)
     assert call_kwargs["thread_history"] == harness.context.thread_history
 
     envelope_kwargs = harness.resolver.build_message_envelope.call_args.kwargs

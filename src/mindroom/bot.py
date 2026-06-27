@@ -1888,6 +1888,7 @@ class AgentBot:
         correlation_id: str | None = None,
         reason_prefix: str = "Team request",
         matrix_run_metadata: dict[str, Any] | None = None,
+        current_timestamp_ms: float | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot)."""
@@ -1905,6 +1906,7 @@ class AgentBot:
                 correlation_id=correlation_id,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
+                current_timestamp_ms=current_timestamp_ms,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
             team_agents=team_agents,
@@ -1927,6 +1929,7 @@ class AgentBot:
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         correlation_id: str | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
+        current_timestamp_ms: float | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate and send/edit a response using AI.
@@ -1948,6 +1951,7 @@ class AgentBot:
             correlation_id: Optional request correlation ID propagated to hook logging.
             matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
                 for unseen-message tracking, coalesced edit regeneration, and cleanup.
+            current_timestamp_ms: Optional source Matrix event timestamp in milliseconds.
             on_lifecycle_lock_acquired: Optional callback that runs after the response
                 lifecycle lock is acquired and before response generation starts.
 
@@ -1969,6 +1973,7 @@ class AgentBot:
                 correlation_id=correlation_id,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
+                current_timestamp_ms=current_timestamp_ms,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
         )
@@ -2157,6 +2162,7 @@ class TeamBot(AgentBot):
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         correlation_id: str | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
+        current_timestamp_ms: float | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response instead of individual agent response."""
@@ -2176,6 +2182,7 @@ class TeamBot(AgentBot):
                     correlation_id=correlation_id,
                     matrix_run_metadata=matrix_run_metadata,
                     system_enrichment_items=system_enrichment_items,
+                    current_timestamp_ms=current_timestamp_ms,
                     on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                 ),
                 response_kind="team",
@@ -2188,6 +2195,7 @@ class TeamBot(AgentBot):
                 config=self.config,
                 runtime_paths=self.runtime_paths,
                 model_prompt=model_prompt,
+                current_timestamp_ms=current_timestamp_ms,
             )
         )
 
@@ -2268,5 +2276,6 @@ class TeamBot(AgentBot):
             correlation_id=correlation_id or target.reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
             matrix_run_metadata=matrix_run_metadata,
+            current_timestamp_ms=current_timestamp_ms,
             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
         )

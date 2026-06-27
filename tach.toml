@@ -818,6 +818,7 @@ depends_on = [
     "mindroom.handled_turns",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.event_info",
     "mindroom.matrix.identity",
     "mindroom.runtime_protocols",
 ]
@@ -2946,7 +2947,7 @@ expose = [
 from = ["mindroom.matrix.conversation_cache"]
 
 [[interfaces]]
-expose = ["EventInfo", "origin_server_ts_from_event_source", "reply_to_event_id_from_content"]
+expose = ["EventInfo", "matrix_timestamp_ms", "origin_server_ts_from_event_source", "reply_to_event_id_from_content"]
 from = ["mindroom.matrix.event_info"]
 
 [[interfaces]]

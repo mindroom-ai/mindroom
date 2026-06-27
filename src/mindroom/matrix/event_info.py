@@ -11,6 +11,13 @@ from dataclasses import dataclass
 from typing import cast
 
 
+def matrix_timestamp_ms(raw_timestamp: object) -> float | None:
+    """Return a numeric Matrix timestamp in milliseconds as a float."""
+    if isinstance(raw_timestamp, int | float) and not isinstance(raw_timestamp, bool):
+        return float(raw_timestamp)
+    return None
+
+
 def origin_server_ts_from_event_source(event_source: object) -> int | float | None:
     """Return a Matrix origin timestamp from one raw event source if present."""
     if not isinstance(event_source, Mapping):
