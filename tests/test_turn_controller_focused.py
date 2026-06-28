@@ -516,6 +516,8 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     assert request.prompt == "please summarize the build failure"
     assert request.user_id == _SENDER
     assert request.correlation_id == event.event_id
+    assert request.current_timestamp_ms == float(event.server_timestamp)
+    assert request.current_prompt_is_structured is False
     assert request.response_envelope.requester_id == _SENDER
     assert request.response_envelope.target.room_id == _ROOM_ID
     # A rootable room-level message becomes its own thread root.

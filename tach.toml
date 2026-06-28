@@ -82,6 +82,7 @@ depends_on = [
     "mindroom.metadata_merge",
     "mindroom.timing",
     "mindroom.tool_system.events",
+    "mindroom.user_turn_time",
 ]
 
 [[modules]]
@@ -820,6 +821,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
     "mindroom.runtime_protocols",
+    "mindroom.timestamp_formatting",
 ]
 
 [[modules]]
@@ -832,7 +834,9 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.history",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.prompt_message_tags",
     "mindroom.streaming",
+    "mindroom.timestamp_formatting",
 ]
 
 [[modules]]
@@ -1129,6 +1133,7 @@ depends_on = [
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.user_turn_time",
 ]
 
 [[modules]]
@@ -1266,6 +1271,32 @@ depends_on = [
     "mindroom.memory.auto_flush",
     "mindroom.memory.functions",
     "mindroom.memory._prompting",
+]
+
+[[modules]]
+path = "mindroom.user_turn_time"
+depends_on = ["mindroom.memory", "mindroom.timestamp_formatting"]
+visibility = ["mindroom.ai", "mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.timestamp_formatting"
+depends_on = []
+visibility = [
+    "mindroom.bot",
+    "mindroom.coalescing_batch",
+    "mindroom.edit_regenerator",
+    "mindroom.execution_preparation",
+    "mindroom.handled_turns",
+    "mindroom.turn_controller",
+    "mindroom.user_turn_time",
+]
+
+[[modules]]
+path = "mindroom.prompt_message_tags"
+depends_on = []
+visibility = [
+    "mindroom.coalescing_batch",
+    "mindroom.execution_preparation",
 ]
 
 [[modules]]
@@ -1945,6 +1976,7 @@ depends_on = [
     "mindroom.scheduling",
     "mindroom.sync_restart_retry",
     "mindroom.teams",
+    "mindroom.timestamp_formatting",
     "mindroom.tool_approval",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
@@ -2477,6 +2509,7 @@ depends_on = [
     "mindroom.routing",
     "mindroom.teams",
     "mindroom.text_ingress_dispatch",
+    "mindroom.timestamp_formatting",
     "mindroom.turn_store",
     "mindroom.turn_policy",
 ]

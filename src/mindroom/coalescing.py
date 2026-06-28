@@ -14,6 +14,7 @@ from .coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
     PendingEvent,
+    TimestampFormatter,
     active_follow_up_coalescing_key,
     build_coalesced_batch,
     is_active_follow_up_coalescing_key,
@@ -190,6 +191,7 @@ class CoalescingGate:
         wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
         room_scope_is_single_conversation: Callable[[str], bool] | None = None,
         dispatch_allowed_now: Callable[[CoalescingKey], bool] | None = None,
+        timestamp_formatter: TimestampFormatter | None = None,
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
@@ -197,6 +199,7 @@ class CoalescingGate:
         self._wait_until_dispatch_allowed = wait_until_dispatch_allowed or _allow_dispatch
         self._room_scope_is_single_conversation = room_scope_is_single_conversation
         self._dispatch_allowed_now = dispatch_allowed_now
+        self._timestamp_formatter = timestamp_formatter
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._lanes = IngressLanes(deliver=self._admit_from_lane)
         self._active_drain_context: _DrainContext | None = None
@@ -474,7 +477,7 @@ class CoalescingGate:
         key: CoalescingKey,
         pending_events: list[PendingEvent],
     ) -> _FlushDiagnostics:
-        batch = build_coalesced_batch(key, pending_events)
+        batch = build_coalesced_batch(key, pending_events, timestamp_formatter=self._timestamp_formatter)
         pending_count = len(pending_events)
         timing_scope = event_timing_scope(batch.primary_event.event_id)
         return _FlushDiagnostics(

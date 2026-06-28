@@ -17,6 +17,7 @@ from mindroom.handled_turns import (
     HandledTurnLedger,
     HandledTurnRecord,
     HandledTurnState,
+    SourceEventMetadata,
     _reset_handled_turn_ledger_runtime,
 )
 from mindroom.history.types import HistoryScope
@@ -379,6 +380,46 @@ def test_visible_echo_persists_across_reload(temp_dir: Path) -> None:
     assert turn_record is not None
     assert not turn_record.completed
     assert turn_record.visible_echo_event_id == "$echo"
+
+
+def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
+    """Coalesced source-event metadata should survive a ledger reload from disk as floats."""
+    tracker1 = HandledTurnLedger("test_source_metadata_reload", base_path=temp_dir)
+    tracker1.record_handled_turn(
+        HandledTurnState.create(
+            ["$first", "$second"],
+            response_event_id="$response",
+            source_event_prompts={"$first": "first", "$second": "second"},
+            source_event_metadata={
+                "$first": SourceEventMetadata(sender="@alice:localhost", timestamp_ms=1_774_019_700_000),
+                "$second": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
+            },
+        ),
+    )
+
+    turn_record = _reload_ledger("test_source_metadata_reload", temp_dir).get_turn_record("$second")
+
+    assert turn_record is not None
+    assert turn_record.source_event_metadata == {
+        "$first": SourceEventMetadata(sender="@alice:localhost", timestamp_ms=1_774_019_700_000.0),
+        "$second": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
+    }
+
+
+def test_missing_source_event_metadata_loads_as_none(temp_dir: Path) -> None:
+    """Records persisted before source_event_metadata existed should load cleanly as None."""
+    tracker1 = HandledTurnLedger("test_source_metadata_absent", base_path=temp_dir)
+    _record_handled_turn(
+        tracker1,
+        ["$first", "$second"],
+        response_event_id="$response",
+        source_event_prompts={"$first": "first", "$second": "second"},
+    )
+
+    turn_record = _reload_ledger("test_source_metadata_absent", temp_dir).get_turn_record("$second")
+
+    assert turn_record is not None
+    assert turn_record.source_event_metadata is None
 
 
 def test_record_outcome_with_empty_source_list_is_noop(temp_dir: Path) -> None:

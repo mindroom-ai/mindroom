@@ -155,6 +155,7 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
             },
         )
         message_event.sender = test_user_id
+        message_event.server_timestamp = 1234567890
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
@@ -189,10 +190,11 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
             ai_kwargs["prompt"]
             == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         )
-        assert ai_kwargs["model_prompt"].startswith("[")
-        assert ai_kwargs["model_prompt"].endswith(
-            f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?",
+        assert (
+            ai_kwargs["model_prompt"]
+            == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         )
+        assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
         assert ai_kwargs["session_id"] == f"{test_room_id}:$thread_root:localhost"
         assert ai_kwargs["thread_history"] == []
         assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
@@ -494,6 +496,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             },
         )
         message_event_with_mention.sender = test_user_id
+        message_event_with_mention.server_timestamp = 1234567890
 
         with (
             patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
@@ -536,10 +539,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             ai_kwargs = mock_ai.call_args.kwargs
             assert ai_kwargs["agent_name"] == "calculator"
             assert ai_kwargs["prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
-            assert ai_kwargs["model_prompt"].startswith("[")
-            assert ai_kwargs["model_prompt"].endswith(
-                f"@mindroom_calculator:{domain} What about 20% of 300?",
-            )
+            assert ai_kwargs["model_prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
+            assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
             assert ai_kwargs["session_id"] == f"{test_room_id}:{thread_root_id}"
             assert ai_kwargs["thread_history"][0].body.startswith("[")
             assert ai_kwargs["thread_history"][0].body.endswith("What's 10% of 100?")

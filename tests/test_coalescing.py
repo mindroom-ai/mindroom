@@ -23,6 +23,7 @@ from mindroom.coalescing_batch import (
     active_follow_up_coalescing_key,
     build_coalesced_batch,
 )
+from mindroom.config.main import Config
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent, build_dispatch_handoff
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -30,8 +31,10 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.execution_preparation import _messages_with_current_prompt
 from mindroom.ingress_lanes import LaneDelivery
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.timestamp_formatting import format_timestamp_ms
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -122,6 +125,139 @@ def _voice_pending(event_id: str, body: str, origin_server_ts: int) -> PendingEv
         room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind=VOICE_SOURCE_KIND,
     )
+
+
+def test_single_message_batch_is_not_structured() -> None:
+    """A lone coalesced message stays unstructured and keeps its plain body as the prompt."""
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+        [_pending(_text_event("$only:localhost", "just one", 1_774_019_700_000))],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    assert batch.current_prompt_is_structured is False
+    assert batch.prompt == "just one"
+
+
+def test_dispatch_handoff_carries_structured_flag_and_metadata() -> None:
+    """A structured coalesced batch must hand its flag and per-message metadata to dispatch."""
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+        [
+            _pending(_text_event("$a1:localhost", "first", 1_774_019_700_000)),
+            _pending(_text_event("$a2:localhost", "second", 1_774_019_760_000)),
+        ],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    handoff = build_dispatch_handoff(batch)
+
+    assert batch.current_prompt_is_structured is True
+    assert handoff.current_prompt_is_structured is True
+    assert set(handoff.source_event_metadata) == {"$a1:localhost", "$a2:localhost"}
+
+
+def test_active_follow_up_prompt_renders_timestamp_attributes() -> None:
+    """Queued message tags should carry per-message local timestamps."""
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    batch = build_coalesced_batch(
+        key,
+        [
+            PendingEvent(
+                event=_text_event("$a1:localhost", "first", 1_774_019_700_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@alice:localhost",
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+            PendingEvent(
+                event=_text_event("$a2:localhost", "second", 1_774_019_760_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@alice:localhost",
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+        ],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    assert batch.prompt == (
+        "Messages arrived while the previous response was still running. "
+        "They are in chat timeline order. Respond once to the combined context:\n\n"
+        "<queued_messages>\n"
+        '<msg event_id="$a1:localhost" from="@alice:localhost" ts="2026-03-20 08:15 PDT"><![CDATA[first]]></msg>\n'
+        '<msg event_id="$a2:localhost" from="@alice:localhost" ts="2026-03-20 08:16 PDT"><![CDATA[second]]></msg>\n'
+        "</queued_messages>"
+    )
+
+
+def test_tagged_coalesced_prompt_is_safe_inside_current_message_wrapper() -> None:
+    """A structured coalesced prompt should not be wrapped in another message tag."""
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@alice:localhost"),
+        [
+            PendingEvent(
+                event=_text_event("$a1:localhost", "first <tag>", 1_774_019_700_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@alice:localhost",
+            ),
+            PendingEvent(
+                event=_text_event("$a2:localhost", "second ]]> message", 1_774_019_760_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@alice:localhost",
+            ),
+        ],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    messages = _messages_with_current_prompt(
+        batch.prompt,
+        current_sender_id="@alice:localhost",
+        current_timestamp_ms=1_774_019_760_000,
+        current_prompt_is_structured=batch.current_prompt_is_structured,
+        config=Config(timezone="America/Los_Angeles"),
+    )
+
+    content = messages[0].content
+    assert content == (
+        "Current message:\n"
+        "The user sent the following messages in quick succession. "
+        "Treat them as one turn and respond once:\n\n"
+        "<messages>\n"
+        '<msg event_id="$a1:localhost" from="@alice:localhost" ts="2026-03-20 08:15 PDT">'
+        "<![CDATA[first <tag>]]></msg>\n"
+        '<msg event_id="$a2:localhost" from="@alice:localhost" ts="2026-03-20 08:16 PDT">'
+        "<![CDATA[second ]]]]><![CDATA[> message]]></msg>\n"
+        "</messages>"
+    )
+    assert "&lt;" not in content
+
+
+def test_structured_coalesced_prompt_with_model_tail_is_not_wrapped() -> None:
+    """Trusted structured prompts should not depend on exact prompt suffixes."""
+    prompt = (
+        "The user sent the following messages in quick succession. "
+        "Treat them as one turn and respond once:\n\n"
+        "<messages>\n"
+        '<msg event_id="$a1:localhost" from="@alice:localhost" ts="2026-03-20 08:15 PDT">'
+        "<![CDATA[first]]></msg>\n"
+        "</messages>\n\n"
+        "Attachment context:\n- file.txt"
+    )
+
+    messages = _messages_with_current_prompt(
+        prompt,
+        current_sender_id="@alice:localhost",
+        current_timestamp_ms=1_774_019_760_000,
+        current_prompt_is_structured=True,
+        config=Config(timezone="America/Los_Angeles"),
+    )
+
+    content = messages[0].content
+    assert content == f"Current message:\n{prompt}"
+    assert '<msg from="@alice:localhost"' not in content
 
 
 async def _ready_after(

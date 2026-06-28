@@ -128,7 +128,7 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
-from tests.conftest import make_event_cache_mock, message_origin, request_envelope
+from tests.conftest import make_event_cache_mock, make_visible_message, message_origin, request_envelope
 from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -3177,11 +3177,33 @@ def test_compose_current_turn_prompt_uses_normalized_tail_comparison() -> None:
     """Whitespace-normalized model prompts should not duplicate the raw turn."""
     prompt = _compose_current_turn_prompt(
         raw_prompt=" report ",
-        model_prompt="[2026-03-20 08:15 PDT] report\n\nAvailable attachment IDs: att_report.",
+        model_prompt="report\n\nAvailable attachment IDs: att_report.",
         prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
     )
 
     assert prompt == " report \n\nAvailable attachment IDs: att_report."
+
+
+def test_compose_current_turn_prompt_strips_stale_model_timestamp_before_tail_comparison() -> None:
+    """Current-turn composition should not reuse timestamp text from model prompts."""
+    prompt = _compose_current_turn_prompt(
+        raw_prompt=" report ",
+        model_prompt="[1999-01-01 00:00 UTC] report\n\nAvailable attachment IDs: att_report.",
+        prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
+    )
+
+    assert prompt == " report \n\nAvailable attachment IDs: att_report."
+
+
+def test_compose_current_turn_prompt_keeps_model_only_tail_without_timestamp() -> None:
+    """Model-only current turns should leave timestamp rendering to the message wrapper."""
+    prompt = _compose_current_turn_prompt(
+        raw_prompt="",
+        model_prompt="Available attachment IDs: att_report.",
+        prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
+    )
+
+    assert prompt == "Available attachment IDs: att_report."
 
 
 @pytest.mark.asyncio
@@ -4376,6 +4398,52 @@ class TestUserIdPassthrough:
         )
 
         assert model_prompt == existing_model_prompt
+
+    def test_prepare_memory_and_model_context_leaves_current_turn_timestamp_structured(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Current-turn timestamping happens at final model prompt composition."""
+        config = _config()
+        config.timezone = "America/Los_Angeles"
+        runtime_paths = _runtime_paths(tmp_path)
+        persist_entity_accounts(config, runtime_paths)
+
+        memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = prepare_memory_and_model_context(
+            "plain text message",
+            [],
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+        assert memory_prompt == "plain text message"
+        assert model_prompt == "plain text message"
+
+    def test_prepare_memory_and_model_context_timestamps_thread_history_user_turns(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Model-facing thread context should expose the Matrix timestamp for user messages."""
+        config = _config()
+        config.timezone = "America/Los_Angeles"
+        runtime_paths = _runtime_paths(tmp_path)
+        persist_entity_accounts(config, runtime_paths)
+
+        _memory_prompt, memory_thread_history, _model_prompt, model_thread_history = prepare_memory_and_model_context(
+            "current",
+            [
+                make_visible_message(
+                    sender="@alice:localhost",
+                    body="older text",
+                    timestamp=1_774_018_800_000,
+                ),
+            ],
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+        assert memory_thread_history[0].body == "older text"
+        assert model_thread_history[0].body == "[2026-03-20 08:00 PDT] older text"
 
     @pytest.mark.asyncio
     async def test_non_streaming_passes_user_id(self, tmp_path: Path) -> None:

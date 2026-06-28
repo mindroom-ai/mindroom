@@ -96,6 +96,7 @@ from mindroom.thread_utils import (
     is_router_only_agent_mention,
     thread_requires_explicit_agent_targeting,
 )
+from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
@@ -843,6 +844,7 @@ class TurnController:
         handled_turn = HandledTurnState.create(
             handoff.source_event_ids,
             source_event_prompts=dict(handoff.source_event_prompts),
+            source_event_metadata=dict(handoff.source_event_metadata) if len(handoff.source_event_ids) > 1 else None,
         )
         try:
             await self._dispatch_handoff(handoff, handled_turn=handled_turn)
@@ -1016,6 +1018,7 @@ class TurnController:
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
         use_command_context: bool = False,
+        current_prompt_is_structured: bool = False,
     ) -> _DispatchPreparation | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
@@ -1181,6 +1184,7 @@ class TurnController:
                 target=target,
                 correlation_id=correlation_id,
                 envelope=envelope,
+                current_prompt_is_structured=current_prompt_is_structured,
             ),
             replay_guard=replay_guard,
         )
@@ -1638,6 +1642,7 @@ class TurnController:
                 dispatch_timing.note(**dispatch.context.thread_history.diagnostics)
 
             self.deps.logger.info(processing_log, event_id=event.event_id)
+            current_timestamp_ms = normalize_timestamp_ms(event.server_timestamp)
             payload_preparation = ResponsePayloadPreparation(
                 dispatch=dispatch,
                 prompt=event.body,
@@ -1679,6 +1684,8 @@ class TurnController:
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                             payload_preparation=payload_preparation,
+                            current_timestamp_ms=current_timestamp_ms,
+                            current_prompt_is_structured=dispatch.current_prompt_is_structured,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
@@ -1698,6 +1705,8 @@ class TurnController:
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                             payload_preparation=payload_preparation,
+                            current_timestamp_ms=current_timestamp_ms,
+                            current_prompt_is_structured=dispatch.current_prompt_is_structured,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
@@ -1738,6 +1747,9 @@ class TurnController:
             handled_turn = HandledTurnState.create(
                 handoff.source_event_ids,
                 source_event_prompts=dict(handoff.source_event_prompts),
+                source_event_metadata=dict(handoff.source_event_metadata)
+                if len(handoff.source_event_ids) > 1
+                else None,
             )
             await self._dispatch_handoff(
                 handoff,
@@ -1779,6 +1791,7 @@ class TurnController:
             ingress_metadata=handoff.ingress,
             payload_metadata=handoff.payload,
             trust_hydrated_internal_metadata=handoff.trust_hydrated_internal_metadata,
+            current_prompt_is_structured=handoff.current_prompt_is_structured,
         )
 
     async def handle_text_event(
@@ -1926,6 +1939,7 @@ class TurnController:
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
         trust_hydrated_internal_metadata: bool | None = None,
+        current_prompt_is_structured: bool = False,
     ) -> None:
         """Run the normal text or command dispatch pipeline for a prepared text event."""
         raw_event: TextDispatchEvent
@@ -1948,6 +1962,7 @@ class TurnController:
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
+            current_prompt_is_structured=current_prompt_is_structured,
         )
 
     async def handle_media_event(
