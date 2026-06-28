@@ -819,9 +819,9 @@ depends_on = [
     "mindroom.handled_turns",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
-    "mindroom.matrix.event_info",
     "mindroom.matrix.identity",
     "mindroom.runtime_protocols",
+    "mindroom.timestamp_formatting",
 ]
 
 [[modules]]
@@ -834,6 +834,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.history",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.prompt_message_tags",
     "mindroom.streaming",
     "mindroom.timestamp_formatting",
 ]
@@ -1282,8 +1283,20 @@ path = "mindroom.timestamp_formatting"
 depends_on = []
 visibility = [
     "mindroom.bot",
+    "mindroom.coalescing_batch",
+    "mindroom.edit_regenerator",
     "mindroom.execution_preparation",
+    "mindroom.handled_turns",
+    "mindroom.turn_controller",
     "mindroom.user_turn_time",
+]
+
+[[modules]]
+path = "mindroom.prompt_message_tags"
+depends_on = []
+visibility = [
+    "mindroom.coalescing_batch",
+    "mindroom.execution_preparation",
 ]
 
 [[modules]]
@@ -1962,8 +1975,8 @@ depends_on = [
     "mindroom.response_runner",
     "mindroom.scheduling",
     "mindroom.sync_restart_retry",
-    "mindroom.timestamp_formatting",
     "mindroom.teams",
+    "mindroom.timestamp_formatting",
     "mindroom.tool_approval",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
@@ -2496,6 +2509,7 @@ depends_on = [
     "mindroom.routing",
     "mindroom.teams",
     "mindroom.text_ingress_dispatch",
+    "mindroom.timestamp_formatting",
     "mindroom.turn_store",
     "mindroom.turn_policy",
 ]
@@ -2965,7 +2979,7 @@ expose = [
 from = ["mindroom.matrix.conversation_cache"]
 
 [[interfaces]]
-expose = ["EventInfo", "matrix_timestamp_ms", "origin_server_ts_from_event_source", "reply_to_event_id_from_content"]
+expose = ["EventInfo", "origin_server_ts_from_event_source", "reply_to_event_id_from_content"]
 from = ["mindroom.matrix.event_info"]
 
 [[interfaces]]

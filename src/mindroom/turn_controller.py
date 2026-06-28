@@ -69,7 +69,7 @@ from mindroom.inbound_turn_normalizer import (
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
-from mindroom.matrix.event_info import EventInfo, matrix_timestamp_ms
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import (
     AudioMessageEvent,
     FileMessageEvent,
@@ -96,6 +96,7 @@ from mindroom.thread_utils import (
     is_router_only_agent_mention,
     thread_requires_explicit_agent_targeting,
 )
+from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
@@ -1641,7 +1642,7 @@ class TurnController:
                 dispatch_timing.note(**dispatch.context.thread_history.diagnostics)
 
             self.deps.logger.info(processing_log, event_id=event.event_id)
-            current_timestamp_ms = matrix_timestamp_ms(event.server_timestamp)
+            current_timestamp_ms = normalize_timestamp_ms(event.server_timestamp)
             payload_preparation = ResponsePayloadPreparation(
                 dispatch=dispatch,
                 prompt=event.body,

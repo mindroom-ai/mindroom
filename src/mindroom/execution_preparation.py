@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING
-from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 from agno.models.message import Message
 
@@ -41,6 +40,7 @@ from mindroom.history import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply, strip_visible_tool_markers
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
@@ -134,19 +134,6 @@ class _ThreadAttachmentContext:
         return attachment_records_for_visible_message(self.storage_path, message, room_id=self.room_id)
 
 
-def _wrap_msg_body(sender: str, body: str, *, ts: str | None = None) -> str:
-    """Render one Matrix message as a <msg from="..."><![CDATA[...]]></msg> tag."""
-    attrs = [f"from={xml_quoteattr(sender)}"]
-    if ts is not None:
-        attrs.append(f"ts={xml_quoteattr(ts)}")
-    return f"<msg {' '.join(attrs)}><![CDATA[{_cdata_body(body)}]]></msg>"
-
-
-def _cdata_body(body: str) -> str:
-    """Render body text inside CDATA without entity-escaping normal message text."""
-    return body.replace("]]>", "]]]]><![CDATA[>")
-
-
 def _build_matrix_prompt_with_history(
     prompt: str,
     history_messages: list[tuple[str, str]],
@@ -157,16 +144,14 @@ def _build_matrix_prompt_with_history(
     current_ts: str | None = None,
     current_prompt_is_structured: bool = False,
 ) -> str:
-    should_wrap_current = current_sender is not None and not current_prompt_is_structured
-    if should_wrap_current:
-        assert current_sender is not None
-        current_block = _wrap_msg_body(current_sender, prompt, ts=current_ts)
+    if current_sender is not None and not current_prompt_is_structured:
+        current_block = render_msg_tag(sender=current_sender, body=prompt, ts=current_ts)
     else:
         current_block = prompt
     standalone_prompt = f"{prompt_intro}{current_block}" if current_sender is not None else prompt
     if not history_messages:
         return standalone_prompt
-    rendered_history = "\n".join(_wrap_msg_body(sender, body) for sender, body in history_messages)
+    rendered_history = "\n".join(render_msg_tag(sender=sender, body=body) for sender, body in history_messages)
     return f"{header}\n<conversation>\n{rendered_history}\n</conversation>\n\n{prompt_intro}{current_block}"
 
 

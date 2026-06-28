@@ -17,7 +17,6 @@ import typing
 from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from math import isfinite
 from typing import Any, NotRequired, TypedDict
 
 from mindroom.durable_write import write_json_file_durable
@@ -25,6 +24,7 @@ from mindroom.file_locks import advisory_file_lock
 from mindroom.history import HistoryScope, HistoryScopeMetadata
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget, MessageTargetMetadata
+from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if typing.TYPE_CHECKING:
     from pathlib import Path
@@ -60,6 +60,10 @@ class SourceEventMetadata:
     sender: str
     timestamp_ms: float | None = None
 
+    def __post_init__(self) -> None:
+        """Coerce the timestamp to a validated float so to_record() never emits an int."""
+        object.__setattr__(self, "timestamp_ms", normalize_timestamp_ms(self.timestamp_ms))
+
     def to_record(self) -> dict[str, object]:
         """Return a JSON-safe representation for durable metadata."""
         record: dict[str, object] = {"sender": self.sender}
@@ -76,10 +80,7 @@ class SourceEventMetadata:
         sender = metadata.get("sender")
         if not isinstance(sender, str) or not sender:
             return None
-        return cls(
-            sender=sender,
-            timestamp_ms=_normalized_source_event_timestamp_ms(metadata.get("timestamp_ms")),
-        )
+        return cls(sender=sender, timestamp_ms=normalize_timestamp_ms(metadata.get("timestamp_ms")))
 
 
 @dataclass(frozen=True)
@@ -844,14 +845,6 @@ def _explicit_prompt_map_for_sources(
         if isinstance((prompt := source_event_prompts.get(event_id)), str)
     }
     return normalized_prompt_map or None
-
-
-def _normalized_source_event_timestamp_ms(raw_timestamp_ms: object) -> float | None:
-    """Return a valid Matrix source-event timestamp in milliseconds."""
-    if isinstance(raw_timestamp_ms, bool) or not isinstance(raw_timestamp_ms, int | float):
-        return None
-    timestamp_ms = float(raw_timestamp_ms)
-    return timestamp_ms if isfinite(timestamp_ms) and timestamp_ms >= 0 else None
 
 
 def _explicit_source_event_metadata_for_sources(

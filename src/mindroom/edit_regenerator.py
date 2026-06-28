@@ -12,8 +12,8 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
-from mindroom.matrix.event_info import matrix_timestamp_ms
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -299,7 +299,7 @@ class EditRegenerator:
             response_envelope=envelope,
             correlation_id=event.event_id,
             matrix_run_metadata=regeneration_matrix_run_metadata,
-            current_timestamp_ms=matrix_timestamp_ms(event.server_timestamp),
+            current_timestamp_ms=normalize_timestamp_ms(event.server_timestamp),
             current_prompt_is_structured=current_prompt_is_structured,
             on_lifecycle_lock_acquired=lambda: self.deps.turn_store.remove_stale_runs_for_edit(
                 loaded_turn=replace(
