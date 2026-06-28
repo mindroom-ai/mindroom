@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 
 def format_timestamp_ms(
-    timestamp_ms: int | float | None,
+    timestamp_ms: float | None,
     *,
     timezone: str,
 ) -> str | None:
