@@ -508,6 +508,10 @@ class AgentBot:
                 turn_store=self._turn_store,
                 ingress_hook_runner=self._ingress_hook_runner,
                 generate_response=lambda **kwargs: self._generate_response(**kwargs),
+                timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
+                    timestamp_ms,
+                    timezone=self.config.timezone,
+                ),
             ),
         )
         self._turn_policy = TurnPolicy(

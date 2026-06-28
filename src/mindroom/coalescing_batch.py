@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import TYPE_CHECKING, NamedTuple
 from xml.sax.saxutils import quoteattr as xml_quoteattr
 
@@ -24,6 +25,7 @@ from .dispatch_source import (
     MEDIA_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from .handled_turns import SourceEventMetadata
 
 if TYPE_CHECKING:
     import nio
@@ -37,7 +39,7 @@ class CoalescingKey(NamedTuple):
     requester_user_id: str
 
 
-type TimestampFormatter = Callable[[int | float | None], str | None]
+type TimestampFormatter = Callable[[float | None], str | None]
 
 
 _ACTIVE_FOLLOW_UP_OWNER_PREFIX = "__mindroom_active_follow_up__"
@@ -90,6 +92,7 @@ class CoalescedBatch:
     attachment_ids: list[str]
     source_event_ids: list[str]
     source_event_prompts: dict[str, str]
+    source_event_metadata: dict[str, SourceEventMetadata]
     media_events: list[MediaDispatchEvent]
     original_sender: str | None = None
     raw_audio_fallback: bool = False
@@ -113,14 +116,29 @@ def coalesced_prompt(message_bodies: list[str]) -> str:
     )
 
 
-def _event_timestamp_attribute(
-    pending_event: PendingEvent,
+def _timestamp_attribute(
+    timestamp_ms: float | None,
     timestamp_formatter: TimestampFormatter | None,
 ) -> str:
     if timestamp_formatter is None:
         return ""
-    formatted_timestamp = timestamp_formatter(pending_event.event.server_timestamp)
+    formatted_timestamp = timestamp_formatter(timestamp_ms)
     return f" ts={xml_quoteattr(formatted_timestamp)}" if formatted_timestamp is not None else ""
+
+
+def _render_tagged_message(
+    *,
+    event_id: str,
+    sender: str,
+    body: str,
+    timestamp_ms: float | None,
+    timestamp_formatter: TimestampFormatter | None,
+) -> str:
+    return (
+        f"<msg event_id={xml_quoteattr(event_id)} "
+        f"from={xml_quoteattr(sender)}"
+        f"{_timestamp_attribute(timestamp_ms, timestamp_formatter)}><![CDATA[{body}]]></msg>"
+    )
 
 
 def _tagged_pending_message(
@@ -128,12 +146,13 @@ def _tagged_pending_message(
     *,
     timestamp_formatter: TimestampFormatter | None,
 ) -> str:
-    safe_body = dispatch_prompt_for_event(pending_event.event).replace("]]>", "]]]]><![CDATA[>")
     sender = pending_event.requester_user_id or pending_event.event.sender
-    return (
-        f"<msg event_id={xml_quoteattr(pending_event.event.event_id)} "
-        f"from={xml_quoteattr(sender)}"
-        f"{_event_timestamp_attribute(pending_event, timestamp_formatter)}><![CDATA[{safe_body}]]></msg>"
+    return _render_tagged_message(
+        event_id=pending_event.event.event_id,
+        sender=sender,
+        body=dispatch_prompt_for_event(pending_event.event),
+        timestamp_ms=_normalized_timestamp_ms(pending_event.event.server_timestamp),
+        timestamp_formatter=timestamp_formatter,
     )
 
 
@@ -166,6 +185,37 @@ def _tagged_coalesced_prompt(
         "The user sent the following messages in quick succession. "
         "Treat them as one turn and respond once:\n\n"
         f"<messages>\n{rendered_messages}\n</messages>"
+    )
+
+
+def tagged_coalesced_prompt(
+    source_event_ids: list[str] | tuple[str, ...],
+    source_event_prompts: dict[str, str],
+    source_event_metadata: dict[str, SourceEventMetadata],
+    *,
+    timestamp_formatter: TimestampFormatter,
+) -> str | None:
+    """Render a persisted coalesced turn with the same model-facing message tags."""
+    rendered_messages: list[str] = []
+    for source_event_id in source_event_ids:
+        prompt = source_event_prompts.get(source_event_id)
+        metadata = source_event_metadata.get(source_event_id)
+        if prompt is None or metadata is None:
+            return None
+        rendered_messages.append(
+            _render_tagged_message(
+                event_id=source_event_id,
+                sender=metadata.sender,
+                body=prompt,
+                timestamp_ms=metadata.timestamp_ms,
+                timestamp_formatter=timestamp_formatter,
+            ),
+        )
+    rendered_body = "\n".join(rendered_messages)
+    return (
+        "The user sent the following messages in quick succession. "
+        "Treat them as one turn and respond once:\n\n"
+        f"<messages>\n{rendered_body}\n</messages>"
     )
 
 
@@ -278,6 +328,23 @@ def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> d
     }
 
 
+def _normalized_timestamp_ms(timestamp_ms: object) -> float | None:
+    if isinstance(timestamp_ms, bool) or not isinstance(timestamp_ms, int | float):
+        return None
+    timestamp_ms_float = float(timestamp_ms)
+    return timestamp_ms_float if isfinite(timestamp_ms_float) and timestamp_ms_float >= 0 else None
+
+
+def _batch_source_event_metadata(ordered_pending_events: list[PendingEvent]) -> dict[str, SourceEventMetadata]:
+    return {
+        pending_event.event.event_id: SourceEventMetadata(
+            sender=pending_event.requester_user_id or pending_event.event.sender,
+            timestamp_ms=_normalized_timestamp_ms(pending_event.event.server_timestamp),
+        )
+        for pending_event in ordered_pending_events
+    }
+
+
 def build_coalesced_batch(
     key: CoalescingKey,
     pending_events: list[PendingEvent],
@@ -311,6 +378,7 @@ def build_coalesced_batch(
         ),
         source_event_ids=[pending_event.event.event_id for pending_event in ordered_pending_events],
         source_event_prompts=_batch_source_event_prompts(ordered_pending_events),
+        source_event_metadata=_batch_source_event_metadata(ordered_pending_events),
         media_events=[
             pending_event.event
             for pending_event in ordered_pending_events

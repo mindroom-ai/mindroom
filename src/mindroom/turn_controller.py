@@ -843,6 +843,7 @@ class TurnController:
         handled_turn = HandledTurnState.create(
             handoff.source_event_ids,
             source_event_prompts=dict(handoff.source_event_prompts),
+            source_event_metadata=dict(handoff.source_event_metadata) if len(handoff.source_event_ids) > 1 else None,
         )
         try:
             await self._dispatch_handoff(handoff, handled_turn=handled_turn)
@@ -1741,6 +1742,9 @@ class TurnController:
             handled_turn = HandledTurnState.create(
                 handoff.source_event_ids,
                 source_event_prompts=dict(handoff.source_event_prompts),
+                source_event_metadata=dict(handoff.source_event_metadata)
+                if len(handoff.source_event_ids) > 1
+                else None,
             )
             await self._dispatch_handoff(
                 handoff,

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey
+    from mindroom.handled_turns import SourceEventMetadata
 
 
 class _PendingEventLike(Protocol):
@@ -108,6 +109,7 @@ class DispatchHandoff:
     trust_hydrated_internal_metadata: bool = False
     source_event_ids: tuple[str, ...] = ()
     source_event_prompts: Mapping[str, str] = field(default_factory=dict)
+    source_event_metadata: Mapping[str, SourceEventMetadata] = field(default_factory=dict)
     media_events: tuple[MediaDispatchEvent, ...] = ()
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
@@ -390,6 +392,7 @@ def build_dispatch_handoff(batch: CoalescedBatch) -> DispatchHandoff:
         ),
         source_event_ids=tuple(batch.source_event_ids),
         source_event_prompts=dict(batch.source_event_prompts),
+        source_event_metadata=dict(batch.source_event_metadata),
         media_events=tuple(batch.media_events),
         dispatch_metadata=batch.dispatch_metadata,
     )

@@ -136,11 +136,24 @@ class _ThreadAttachmentContext:
 
 def _wrap_msg_body(sender: str, body: str, *, ts: str | None = None) -> str:
     """Render one Matrix message as a <msg from="..."><![CDATA[...]]></msg> tag."""
-    safe_body = body.replace("]]>", "]]]]><![CDATA[>")
     attrs = [f"from={xml_quoteattr(sender)}"]
     if ts is not None:
         attrs.append(f"ts={xml_quoteattr(ts)}")
-    return f"<msg {' '.join(attrs)}><![CDATA[{safe_body}]]></msg>"
+    return f"<msg {' '.join(attrs)}><![CDATA[{body}]]></msg>"
+
+
+def _is_structured_current_turn_prompt(prompt: str) -> bool:
+    """Return whether the prompt already carries per-message current-turn tags."""
+    stripped_prompt = prompt.strip()
+    return (
+        stripped_prompt.startswith("The user sent the following messages in quick succession. ")
+        and "\n<messages>\n<msg " in stripped_prompt
+        and stripped_prompt.endswith("\n</messages>")
+    ) or (
+        stripped_prompt.startswith("Messages arrived while the previous response was still running. ")
+        and "\n<queued_messages>\n<msg " in stripped_prompt
+        and stripped_prompt.endswith("\n</queued_messages>")
+    )
 
 
 def _build_matrix_prompt_with_history(
@@ -152,7 +165,12 @@ def _build_matrix_prompt_with_history(
     current_sender: str | None,
     current_ts: str | None = None,
 ) -> str:
-    current_block = _wrap_msg_body(current_sender, prompt, ts=current_ts) if current_sender is not None else prompt
+    should_wrap_current = current_sender is not None and not _is_structured_current_turn_prompt(prompt)
+    if should_wrap_current:
+        assert current_sender is not None
+        current_block = _wrap_msg_body(current_sender, prompt, ts=current_ts)
+    else:
+        current_block = prompt
     standalone_prompt = f"{prompt_intro}{current_block}" if current_sender is not None else prompt
     if not history_messages:
         return standalone_prompt

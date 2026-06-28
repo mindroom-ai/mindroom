@@ -23,6 +23,7 @@ from mindroom.coalescing_batch import (
     active_follow_up_coalescing_key,
     build_coalesced_batch,
 )
+from mindroom.config.main import Config
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent, build_dispatch_handoff
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -30,6 +31,7 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.execution_preparation import _messages_with_current_prompt
 from mindroom.ingress_lanes import LaneDelivery
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -157,6 +159,50 @@ def test_active_follow_up_prompt_renders_timestamp_attributes() -> None:
         '<msg event_id="$a2:localhost" from="@alice:localhost" ts="2026-03-20 08:16 PDT"><![CDATA[second]]></msg>\n'
         "</queued_messages>"
     )
+
+
+def test_tagged_coalesced_prompt_is_safe_inside_current_message_wrapper() -> None:
+    """A structured coalesced prompt should not be wrapped in another message tag."""
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@alice:localhost"),
+        [
+            PendingEvent(
+                event=_text_event("$a1:localhost", "first <tag>", 1_774_019_700_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@alice:localhost",
+            ),
+            PendingEvent(
+                event=_text_event("$a2:localhost", "second ]]> message", 1_774_019_760_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@alice:localhost",
+            ),
+        ],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    messages = _messages_with_current_prompt(
+        batch.prompt,
+        current_sender_id="@alice:localhost",
+        current_timestamp_ms=1_774_019_760_000,
+        config=Config(timezone="America/Los_Angeles"),
+    )
+
+    content = messages[0].content
+    assert content == (
+        "Current message:\n"
+        "The user sent the following messages in quick succession. "
+        "Treat them as one turn and respond once:\n\n"
+        "<messages>\n"
+        '<msg event_id="$a1:localhost" from="@alice:localhost" ts="2026-03-20 08:15 PDT">'
+        "<![CDATA[first <tag>]]></msg>\n"
+        '<msg event_id="$a2:localhost" from="@alice:localhost" ts="2026-03-20 08:16 PDT">'
+        "<![CDATA[second ]]> message]]></msg>\n"
+        "</messages>"
+    )
+    assert "&lt;" not in content
+    assert "]]]]><![CDATA[>" not in content
 
 
 async def _ready_after(

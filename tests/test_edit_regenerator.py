@@ -16,11 +16,12 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.edit_regenerator import EditRegenerator, EditRegeneratorDeps
-from mindroom.handled_turns import HandledTurnRecord
+from mindroom.handled_turns import HandledTurnRecord, SourceEventMetadata
 from mindroom.history.types import HistoryScope
 from mindroom.hooks.ingress import HookIngressPolicy
 from mindroom.matrix.event_info import EventInfo
 from mindroom.message_target import MessageTarget
+from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_policy import IngressHookRunner
 from mindroom.turn_store import TurnStore, _LoadedTurnRecord
 from tests.conftest import make_visible_message, request_envelope
@@ -83,6 +84,7 @@ def _turn_record(
     anchor_event_id: str | None = None,
     response_event_id: str | None = RESPONSE_EVENT_ID,
     source_event_prompts: dict[str, str] | None = None,
+    source_event_metadata: dict[str, SourceEventMetadata] | None = None,
     response_owner: str | None = AGENT_NAME,
     thread_id: str | None = THREAD_ID,
 ) -> HandledTurnRecord:
@@ -92,6 +94,7 @@ def _turn_record(
         source_event_ids=source_event_ids,
         response_event_id=response_event_id,
         source_event_prompts=source_event_prompts,
+        source_event_metadata=source_event_metadata,
         response_owner=response_owner,
         history_scope=HistoryScope(kind="agent", scope_id=AGENT_NAME),
         conversation_target=MessageTarget.resolve(ROOM_ID, thread_id, anchor),
@@ -170,6 +173,7 @@ def _harness(tmp_path: Path, *, turn_record: HandledTurnRecord | None, requires_
             turn_store=turn_store,
             ingress_hook_runner=ingress_hook_runner,
             generate_response=generate_response,
+            timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone=config.timezone),
         ),
     )
     return _Harness(
@@ -284,6 +288,42 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
         first_event_id: "edited first message",
         second_event_id: "second message",
     }
+
+
+@pytest.mark.asyncio
+async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -> None:
+    """Edited coalesced turns should keep the model-facing per-message metadata shape."""
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    record = _turn_record(
+        source_event_ids=(first_event_id, second_event_id),
+        source_event_prompts={first_event_id: "first message", second_event_id: "second message"},
+        source_event_metadata={
+            first_event_id: SourceEventMetadata(sender="@alice:example.org", timestamp_ms=1_774_019_700_000),
+            second_event_id: SourceEventMetadata(sender="@bob:example.org", timestamp_ms=1_774_019_760_000),
+        },
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    harness.config.timezone = "America/Los_Angeles"
+    event, event_info = _edit_event(original_event_id=first_event_id, new_body="edited first message")
+
+    await _handle_edit(harness, event, event_info)
+
+    assert harness.generate_response.await_args.kwargs["prompt"] == (
+        "The user sent the following messages in quick succession. "
+        "Treat them as one turn and respond once:\n\n"
+        "<messages>\n"
+        '<msg event_id="$m1:example.org" from="@alice:example.org" ts="2026-03-20 08:15 PDT">'
+        "<![CDATA[edited first message]]></msg>\n"
+        '<msg event_id="$m2:example.org" from="@bob:example.org" ts="2026-03-20 08:16 PDT">'
+        "<![CDATA[second message]]></msg>\n"
+        "</messages>"
+    )
+
+    handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
+    assert handled_turn.source_event_metadata == record.source_event_metadata
+    recorded = harness.turn_store.record_turn_record.call_args.args[0]
+    assert recorded.source_event_metadata == record.source_event_metadata
 
 
 @pytest.mark.asyncio
