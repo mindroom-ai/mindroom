@@ -148,7 +148,7 @@ uv run pre-commit run --all-files
 
 ## Task 4: Commit, PR, and Native Review Loop
 
-- [ ] Stage only changed files.
+- [x] Stage only changed files.
 
 Command:
 
@@ -156,7 +156,7 @@ Command:
 git add docs/superpowers/specs/2026-06-28-matrix-voice-message-tool-design.md docs/superpowers/plans/2026-06-28-matrix-voice-message-tool.md pyproject.toml src/mindroom/matrix/client_delivery.py src/mindroom/custom_tools/matrix_voice_message.py src/mindroom/tools/matrix_voice_message.py src/mindroom/tools/__init__.py src/mindroom/tools_metadata.json tach.toml tests/test_send_file_message.py tests/test_matrix_voice_message.py uv.lock
 ```
 
-- [ ] Commit with a focused feature message.
+- [x] Commit with a focused feature message.
 
 Command:
 
@@ -164,10 +164,10 @@ Command:
 git commit -m "Add Matrix voice message tool"
 ```
 
-- [ ] Push the branch and open a PR.
+- [x] Push the branch and open a PR.
 
-- [ ] After opening the PR, run two fresh native Codex PR-review subagents against the latest head.
+- [x] After opening the PR, run two fresh native Codex PR-review subagents against the latest head.
 
-- [ ] Verify every finding in the main thread.
+- [x] Verify every finding in the main thread.
 
-- [ ] Push follow-up commits for real in-scope issues and repeat with fresh reviewers until both approve the same head.
+- [x] Push follow-up commits for real in-scope issues and repeat with fresh reviewers until both approve the same head.

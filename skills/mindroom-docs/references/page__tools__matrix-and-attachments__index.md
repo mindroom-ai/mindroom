@@ -10,6 +10,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 ## Tools On This Page
 
 - [`matrix_message`] - Send, reply, react, read, edit, or inspect Matrix conversation context.
+- [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
 - [`thread_summary`] - Set or update a Matrix thread summary from the current room and thread context.
 - [`thread_model`] - Show, switch, or reset the model override for the current Matrix thread.
@@ -21,7 +22,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 These tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation.
 `matrix_message` implies `attachments` through `Config.IMPLIED_TOOLS`, so enabling `matrix_message` makes the `attachments` toolkit available even when you do not list it separately.
 Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run.
-Current source in this worktree exposes `matrix_message`, `thread_tags`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
+Current source in this worktree exposes `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
 
 ## [`matrix_message`]
 
@@ -76,6 +77,56 @@ matrix_message(action="react", target="$event123", message="✅")
 - Use `action="context"` before a follow-up write when you want to inspect the resolved `room_id`, `thread_id`, and `reply_to_event_id`.
 - Successful attachment sends also return `attachment_thread_id`, which identifies the thread root used for the uploaded files.
 - If you need to send existing conversation files, pass `attachment_ids` from the current context or use the `attachments` tool to inspect them first.
+
+## [`matrix_voice_message`]
+
+`matrix_voice_message` lets agents generate speech from text and send it as a Matrix voice message in one tool call.
+
+### What It Does
+
+`matrix_voice_message(text, room_id=None, thread_id=None, caption=None, companion_message=None)` calls OpenAI text-to-speech, uploads the generated audio, and sends one `m.audio` event with Matrix voice-message metadata.
+When both `room_id` and `thread_id` are omitted, it targets the active Matrix room and active thread.
+Pass `thread_id="room"` to force a room-level voice message instead of inheriting the current thread.
+`caption` becomes the audio event body only, so clients may show it as the voice-note label or fallback text.
+`caption` is not a separate text event.
+Use `companion_message` when the agent should also post normal readable text.
+The companion text is sent before the voice note to the same room and thread, and mention handling is suppressed like the default `matrix_message` send path.
+
+### Configuration
+
+`matrix_voice_message` requires OpenAI text-to-speech access.
+Set `api_key` inline or provide `OPENAI_API_KEY` in the runtime environment.
+The default `model` is `gpt-4o-mini-tts`.
+The default `voice` is `alloy`.
+The default `response_format` is `mp3`.
+
+### Example
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - matrix_voice_message
+```
+
+```python
+matrix_voice_message("Here is the quick audio version.")
+matrix_voice_message(
+    "The build finished successfully.",
+    companion_message="The build finished successfully.",
+)
+matrix_voice_message(
+    "Posting this to the room timeline.",
+    thread_id="room",
+    caption="Build status",
+)
+```
+
+### Notes
+
+- The tool returns `event_id` for the voice event and `companion_event_id` when companion text was sent.
+- If companion text succeeds but speech generation or voice delivery fails later, the error payload still includes `companion_event_id`.
+- The tool rate-limits each `(agent_name, requester_id, room_id)` combination to six voice sends per 30 seconds.
 
 ## [`thread_tags`]
 
