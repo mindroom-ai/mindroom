@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
-from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY, VOICE_TRANSCRIPT_KEY
@@ -23,6 +23,9 @@ from .dispatch_source import (
     MEDIA_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from .handled_turns import SourceEventMetadata
+from .prompt_message_tags import render_msg_tag
+from .timestamp_formatting import normalize_timestamp_ms
 
 if TYPE_CHECKING:
     import nio
@@ -34,6 +37,9 @@ class CoalescingKey(NamedTuple):
     room_id: str
     thread_id: str | None
     requester_user_id: str
+
+
+type TimestampFormatter = Callable[[float | None], str | None]
 
 
 _ACTIVE_FOLLOW_UP_OWNER_PREFIX = "__mindroom_active_follow_up__"
@@ -86,6 +92,8 @@ class CoalescedBatch:
     attachment_ids: list[str]
     source_event_ids: list[str]
     source_event_prompts: dict[str, str]
+    source_event_metadata: dict[str, SourceEventMetadata]
+    current_prompt_is_structured: bool
     media_events: list[MediaDispatchEvent]
     original_sender: str | None = None
     raw_audio_fallback: bool = False
@@ -97,44 +105,143 @@ def _pending_event_trusts_internal_payload(pending_event: PendingEvent) -> bool:
     return pending_event.trust_internal_payload_metadata
 
 
+_COALESCED_MESSAGES_INTRO = (
+    "The user sent the following messages in quick succession. Treat them as one turn and respond once:"
+)
+_QUEUED_MESSAGES_INTRO = (
+    "Messages arrived while the previous response was still running. "
+    "They are in chat timeline order. Respond once to the combined context:"
+)
+
+
+def _messages_envelope(*, intro: str, tag: str, rendered_messages: str) -> str:
+    """Wrap rendered <msg> tags in one labeled container under a shared preamble."""
+    return f"{intro}\n\n<{tag}>\n{rendered_messages}\n</{tag}>"
+
+
 def coalesced_prompt(message_bodies: list[str]) -> str:
     """Return the single prompt text used to dispatch one coalesced turn."""
     if len(message_bodies) == 1:
         return message_bodies[0]
     combined_body = "\n".join(message_bodies)
-    return (
-        "The user sent the following messages in quick succession. "
-        "Treat them as one turn and respond once:\n\n"
-        f"{combined_body}"
+    return f"{_COALESCED_MESSAGES_INTRO}\n\n{combined_body}"
+
+
+def _format_event_timestamp(
+    raw_timestamp_ms: object,
+    timestamp_formatter: TimestampFormatter | None,
+) -> str | None:
+    """Render one raw event timestamp via the formatter, or None when unavailable."""
+    if timestamp_formatter is None:
+        return None
+    return timestamp_formatter(normalize_timestamp_ms(raw_timestamp_ms))
+
+
+def _tagged_pending_message(
+    pending_event: PendingEvent,
+    *,
+    timestamp_formatter: TimestampFormatter | None,
+) -> str:
+    return render_msg_tag(
+        sender=pending_event.requester_user_id or pending_event.event.sender,
+        body=dispatch_prompt_for_event(pending_event.event),
+        event_id=pending_event.event.event_id,
+        ts=_format_event_timestamp(pending_event.event.server_timestamp, timestamp_formatter),
     )
 
 
-def _active_follow_up_message(pending_event: PendingEvent) -> str:
-    safe_body = dispatch_prompt_for_event(pending_event.event).replace("]]>", "]]]]><![CDATA[>")
-    sender = pending_event.requester_user_id or pending_event.event.sender
-    return (
-        f"<msg event_id={xml_quoteattr(pending_event.event.event_id)} "
-        f"from={xml_quoteattr(sender)}><![CDATA[{safe_body}]]></msg>"
+def _rendered_pending_messages(
+    pending_events: list[PendingEvent],
+    *,
+    timestamp_formatter: TimestampFormatter | None,
+) -> str:
+    return "\n".join(
+        _tagged_pending_message(pending_event, timestamp_formatter=timestamp_formatter)
+        for pending_event in pending_events
     )
 
 
-def _active_follow_up_prompt(pending_events: list[PendingEvent]) -> str:
-    rendered_messages = "\n".join(_active_follow_up_message(pending_event) for pending_event in pending_events)
-    return (
-        "Messages arrived while the previous response was still running. "
-        "They are in chat timeline order. Respond once to the combined context:\n\n"
-        f"<queued_messages>\n{rendered_messages}\n</queued_messages>"
+def _active_follow_up_prompt(
+    pending_events: list[PendingEvent],
+    *,
+    timestamp_formatter: TimestampFormatter | None,
+) -> str:
+    return _messages_envelope(
+        intro=_QUEUED_MESSAGES_INTRO,
+        tag="queued_messages",
+        rendered_messages=_rendered_pending_messages(pending_events, timestamp_formatter=timestamp_formatter),
     )
 
 
-def _coalesced_prompt_for_events(ordered_pending_events: list[PendingEvent]) -> str:
-    if (
-        len(ordered_pending_events) > 1
-        and _batch_dispatch_policy_source_kind(ordered_pending_events) == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    ):
-        return _active_follow_up_prompt(ordered_pending_events)
-    return coalesced_prompt(
-        [dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events],
+def _tagged_coalesced_prompt(
+    ordered_pending_events: list[PendingEvent],
+    *,
+    timestamp_formatter: TimestampFormatter,
+) -> str:
+    return _messages_envelope(
+        intro=_COALESCED_MESSAGES_INTRO,
+        tag="messages",
+        rendered_messages=_rendered_pending_messages(ordered_pending_events, timestamp_formatter=timestamp_formatter),
+    )
+
+
+def tagged_coalesced_prompt(
+    source_event_ids: list[str] | tuple[str, ...],
+    source_event_prompts: dict[str, str],
+    source_event_metadata: dict[str, SourceEventMetadata],
+    *,
+    timestamp_formatter: TimestampFormatter,
+) -> str | None:
+    """Render a persisted coalesced turn with the same model-facing message tags."""
+    rendered_messages: list[str] = []
+    for source_event_id in source_event_ids:
+        prompt = source_event_prompts.get(source_event_id)
+        metadata = source_event_metadata.get(source_event_id)
+        if prompt is None or metadata is None:
+            return None
+        rendered_messages.append(
+            render_msg_tag(
+                sender=metadata.sender,
+                body=prompt,
+                event_id=source_event_id,
+                ts=timestamp_formatter(metadata.timestamp_ms),
+            ),
+        )
+    return _messages_envelope(
+        intro=_COALESCED_MESSAGES_INTRO,
+        tag="messages",
+        rendered_messages="\n".join(rendered_messages),
+    )
+
+
+@dataclass(frozen=True)
+class _CoalescedPromptRendering:
+    """One coalesced turn's model prompt and whether it carries trusted message tags."""
+
+    prompt: str
+    is_structured: bool
+
+
+def _render_coalesced_prompt(
+    ordered_pending_events: list[PendingEvent],
+    *,
+    timestamp_formatter: TimestampFormatter | None,
+) -> _CoalescedPromptRendering:
+    """Render the coalesced prompt and its structured-ness from one branch decision."""
+    if len(ordered_pending_events) > 1:
+        if _batch_dispatch_policy_source_kind(ordered_pending_events) == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
+            return _CoalescedPromptRendering(
+                _active_follow_up_prompt(ordered_pending_events, timestamp_formatter=timestamp_formatter),
+                is_structured=True,
+            )
+        if timestamp_formatter is not None:
+            return _CoalescedPromptRendering(
+                _tagged_coalesced_prompt(ordered_pending_events, timestamp_formatter=timestamp_formatter),
+                is_structured=True,
+            )
+    return _CoalescedPromptRendering(
+        coalesced_prompt([dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events]),
+        is_structured=False,
     )
 
 
@@ -227,21 +334,34 @@ def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> d
     }
 
 
+def _batch_source_event_metadata(ordered_pending_events: list[PendingEvent]) -> dict[str, SourceEventMetadata]:
+    return {
+        pending_event.event.event_id: SourceEventMetadata(
+            sender=pending_event.requester_user_id or pending_event.event.sender,
+            timestamp_ms=normalize_timestamp_ms(pending_event.event.server_timestamp),
+        )
+        for pending_event in ordered_pending_events
+    }
+
+
 def build_coalesced_batch(
     key: CoalescingKey,
     pending_events: list[PendingEvent],
+    *,
+    timestamp_formatter: TimestampFormatter | None = None,
 ) -> CoalescedBatch:
     """Build one normalized dispatch batch from queued pending events."""
     ordered_pending_events = list(pending_events)
     primary_pending_event = ordered_pending_events[-1]
     original_sender, raw_audio_fallback, voice_transcript = _batch_metadata(ordered_pending_events)
+    prompt_rendering = _render_coalesced_prompt(ordered_pending_events, timestamp_formatter=timestamp_formatter)
     return CoalescedBatch(
         coalescing_key=key,
         room=primary_pending_event.room,
         primary_event=primary_pending_event.event,
         requester_user_id=primary_pending_event.requester_user_id or key.requester_user_id,
         pending_events=tuple(ordered_pending_events),
-        prompt=_coalesced_prompt_for_events(ordered_pending_events),
+        prompt=prompt_rendering.prompt,
         source_kind=_batch_source_kind(ordered_pending_events),
         dispatch_policy_source_kind=_batch_dispatch_policy_source_kind(ordered_pending_events),
         hook_source=_batch_hook_source(ordered_pending_events),
@@ -255,6 +375,8 @@ def build_coalesced_batch(
         ),
         source_event_ids=[pending_event.event.event_id for pending_event in ordered_pending_events],
         source_event_prompts=_batch_source_event_prompts(ordered_pending_events),
+        source_event_metadata=_batch_source_event_metadata(ordered_pending_events),
+        current_prompt_is_structured=prompt_rendering.is_structured,
         media_events=[
             pending_event.event
             for pending_event in ordered_pending_events

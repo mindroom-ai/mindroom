@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 from mindroom import constants
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import HandledTurnState, SourceEventMetadata
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.turn_store import (
     TurnStore,
@@ -83,6 +83,36 @@ def test_build_run_metadata_uses_shared_source_event_id_normalization(tmp_path: 
     }
 
 
+def test_build_run_metadata_persists_source_event_metadata(tmp_path: Path) -> None:
+    """Coalesced prompt metadata should survive into durable run metadata."""
+    store = TurnStore(
+        TurnStoreDeps(
+            agent_name="agent",
+            tracking_base_path=tmp_path,
+            state_writer=MagicMock(),
+            resolver=MagicMock(),
+            tool_runtime=MagicMock(),
+        ),
+    )
+    handled_turn = HandledTurnState.create(
+        ["$first", "$anchor"],
+        source_event_metadata={
+            "$first": SourceEventMetadata(sender="@alice:localhost", timestamp_ms=1_774_019_700_000),
+            "$anchor": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
+        },
+    )
+
+    metadata = store.build_run_metadata(handled_turn)
+
+    assert metadata == {
+        constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$anchor"],
+        constants.MATRIX_SOURCE_EVENT_METADATA_KEY: {
+            "$first": {"sender": "@alice:localhost", "timestamp_ms": 1_774_019_700_000.0},
+            "$anchor": {"sender": "@bob:localhost"},
+        },
+    }
+
+
 def test_persisted_turn_metadata_uses_shared_source_event_id_normalization(tmp_path: Path) -> None:
     """Persisted run metadata parsing should normalize IDs and filter prompt entries."""
     store = TurnStore(
@@ -104,6 +134,11 @@ def test_persisted_turn_metadata_uses_shared_source_event_id_normalization(tmp_p
                 "$anchor": "anchor",
                 "$extra": "ignored",
             },
+            constants.MATRIX_SOURCE_EVENT_METADATA_KEY: {
+                "$first": {"sender": "@alice:localhost", "timestamp_ms": 1_774_019_700_000},
+                "$anchor": {"sender": "@bob:localhost"},
+                "$extra": {"sender": "@carol:localhost", "timestamp_ms": 1},
+            },
             constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$response",
         },
     )
@@ -112,6 +147,10 @@ def test_persisted_turn_metadata_uses_shared_source_event_id_normalization(tmp_p
     assert metadata.anchor_event_id == "$anchor"
     assert metadata.source_event_ids == ("$first", "$anchor")
     assert metadata.source_event_prompts == {"$first": "first", "$anchor": "anchor"}
+    assert metadata.source_event_metadata == {
+        "$first": SourceEventMetadata(sender="@alice:localhost", timestamp_ms=1_774_019_700_000.0),
+        "$anchor": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
+    }
     assert metadata.response_event_id == "$response"
 
 

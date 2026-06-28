@@ -63,6 +63,7 @@ from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN, GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
+from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_approval import is_process_active_approval_card
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
@@ -383,6 +384,10 @@ class AgentBot:
             wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
             room_scope_is_single_conversation=self._room_scope_is_single_conversation,
             dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
+            timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
+                timestamp_ms,
+                timezone=self.config.timezone,
+            ),
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
@@ -503,6 +508,10 @@ class AgentBot:
                 turn_store=self._turn_store,
                 ingress_hook_runner=self._ingress_hook_runner,
                 generate_response=lambda **kwargs: self._generate_response(**kwargs),
+                timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
+                    timestamp_ms,
+                    timezone=self.config.timezone,
+                ),
             ),
         )
         self._turn_policy = TurnPolicy(
@@ -1888,6 +1897,8 @@ class AgentBot:
         correlation_id: str | None = None,
         reason_prefix: str = "Team request",
         matrix_run_metadata: dict[str, Any] | None = None,
+        current_timestamp_ms: float | None = None,
+        current_prompt_is_structured: bool = False,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot)."""
@@ -1905,6 +1916,8 @@ class AgentBot:
                 correlation_id=correlation_id,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
+                current_timestamp_ms=current_timestamp_ms,
+                current_prompt_is_structured=current_prompt_is_structured,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
             team_agents=team_agents,
@@ -1927,6 +1940,8 @@ class AgentBot:
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         correlation_id: str | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
+        current_timestamp_ms: float | None = None,
+        current_prompt_is_structured: bool = False,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate and send/edit a response using AI.
@@ -1948,6 +1963,8 @@ class AgentBot:
             correlation_id: Optional request correlation ID propagated to hook logging.
             matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
                 for unseen-message tracking, coalesced edit regeneration, and cleanup.
+            current_timestamp_ms: Optional source Matrix event timestamp in milliseconds.
+            current_prompt_is_structured: Whether the current prompt already carries trusted message tags.
             on_lifecycle_lock_acquired: Optional callback that runs after the response
                 lifecycle lock is acquired and before response generation starts.
 
@@ -1969,6 +1986,8 @@ class AgentBot:
                 correlation_id=correlation_id,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
+                current_timestamp_ms=current_timestamp_ms,
+                current_prompt_is_structured=current_prompt_is_structured,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
         )
@@ -2157,6 +2176,8 @@ class TeamBot(AgentBot):
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         correlation_id: str | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
+        current_timestamp_ms: float | None = None,
+        current_prompt_is_structured: bool = False,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response instead of individual agent response."""
@@ -2176,6 +2197,8 @@ class TeamBot(AgentBot):
                     correlation_id=correlation_id,
                     matrix_run_metadata=matrix_run_metadata,
                     system_enrichment_items=system_enrichment_items,
+                    current_timestamp_ms=current_timestamp_ms,
+                    current_prompt_is_structured=current_prompt_is_structured,
                     on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                 ),
                 response_kind="team",
@@ -2268,5 +2291,7 @@ class TeamBot(AgentBot):
             correlation_id=correlation_id or target.reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
             matrix_run_metadata=matrix_run_metadata,
+            current_timestamp_ms=current_timestamp_ms,
+            current_prompt_is_structured=current_prompt_is_structured,
             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
         )

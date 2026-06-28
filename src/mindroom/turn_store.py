@@ -13,7 +13,7 @@ from agno.run.team import TeamRunOutput
 from mindroom import constants
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
-from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
+from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState, SourceEventMetadata
 from mindroom.thread_utils import create_session_id
 
 if TYPE_CHECKING:
@@ -43,6 +43,7 @@ class _PersistedTurnMetadata:
     source_event_ids: tuple[str, ...]
     response_event_id: str | None = None
     source_event_prompts: dict[str, str] | None = None
+    source_event_metadata: dict[str, SourceEventMetadata] | None = None
     response_owner: str | None = None
     history_scope: HistoryScope | None = None
     conversation_target: MessageTarget | None = None
@@ -191,6 +192,11 @@ class TurnStore:
             metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = list(handled_turn.source_event_ids)
         if handled_turn.source_event_prompts:
             metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(handled_turn.source_event_prompts)
+        if handled_turn.source_event_metadata:
+            metadata[constants.MATRIX_SOURCE_EVENT_METADATA_KEY] = {
+                event_id: source_metadata.to_record()
+                for event_id, source_metadata in handled_turn.source_event_metadata.items()
+            }
         if handled_turn.response_owner is not None:
             metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] = handled_turn.response_owner
         if handled_turn.history_scope is not None:
@@ -227,6 +233,7 @@ class TurnStore:
                 source_event_ids=persisted_turn_metadata.source_event_ids,
                 response_event_id=persisted_turn_metadata.response_event_id,
                 source_event_prompts=persisted_turn_metadata.source_event_prompts,
+                source_event_metadata=persisted_turn_metadata.source_event_metadata,
                 response_owner=persisted_turn_metadata.response_owner,
                 history_scope=persisted_turn_metadata.history_scope,
                 conversation_target=persisted_turn_metadata.conversation_target,
@@ -239,11 +246,15 @@ class TurnStore:
         merged_prompt_map = turn_record.source_event_prompts
         if merged_prompt_map is None and persisted_turn_metadata.is_coalesced:
             merged_prompt_map = persisted_turn_metadata.source_event_prompts
+        merged_source_event_metadata = turn_record.source_event_metadata
+        if merged_source_event_metadata is None and persisted_turn_metadata.is_coalesced:
+            merged_source_event_metadata = persisted_turn_metadata.source_event_metadata
         merged_turn_record = replace(
             turn_record,
             anchor_event_id=persisted_turn_metadata.anchor_event_id,
             response_event_id=persisted_turn_metadata.response_event_id or turn_record.response_event_id,
             source_event_prompts=merged_prompt_map,
+            source_event_metadata=merged_source_event_metadata,
             response_owner=turn_record.response_owner or persisted_turn_metadata.response_owner,
             history_scope=turn_record.history_scope or persisted_turn_metadata.history_scope,
             conversation_target=turn_record.conversation_target or persisted_turn_metadata.conversation_target,
@@ -272,6 +283,7 @@ class TurnStore:
             return None
         raw_source_event_ids = metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
         raw_prompt_map = metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)
+        raw_source_event_metadata = metadata.get(constants.MATRIX_SOURCE_EVENT_METADATA_KEY)
         raw_response_event_id = metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
         raw_response_owner = metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)
         response_event_id = raw_response_event_id if isinstance(raw_response_event_id, str) else None
@@ -279,6 +291,7 @@ class TurnStore:
             _normalized_matrix_source_event_ids_or_anchor(raw_source_event_ids, anchor_event_id=anchor_event_id),
             response_event_id=response_event_id,
             source_event_prompts=raw_prompt_map if isinstance(raw_prompt_map, dict) else None,
+            source_event_metadata=raw_source_event_metadata if isinstance(raw_source_event_metadata, dict) else None,
             response_owner=raw_response_owner if isinstance(raw_response_owner, str) else None,
             history_scope_metadata=metadata.get(constants.MATRIX_HISTORY_SCOPE_METADATA_KEY),
             conversation_target_metadata=metadata.get(constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY),
@@ -288,6 +301,7 @@ class TurnStore:
             source_event_ids=handled_turn.source_event_ids,
             response_event_id=handled_turn.response_event_id,
             source_event_prompts=handled_turn.source_event_prompts,
+            source_event_metadata=handled_turn.source_event_metadata,
             response_owner=handled_turn.response_owner,
             history_scope=handled_turn.history_scope,
             conversation_target=handled_turn.conversation_target,

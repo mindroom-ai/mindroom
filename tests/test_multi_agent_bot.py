@@ -2521,6 +2521,7 @@ class TestAgentBot:
         mock_event.sender = "@user:localhost"
         mock_event.body = f"{mention_id}: What's 2+2?"
         mock_event.event_id = "event123"
+        mock_event.server_timestamp = 1_774_019_700_000
         mock_event.source = {
             "content": {
                 "body": f"{mention_id}: What's 2+2?",
@@ -2545,8 +2546,8 @@ class TestAgentBot:
             stream_kwargs = mock_stream_agent_response.call_args.kwargs
             assert stream_kwargs["agent_name"] == "calculator"
             assert stream_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
-            assert stream_kwargs["model_prompt"].startswith("[")
-            assert stream_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
+            assert stream_kwargs["model_prompt"] == f"{mention_id}: What's 2+2?"
+            assert stream_kwargs["current_timestamp_ms"] == 1_774_019_700_000.0
             assert stream_kwargs["session_id"] == "!test:localhost:$thread_root_id"
             assert stream_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert stream_kwargs["config"] == config
@@ -2570,8 +2571,8 @@ class TestAgentBot:
             ai_kwargs = mock_ai_response.call_args.kwargs
             assert ai_kwargs["agent_name"] == "calculator"
             assert ai_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
-            assert ai_kwargs["model_prompt"].startswith("[")
-            assert ai_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
+            assert ai_kwargs["model_prompt"] == f"{mention_id}: What's 2+2?"
+            assert ai_kwargs["current_timestamp_ms"] == 1_774_019_700_000.0
             assert ai_kwargs["session_id"] == "!test:localhost:$thread_root_id"
             assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
@@ -5627,12 +5628,12 @@ class TestAgentBot:
         ]
 
     @pytest.mark.asyncio
-    async def test_generate_response_prefixes_user_turns_with_local_datetime(
+    async def test_generate_response_passes_structured_user_turn_time(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Top-level response generation should prefix user turns with local date and time."""
+        """Top-level response generation should preserve current-turn time as request data."""
 
         async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
             response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
@@ -5663,6 +5664,7 @@ class TestAgentBot:
 
         prior_user_time = datetime(2026, 3, 10, 8, 10, tzinfo=ZoneInfo("America/Los_Angeles"))
         prior_agent_time = datetime(2026, 3, 10, 8, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
+        current_turn_time = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
         thread_history = [
             _visible_message(
                 sender="@alice:localhost",
@@ -5702,20 +5704,17 @@ class TestAgentBot:
                 "mindroom.response_runner.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
             ),
-            patch("mindroom.response_runner.datetime") as mock_datetime,
             patch.object(
                 bot._conversation_resolver,
                 "fetch_thread_history",
                 new=AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
             ),
         ):
-            mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
-            mock_datetime.fromtimestamp.side_effect = lambda seconds, tz: datetime.fromtimestamp(seconds, tz)
-
             await bot._generate_response(
                 prompt="What time is it?",
                 thread_history=thread_history,
                 user_id="@alice:localhost",
+                current_timestamp_ms=int(current_turn_time.timestamp() * 1000),
                 response_envelope=request_envelope(
                     room_id="!test:localhost",
                     reply_to_event_id="$event",
@@ -5731,7 +5730,8 @@ class TestAgentBot:
 
         request = mock_process.await_args.args[0]
         assert request.prompt == "What time is it?"
-        assert request.model_prompt == "[2026-03-20 08:15 PDT] What time is it?"
+        assert request.model_prompt == "What time is it?"
+        assert request.current_timestamp_ms == int(current_turn_time.timestamp() * 1000)
         assert request.thread_history[0].body == "[2026-03-10 08:10 PDT] Earlier user question"
         assert request.thread_history[1].body == "Existing agent reply"
 
@@ -5776,6 +5776,7 @@ class TestAgentBot:
         bob_time = datetime(2026, 3, 10, 8, 10, tzinfo=ZoneInfo("America/Los_Angeles"))
         alice_time = datetime(2026, 3, 10, 8, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
         agent_time = datetime(2026, 3, 10, 8, 14, tzinfo=ZoneInfo("America/Los_Angeles"))
+        current_turn_time = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
         thread_history = [
             _visible_message(
                 sender="@bob:localhost",
@@ -5815,7 +5816,6 @@ class TestAgentBot:
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
-            patch("mindroom.response_runner.datetime") as mock_datetime,
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 create_background_task=schedule_background_task,
@@ -5827,13 +5827,11 @@ class TestAgentBot:
                 new=AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
             ),
         ):
-            mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
-            mock_datetime.fromtimestamp.side_effect = lambda seconds, tz: datetime.fromtimestamp(seconds, tz)
-
             await bot._generate_response(
                 prompt="What time is it?",
                 thread_history=thread_history,
                 user_id="@alice:localhost",
+                current_timestamp_ms=int(current_turn_time.timestamp() * 1000),
                 response_envelope=request_envelope(
                     room_id="!test:localhost",
                     reply_to_event_id="$event",
@@ -5849,7 +5847,8 @@ class TestAgentBot:
 
         request = mock_process.await_args.args[0]
         assert request.prompt == "What time is it?"
-        assert request.model_prompt == "[2026-03-20 08:15 PDT] What time is it?"
+        assert request.model_prompt == "What time is it?"
+        assert request.current_timestamp_ms == int(current_turn_time.timestamp() * 1000)
         assert request.thread_history[0].body == "[2026-03-10 08:10 PDT] Bob question"
         assert request.thread_history[1].body == "[2026-03-10 08:12 PDT] Alice earlier"
         assert request.thread_history[2].body == "Existing agent reply"

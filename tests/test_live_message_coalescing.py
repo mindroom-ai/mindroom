@@ -515,7 +515,11 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
         (
             "$m2",
             "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\nfirst\nsecond",
+            "Treat them as one turn and respond once:\n\n"
+            "<messages>\n"
+            '<msg event_id="$m1" from="@user:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[first]]></msg>\n'
+            '<msg event_id="$m2" from="@user:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[second]]></msg>\n'
+            "</messages>",
             ["$m1", "$m2"],
         ),
     ]
@@ -596,7 +600,11 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
     assert calls == [
         (
             "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\n[Attached image]\ndescribe it",
+            "Treat them as one turn and respond once:\n\n"
+            "<messages>\n"
+            '<msg event_id="$img1" from="@user:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[[Attached image]]]></msg>\n'
+            '<msg event_id="$m2" from="@user:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[describe it]]></msg>\n'
+            "</messages>",
             ["$img1", "$m2"],
             1,
         ),
@@ -632,7 +640,11 @@ async def test_room_root_image_and_caption_coalesce_into_single_dispatch(tmp_pat
     assert calls == [
         (
             "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\n[Attached image]\ndescribe this",
+            "Treat them as one turn and respond once:\n\n"
+            "<messages>\n"
+            '<msg event_id="$img" from="@user:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[[Attached image]]]></msg>\n'
+            '<msg event_id="$text" from="@user:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[describe this]]></msg>\n'
+            "</messages>",
             ["$img", "$text"],
             1,
         ),
@@ -1556,8 +1568,8 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
         "Messages arrived while the previous response was still running. "
         "They are in chat timeline order. Respond once to the combined context:\n\n"
         "<queued_messages>\n"
-        '<msg event_id="$text" from="@alice:localhost"><![CDATA[text follow-up]]></msg>\n'
-        '<msg event_id="$img" from="@bob:localhost"><![CDATA[[Attached image]]]></msg>\n'
+        '<msg event_id="$text" from="@alice:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[text follow-up]]></msg>\n'
+        '<msg event_id="$img" from="@bob:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[[Attached image]]]></msg>\n'
         "</queued_messages>"
     )
 

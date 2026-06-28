@@ -14,6 +14,7 @@ import json
 import threading
 import time
 import typing
+from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, NotRequired, TypedDict
@@ -23,6 +24,7 @@ from mindroom.file_locks import advisory_file_lock
 from mindroom.history import HistoryScope, HistoryScopeMetadata
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget, MessageTargetMetadata
+from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if typing.TYPE_CHECKING:
     from pathlib import Path
@@ -40,6 +42,7 @@ class _SerializedHandledTurnRecord(TypedDict):
     visible_echo_event_id: NotRequired[str | None]
     source_event_ids: NotRequired[list[str]]
     source_event_prompts: NotRequired[dict[str, str] | None]
+    source_event_metadata: NotRequired[dict[str, dict[str, object]] | None]
     response_owner: NotRequired[str | None]
     requester_id: NotRequired[str | None]
     correlation_id: NotRequired[str | None]
@@ -51,6 +54,36 @@ type _SerializedHandledTurnRecordLike = _SerializedHandledTurnRecord | dict[str,
 
 
 @dataclass(frozen=True)
+class SourceEventMetadata:
+    """Durable model-facing metadata for one source Matrix event."""
+
+    sender: str
+    timestamp_ms: float | None = None
+
+    def __post_init__(self) -> None:
+        """Coerce the timestamp to a validated float so to_record() never emits an int."""
+        object.__setattr__(self, "timestamp_ms", normalize_timestamp_ms(self.timestamp_ms))
+
+    def to_record(self) -> dict[str, object]:
+        """Return a JSON-safe representation for durable metadata."""
+        record: dict[str, object] = {"sender": self.sender}
+        if self.timestamp_ms is not None:
+            record["timestamp_ms"] = self.timestamp_ms
+        return record
+
+    @classmethod
+    def from_raw(cls, raw_metadata: object) -> SourceEventMetadata | None:
+        """Build source metadata from a persisted JSON-like value."""
+        if not isinstance(raw_metadata, Mapping):
+            return None
+        metadata = typing.cast("Mapping[str, object]", raw_metadata)
+        sender = metadata.get("sender")
+        if not isinstance(sender, str) or not sender:
+            return None
+        return cls(sender=sender, timestamp_ms=normalize_timestamp_ms(metadata.get("timestamp_ms")))
+
+
+@dataclass(frozen=True)
 class HandledTurnState:
     """Typed handled-turn facts carried through normal bot runtime flow."""
 
@@ -58,6 +91,7 @@ class HandledTurnState:
     response_event_id: str | None = None
     visible_echo_event_id: str | None = None
     source_event_prompts: dict[str, str] | None = None
+    source_event_metadata: dict[str, SourceEventMetadata] | None = None
     response_owner: str | None = None
     requester_id: str | None = None
     correlation_id: str | None = None
@@ -72,6 +106,7 @@ class HandledTurnState:
         response_event_id: str | None = None,
         visible_echo_event_id: str | None = None,
         source_event_prompts: typing.Mapping[str, str] | None = None,
+        source_event_metadata: typing.Mapping[str, object] | None = None,
         response_owner: str | None = None,
         requester_id: str | None = None,
         correlation_id: str | None = None,
@@ -88,6 +123,10 @@ class HandledTurnState:
                 normalized_source_event_ids,
                 source_event_prompts,
             ),
+            source_event_metadata=_explicit_source_event_metadata_for_sources(
+                normalized_source_event_ids,
+                source_event_metadata,
+            ),
             response_owner=_normalized_response_owner(response_owner),
             requester_id=_normalized_requester_id(requester_id),
             correlation_id=_normalized_correlation_id(correlation_id),
@@ -103,6 +142,7 @@ class HandledTurnState:
         response_event_id: str | None = None,
         visible_echo_event_id: str | None = None,
         source_event_prompts: typing.Mapping[str, str] | None = None,
+        source_event_metadata: typing.Mapping[str, object] | None = None,
         response_owner: str | None = None,
         requester_id: str | None = None,
         correlation_id: str | None = None,
@@ -115,6 +155,7 @@ class HandledTurnState:
             response_event_id=response_event_id,
             visible_echo_event_id=visible_echo_event_id,
             source_event_prompts=source_event_prompts,
+            source_event_metadata=source_event_metadata,
             response_owner=response_owner,
             requester_id=requester_id,
             correlation_id=correlation_id,
@@ -129,6 +170,7 @@ class HandledTurnState:
         *,
         response_event_id: str | None = None,
         source_event_prompts: typing.Mapping[str, str] | None = None,
+        source_event_metadata: typing.Mapping[str, object] | None = None,
         response_owner: str | None = None,
         history_scope_metadata: object,
         conversation_target_metadata: object,
@@ -138,6 +180,7 @@ class HandledTurnState:
             source_event_ids,
             response_event_id=response_event_id,
             source_event_prompts=source_event_prompts,
+            source_event_metadata=source_event_metadata,
             response_owner=response_owner,
             history_scope=HistoryScope.from_metadata(history_scope_metadata),
             conversation_target=MessageTarget.from_metadata(conversation_target_metadata),
@@ -160,6 +203,7 @@ class HandledTurnState:
             response_event_id=response_event_id,
             visible_echo_event_id=self.visible_echo_event_id,
             source_event_prompts=self.source_event_prompts,
+            source_event_metadata=self.source_event_metadata,
             response_owner=self.response_owner,
             requester_id=self.requester_id,
             correlation_id=self.correlation_id,
@@ -174,6 +218,7 @@ class HandledTurnState:
             response_event_id=self.response_event_id,
             visible_echo_event_id=visible_echo_event_id,
             source_event_prompts=self.source_event_prompts,
+            source_event_metadata=self.source_event_metadata,
             response_owner=self.response_owner,
             requester_id=self.requester_id,
             correlation_id=self.correlation_id,
@@ -191,6 +236,7 @@ class HandledTurnState:
             response_event_id=self.response_event_id,
             visible_echo_event_id=self.visible_echo_event_id,
             source_event_prompts=source_event_prompts,
+            source_event_metadata=self.source_event_metadata,
             response_owner=self.response_owner,
             requester_id=self.requester_id,
             correlation_id=self.correlation_id,
@@ -210,6 +256,7 @@ class HandledTurnState:
             response_event_id=self.response_event_id,
             visible_echo_event_id=self.visible_echo_event_id,
             source_event_prompts=self.source_event_prompts,
+            source_event_metadata=self.source_event_metadata,
             response_owner=self.response_owner,
             requester_id=requester_id,
             correlation_id=correlation_id,
@@ -232,6 +279,7 @@ class HandledTurnState:
             response_event_id=self.response_event_id,
             visible_echo_event_id=self.visible_echo_event_id,
             source_event_prompts=self.source_event_prompts,
+            source_event_metadata=self.source_event_metadata,
             response_owner=response_owner,
             requester_id=requester_id if requester_id is not None else self.requester_id,
             correlation_id=correlation_id if correlation_id is not None else self.correlation_id,
@@ -250,6 +298,7 @@ class HandledTurnRecord:
     completed: bool = True
     visible_echo_event_id: str | None = None
     source_event_prompts: dict[str, str] | None = None
+    source_event_metadata: dict[str, SourceEventMetadata] | None = None
     response_owner: str | None = None
     requester_id: str | None = None
     correlation_id: str | None = None
@@ -361,6 +410,7 @@ class HandledTurnLedger:
                 completed=True,
                 visible_echo_event_id=handled_turn.visible_echo_event_id,
                 source_event_prompts=handled_turn.source_event_prompts,
+                source_event_metadata=handled_turn.source_event_metadata,
                 response_owner=handled_turn.response_owner,
                 requester_id=handled_turn.requester_id,
                 correlation_id=handled_turn.correlation_id,
@@ -384,6 +434,7 @@ class HandledTurnLedger:
                 completed=turn_record.completed,
                 visible_echo_event_id=turn_record.visible_echo_event_id,
                 source_event_prompts=turn_record.source_event_prompts,
+                source_event_metadata=turn_record.source_event_metadata,
                 response_owner=turn_record.response_owner,
                 requester_id=turn_record.requester_id,
                 correlation_id=turn_record.correlation_id,
@@ -406,6 +457,7 @@ class HandledTurnLedger:
                 completed=_completed_for_record(existing_record),
                 visible_echo_event_id=echo_event_id,
                 source_event_prompts=_prompt_map_for_record(source_event_ids, existing_record),
+                source_event_metadata=_source_event_metadata_for_record(source_event_ids, existing_record),
                 response_owner=_response_owner_for_record(existing_record),
                 requester_id=_requester_id_for_record(existing_record),
                 correlation_id=_correlation_id_for_record(existing_record),
@@ -458,6 +510,7 @@ class HandledTurnLedger:
                 completed=_completed_for_record(record),
                 visible_echo_event_id=_visible_echo_event_id_for_record(record),
                 source_event_prompts=_prompt_map_for_record(source_event_ids, record),
+                source_event_metadata=_source_event_metadata_for_record(source_event_ids, record),
                 response_owner=_response_owner_for_record(record),
                 requester_id=_requester_id_for_record(record),
                 correlation_id=_correlation_id_for_record(record),
@@ -596,6 +649,7 @@ class HandledTurnLedger:
         completed: bool,
         visible_echo_event_id: str | None,
         source_event_prompts: typing.Mapping[str, str] | None,
+        source_event_metadata: typing.Mapping[str, SourceEventMetadata] | None,
         response_owner: str | None,
         requester_id: str | None,
         correlation_id: str | None,
@@ -606,6 +660,7 @@ class HandledTurnLedger:
         """Apply one handled turn to in-memory state while the state lock is held."""
         visible_echo_event_id = visible_echo_event_id or self._visible_echo_for_sources(source_event_ids)
         prompt_map = self._normalized_prompt_map(source_event_ids, source_event_prompts)
+        source_metadata = _explicit_source_event_metadata_for_sources(source_event_ids, source_event_metadata)
         response_owner = self._normalized_response_owner(source_event_ids, response_owner)
         requester_id = self._normalized_requester_id(source_event_ids, requester_id)
         correlation_id = self._normalized_correlation_id(source_event_ids, correlation_id)
@@ -622,6 +677,7 @@ class HandledTurnLedger:
                 source_event_ids=source_event_ids,
                 visible_echo_event_id=visible_echo_event_id,
                 source_event_prompts=prompt_map,
+                source_event_metadata=source_metadata,
                 response_owner=response_owner,
                 requester_id=requester_id,
                 correlation_id=correlation_id,
@@ -791,6 +847,26 @@ def _explicit_prompt_map_for_sources(
     return normalized_prompt_map or None
 
 
+def _explicit_source_event_metadata_for_sources(
+    source_event_ids: tuple[str, ...],
+    source_event_metadata: typing.Mapping[str, object] | None,
+) -> dict[str, SourceEventMetadata] | None:
+    """Return source metadata entries that match the tracked source event IDs."""
+    if not source_event_metadata:
+        return None
+    normalized_metadata: dict[str, SourceEventMetadata] = {}
+    for event_id in source_event_ids:
+        raw_metadata = source_event_metadata.get(event_id)
+        metadata = (
+            raw_metadata
+            if isinstance(raw_metadata, SourceEventMetadata)
+            else SourceEventMetadata.from_raw(raw_metadata)
+        )
+        if metadata is not None:
+            normalized_metadata[event_id] = metadata
+    return normalized_metadata or None
+
+
 def _serialized_record(
     *,
     timestamp: float,
@@ -800,6 +876,7 @@ def _serialized_record(
     source_event_ids: tuple[str, ...],
     visible_echo_event_id: str | None = None,
     source_event_prompts: typing.Mapping[str, str] | None = None,
+    source_event_metadata: typing.Mapping[str, SourceEventMetadata] | None = None,
     response_owner: str | None = None,
     requester_id: str | None = None,
     correlation_id: str | None = None,
@@ -819,6 +896,10 @@ def _serialized_record(
         record["visible_echo_event_id"] = visible_echo_event_id
     if source_event_prompts is not None:
         record["source_event_prompts"] = dict(source_event_prompts)
+    if source_event_metadata is not None:
+        record["source_event_metadata"] = {
+            event_id: metadata.to_record() for event_id, metadata in source_event_metadata.items()
+        }
     if response_owner is not None:
         record["response_owner"] = response_owner
     if requester_id is not None:
@@ -917,34 +998,27 @@ def _normalize_serialized_record(
         normalized_source_event_ids = (event_id,)
     anchor_event_id = _normalized_event_id(raw_record.get("anchor_event_id"))
     prompt_map = _prompt_map_for_record(normalized_source_event_ids, raw_record)
+    source_metadata = _source_event_metadata_for_record(normalized_source_event_ids, raw_record)
     response_owner = _response_owner_for_record(raw_record)
     requester_id = _requester_id_for_record(raw_record)
     correlation_id = _correlation_id_for_record(raw_record)
     history_scope = _history_scope_for_record(raw_record)
     conversation_target = _conversation_target_for_record(raw_record)
-    normalized_record: _SerializedHandledTurnRecord = {
-        "timestamp": float(timestamp) if isinstance(timestamp, int | float) else 0.0,
-        "response_event_id": response_event_id if isinstance(response_event_id, str) else None,
-        "completed": bool(raw_record.get("completed", True)),
-        "source_event_ids": list(normalized_source_event_ids),
-    }
-    if anchor_event_id is not None and anchor_event_id != normalized_source_event_ids[-1]:
-        normalized_record["anchor_event_id"] = anchor_event_id
-    if isinstance(visible_echo_event_id, str):
-        normalized_record["visible_echo_event_id"] = visible_echo_event_id
-    if prompt_map is not None:
-        normalized_record["source_event_prompts"] = prompt_map
-    if response_owner is not None:
-        normalized_record["response_owner"] = response_owner
-    if requester_id is not None:
-        normalized_record["requester_id"] = requester_id
-    if correlation_id is not None:
-        normalized_record["correlation_id"] = correlation_id
-    if history_scope is not None:
-        normalized_record["history_scope"] = history_scope.to_metadata()
-    if conversation_target is not None:
-        normalized_record["conversation_target"] = conversation_target.to_metadata()
-    return normalized_record
+    return _serialized_record(
+        timestamp=float(timestamp) if isinstance(timestamp, int | float) else 0.0,
+        response_event_id=response_event_id if isinstance(response_event_id, str) else None,
+        completed=bool(raw_record.get("completed", True)),
+        anchor_event_id=anchor_event_id,
+        source_event_ids=normalized_source_event_ids,
+        visible_echo_event_id=visible_echo_event_id if isinstance(visible_echo_event_id, str) else None,
+        source_event_prompts=prompt_map,
+        source_event_metadata=source_metadata,
+        response_owner=response_owner,
+        requester_id=requester_id,
+        correlation_id=correlation_id,
+        history_scope=history_scope,
+        conversation_target=conversation_target,
+    )
 
 
 def _source_event_ids_for_record(
@@ -976,6 +1050,19 @@ def _prompt_map_for_record(
         event_id: prompt for event_id in source_event_ids if isinstance((prompt := raw_prompt_map.get(event_id)), str)
     }
     return normalized_prompt_map or None
+
+
+def _source_event_metadata_for_record(
+    source_event_ids: tuple[str, ...],
+    record: _SerializedHandledTurnRecordLike | None,
+) -> dict[str, SourceEventMetadata] | None:
+    """Return source metadata for one record if present."""
+    if record is None:
+        return None
+    raw_source_event_metadata = record.get("source_event_metadata")
+    if not isinstance(raw_source_event_metadata, Mapping):
+        return None
+    return _explicit_source_event_metadata_for_sources(source_event_ids, raw_source_event_metadata)
 
 
 def _anchor_event_id_for_record(

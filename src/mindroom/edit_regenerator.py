@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.coalescing_batch import coalesced_prompt
+from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
@@ -13,6 +13,7 @@ from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -44,6 +45,8 @@ class _GenerateResponse(Protocol):
         response_envelope: MessageEnvelope,
         correlation_id: str | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
+        current_timestamp_ms: float | None = None,
+        current_prompt_is_structured: bool = False,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate or regenerate a response for one handled turn."""
@@ -61,6 +64,7 @@ class EditRegeneratorDeps:
     turn_store: TurnStore
     ingress_hook_runner: IngressHookRunner
     generate_response: _GenerateResponse
+    timestamp_formatter: Callable[[float | None], str | None]
 
 
 @dataclass
@@ -235,10 +239,22 @@ class EditRegenerator:
                     return
                 rebuilt_prompt_parts.append(prompt_part)
             regeneration_prompt = coalesced_prompt(rebuilt_prompt_parts)
+            current_prompt_is_structured = False
+            if regeneration_turn_record.source_event_metadata is not None:
+                tagged_prompt = tagged_coalesced_prompt(
+                    list(regeneration_turn_record.source_event_ids),
+                    updated_prompt_map,
+                    regeneration_turn_record.source_event_metadata,
+                    timestamp_formatter=self.deps.timestamp_formatter,
+                )
+                if tagged_prompt is not None:
+                    regeneration_prompt = tagged_prompt
+                    current_prompt_is_structured = True
             regeneration_handled_turn = HandledTurnState.create(
                 regeneration_turn_record.source_event_ids,
                 response_event_id=response_event_id,
                 source_event_prompts=updated_prompt_map,
+                source_event_metadata=regeneration_turn_record.source_event_metadata,
                 response_owner=regeneration_response_owner,
                 history_scope=regeneration_history_scope,
                 conversation_target=regeneration_target,
@@ -246,6 +262,7 @@ class EditRegenerator:
             regeneration_turn_record = replace(regeneration_turn_record, source_event_prompts=updated_prompt_map)
         else:
             regeneration_prompt = edited_content
+            current_prompt_is_structured = False
         regeneration_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
             regeneration_handled_turn,
             additional_source_event_ids=(
@@ -282,6 +299,8 @@ class EditRegenerator:
             response_envelope=envelope,
             correlation_id=event.event_id,
             matrix_run_metadata=regeneration_matrix_run_metadata,
+            current_timestamp_ms=normalize_timestamp_ms(event.server_timestamp),
+            current_prompt_is_structured=current_prompt_is_structured,
             on_lifecycle_lock_acquired=lambda: self.deps.turn_store.remove_stale_runs_for_edit(
                 loaded_turn=replace(
                     loaded_turn,
