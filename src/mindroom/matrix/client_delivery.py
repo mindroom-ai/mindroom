@@ -282,26 +282,44 @@ async def _upload_file_as_mxc(
         logger.exception("Failed to read file before upload", path=str(file_path))
         return None, None
 
-    info: dict[str, Any] = {"size": len(file_bytes), "mimetype": mimetype}
+    return await _upload_media_bytes_as_mxc(
+        client,
+        room_id,
+        file_bytes,
+        filename=file_path.name,
+        mimetype=mimetype,
+    )
+
+
+async def _upload_media_bytes_as_mxc(
+    client: nio.AsyncClient,
+    room_id: str,
+    media_bytes: bytes,
+    *,
+    filename: str,
+    mimetype: str,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Upload an in-memory Matrix media payload as MXC, encrypting for encrypted rooms."""
+    info: dict[str, Any] = {"size": len(media_bytes), "mimetype": mimetype}
     room = cached_room(client, room_id)
     if room is None:
         logger.error("Cannot determine encryption state for unknown room", room_id=room_id)
         return None, None
     room_encrypted = bool(room.encrypted)
-    upload_bytes = file_bytes
+    upload_bytes = media_bytes
     encrypted_file_payload: dict[str, Any] | None = None
     upload_mimetype = mimetype
-    upload_name = file_path.name
+    upload_name = filename
 
     if room_encrypted:
         try:
-            encrypted_bytes, encryption_keys = crypto.attachments.encrypt_attachment(file_bytes)
+            encrypted_bytes, encryption_keys = crypto.attachments.encrypt_attachment(media_bytes)
         except Exception:
-            logger.exception("Failed to encrypt file attachment", path=str(file_path))
+            logger.exception("Failed to encrypt Matrix media upload", filename=filename)
             return None, None
         upload_bytes = encrypted_bytes
         upload_mimetype = "application/octet-stream"
-        upload_name = f"{file_path.name}.enc"
+        upload_name = f"{filename}.enc"
         encrypted_file_payload = {
             "url": "",
             "key": encryption_keys["key"],
@@ -309,7 +327,7 @@ async def _upload_file_as_mxc(
             "hashes": encryption_keys["hashes"],
             "v": "v2",
             "mimetype": mimetype,
-            "size": len(file_bytes),
+            "size": len(media_bytes),
         }
 
     try:
@@ -320,12 +338,12 @@ async def _upload_file_as_mxc(
             filename=upload_name,
         )
     except Exception:
-        logger.exception("Failed uploading Matrix file", path=str(file_path))
+        logger.exception("Failed uploading Matrix media", filename=filename)
         return None, None
 
     mxc_uri = upload_content_uri(upload_response)
     if mxc_uri is None:
-        logger.error("Failed file upload response", path=str(file_path), response=str(upload_response))
+        logger.error("Failed Matrix media upload response", filename=filename, response=str(upload_response))
         return None, None
 
     upload_payload: dict[str, Any] = {"info": info}
@@ -383,6 +401,70 @@ async def send_file_message(
     }
     if msgtype == "m.file":
         content["filename"] = resolved_path.name
+    encrypted_file_payload = upload_payload.get("file")
+    if isinstance(encrypted_file_payload, dict):
+        content["file"] = encrypted_file_payload
+    else:
+        content["url"] = mxc_uri
+
+    if thread_id:
+        if latest_thread_event_id is None:
+            msg = "latest_thread_event_id is required for thread fallback"
+            raise ValueError(msg)
+        content["m.relates_to"] = {
+            "rel_type": "m.thread",
+            "event_id": thread_id,
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": latest_thread_event_id},
+        }
+
+    delivered = await send_message_result(client, room_id, content, config=config)
+    if delivered is not None and conversation_cache is not None:
+        conversation_cache.notify_outbound_message(
+            room_id,
+            delivered.event_id,
+            delivered.content_sent,
+        )
+    return delivered.event_id if delivered is not None else None
+
+
+async def send_audio_message(
+    client: nio.AsyncClient,
+    room_id: str,
+    audio_bytes: bytes,
+    *,
+    config: Config,
+    mimetype: str,
+    filename: str = "voice-message.mp3",
+    caption: str | None = None,
+    thread_id: str | None = None,
+    latest_thread_event_id: str | None = None,
+    conversation_cache: ConversationCacheProtocol | None = None,
+) -> str | None:
+    """Upload an in-memory audio payload and send it as a Matrix voice message."""
+    if not _can_send_to_encrypted_room(client, room_id, operation="send_audio_message"):
+        return None
+
+    mxc_uri, upload_payload = await _upload_media_bytes_as_mxc(
+        client,
+        room_id,
+        audio_bytes,
+        filename=filename,
+        mimetype=mimetype,
+    )
+    if mxc_uri is None or upload_payload is None:
+        return None
+
+    info = upload_payload.get("info")
+    if not isinstance(info, dict):
+        info = {"size": len(audio_bytes), "mimetype": mimetype}
+
+    content: dict[str, Any] = {
+        "msgtype": "m.audio",
+        "body": caption or filename,
+        "info": info,
+        "org.matrix.msc3245.voice": {},
+    }
     encrypted_file_payload = upload_payload.get("file")
     if isinstance(encrypted_file_payload, dict):
         content["file"] = encrypted_file_payload
@@ -490,6 +572,7 @@ __all__ = [
     "cached_room",
     "can_send_to_encrypted_room",
     "edit_message_result",
+    "send_audio_message",
     "send_file_message",
     "send_message_result",
 ]

@@ -260,6 +260,7 @@ matrix_api = []
 matrix-e2ee = []
 matrix_message = []
 matrix_room = []
+matrix_voice_message = []
 mem0 = [
   "mem0ai>=0.1.115",
 ]

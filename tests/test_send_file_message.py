@@ -16,6 +16,7 @@ from mindroom.matrix.client_delivery import (
     _msgtype_for_mimetype,
     _upload_file_as_mxc,
     edit_message_result,
+    send_audio_message,
     send_file_message,
     send_message_result,
 )
@@ -451,6 +452,162 @@ class TestSendFileMessage:
         assert sent_content is not None
         assert sent_content["body"] == "Q4 Report"
         assert sent_content["filename"] == "report.pdf"
+
+
+class TestSendAudioMessage:
+    """Tests for direct Matrix audio voice sends."""
+
+    @pytest.mark.asyncio
+    async def test_sends_unencrypted_voice_audio_with_url(self) -> None:
+        """Unencrypted voice audio should produce m.audio content with voice metadata."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/voice"), {})
+
+        sent_content: dict | None = None
+
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
+            nonlocal sent_content
+            assert isinstance(config, Config)
+            sent_content = content
+            return DeliveredMatrixEvent(event_id="$voice:localhost", content_sent=content)
+
+        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
+            event_id = await send_audio_message(
+                client,
+                "!room:localhost",
+                b"audio-bytes",
+                config=Config(),
+                mimetype="audio/mpeg",
+                filename="reply.mp3",
+                caption="Voice reply",
+            )
+
+        assert event_id == "$voice:localhost"
+        assert sent_content is not None
+        assert sent_content["msgtype"] == "m.audio"
+        assert sent_content["body"] == "Voice reply"
+        assert sent_content["url"] == "mxc://localhost/voice"
+        assert sent_content["info"] == {"size": 11, "mimetype": "audio/mpeg"}
+        assert sent_content["org.matrix.msc3245.voice"] == {}
+        assert "file" not in sent_content
+
+    @pytest.mark.asyncio
+    async def test_sends_encrypted_voice_audio_with_file_payload(self) -> None:
+        """Encrypted voice audio should produce an encrypted file payload."""
+        client = _mock_client(encrypted=True)
+        client.upload.return_value = (_upload_response("mxc://localhost/voice-enc"), {})
+
+        sent_content: dict | None = None
+
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
+            nonlocal sent_content
+            assert isinstance(config, Config)
+            sent_content = content
+            return DeliveredMatrixEvent(event_id="$voice:localhost", content_sent=content)
+
+        with (
+            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True),
+            patch(
+                "mindroom.matrix.client_delivery.crypto.attachments.encrypt_attachment",
+                return_value=(
+                    b"encrypted",
+                    {
+                        "key": {"k": "k1"},
+                        "iv": "iv1",
+                        "hashes": {"sha256": "h1"},
+                    },
+                ),
+            ),
+            patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
+        ):
+            event_id = await send_audio_message(
+                client,
+                "!room:localhost",
+                b"audio-bytes",
+                config=Config(),
+                mimetype="audio/mpeg",
+                filename="reply.mp3",
+            )
+
+        assert event_id == "$voice:localhost"
+        assert sent_content is not None
+        assert sent_content["msgtype"] == "m.audio"
+        assert sent_content["body"] == "reply.mp3"
+        assert sent_content["org.matrix.msc3245.voice"] == {}
+        assert sent_content["file"]["url"] == "mxc://localhost/voice-enc"
+        assert sent_content["file"]["mimetype"] == "audio/mpeg"
+        assert "url" not in sent_content
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_encrypted_room_when_e2ee_support_is_unavailable(self) -> None:
+        """Encrypted-room audio sends should fail early when nio E2EE support is disabled."""
+        client = _mock_client(encrypted=True)
+
+        with (
+            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False),
+            patch("mindroom.matrix.client_delivery._upload_media_bytes_as_mxc", new_callable=AsyncMock) as mock_upload,
+        ):
+            result = await send_audio_message(
+                client,
+                "!room:localhost",
+                b"audio-bytes",
+                config=Config(),
+                mimetype="audio/mpeg",
+            )
+
+        assert result is None
+        mock_upload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_thread_relation_is_set(self) -> None:
+        """Voice audio should preserve Matrix thread fallback metadata."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/thread-voice"), {})
+
+        sent_content: dict | None = None
+
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
+            nonlocal sent_content
+            assert isinstance(config, Config)
+            sent_content = content
+            return DeliveredMatrixEvent(event_id="$voice:localhost", content_sent=content)
+
+        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
+            await send_audio_message(
+                client,
+                "!room:localhost",
+                b"audio-bytes",
+                config=Config(),
+                mimetype="audio/ogg",
+                thread_id="$thread-root",
+                latest_thread_event_id="$latest",
+            )
+
+        assert sent_content is not None
+        assert sent_content["m.relates_to"] == {
+            "rel_type": "m.thread",
+            "event_id": "$thread-root",
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": "$latest"},
+        }
 
 
 class TestMsgtypeForMimetype:

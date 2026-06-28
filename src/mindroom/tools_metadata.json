@@ -197,6 +197,79 @@
           "authored_override": true,
           "default": null,
           "description": null,
+          "label": "OpenAI API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": "gpt-4o-mini-tts",
+          "description": null,
+          "label": "TTS Model",
+          "name": "model",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": "alloy",
+          "description": null,
+          "label": "Voice",
+          "name": "voice",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": "mp3",
+          "description": null,
+          "label": "Audio Format",
+          "name": "response_format",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "openai"
+      ],
+      "description": "Generate speech from text and send it as a Matrix voice message with room/thread context defaults",
+      "display_name": "Matrix Voice Message",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "matrix_voice_message"
+      ],
+      "helper_text": null,
+      "icon": "Mic",
+      "icon_color": "text-green-500",
+      "name": "matrix_voice_message",
+      "requires_room_context": true,
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": null,
+          "description": null,
           "label": "Token",
           "name": "token",
           "options": null,
