@@ -46,6 +46,7 @@ class _GenerateResponse(Protocol):
         correlation_id: str | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         current_timestamp_ms: float | None = None,
+        current_prompt_is_structured: bool = False,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate or regenerate a response for one handled turn."""
@@ -238,6 +239,7 @@ class EditRegenerator:
                     return
                 rebuilt_prompt_parts.append(prompt_part)
             regeneration_prompt = coalesced_prompt(rebuilt_prompt_parts)
+            current_prompt_is_structured = False
             if regeneration_turn_record.source_event_metadata is not None:
                 tagged_prompt = tagged_coalesced_prompt(
                     list(regeneration_turn_record.source_event_ids),
@@ -247,6 +249,7 @@ class EditRegenerator:
                 )
                 if tagged_prompt is not None:
                     regeneration_prompt = tagged_prompt
+                    current_prompt_is_structured = True
             regeneration_handled_turn = HandledTurnState.create(
                 regeneration_turn_record.source_event_ids,
                 response_event_id=response_event_id,
@@ -259,6 +262,7 @@ class EditRegenerator:
             regeneration_turn_record = replace(regeneration_turn_record, source_event_prompts=updated_prompt_map)
         else:
             regeneration_prompt = edited_content
+            current_prompt_is_structured = False
         regeneration_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
             regeneration_handled_turn,
             additional_source_event_ids=(
@@ -296,6 +300,7 @@ class EditRegenerator:
             correlation_id=event.event_id,
             matrix_run_metadata=regeneration_matrix_run_metadata,
             current_timestamp_ms=matrix_timestamp_ms(event.server_timestamp),
+            current_prompt_is_structured=current_prompt_is_structured,
             on_lifecycle_lock_acquired=lambda: self.deps.turn_store.remove_stale_runs_for_edit(
                 loaded_turn=replace(
                     loaded_turn,

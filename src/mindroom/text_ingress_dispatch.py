@@ -90,6 +90,7 @@ async def dispatch_text_message(
     ingress_metadata: DispatchIngressMetadata | None = None,
     payload_metadata: DispatchPayloadMetadata | None = None,
     trust_hydrated_internal_metadata: bool | None = None,
+    current_prompt_is_structured: bool = False,
 ) -> None:
     """Run the normal text or command dispatch pipeline for a prepared text event."""
     timing_scope_token = None
@@ -105,6 +106,7 @@ async def dispatch_text_message(
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
+            current_prompt_is_structured=current_prompt_is_structured,
             dispatch_timing=dispatch_timing,
         )
         if prepared is None:
@@ -162,6 +164,7 @@ async def _prepare_text_dispatch(
     ingress_metadata: DispatchIngressMetadata | None,
     payload_metadata: DispatchPayloadMetadata | None,
     trust_hydrated_internal_metadata: bool | None,
+    current_prompt_is_structured: bool,
     dispatch_timing: DispatchPipelineTiming | None,
 ) -> _PreparedTextDispatch | None:
     event = await controller.deps.normalizer.resolve_text_event(TextNormalizationRequest(event=raw_event))
@@ -213,6 +216,7 @@ async def _prepare_text_dispatch(
         ingress_metadata=ingress_metadata,
         payload_metadata=payload_metadata,
         use_command_context=command is not None,
+        current_prompt_is_structured=current_prompt_is_structured,
     )
     if dispatch_timing is not None:
         dispatch_timing.mark("dispatch_prepare_ready")

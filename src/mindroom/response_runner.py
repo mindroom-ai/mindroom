@@ -259,6 +259,7 @@ class ResponseRequest:
     requires_model_history_refresh: bool = False
     payload_preparation: ResponsePayloadPreparation | None = None
     current_timestamp_ms: float | None = None
+    current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
@@ -1097,6 +1098,7 @@ class ResponseRunner:
                             user_id=requester_user_id,
                             reply_to_event_id=request.reply_to_event_id,
                             current_timestamp_ms=request.current_timestamp_ms,
+                            current_prompt_is_structured=request.current_prompt_is_structured,
                             correlation_id=resolved_correlation_id,
                             active_event_ids=active_event_ids,
                             response_sender_id=self.deps.matrix_full_id,
@@ -1194,6 +1196,7 @@ class ResponseRunner:
                                     user_id=requester_user_id,
                                     reply_to_event_id=request.reply_to_event_id,
                                     current_timestamp_ms=request.current_timestamp_ms,
+                                    current_prompt_is_structured=request.current_prompt_is_structured,
                                     correlation_id=resolved_correlation_id,
                                     active_event_ids=active_event_ids,
                                     response_sender_id=self.deps.matrix_full_id,
@@ -1603,6 +1606,7 @@ class ResponseRunner:
                 thread_history=request.thread_history,
                 model_prompt=runtime.model_prompt,
                 current_timestamp_ms=request.current_timestamp_ms,
+                current_prompt_is_structured=request.current_prompt_is_structured,
                 thread_id=runtime.resolved_target.resolved_thread_id,
                 room_id=request.room_id,
                 knowledge=knowledge_resolution.knowledge,
@@ -1696,6 +1700,7 @@ class ResponseRunner:
             thread_history=request.thread_history,
             model_prompt=runtime.model_prompt,
             current_timestamp_ms=request.current_timestamp_ms,
+            current_prompt_is_structured=request.current_prompt_is_structured,
             thread_id=runtime.resolved_target.resolved_thread_id,
             room_id=request.room_id,
             knowledge=knowledge_resolution.knowledge,

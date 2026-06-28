@@ -1017,6 +1017,7 @@ class TurnController:
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
         use_command_context: bool = False,
+        current_prompt_is_structured: bool = False,
     ) -> _DispatchPreparation | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
@@ -1182,6 +1183,7 @@ class TurnController:
                 target=target,
                 correlation_id=correlation_id,
                 envelope=envelope,
+                current_prompt_is_structured=current_prompt_is_structured,
             ),
             replay_guard=replay_guard,
         )
@@ -1682,6 +1684,7 @@ class TurnController:
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                             payload_preparation=payload_preparation,
                             current_timestamp_ms=current_timestamp_ms,
+                            current_prompt_is_structured=dispatch.current_prompt_is_structured,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
@@ -1702,6 +1705,7 @@ class TurnController:
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                             payload_preparation=payload_preparation,
                             current_timestamp_ms=current_timestamp_ms,
+                            current_prompt_is_structured=dispatch.current_prompt_is_structured,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
@@ -1786,6 +1790,7 @@ class TurnController:
             ingress_metadata=handoff.ingress,
             payload_metadata=handoff.payload,
             trust_hydrated_internal_metadata=handoff.trust_hydrated_internal_metadata,
+            current_prompt_is_structured=handoff.current_prompt_is_structured,
         )
 
     async def handle_text_event(
@@ -1933,6 +1938,7 @@ class TurnController:
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
         trust_hydrated_internal_metadata: bool | None = None,
+        current_prompt_is_structured: bool = False,
     ) -> None:
         """Run the normal text or command dispatch pipeline for a prepared text event."""
         raw_event: TextDispatchEvent
@@ -1955,6 +1961,7 @@ class TurnController:
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
+            current_prompt_is_structured=current_prompt_is_structured,
         )
 
     async def handle_media_event(

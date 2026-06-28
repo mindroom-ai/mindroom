@@ -305,7 +305,7 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
     )
     harness = _harness(tmp_path, turn_record=record)
     harness.config.timezone = "America/Los_Angeles"
-    event, event_info = _edit_event(original_event_id=first_event_id, new_body="edited first message")
+    event, event_info = _edit_event(original_event_id=first_event_id, new_body="edited ]]> first <message>")
 
     await _handle_edit(harness, event, event_info)
 
@@ -314,11 +314,12 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
         "Treat them as one turn and respond once:\n\n"
         "<messages>\n"
         '<msg event_id="$m1:example.org" from="@alice:example.org" ts="2026-03-20 08:15 PDT">'
-        "<![CDATA[edited first message]]></msg>\n"
+        "<![CDATA[edited ]]]]><![CDATA[> first <message>]]></msg>\n"
         '<msg event_id="$m2:example.org" from="@bob:example.org" ts="2026-03-20 08:16 PDT">'
         "<![CDATA[second message]]></msg>\n"
         "</messages>"
     )
+    assert harness.generate_response.await_args.kwargs["current_prompt_is_structured"] is True
 
     handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
     assert handled_turn.source_event_metadata == record.source_event_metadata

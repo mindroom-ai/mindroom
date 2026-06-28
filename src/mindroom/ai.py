@@ -158,6 +158,7 @@ class _DynamicContinuationRunState:
     active_prompt: str
     active_model_prompt: str | None
     active_current_timestamp_ms: float | None
+    active_current_prompt_is_structured: bool
     active_run_id: str | None
     continuation_model_prompt_tail: str
 
@@ -168,6 +169,7 @@ class _DynamicContinuationRunState:
         prompt: str,
         model_prompt: str | None,
         current_timestamp_ms: float | None,
+        current_prompt_is_structured: bool,
         run_id: str | None,
     ) -> _DynamicContinuationRunState:
         return cls(
@@ -175,6 +177,7 @@ class _DynamicContinuationRunState:
             active_prompt=prompt,
             active_model_prompt=model_prompt,
             active_current_timestamp_ms=current_timestamp_ms,
+            active_current_prompt_is_structured=current_prompt_is_structured,
             active_run_id=run_id,
             continuation_model_prompt_tail=_model_prompt_tail_after_raw_prompt(
                 raw_prompt=prompt,
@@ -193,6 +196,7 @@ class _DynamicContinuationRunState:
             active_prompt=continuation_prompt,
             active_model_prompt=self.continuation_model_prompt_tail or None,
             active_current_timestamp_ms=None,
+            active_current_prompt_is_structured=False,
             active_run_id=ai_runtime.next_retry_run_id(previous_run_id),
         )
 
@@ -1154,6 +1158,7 @@ async def _prepare_agent_and_prompt(
     timing_scope: str | None = None,
     model_prompt: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_prompt_is_structured: bool = False,
     current_sender_id: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedAgentRun:
@@ -1244,6 +1249,7 @@ async def _prepare_agent_and_prompt(
         compaction_lifecycle=compaction_lifecycle,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
         include_openai_compat_guidance=include_openai_compat_guidance,
         timing_scope=timing_scope,
         pipeline_timing=pipeline_timing,
@@ -1312,6 +1318,7 @@ async def _prepare_agent_run_context(
     timing_scope: str,
     model_prompt: str | None,
     current_timestamp_ms: float | None,
+    current_prompt_is_structured: bool,
     user_id: str | None,
     requester_id: str | None,
     correlation_id: str,
@@ -1346,6 +1353,7 @@ async def _prepare_agent_run_context(
         timing_scope=timing_scope,
         model_prompt=model_prompt,
         current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
         **_current_sender_id_kwargs(
             user_id,
             include_openai_compat_guidance=include_openai_compat_guidance,
@@ -1406,6 +1414,7 @@ async def ai_response(  # noqa: C901, PLR0915
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_prompt: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_prompt_is_structured: bool = False,
     thread_id: str | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
@@ -1443,6 +1452,7 @@ async def ai_response(  # noqa: C901, PLR0915
         thread_history: Optional thread history
         model_prompt: Optional model-facing current-turn prompt additions.
         current_timestamp_ms: Optional source Matrix event timestamp in milliseconds.
+        current_prompt_is_structured: Whether the current prompt already carries trusted message tags.
         thread_id: Optional resolved Matrix thread ID for request-log correlation and run metadata.
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
@@ -1501,6 +1511,7 @@ async def ai_response(  # noqa: C901, PLR0915
                 thread_history=thread_history,
                 model_prompt=model_prompt,
                 current_timestamp_ms=current_timestamp_ms,
+                current_prompt_is_structured=current_prompt_is_structured,
                 thread_id=thread_id,
                 room_id=room_id,
                 knowledge=knowledge,
@@ -1585,6 +1596,7 @@ async def ai_response(  # noqa: C901, PLR0915
                     timing_scope=timing_scope,
                     model_prompt=continuation_state.active_model_prompt,
                     current_timestamp_ms=continuation_state.active_current_timestamp_ms,
+                    current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
                     user_id=user_id,
                     requester_id=resolved_requester_id,
                     correlation_id=resolved_correlation_id,
@@ -1736,6 +1748,7 @@ async def ai_response(  # noqa: C901, PLR0915
                 prompt=prompt,
                 model_prompt=model_prompt,
                 current_timestamp_ms=current_timestamp_ms,
+                current_prompt_is_structured=current_prompt_is_structured,
                 run_id=run_id,
             )
             for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
@@ -2011,6 +2024,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_prompt: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_prompt_is_structured: bool = False,
     thread_id: str | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
@@ -2046,6 +2060,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         thread_history: Optional thread history
         model_prompt: Optional model-facing current-turn prompt additions.
         current_timestamp_ms: Optional source Matrix event timestamp in milliseconds.
+        current_prompt_is_structured: Whether the current prompt already carries trusted message tags.
         thread_id: Optional resolved Matrix thread ID for request-log correlation and run metadata.
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
@@ -2150,6 +2165,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     timing_scope=timing_scope,
                     model_prompt=continuation_state.active_model_prompt,
                     current_timestamp_ms=continuation_state.active_current_timestamp_ms,
+                    current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
                     user_id=user_id,
                     requester_id=resolved_requester_id,
                     correlation_id=resolved_correlation_id,
@@ -2404,6 +2420,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 prompt=prompt,
                 model_prompt=model_prompt,
                 current_timestamp_ms=current_timestamp_ms,
+                current_prompt_is_structured=current_prompt_is_structured,
                 run_id=run_id,
             )
             for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):

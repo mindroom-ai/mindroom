@@ -139,21 +139,12 @@ def _wrap_msg_body(sender: str, body: str, *, ts: str | None = None) -> str:
     attrs = [f"from={xml_quoteattr(sender)}"]
     if ts is not None:
         attrs.append(f"ts={xml_quoteattr(ts)}")
-    return f"<msg {' '.join(attrs)}><![CDATA[{body}]]></msg>"
+    return f"<msg {' '.join(attrs)}><![CDATA[{_cdata_body(body)}]]></msg>"
 
 
-def _is_structured_current_turn_prompt(prompt: str) -> bool:
-    """Return whether the prompt already carries per-message current-turn tags."""
-    stripped_prompt = prompt.strip()
-    return (
-        stripped_prompt.startswith("The user sent the following messages in quick succession. ")
-        and "\n<messages>\n<msg " in stripped_prompt
-        and stripped_prompt.endswith("\n</messages>")
-    ) or (
-        stripped_prompt.startswith("Messages arrived while the previous response was still running. ")
-        and "\n<queued_messages>\n<msg " in stripped_prompt
-        and stripped_prompt.endswith("\n</queued_messages>")
-    )
+def _cdata_body(body: str) -> str:
+    """Render body text inside CDATA without entity-escaping normal message text."""
+    return body.replace("]]>", "]]]]><![CDATA[>")
 
 
 def _build_matrix_prompt_with_history(
@@ -164,8 +155,9 @@ def _build_matrix_prompt_with_history(
     prompt_intro: str,
     current_sender: str | None,
     current_ts: str | None = None,
+    current_prompt_is_structured: bool = False,
 ) -> str:
-    should_wrap_current = current_sender is not None and not _is_structured_current_turn_prompt(prompt)
+    should_wrap_current = current_sender is not None and not current_prompt_is_structured
     if should_wrap_current:
         assert current_sender is not None
         current_block = _wrap_msg_body(current_sender, prompt, ts=current_ts)
@@ -358,6 +350,7 @@ def _messages_with_capped_context(
     context_messages: Sequence[Message],
     current_sender_id: str | None,
     current_timestamp_ms: float | None = None,
+    current_prompt_is_structured: bool = False,
     config: Config,
     static_token_budget: int,
     estimate_static_tokens_fn: Callable[[str], int],
@@ -369,6 +362,7 @@ def _messages_with_capped_context(
         prompt,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
         config=config,
     )
     current_only_tokens = estimate_static_tokens_fn(render_messages_text_fn(current_only_messages))
@@ -382,6 +376,7 @@ def _messages_with_capped_context(
             context_messages=candidate_context,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_prompt_is_structured=current_prompt_is_structured,
             config=config,
         )
         if estimate_static_tokens_fn(render_messages_text_fn(candidate_messages)) > static_token_budget:
@@ -392,6 +387,7 @@ def _messages_with_capped_context(
         context_messages=selected_context,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
         config=config,
     )
 
@@ -402,6 +398,7 @@ def _messages_with_current_prompt(
     context_messages: Sequence[Message] = (),
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_prompt_is_structured: bool = False,
     config: Config,
 ) -> tuple[Message, ...]:
     """Return canonical live request messages with the current user turn last."""
@@ -415,6 +412,7 @@ def _messages_with_current_prompt(
             prompt_intro=config.get_prompt("CURRENT_MESSAGE_PROMPT_INTRO"),
             current_sender=current_sender_id,
             current_ts=current_ts,
+            current_prompt_is_structured=current_prompt_is_structured,
         )
         if current_sender_id is not None
         else prompt
@@ -449,6 +447,7 @@ def _build_unseen_context_messages(
     response_sender_id: str | None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_prompt_is_structured: bool = False,
     config: Config,
     attachment_context: _ThreadAttachmentContext | None = None,
 ) -> tuple[tuple[Message, ...], list[str]]:
@@ -476,6 +475,7 @@ def _build_unseen_context_messages(
             context_messages=context_messages,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_prompt_is_structured=current_prompt_is_structured,
             config=config,
         ),
         _get_unseen_event_ids_for_metadata(
@@ -492,6 +492,7 @@ def _build_thread_history_messages(
     response_sender_id: str | None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_prompt_is_structured: bool = False,
     config: Config,
     max_messages: int | None = None,
     max_message_length: int | None = None,
@@ -507,6 +508,7 @@ def _build_thread_history_messages(
             prompt,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_prompt_is_structured=current_prompt_is_structured,
             config=config,
         )
     context_messages = _context_messages_from_visible_messages(
@@ -527,6 +529,7 @@ def _build_thread_history_messages(
             context_messages=context_messages,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_prompt_is_structured=current_prompt_is_structured,
             config=config,
             static_token_budget=static_token_budget,
             estimate_static_tokens_fn=estimate_static_tokens_fn,
@@ -537,6 +540,7 @@ def _build_thread_history_messages(
         context_messages=context_messages,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
         config=config,
     )
 
@@ -676,6 +680,7 @@ async def _prepare_execution_context_common(
     response_sender_id: str | None,
     current_sender_id: str | None,
     current_timestamp_ms: float | None = None,
+    current_prompt_is_structured: bool = False,
     config: Config,
     prepare_scope_history_fn: Callable[[str], Awaitable[PreparedScopeHistory]],
     estimate_static_tokens_fn: Callable[[str], int],
@@ -694,6 +699,7 @@ async def _prepare_execution_context_common(
         prompt,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
         config=config,
     )
     if reply_to_event_id and thread_history:
@@ -706,6 +712,7 @@ async def _prepare_execution_context_common(
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_prompt_is_structured=current_prompt_is_structured,
             config=config,
             attachment_context=attachment_context,
         )
@@ -716,6 +723,7 @@ async def _prepare_execution_context_common(
         prompt,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
         config=config,
     )
     if reply_to_event_id and thread_history:
@@ -728,6 +736,7 @@ async def _prepare_execution_context_common(
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_prompt_is_structured=current_prompt_is_structured,
             config=config,
             attachment_context=attachment_context,
         )
@@ -757,6 +766,7 @@ async def _prepare_execution_context_common(
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_prompt_is_structured=current_prompt_is_structured,
             config=config,
             max_messages=thread_history_render_limits.max_messages if thread_history_render_limits else None,
             max_message_length=(
@@ -813,6 +823,7 @@ async def prepare_agent_execution_context(
     compaction_lifecycle: CompactionLifecycle | None = None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_prompt_is_structured: bool = False,
     include_openai_compat_guidance: bool = False,
     timing_scope: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
@@ -863,6 +874,7 @@ async def prepare_agent_execution_context(
         response_sender_id=response_sender,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
         config=config,
         prepare_scope_history_fn=_prepare_agent_scope_history,
         estimate_static_tokens_fn=_estimate_agent_static_tokens,
@@ -899,6 +911,7 @@ async def _prepare_bound_team_execution_context(
     response_sender_id: str | None = None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_prompt_is_structured: bool = False,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
@@ -940,6 +953,7 @@ async def _prepare_bound_team_execution_context(
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
         config=config,
         prepare_scope_history_fn=_prepare_team_scope_history,
         estimate_static_tokens_fn=_estimate_team_static_tokens,
@@ -992,6 +1006,7 @@ async def prepare_bound_team_run_context(
     response_sender_id: str | None = None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_prompt_is_structured: bool = False,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
@@ -1020,6 +1035,7 @@ async def prepare_bound_team_run_context(
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
         compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
         thread_history_render_limits=thread_history_render_limits,

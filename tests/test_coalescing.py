@@ -186,6 +186,7 @@ def test_tagged_coalesced_prompt_is_safe_inside_current_message_wrapper() -> Non
         batch.prompt,
         current_sender_id="@alice:localhost",
         current_timestamp_ms=1_774_019_760_000,
+        current_prompt_is_structured=batch.current_prompt_is_structured,
         config=Config(timezone="America/Los_Angeles"),
     )
 
@@ -198,11 +199,35 @@ def test_tagged_coalesced_prompt_is_safe_inside_current_message_wrapper() -> Non
         '<msg event_id="$a1:localhost" from="@alice:localhost" ts="2026-03-20 08:15 PDT">'
         "<![CDATA[first <tag>]]></msg>\n"
         '<msg event_id="$a2:localhost" from="@alice:localhost" ts="2026-03-20 08:16 PDT">'
-        "<![CDATA[second ]]> message]]></msg>\n"
+        "<![CDATA[second ]]]]><![CDATA[> message]]></msg>\n"
         "</messages>"
     )
     assert "&lt;" not in content
-    assert "]]]]><![CDATA[>" not in content
+
+
+def test_structured_coalesced_prompt_with_model_tail_is_not_wrapped() -> None:
+    """Trusted structured prompts should not depend on exact prompt suffixes."""
+    prompt = (
+        "The user sent the following messages in quick succession. "
+        "Treat them as one turn and respond once:\n\n"
+        "<messages>\n"
+        '<msg event_id="$a1:localhost" from="@alice:localhost" ts="2026-03-20 08:15 PDT">'
+        "<![CDATA[first]]></msg>\n"
+        "</messages>\n\n"
+        "Attachment context:\n- file.txt"
+    )
+
+    messages = _messages_with_current_prompt(
+        prompt,
+        current_sender_id="@alice:localhost",
+        current_timestamp_ms=1_774_019_760_000,
+        current_prompt_is_structured=True,
+        config=Config(timezone="America/Los_Angeles"),
+    )
+
+    content = messages[0].content
+    assert content == f"Current message:\n{prompt}"
+    assert '<msg from="@alice:localhost"' not in content
 
 
 async def _ready_after(

@@ -93,6 +93,7 @@ class CoalescedBatch:
     source_event_ids: list[str]
     source_event_prompts: dict[str, str]
     source_event_metadata: dict[str, SourceEventMetadata]
+    current_prompt_is_structured: bool
     media_events: list[MediaDispatchEvent]
     original_sender: str | None = None
     raw_audio_fallback: bool = False
@@ -126,6 +127,11 @@ def _timestamp_attribute(
     return f" ts={xml_quoteattr(formatted_timestamp)}" if formatted_timestamp is not None else ""
 
 
+def _cdata_body(body: str) -> str:
+    """Render body text inside CDATA without entity-escaping normal message text."""
+    return body.replace("]]>", "]]]]><![CDATA[>")
+
+
 def _render_tagged_message(
     *,
     event_id: str,
@@ -137,7 +143,7 @@ def _render_tagged_message(
     return (
         f"<msg event_id={xml_quoteattr(event_id)} "
         f"from={xml_quoteattr(sender)}"
-        f"{_timestamp_attribute(timestamp_ms, timestamp_formatter)}><![CDATA[{body}]]></msg>"
+        f"{_timestamp_attribute(timestamp_ms, timestamp_formatter)}><![CDATA[{_cdata_body(body)}]]></msg>"
     )
 
 
@@ -237,6 +243,18 @@ def _coalesced_prompt_for_events(
     return coalesced_prompt(
         [dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events],
     )
+
+
+def _coalesced_prompt_is_structured(
+    ordered_pending_events: list[PendingEvent],
+    *,
+    timestamp_formatter: TimestampFormatter | None,
+) -> bool:
+    if len(ordered_pending_events) <= 1:
+        return False
+    if _batch_dispatch_policy_source_kind(ordered_pending_events) == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
+        return True
+    return timestamp_formatter is not None
 
 
 def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, bool, bool]:
@@ -379,6 +397,10 @@ def build_coalesced_batch(
         source_event_ids=[pending_event.event.event_id for pending_event in ordered_pending_events],
         source_event_prompts=_batch_source_event_prompts(ordered_pending_events),
         source_event_metadata=_batch_source_event_metadata(ordered_pending_events),
+        current_prompt_is_structured=_coalesced_prompt_is_structured(
+            ordered_pending_events,
+            timestamp_formatter=timestamp_formatter,
+        ),
         media_events=[
             pending_event.event
             for pending_event in ordered_pending_events
