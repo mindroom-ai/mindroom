@@ -95,7 +95,8 @@ The companion text is sent before the voice note to the same room and thread, an
 ### Configuration
 
 `matrix_voice_message` requires OpenAI text-to-speech access.
-Set `api_key` inline or provide `OPENAI_API_KEY` in the runtime environment.
+Configure a stored `matrix_voice_message` credential or provide `OPENAI_API_KEY` / `OPENAI_API_KEY_FILE` in the runtime environment.
+Do not put the password `api_key` field inline in authored YAML config.
 The default `model` is `gpt-4o-mini-tts`.
 The default `voice` is `alloy`.
 The default `response_format` is `mp3`.

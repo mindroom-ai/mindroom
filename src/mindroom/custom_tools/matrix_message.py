@@ -10,7 +10,12 @@ from typing import ClassVar
 from agno.tools import Toolkit
 
 from mindroom.custom_tools import matrix_conversation_operations
-from mindroom.custom_tools.attachment_helpers import normalize_str_list, resolve_context_thread_id, room_access_allowed
+from mindroom.custom_tools.attachment_helpers import (
+    normalize_str_list,
+    resolve_context_thread_id,
+    resolve_optional_room_id,
+    room_access_allowed,
+)
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.message_extras import MessageExtraSection, parse_message_extra_sections
@@ -166,7 +171,7 @@ class MatrixMessageTools(Toolkit):
         thread_id: str | None,
         normalized_action: str,
     ) -> str:
-        resolved_room_id = room_id or context.room_id
+        resolved_room_id = resolve_optional_room_id(context, room_id)
         resolved_thread_id = resolve_context_thread_id(
             context,
             room_id=resolved_room_id,
@@ -308,7 +313,7 @@ class MatrixMessageTools(Toolkit):
                 action=normalized_action or action,
                 message=attachment_file_paths_error,
             )
-        resolved_room_id = room_id or context.room_id
+        resolved_room_id = resolve_optional_room_id(context, room_id)
         attachment_count = len(normalized_attachment_ids) + len(normalized_attachment_file_paths)
         validation_error = self._validate_matrix_message_request(
             context,

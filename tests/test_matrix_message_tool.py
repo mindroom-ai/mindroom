@@ -22,6 +22,7 @@ from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client import RoomThreadsPageError
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
+from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
@@ -246,6 +247,32 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
     sent_content = mock_send.await_args.args[2]
     assert sent_content["body"] == "hello"
     assert "m.relates_to" not in sent_content
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_resolves_room_alias_before_send(tmp_path: Path) -> None:
+    """Explicit room aliases should resolve to room IDs before authorization and delivery."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(storage_path=tmp_path, thread_id=None)
+    state = MatrixState()
+    state.add_room("ops", room_id="!ops:localhost", alias="#ops:localhost", name="Ops")
+    state.save(runtime_paths=ctx.runtime_paths)
+    _load_matrix_state_file_cached.cache_clear()
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.room_access_allowed", return_value=True) as mock_access,
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="send", message="hello", room_id="#ops:localhost"))
+
+    mock_access.assert_called_once_with(ctx, "!ops:localhost")
+    assert mock_send.await_args.args[1] == "!ops:localhost"
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == "!ops:localhost"
 
 
 @pytest.mark.asyncio

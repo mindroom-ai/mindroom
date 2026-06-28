@@ -13,6 +13,7 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_voice_message import MatrixVoiceMessageTools
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -165,6 +166,38 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
     assert payload["event_id"] == "$voice-event"
     assert payload["room_id"] == "!room:localhost"
     assert payload["thread_id"] == "$thread-root"
+
+
+@pytest.mark.asyncio
+async def test_matrix_voice_message_resolves_room_alias_before_send(tmp_path: Path) -> None:
+    """Explicit room aliases should resolve to room IDs before authorization and delivery."""
+    context = _context(tmp_path, thread_id=None)
+    state = MatrixState()
+    state.add_room("ops", room_id="!ops:localhost", alias="#ops:localhost", name="Ops")
+    state.save(runtime_paths=context.runtime_paths)
+    _load_matrix_state_file_cached.cache_clear()
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.room_access_allowed", return_value=True) as mock_access,
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+        patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
+    ):
+        mock_openai.return_value.audio.speech.create.return_value = SimpleNamespace(content=b"voice-bytes")
+        mock_send.return_value = "$voice-event"
+
+        result = await MatrixVoiceMessageTools(api_key="sk-test").matrix_voice_message(
+            "send to ops",
+            room_id="#ops:localhost",
+        )
+
+    mock_access.assert_called_once_with(context, "!ops:localhost")
+    mock_send.assert_awaited_once()
+    assert mock_send.await_args.args[1] == "!ops:localhost"
+
+    payload = _payload(result)
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == "!ops:localhost"
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,11 @@ from agno.tools import Toolkit
 from openai import OpenAI
 
 from mindroom.credentials_sync import get_secret_from_env
-from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id, room_access_allowed
+from mindroom.custom_tools.attachment_helpers import (
+    resolve_context_thread_id,
+    resolve_optional_room_id,
+    room_access_allowed,
+)
 from mindroom.custom_tools.matrix_conversation_operations import MatrixMessageOperationResult, MatrixMessageOperations
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -174,7 +178,7 @@ class MatrixVoiceMessageTools(Toolkit):
 
         Args:
             text (str): Required spoken content to synthesize into the voice message.
-            room_id (str | None): Optional target room ID or alias; defaults to the current room context when omitted.
+            room_id (str | None): Optional target room ID, full alias, or managed room key; defaults to the current room context when omitted.
             thread_id (str | None): Optional explicit thread target; `thread_id="room"` forces room-level scope instead of inheriting the current thread.
             caption (str | None): Optional Matrix event body shown beside the audio. If omitted, the event body is a short generated audio filename.
             companion_message (str | None): Optional normal text message to send to the same target before the voice message. Mentions are suppressed like `matrix_message` default text sends.
@@ -188,7 +192,7 @@ class MatrixVoiceMessageTools(Toolkit):
         if not normalized_text:
             return self._payload("error", message="text is required and must be non-empty.")
 
-        resolved_room_id = room_id or context.room_id
+        resolved_room_id = resolve_optional_room_id(context, room_id)
         if not room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",

@@ -106,8 +106,13 @@ class MatrixState(BaseModel):
         self.rooms[key] = MatrixRoom(room_id=room_id, alias=alias, name=name, created_at=datetime.now(tz=UTC))
 
     def get_room_aliases(self) -> dict[str, str]:
-        """Get mapping of room aliases to room IDs."""
-        return {key: room.room_id for key, room in self.rooms.items()}
+        """Get mapping of room keys and full aliases to room IDs."""
+        aliases: dict[str, str] = {}
+        for key, room in self.rooms.items():
+            aliases[key] = room.room_id
+            if room.alias:
+                aliases[room.alias] = room.room_id
+        return aliases
 
     def set_space_room_id(self, room_id: str | None) -> None:
         """Persist the root Matrix Space room ID."""
