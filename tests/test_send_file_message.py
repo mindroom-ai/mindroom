@@ -20,6 +20,7 @@ from mindroom.matrix.client_delivery import (
     send_file_message,
     send_message_result,
 )
+from mindroom.matrix.media import extract_media_caption
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -492,10 +493,16 @@ class TestSendAudioMessage:
         assert sent_content is not None
         assert sent_content["msgtype"] == "m.audio"
         assert sent_content["body"] == "Voice reply"
+        assert sent_content["filename"] == "reply.mp3"
         assert sent_content["url"] == "mxc://localhost/voice"
         assert sent_content["info"] == {"size": 11, "mimetype": "audio/mpeg"}
         assert sent_content["org.matrix.msc3245.voice"] == {}
         assert "file" not in sent_content
+
+        received_event = MagicMock(spec=nio.RoomMessageAudio)
+        received_event.body = sent_content["body"]
+        received_event.source = {"content": sent_content}
+        assert extract_media_caption(received_event, default="[Attached voice message]") == "Voice reply"
 
     @pytest.mark.asyncio
     async def test_sends_encrypted_voice_audio_with_file_payload(self) -> None:

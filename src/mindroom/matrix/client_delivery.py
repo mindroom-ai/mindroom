@@ -465,6 +465,8 @@ async def send_audio_message(
         "info": info,
         "org.matrix.msc3245.voice": {},
     }
+    if caption:
+        content["filename"] = filename
     encrypted_file_payload = upload_payload.get("file")
     if isinstance(encrypted_file_payload, dict):
         content["file"] = encrypted_file_payload
