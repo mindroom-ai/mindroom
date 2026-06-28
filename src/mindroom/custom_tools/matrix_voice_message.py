@@ -12,6 +12,7 @@ from openai import OpenAI
 
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id, room_access_allowed
+from mindroom.custom_tools.matrix_conversation_operations import MatrixMessageOperationResult, MatrixMessageOperations
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.client_delivery import send_audio_message
@@ -50,6 +51,7 @@ class MatrixVoiceMessageTools(Toolkit):
         self._model = model
         self._voice = voice
         self._response_format = response_format
+        self._message_operations = MatrixMessageOperations()
         super().__init__(
             name="matrix_voice_message",
             tools=[self.matrix_voice_message],
@@ -105,24 +107,77 @@ class MatrixVoiceMessageTools(Toolkit):
             raise TypeError(msg)
         return audio_content
 
+    async def _send_companion_message(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        companion_message: str | None,
+    ) -> MatrixMessageOperationResult | None:
+        companion_text = companion_message.strip() if isinstance(companion_message, str) else ""
+        if not companion_text:
+            return None
+
+        return await self._message_operations.dispatch_action(
+            context,
+            action="thread-reply" if thread_id is not None else "send",
+            message=companion_text,
+            attachment_ids=[],
+            attachment_file_paths=[],
+            room_id=room_id,
+            target=None,
+            thread_id=thread_id,
+            ignore_mentions=True,
+            message_extras=None,
+            read_limit=1,
+            page_token=None,
+            room_timeline_sentinel=self._ROOM_TIMELINE_SENTINEL,
+        )
+
+    def _companion_event_id_or_error(
+        self,
+        companion_result: MatrixMessageOperationResult | None,
+        *,
+        room_id: str,
+        thread_id: str | None,
+    ) -> tuple[str | None, str | None]:
+        if companion_result is None:
+            return None, None
+
+        companion_event_id = companion_result.fields.get("event_id")
+        if companion_result.status == "ok" and isinstance(companion_event_id, str):
+            return companion_event_id, None
+
+        return None, self._payload(
+            "error",
+            room_id=room_id,
+            thread_id=thread_id,
+            message="Failed to send companion message to Matrix.",
+        )
+
     async def matrix_voice_message(  # noqa: PLR0911
         self,
         text: str,
         room_id: str | None = None,
         thread_id: str | None = None,
         caption: str | None = None,
+        companion_message: str | None = None,
     ) -> str:
         """Generate and send a Matrix voice message from text using OpenAI text-to-speech.
 
         The tool sends one `m.audio` Matrix event with voice-message metadata.
         It defaults to the current room and current thread.
         Pass `thread_id="room"` to force a room-level voice message instead of inheriting the active thread.
+        Pass `companion_message` to send a normal Matrix text event to the same room/thread before the voice event.
+        `caption` is only the audio event body; it is not a separate timeline message.
 
         Args:
             text (str): Required spoken content to synthesize into the voice message.
             room_id (str | None): Optional target room ID or alias; defaults to the current room context when omitted.
             thread_id (str | None): Optional explicit thread target; `thread_id="room"` forces room-level scope instead of inheriting the current thread.
             caption (str | None): Optional Matrix event body shown beside the audio. If omitted, the event body is a short generated audio filename.
+            companion_message (str | None): Optional normal text message to send to the same target before the voice message. Mentions are suppressed like `matrix_message` default text sends.
 
         """
         context = get_tool_runtime_context()
@@ -162,6 +217,20 @@ class MatrixVoiceMessageTools(Toolkit):
             thread_id=thread_id,
             room_timeline_sentinel=self._ROOM_TIMELINE_SENTINEL,
         )
+        companion_result = await self._send_companion_message(
+            context,
+            room_id=resolved_room_id,
+            thread_id=effective_thread_id,
+            companion_message=companion_message,
+        )
+        companion_event_id, companion_error = self._companion_event_id_or_error(
+            companion_result,
+            room_id=resolved_room_id,
+            thread_id=effective_thread_id,
+        )
+        if companion_error is not None:
+            return companion_error
+
         latest_thread_event_id = None
         if effective_thread_id is not None:
             latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
@@ -181,6 +250,7 @@ class MatrixVoiceMessageTools(Toolkit):
                 "error",
                 room_id=resolved_room_id,
                 thread_id=effective_thread_id,
+                companion_event_id=companion_event_id,
                 message="Failed to generate speech.",
             )
 
@@ -201,6 +271,7 @@ class MatrixVoiceMessageTools(Toolkit):
                 "error",
                 room_id=resolved_room_id,
                 thread_id=effective_thread_id,
+                companion_event_id=companion_event_id,
                 message="Failed to send voice message to Matrix.",
             )
 
@@ -209,4 +280,5 @@ class MatrixVoiceMessageTools(Toolkit):
             room_id=resolved_room_id,
             thread_id=effective_thread_id,
             event_id=event_id,
+            companion_event_id=companion_event_id,
         )

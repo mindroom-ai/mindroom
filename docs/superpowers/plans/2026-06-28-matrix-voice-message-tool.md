@@ -67,6 +67,7 @@ Required cases:
 - Successful call generates speech with configured model, voice, and format, then sends audio to the current room and thread.
 - `thread_id="room"` sends at room level.
 - Processed function schema documents `text`, `caption`, and `thread_id="room"`.
+- Optional `companion_message` sends normal Matrix text to the same room/thread before the voice event.
 
 - [x] Run the new tests and confirm they fail because the tool does not exist.
 
@@ -87,6 +88,7 @@ Implementation notes:
 - Use `room_access_allowed`.
 - Use `check_rate_limit`.
 - Generate speech with the OpenAI client inside `asyncio.to_thread`.
+- Reuse `MatrixMessageOperations` for optional companion text instead of duplicating text-send behavior.
 - Return `custom_tool_payload("matrix_voice_message", ...)`.
 
 - [x] Add metadata registration in `src/mindroom/tools/matrix_voice_message.py`.
@@ -135,6 +137,14 @@ Command:
 uv sync --all-extras
 uv run pre-commit run --all-files
 ```
+
+## Task 3.5: Companion Text Follow-Up
+
+- [x] Add `companion_message` to `matrix_voice_message`.
+- [x] Reuse `MatrixMessageOperations` to send the companion as normal Matrix text to the same resolved room/thread.
+- [x] Keep `caption` as the voice event body only.
+- [x] Return `companion_event_id` when companion text is sent.
+- [x] Cover same-thread companion delivery and voice-send failure after companion delivery.
 
 ## Task 4: Commit, PR, and Native Review Loop
 

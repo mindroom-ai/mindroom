@@ -750,6 +750,7 @@ path = "mindroom.custom_tools.matrix_voice_message"
 depends_on = [
     "mindroom.credentials_sync",
     "mindroom.custom_tools.attachment_helpers",
+    "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_helpers",
     "mindroom.custom_tools.tool_payloads",
     "mindroom.matrix.client_delivery",
@@ -771,7 +772,10 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.mentions",
 ]
-visibility = ["mindroom.custom_tools.matrix_message"]
+visibility = [
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.matrix_voice_message",
+]
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_room"

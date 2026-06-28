@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_voice_message import MatrixVoiceMessageTools
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -194,6 +195,96 @@ async def test_matrix_voice_message_room_sentinel_forces_room_level_send(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_matrix_voice_message_companion_message_sends_to_same_thread(tmp_path: Path) -> None:
+    """Optional companion text should use the same target before voice delivery."""
+    context = _context(tmp_path, thread_id="$thread-root")
+    sent_text_content: dict[str, object] | None = None
+
+    async def capture_text_send(
+        _client: object,
+        _room_id: str,
+        content: dict[str, object],
+        *,
+        config: Config,
+    ) -> DeliveredMatrixEvent:
+        nonlocal sent_text_content
+        assert isinstance(config, Config)
+        sent_text_content = content
+        return DeliveredMatrixEvent(event_id="$companion-event", content_sent=content)
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            side_effect=capture_text_send,
+        ),
+        patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
+    ):
+        mock_openai.return_value.audio.speech.create.return_value = SimpleNamespace(content=b"voice-bytes")
+        mock_send.return_value = "$voice-event"
+
+        result = await MatrixVoiceMessageTools(api_key="sk-test").matrix_voice_message(
+            "spoken version",
+            caption="Audio body",
+            companion_message="Readable transcript",
+        )
+
+    assert sent_text_content is not None
+    assert sent_text_content["body"] == "Readable transcript"
+    assert sent_text_content["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": "$thread-root",
+        "is_falling_back": True,
+        "m.in_reply_to": {"event_id": "$latest"},
+    }
+    assert sent_text_content["com.mindroom.skip_mentions"] is True
+    mock_send.assert_awaited_once()
+    assert mock_send.await_args.kwargs["caption"] == "Audio body"
+    assert mock_send.await_args.kwargs["thread_id"] == "$thread-root"
+
+    payload = _payload(result)
+    assert payload["status"] == "ok"
+    assert payload["event_id"] == "$voice-event"
+    assert payload["companion_event_id"] == "$companion-event"
+
+
+@pytest.mark.asyncio
+async def test_matrix_voice_message_voice_failure_reports_sent_companion(tmp_path: Path) -> None:
+    """A failed voice send should report that the companion text was already delivered."""
+    context = _context(tmp_path, thread_id="$thread-root")
+
+    async def text_send(
+        _client: object,
+        _room_id: str,
+        content: dict[str, object],
+        *,
+        config: Config,
+    ) -> DeliveredMatrixEvent:
+        assert isinstance(config, Config)
+        return DeliveredMatrixEvent(event_id="$companion-event", content_sent=content)
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+        patch("mindroom.custom_tools.matrix_conversation_operations.send_message_result", side_effect=text_send),
+        patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
+    ):
+        mock_openai.return_value.audio.speech.create.return_value = SimpleNamespace(content=b"voice-bytes")
+        mock_send.return_value = None
+
+        result = await MatrixVoiceMessageTools(api_key="sk-test").matrix_voice_message(
+            "spoken version",
+            companion_message="Readable transcript",
+        )
+
+    payload = _payload(result)
+    assert payload["status"] == "error"
+    assert payload["companion_event_id"] == "$companion-event"
+    assert payload["message"] == "Failed to send voice message to Matrix."
+
+
+@pytest.mark.asyncio
 async def test_matrix_voice_message_generation_error_is_sanitized(tmp_path: Path) -> None:
     """Provider errors should not leak raw API failure text into Matrix."""
     context = _context(tmp_path, thread_id="$thread-root")
@@ -223,6 +314,7 @@ def test_matrix_voice_message_description_covers_critical_behavior() -> None:
     assert "send a Matrix voice message" in description
     assert "OpenAI text-to-speech" in description
     assert 'thread_id="room"' in description
+    assert "companion_message" in description
 
 
 def test_matrix_voice_message_parameter_descriptions_are_exposed() -> None:
@@ -232,4 +324,5 @@ def test_matrix_voice_message_parameter_descriptions_are_exposed() -> None:
 
     assert "spoken content" in properties["text"]["description"]
     assert "Matrix event body" in properties["caption"]["description"]
+    assert "normal text message" in properties["companion_message"]["description"]
     assert 'thread_id="room"' in properties["thread_id"]["description"]
