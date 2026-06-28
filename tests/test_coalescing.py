@@ -127,6 +127,36 @@ def _voice_pending(event_id: str, body: str, origin_server_ts: int) -> PendingEv
     )
 
 
+def test_single_message_batch_is_not_structured() -> None:
+    """A lone coalesced message stays unstructured and keeps its plain body as the prompt."""
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+        [_pending(_text_event("$only:localhost", "just one", 1_774_019_700_000))],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    assert batch.current_prompt_is_structured is False
+    assert batch.prompt == "just one"
+
+
+def test_dispatch_handoff_carries_structured_flag_and_metadata() -> None:
+    """A structured coalesced batch must hand its flag and per-message metadata to dispatch."""
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+        [
+            _pending(_text_event("$a1:localhost", "first", 1_774_019_700_000)),
+            _pending(_text_event("$a2:localhost", "second", 1_774_019_760_000)),
+        ],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    handoff = build_dispatch_handoff(batch)
+
+    assert batch.current_prompt_is_structured is True
+    assert handoff.current_prompt_is_structured is True
+    assert set(handoff.source_event_metadata) == {"$a1:localhost", "$a2:localhost"}
+
+
 def test_active_follow_up_prompt_renders_timestamp_attributes() -> None:
     """Queued message tags should carry per-message local timestamps."""
     key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
