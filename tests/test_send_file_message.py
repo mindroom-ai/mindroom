@@ -487,6 +487,8 @@ class TestSendAudioMessage:
                 mimetype="audio/mpeg",
                 filename="reply.mp3",
                 caption="Voice reply",
+                duration_ms=1234,
+                waveform=[0, 512, 1024],
             )
 
         assert event_id == "$voice:localhost"
@@ -495,8 +497,12 @@ class TestSendAudioMessage:
         assert sent_content["body"] == "Voice reply"
         assert sent_content["filename"] == "reply.mp3"
         assert sent_content["url"] == "mxc://localhost/voice"
-        assert sent_content["info"] == {"size": 11, "mimetype": "audio/mpeg"}
+        assert sent_content["info"] == {"size": 11, "mimetype": "audio/mpeg", "duration": 1234}
         assert sent_content["org.matrix.msc3245.voice"] == {}
+        assert sent_content["org.matrix.msc1767.audio"] == {
+            "duration": 1234,
+            "waveform": [0, 512, 1024],
+        }
         assert "file" not in sent_content
 
         received_event = MagicMock(spec=nio.RoomMessageAudio)
@@ -546,6 +552,8 @@ class TestSendAudioMessage:
                 config=Config(),
                 mimetype="audio/mpeg",
                 filename="reply.mp3",
+                duration_ms=1234,
+                waveform=[1024],
             )
 
         assert event_id == "$voice:localhost"
@@ -553,6 +561,10 @@ class TestSendAudioMessage:
         assert sent_content["msgtype"] == "m.audio"
         assert sent_content["body"] == "reply.mp3"
         assert sent_content["org.matrix.msc3245.voice"] == {}
+        assert sent_content["org.matrix.msc1767.audio"] == {
+            "duration": 1234,
+            "waveform": [1024],
+        }
         assert sent_content["file"]["url"] == "mxc://localhost/voice-enc"
         assert sent_content["file"]["mimetype"] == "audio/mpeg"
         assert "url" not in sent_content
@@ -604,6 +616,7 @@ class TestSendAudioMessage:
                 b"audio-bytes",
                 config=Config(),
                 mimetype="audio/ogg",
+                duration_ms=1000,
                 thread_id="$thread-root",
                 latest_thread_event_id="$latest",
             )
@@ -615,6 +628,70 @@ class TestSendAudioMessage:
             "is_falling_back": True,
             "m.in_reply_to": {"event_id": "$latest"},
         }
+
+    @pytest.mark.asyncio
+    async def test_audio_without_duration_omits_voice_marker(self) -> None:
+        """Audio without voice details should not claim Matrix voice-note metadata."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/audio"), {})
+
+        sent_content: dict | None = None
+
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
+            nonlocal sent_content
+            assert isinstance(config, Config)
+            sent_content = content
+            return DeliveredMatrixEvent(event_id="$audio:localhost", content_sent=content)
+
+        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
+            await send_audio_message(
+                client,
+                "!room:localhost",
+                b"audio-bytes",
+                config=Config(),
+                mimetype="audio/mpeg",
+                filename="reply.mp3",
+            )
+
+        assert sent_content is not None
+        assert "org.matrix.msc3245.voice" not in sent_content
+        assert "org.matrix.msc1767.audio" not in sent_content
+
+    @pytest.mark.asyncio
+    async def test_uncached_unencrypted_room_uses_raw_send_fallback(self) -> None:
+        """Voice audio sends should match text delivery's uncached-room fallback."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.olm = None
+        client.access_token = "token"  # noqa: S105
+        client.upload.return_value = (_upload_response("mxc://localhost/voice"), {})
+        client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+            "not found",
+            status_code="M_NOT_FOUND",
+        )
+        client._send.return_value = nio.RoomSendResponse("$voice:localhost", "!room:localhost")
+
+        event_id = await send_audio_message(
+            client,
+            "!room:localhost",
+            b"audio-bytes",
+            config=Config(),
+            mimetype="audio/ogg",
+            filename="reply.opus",
+            duration_ms=1000,
+            waveform=[0],
+        )
+
+        assert event_id == "$voice:localhost"
+        assert client.room_get_state_event.await_count == 2
+        client.room_send.assert_not_awaited()
+        client._send.assert_awaited_once()
 
 
 class TestMsgtypeForMimetype:

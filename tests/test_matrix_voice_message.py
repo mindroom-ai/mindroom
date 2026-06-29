@@ -42,6 +42,40 @@ def _matrix_voice_message_function() -> Function:
     return function
 
 
+def _ogg_page(payload: bytes, *, granule_position: int, sequence: int) -> bytes:
+    segment_sizes = []
+    remaining = len(payload)
+    while remaining >= 255:
+        segment_sizes.append(255)
+        remaining -= 255
+    segment_sizes.append(remaining)
+    return b"".join(
+        [
+            b"OggS",
+            b"\x00\x00",
+            granule_position.to_bytes(8, "little", signed=True),
+            (1).to_bytes(4, "little"),
+            sequence.to_bytes(4, "little"),
+            b"\x00\x00\x00\x00",
+            bytes([len(segment_sizes)]),
+            bytes(segment_sizes),
+            payload,
+        ],
+    )
+
+
+def _one_second_ogg_opus() -> bytes:
+    pre_skip = 312
+    opus_head = b"OpusHead\x01\x01" + pre_skip.to_bytes(2, "little") + b"\x80\xbb\x00\x00\x00\x00\x00"
+    return b"".join(
+        [
+            _ogg_page(opus_head, granule_position=0, sequence=0),
+            _ogg_page(b"OpusTags" + b"\x00" * 8, granule_position=0, sequence=1),
+            _ogg_page(b"\x01" * 100, granule_position=48_000 + pre_skip, sequence=2),
+        ],
+    )
+
+
 def _mock_client() -> AsyncMock:
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = "@mindroom_general:localhost"
@@ -98,6 +132,23 @@ async def test_matrix_voice_message_rejects_empty_text(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_matrix_voice_message_rejects_non_string_inputs(tmp_path: Path) -> None:
+    """Tool inputs should report type errors separately from empty values."""
+    with tool_runtime_context(_context(tmp_path)):
+        result = await MatrixVoiceMessageTools(api_key="sk-test").matrix_voice_message(123)  # type: ignore[arg-type]
+
+    payload = _payload(result)
+    assert payload["status"] == "error"
+    assert payload["message"] == "text must be a string."
+
+
+def test_matrix_voice_message_rejects_invalid_response_format() -> None:
+    """Configured speech format should fail before provider calls."""
+    with pytest.raises(ValueError, match="response_format must be one of"):
+        MatrixVoiceMessageTools(api_key="sk-test", response_format="ogg")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
 async def test_matrix_voice_message_rejects_unauthorized_room(tmp_path: Path) -> None:
     """Target rooms should use the shared Matrix room authorization check."""
     with (
@@ -119,7 +170,7 @@ async def test_matrix_voice_message_rejects_unauthorized_room(tmp_path: Path) ->
 async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread(tmp_path: Path) -> None:
     """Successful calls should synthesize speech and send it to the active Matrix thread."""
     context = _context(tmp_path, thread_id="$thread-root")
-    speech_response = SimpleNamespace(content=b"voice-bytes")
+    speech_response = SimpleNamespace(content=_one_second_ogg_opus())
 
     with (
         tool_runtime_context(context),
@@ -133,7 +184,6 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
             api_key="sk-test",
             model="tts-test",
             voice="nova",
-            response_format="mp3",
         ).matrix_voice_message("Read this aloud", caption="Voice reply")
 
     mock_openai.assert_called_once_with(api_key="sk-test")
@@ -141,7 +191,7 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
         model="tts-test",
         voice="nova",
         input="Read this aloud",
-        response_format="mp3",
+        response_format="opus",
     )
     context.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
         "!room:localhost",
@@ -151,11 +201,13 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
     mock_send.assert_awaited_once_with(
         context.client,
         "!room:localhost",
-        b"voice-bytes",
+        speech_response.content,
         config=context.config,
-        mimetype="audio/mpeg",
-        filename="voice-message.mp3",
+        mimetype="audio/ogg",
+        filename="voice-message.opus",
         caption="Voice reply",
+        duration_ms=1000,
+        waveform=(1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
         thread_id="$thread-root",
         latest_thread_event_id="$latest",
         conversation_cache=context.conversation_cache,
@@ -324,6 +376,7 @@ async def test_matrix_voice_message_generation_error_is_sanitized(tmp_path: Path
 
     with (
         tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.logger") as mock_logger,
         patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
         patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
     ):
@@ -336,6 +389,27 @@ async def test_matrix_voice_message_generation_error_is_sanitized(tmp_path: Path
     assert payload["status"] == "error"
     assert payload["message"] == "Failed to generate speech."
     assert "sk-secret" not in result
+    mock_logger.error.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_matrix_voice_message_missing_thread_fallback_is_structured_error(tmp_path: Path) -> None:
+    """Missing thread fallback should not escape as a delivery ValueError."""
+    context = _context(tmp_path, thread_id="$thread-root")
+    context.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+        patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
+    ):
+        result = await MatrixVoiceMessageTools(api_key="sk-test").matrix_voice_message("hello")
+
+    mock_openai.assert_not_called()
+    mock_send.assert_not_awaited()
+    payload = _payload(result)
+    assert payload["status"] == "error"
+    assert payload["message"] == "Failed to resolve Matrix thread fallback for voice message."
 
 
 def test_matrix_voice_message_description_covers_critical_behavior() -> None:

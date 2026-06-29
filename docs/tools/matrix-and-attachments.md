@@ -89,6 +89,7 @@ matrix_message(action="react", target="$event123", message="✅")
 ### What It Does
 
 `matrix_voice_message(text, room_id=None, thread_id=None, caption=None, companion_message=None)` calls OpenAI text-to-speech, uploads the generated audio, and sends one `m.audio` event with Matrix voice-message metadata.
+The default Opus output includes duration and waveform metadata so Matrix clients can render it as a voice note instead of a generic audio file.
 When both `room_id` and `thread_id` are omitted, it targets the active Matrix room and active thread.
 Pass `thread_id="room"` to force a room-level voice message instead of inheriting the current thread.
 `caption` becomes the audio event body only, so clients may show it as the voice-note label or fallback text.
@@ -103,7 +104,9 @@ Configure a stored `matrix_voice_message` credential or provide `OPENAI_API_KEY`
 Do not put the password `api_key` field inline in authored YAML config.
 The default `model` is `gpt-4o-mini-tts`.
 The default `voice` is `alloy`.
-The default `response_format` is `mp3`.
+The default `response_format` is `opus`.
+Use `opus` for Matrix voice-note interoperability.
+Other response formats may send as regular `m.audio` when duration metadata cannot be derived.
 
 ### Example
 

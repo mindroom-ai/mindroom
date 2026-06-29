@@ -30,7 +30,7 @@ Reuse `matrix.client_delivery` upload, encryption, thread fallback, and conversa
 
 Required cases:
 
-- `send_audio_message` sends unencrypted bytes with `msgtype: m.audio`, `url`, `info.mimetype`, `info.size`, and `org.matrix.msc3245.voice`.
+- `send_audio_message` sends unencrypted bytes with `msgtype: m.audio`, `url`, `info.mimetype`, `info.size`, `info.duration`, `org.matrix.msc1767.audio`, and `org.matrix.msc3245.voice`.
 - `send_audio_message` sends encrypted-room bytes with `file` payload and no `url`.
 - `send_audio_message` fails before upload when encrypted-room E2EE support is unavailable.
 - `send_audio_message` sets thread fallback relation when `thread_id` and `latest_thread_event_id` are provided.
@@ -49,8 +49,8 @@ Implementation notes:
 
 - Extract `_upload_media_bytes_as_mxc(client, room_id, upload_bytes, filename, mimetype)`.
 - Keep `_upload_file_as_mxc` as a thin file-reading caller.
-- Add `send_audio_message(client, room_id, audio_bytes, *, config, mimetype, filename="voice-message.mp3", caption=None, thread_id=None, latest_thread_event_id=None, conversation_cache=None)`.
-- Build content with `msgtype: "m.audio"` and `org.matrix.msc3245.voice: {}`.
+- Add `send_audio_message(client, room_id, audio_bytes, *, config, mimetype, filename="voice-message.opus", caption=None, thread_id=None, latest_thread_event_id=None, conversation_cache=None)`.
+- Build content with `msgtype: "m.audio"`, `org.matrix.msc3245.voice: {}`, and voice audio details when available.
 - Notify `conversation_cache` exactly like `send_file_message`.
 
 - [x] Run the focused test file and confirm it passes.

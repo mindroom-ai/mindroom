@@ -217,6 +217,8 @@ Use `matrix_voice_message` when an agent should send a playable Matrix voice not
 When `room_id` and `thread_id` are omitted, it sends to the current room and active thread.
 Pass `thread_id="room"` to send at room level.
 Use `caption` for the audio event body, and use `companion_message` for a separate readable text message in the same target.
+The default Opus output includes duration and waveform metadata for Matrix voice-note rendering.
+Other response formats may send as regular `m.audio` when duration metadata cannot be derived.
 
 See the [Tools documentation](https://docs.mindroom.chat/tools/) for configuration details.
 

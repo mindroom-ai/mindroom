@@ -231,14 +231,39 @@
         },
         {
           "authored_override": true,
-          "default": "mp3",
+          "default": "opus",
           "description": null,
           "label": "Audio Format",
           "name": "response_format",
-          "options": null,
+          "options": [
+            {
+              "label": "Opus",
+              "value": "opus"
+            },
+            {
+              "label": "MP3",
+              "value": "mp3"
+            },
+            {
+              "label": "AAC",
+              "value": "aac"
+            },
+            {
+              "label": "FLAC",
+              "value": "flac"
+            },
+            {
+              "label": "WAV",
+              "value": "wav"
+            },
+            {
+              "label": "PCM",
+              "value": "pcm"
+            }
+          ],
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "select",
           "validation": null
         }
       ],

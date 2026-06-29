@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -144,6 +144,32 @@ def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operat
         hint="Reinstall MindRoom dependencies so `mindroom-nio[e2e]` is available for encrypted Matrix rooms.",
     )
     return False
+
+
+async def _cached_or_remote_room_encrypted(client: nio.AsyncClient, room_id: str, *, operation: str) -> bool | None:
+    """Return room encryption state, failing closed when an uncached room is encrypted."""
+    room = cached_room(client, room_id)
+    if room is not None:
+        return bool(room.encrypted)
+
+    encryption_state = await client.room_get_state_event(room_id, "m.room.encryption")
+    if isinstance(encryption_state, nio.RoomGetStateEventResponse):
+        logger.error(
+            "matrix_encrypted_media_upload_requires_synced_room_cache",
+            room_id=room_id,
+            operation=operation,
+            hint="Wait for initial sync to populate nio's room cache before uploading encrypted media.",
+        )
+        return None
+    if isinstance(encryption_state, nio.RoomGetStateEventError) and encryption_state.status_code == "M_NOT_FOUND":
+        return False
+    logger.error(
+        "matrix_media_upload_requires_known_encryption_state",
+        room_id=room_id,
+        operation=operation,
+        hint="Unable to determine whether the room is encrypted while nio's room cache is empty.",
+    )
+    return None
 
 
 def can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operation: str) -> bool:
@@ -301,11 +327,9 @@ async def _upload_media_bytes_as_mxc(
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload an in-memory Matrix media payload as MXC, encrypting for encrypted rooms."""
     info: dict[str, Any] = {"size": len(media_bytes), "mimetype": mimetype}
-    room = cached_room(client, room_id)
-    if room is None:
-        logger.error("Cannot determine encryption state for unknown room", room_id=room_id)
+    room_encrypted = await _cached_or_remote_room_encrypted(client, room_id, operation="upload_media_bytes")
+    if room_encrypted is None:
         return None, None
-    room_encrypted = bool(room.encrypted)
     upload_bytes = media_bytes
     encrypted_file_payload: dict[str, Any] | None = None
     upload_mimetype = mimetype
@@ -365,6 +389,38 @@ def _msgtype_for_mimetype(mimetype: str) -> str:
     return "m.file"
 
 
+def _normalized_voice_waveform(waveform: Sequence[int] | None) -> list[int]:
+    """Return a Matrix-compatible waveform payload."""
+    if waveform is None:
+        return [0] * 30
+    return [min(1024, max(0, int(level))) for level in waveform]
+
+
+def _voice_audio_details(duration_ms: int | None, waveform: Sequence[int] | None) -> dict[str, Any] | None:
+    """Build Matrix voice-message audio details when duration is available."""
+    if duration_ms is None:
+        return None
+    return {
+        "duration": duration_ms,
+        "waveform": _normalized_voice_waveform(waveform),
+    }
+
+
+def _thread_relation_content(thread_id: str | None, latest_thread_event_id: str | None) -> dict[str, Any] | None:
+    """Build Matrix thread relation content for media sends."""
+    if thread_id is None:
+        return None
+    if latest_thread_event_id is None:
+        msg = "latest_thread_event_id is required for thread fallback"
+        raise ValueError(msg)
+    return {
+        "rel_type": "m.thread",
+        "event_id": thread_id,
+        "is_falling_back": True,
+        "m.in_reply_to": {"event_id": latest_thread_event_id},
+    }
+
+
 async def send_file_message(
     client: nio.AsyncClient,
     room_id: str,
@@ -407,16 +463,9 @@ async def send_file_message(
     else:
         content["url"] = mxc_uri
 
-    if thread_id:
-        if latest_thread_event_id is None:
-            msg = "latest_thread_event_id is required for thread fallback"
-            raise ValueError(msg)
-        content["m.relates_to"] = {
-            "rel_type": "m.thread",
-            "event_id": thread_id,
-            "is_falling_back": True,
-            "m.in_reply_to": {"event_id": latest_thread_event_id},
-        }
+    thread_relation = _thread_relation_content(thread_id, latest_thread_event_id)
+    if thread_relation is not None:
+        content["m.relates_to"] = thread_relation
 
     delivered = await send_message_result(client, room_id, content, config=config)
     if delivered is not None and conversation_cache is not None:
@@ -435,8 +484,10 @@ async def send_audio_message(
     *,
     config: Config,
     mimetype: str,
-    filename: str = "voice-message.mp3",
+    filename: str = "voice-message.opus",
     caption: str | None = None,
+    duration_ms: int | None = None,
+    waveform: Sequence[int] | None = None,
     thread_id: str | None = None,
     latest_thread_event_id: str | None = None,
     conversation_cache: ConversationCacheProtocol | None = None,
@@ -458,13 +509,18 @@ async def send_audio_message(
     info = upload_payload.get("info")
     if not isinstance(info, dict):
         info = {"size": len(audio_bytes), "mimetype": mimetype}
+    audio_details = _voice_audio_details(duration_ms, waveform)
+    if audio_details is not None:
+        info["duration"] = audio_details["duration"]
 
     content: dict[str, Any] = {
         "msgtype": "m.audio",
         "body": caption or filename,
         "info": info,
-        "org.matrix.msc3245.voice": {},
     }
+    if audio_details is not None:
+        content["org.matrix.msc3245.voice"] = {}
+        content["org.matrix.msc1767.audio"] = audio_details
     if caption:
         content["filename"] = filename
     encrypted_file_payload = upload_payload.get("file")
@@ -473,16 +529,9 @@ async def send_audio_message(
     else:
         content["url"] = mxc_uri
 
-    if thread_id:
-        if latest_thread_event_id is None:
-            msg = "latest_thread_event_id is required for thread fallback"
-            raise ValueError(msg)
-        content["m.relates_to"] = {
-            "rel_type": "m.thread",
-            "event_id": thread_id,
-            "is_falling_back": True,
-            "m.in_reply_to": {"event_id": latest_thread_event_id},
-        }
+    thread_relation = _thread_relation_content(thread_id, latest_thread_event_id)
+    if thread_relation is not None:
+        content["m.relates_to"] = thread_relation
 
     delivered = await send_message_result(client, room_id, content, config=config)
     if delivered is not None and conversation_cache is not None:

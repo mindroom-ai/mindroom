@@ -26,14 +26,14 @@ When `caption` is omitted, the body is a short default filename-style label so c
 ## Configuration
 
 The builtin tool metadata exposes OpenAI API key, TTS model, voice, and format fields.
-Defaults reuse `OPENAI_TTS`, `alloy`, and `mp3`.
+Defaults reuse `OPENAI_TTS`, `alloy`, and `opus`.
 The implementation stays OpenAI-only for this feature so the first version is small and testable.
 
 ## Matrix Delivery
 
 Add an in-memory audio send helper in `matrix/client_delivery.py`.
 It reuses the same upload and encryption logic used by `send_file_message`.
-The sent content uses `msgtype: m.audio`, includes MIME and size metadata, and adds `org.matrix.msc3245.voice` so Matrix clients can render it as a voice note.
+The sent content uses `msgtype: m.audio`, includes MIME, size, duration, and waveform metadata, and adds `org.matrix.msc3245.voice` so Matrix clients can render it as a voice note.
 When `companion_message` is provided, the tool reuses the existing Matrix message operation path to send normal text to the same room/thread before sending the voice note.
 Threaded sends use existing fallback relation behavior and require the same latest-thread-event lookup as file sends.
 
