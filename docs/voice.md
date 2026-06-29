@@ -217,12 +217,8 @@ These are separate from voice message transcription and allow agents to generate
 - **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
 - **Groq** - Fast speech generation via `groq` tool
 
-Use `matrix_voice_message` when an agent should send a playable Matrix voice note directly.
-When `room_id` and `thread_id` are omitted, it sends to the current room and active thread.
-Pass `thread_id="room"` to send at room level.
-Use `caption` for the audio event body, and use `companion_message` for a separate readable text message in the same target.
-The default Opus output includes duration and waveform metadata for Matrix voice-note rendering.
-Only Opus output is supported for this tool so Matrix clients receive native voice-note metadata.
+Use `matrix_voice_message` when an agent should send a playable Opus Matrix voice note directly.
+It defaults to the current room and active thread, accepts `thread_id="room"` for room-level delivery, and can add readable text through `companion_message`.
 
 See the [Tools documentation](tools/index.md) for configuration details.
 

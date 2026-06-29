@@ -228,23 +228,6 @@
           "required": false,
           "type": "text",
           "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": "opus",
-          "description": null,
-          "label": "Audio Format",
-          "name": "response_format",
-          "options": [
-            {
-              "label": "Opus",
-              "value": "opus"
-            }
-          ],
-          "placeholder": null,
-          "required": false,
-          "type": "select",
-          "validation": null
         }
       ],
       "consumes_workspace_paths": false,

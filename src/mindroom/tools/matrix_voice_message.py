@@ -43,16 +43,6 @@ if TYPE_CHECKING:
             required=False,
             default="alloy",
         ),
-        ConfigField(
-            name="response_format",
-            label="Audio Format",
-            type="select",
-            required=False,
-            default="opus",
-            options=[
-                {"label": "Opus", "value": "opus"},
-            ],
-        ),
     ],
     dependencies=["openai"],
     docs_url="https://github.com/mindroom-ai/mindroom",

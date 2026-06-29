@@ -142,12 +142,6 @@ async def test_matrix_voice_message_rejects_non_string_inputs(tmp_path: Path) ->
     assert payload["message"] == "text must be a string."
 
 
-def test_matrix_voice_message_rejects_invalid_response_format() -> None:
-    """Configured speech format should stay native Matrix voice-note compatible."""
-    with pytest.raises(ValueError, match="response_format must be one of: opus\\."):
-        MatrixVoiceMessageTools(api_key="sk-test", response_format="mp3")  # type: ignore[arg-type]
-
-
 @pytest.mark.asyncio
 async def test_matrix_voice_message_rejects_unauthorized_room(tmp_path: Path) -> None:
     """Target rooms should use the shared Matrix room authorization check."""

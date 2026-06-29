@@ -88,24 +88,16 @@ matrix_message(action="react", target="$event123", message="✅")
 
 ### What It Does
 
-`matrix_voice_message(text, room_id=None, thread_id=None, caption=None, companion_message=None)` calls OpenAI text-to-speech, uploads the generated audio, and sends one `m.audio` event with Matrix voice-message metadata.
-The default Opus output includes duration and waveform metadata so Matrix clients can render it as a voice note instead of a generic audio file.
+`matrix_voice_message(text, room_id=None, thread_id=None, caption=None, companion_message=None)` calls OpenAI text-to-speech and sends one Opus `m.audio` event with Matrix voice-note metadata.
 When both `room_id` and `thread_id` are omitted, it targets the active Matrix room and active thread.
-Pass `thread_id="room"` to force a room-level voice message instead of inheriting the current thread.
-`caption` becomes the audio event body only, so clients may show it as the voice-note label or fallback text.
-`caption` is not a separate text event.
-Use `companion_message` when the agent should also post normal readable text.
-The companion text is sent before the voice note to the same room and thread, and mention handling is suppressed like the default `matrix_message` send path.
+Pass `thread_id="room"` to force room-level delivery.
+Use `caption` for the audio event body and `companion_message` for a separate readable text event in the same target.
 
 ### Configuration
 
-`matrix_voice_message` requires OpenAI text-to-speech access.
-Configure a stored `matrix_voice_message` credential or provide `OPENAI_API_KEY` / `OPENAI_API_KEY_FILE` in the runtime environment.
-Do not put the password `api_key` field inline in authored YAML config.
-The default `model` is `gpt-4o-mini-tts`.
-The default `voice` is `alloy`.
-The default `response_format` is `opus`.
-Only `opus` is supported because Matrix voice notes require Opus audio with duration and waveform metadata.
+`matrix_voice_message` requires OpenAI text-to-speech access through a stored credential or `OPENAI_API_KEY` / `OPENAI_API_KEY_FILE`.
+Defaults: `model=gpt-4o-mini-tts`, `voice=alloy`.
+The tool always requests Opus output because Matrix voice notes need Opus audio with duration and waveform metadata.
 
 ### Example
 
@@ -122,17 +114,11 @@ matrix_voice_message(
     "The build finished successfully.",
     companion_message="The build finished successfully.",
 )
-matrix_voice_message(
-    "Posting this to the room timeline.",
-    thread_id="room",
-    caption="Build status",
-)
 ```
 
 ### Notes
 
 - The tool returns `event_id` for the voice event and `companion_event_id` when companion text was sent.
-- If companion text succeeds but speech generation or voice delivery fails later, the error payload still includes `companion_event_id`.
 - The tool rate-limits each `(agent_name, requester_id, room_id)` combination to six voice sends per 30 seconds.
 
 ## [`thread_tags`]

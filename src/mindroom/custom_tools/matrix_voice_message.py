@@ -6,7 +6,7 @@ import asyncio
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from threading import Lock
-from typing import ClassVar, Literal, cast
+from typing import ClassVar
 
 from agno.tools import Toolkit
 from openai import APIStatusError, OpenAI
@@ -25,8 +25,9 @@ from mindroom.matrix.client_delivery import send_audio_message
 from mindroom.model_defaults import OPENAI_TTS
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
-_SpeechResponseFormat = Literal["opus"]
-_DEFAULT_RESPONSE_FORMAT: _SpeechResponseFormat = "opus"
+_OPUS_RESPONSE_FORMAT = "opus"
+_OPUS_MIMETYPE = "audio/ogg"
+_OPUS_FILENAME = "voice-message.opus"
 _OPUS_SAMPLE_RATE_HZ = 48_000
 _VOICE_WAVEFORM_BINS = 30
 logger = get_logger(__name__)
@@ -47,18 +48,6 @@ class _VoiceMessagePreflight:
     text: str
     room_id: str
     api_key: str
-
-
-def _format_options() -> str:
-    return ", ".join(MatrixVoiceMessageTools._MIMETYPE_BY_FORMAT)
-
-
-def _normalize_response_format(response_format: str) -> _SpeechResponseFormat:
-    normalized_format = response_format.strip().lower() if isinstance(response_format, str) else ""
-    if normalized_format not in MatrixVoiceMessageTools._MIMETYPE_BY_FORMAT:
-        msg = f"response_format must be one of: {_format_options()}."
-        raise ValueError(msg)
-    return cast("_SpeechResponseFormat", normalized_format)
 
 
 def _waveform_from_sizes(sizes: list[int]) -> tuple[int, ...]:
@@ -138,9 +127,6 @@ class MatrixVoiceMessageTools(Toolkit):
     _RATE_LIMIT_WINDOW_SECONDS: ClassVar[float] = 30.0
     _RATE_LIMIT_MAX_ACTIONS: ClassVar[int] = 6
     _ROOM_TIMELINE_SENTINEL: ClassVar[str] = "room"
-    _MIMETYPE_BY_FORMAT: ClassVar[dict[str, str]] = {
-        "opus": "audio/ogg",
-    }
 
     def __init__(
         self,
@@ -148,12 +134,10 @@ class MatrixVoiceMessageTools(Toolkit):
         api_key: str | None = None,
         model: str = OPENAI_TTS,
         voice: str = "alloy",
-        response_format: _SpeechResponseFormat = _DEFAULT_RESPONSE_FORMAT,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._voice = voice
-        self._response_format = _normalize_response_format(response_format)
         self._message_operations = MatrixMessageOperations()
         super().__init__(
             name="matrix_voice_message",
@@ -183,16 +167,6 @@ class MatrixVoiceMessageTools(Toolkit):
             room_id=room_id,
         )
 
-    @classmethod
-    def _mimetype_for_response_format(cls, response_format: str) -> str:
-        normalized_format = response_format.strip().lower()
-        return cls._MIMETYPE_BY_FORMAT[normalized_format]
-
-    @staticmethod
-    def _filename_for_response_format(response_format: str) -> str:
-        normalized_format = response_format.strip().lower()
-        return f"voice-message.{normalized_format}"
-
     @staticmethod
     def _voice_audio_metadata(audio_bytes: bytes) -> _VoiceAudioMetadata | None:
         return _ogg_opus_metadata(audio_bytes)
@@ -205,7 +179,7 @@ class MatrixVoiceMessageTools(Toolkit):
             model=self._model,
             voice=self._voice,
             input=text,
-            response_format=self._response_format,
+            response_format=_OPUS_RESPONSE_FORMAT,
         )
         audio_content = response.content
         if not isinstance(audio_content, bytes):
@@ -422,8 +396,8 @@ class MatrixVoiceMessageTools(Toolkit):
             preflight.room_id,
             audio_bytes,
             config=context.config,
-            mimetype=self._mimetype_for_response_format(self._response_format),
-            filename=self._filename_for_response_format(self._response_format),
+            mimetype=_OPUS_MIMETYPE,
+            filename=_OPUS_FILENAME,
             caption=caption.strip() if isinstance(caption, str) and caption.strip() else None,
             duration_ms=voice_metadata.duration_ms if voice_metadata is not None else None,
             waveform=voice_metadata.waveform if voice_metadata is not None else None,
