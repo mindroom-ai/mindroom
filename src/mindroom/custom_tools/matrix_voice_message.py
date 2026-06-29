@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
-import wave
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from threading import Lock
@@ -27,7 +25,7 @@ from mindroom.matrix.client_delivery import send_audio_message
 from mindroom.model_defaults import OPENAI_TTS
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
-_SpeechResponseFormat = Literal["mp3", "opus", "aac", "flac", "wav", "pcm"]
+_SpeechResponseFormat = Literal["opus"]
 _DEFAULT_RESPONSE_FORMAT: _SpeechResponseFormat = "opus"
 _OPUS_SAMPLE_RATE_HZ = 48_000
 _VOICE_WAVEFORM_BINS = 30
@@ -112,19 +110,6 @@ def _ogg_opus_metadata(audio_bytes: bytes) -> _VoiceAudioMetadata | None:
     return _VoiceAudioMetadata(duration_ms=duration_ms, waveform=_waveform_from_sizes(audio_page_sizes))
 
 
-def _wav_metadata(audio_bytes: bytes) -> _VoiceAudioMetadata | None:
-    try:
-        with wave.open(io.BytesIO(audio_bytes), "rb") as wav_file:
-            frame_rate = wav_file.getframerate()
-            frame_count = wav_file.getnframes()
-    except (EOFError, wave.Error):
-        return None
-    if frame_rate <= 0 or frame_count <= 0:
-        return None
-    duration_ms = max(1, round(frame_count * 1000 / frame_rate))
-    return _VoiceAudioMetadata(duration_ms=duration_ms, waveform=tuple([0] * _VOICE_WAVEFORM_BINS))
-
-
 def _input_validation_error(
     text: object,
     room_id: object,
@@ -154,12 +139,7 @@ class MatrixVoiceMessageTools(Toolkit):
     _RATE_LIMIT_MAX_ACTIONS: ClassVar[int] = 6
     _ROOM_TIMELINE_SENTINEL: ClassVar[str] = "room"
     _MIMETYPE_BY_FORMAT: ClassVar[dict[str, str]] = {
-        "mp3": "audio/mpeg",
         "opus": "audio/ogg",
-        "aac": "audio/aac",
-        "flac": "audio/flac",
-        "wav": "audio/wav",
-        "pcm": "audio/pcm",
     }
 
     def __init__(
@@ -214,12 +194,8 @@ class MatrixVoiceMessageTools(Toolkit):
         return f"voice-message.{normalized_format}"
 
     @staticmethod
-    def _voice_audio_metadata(audio_bytes: bytes, response_format: _SpeechResponseFormat) -> _VoiceAudioMetadata | None:
-        if response_format == "opus":
-            return _ogg_opus_metadata(audio_bytes)
-        if response_format == "wav":
-            return _wav_metadata(audio_bytes)
-        return None
+    def _voice_audio_metadata(audio_bytes: bytes) -> _VoiceAudioMetadata | None:
+        return _ogg_opus_metadata(audio_bytes)
 
     def _api_key_for_context(self, context: ToolRuntimeContext) -> str | None:
         return self._api_key or get_secret_from_env("OPENAI_API_KEY", context.runtime_paths)
@@ -440,7 +416,7 @@ class MatrixVoiceMessageTools(Toolkit):
                 message="Failed to generate speech.",
             )
 
-        voice_metadata = self._voice_audio_metadata(audio_bytes, self._response_format)
+        voice_metadata = self._voice_audio_metadata(audio_bytes)
         event_id = await send_audio_message(
             context.client,
             preflight.room_id,

@@ -105,8 +105,7 @@ Do not put the password `api_key` field inline in authored YAML config.
 The default `model` is `gpt-4o-mini-tts`.
 The default `voice` is `alloy`.
 The default `response_format` is `opus`.
-Use `opus` for Matrix voice-note interoperability.
-Other response formats may send as regular `m.audio` when duration metadata cannot be derived.
+Only `opus` is supported because Matrix voice notes require Opus audio with duration and waveform metadata.
 
 ### Example
 

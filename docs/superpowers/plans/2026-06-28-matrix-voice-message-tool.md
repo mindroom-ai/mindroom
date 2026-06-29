@@ -82,7 +82,7 @@ uv run pytest tests/test_matrix_voice_message.py -x -n 0 --no-cov -v
 Implementation notes:
 
 - Define `MatrixVoiceMessageTools(Toolkit)`.
-- Constructor fields: `api_key`, `model`, `voice`, `response_format`.
+- Constructor fields: `api_key`, `model`, `voice`, `response_format` fixed to Opus for Matrix voice-note compatibility.
 - Use `get_tool_runtime_context`.
 - Use `resolve_context_thread_id` with current-thread fallback and room sentinel.
 - Use `room_access_allowed`.
@@ -96,7 +96,7 @@ Implementation notes:
 Implementation notes:
 
 - Use `SetupType.API_KEY`, `ToolCategory.COMMUNICATION`, `ToolStatus.REQUIRES_CONFIG`, and `requires_room_context=True`.
-- Config fields: `api_key`, `model`, `voice`, and `response_format`.
+- Config fields: `api_key`, `model`, `voice`, and Opus-only `response_format`.
 - Function name: `matrix_voice_message`.
 
 - [x] Wire the metadata module into `src/mindroom/tools/__init__.py`.

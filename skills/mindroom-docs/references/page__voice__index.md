@@ -218,7 +218,7 @@ When `room_id` and `thread_id` are omitted, it sends to the current room and act
 Pass `thread_id="room"` to send at room level.
 Use `caption` for the audio event body, and use `companion_message` for a separate readable text message in the same target.
 The default Opus output includes duration and waveform metadata for Matrix voice-note rendering.
-Other response formats may send as regular `m.audio` when duration metadata cannot be derived.
+Only Opus output is supported for this tool so Matrix clients receive native voice-note metadata.
 
 See the [Tools documentation](https://docs.mindroom.chat/tools/) for configuration details.
 

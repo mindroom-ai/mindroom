@@ -276,6 +276,25 @@ async def test_matrix_message_send_resolves_room_alias_before_send(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_matrix_message_rejects_non_string_room_id_before_resolution(tmp_path: Path) -> None:
+    """Explicit room IDs should return structured type errors before alias resolution."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(storage_path=tmp_path, thread_id=None)
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.resolve_optional_room_id") as mock_resolve,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(action="send", message="hello", room_id=123),  # type: ignore[arg-type]
+        )
+
+    mock_resolve.assert_not_called()
+    assert payload["status"] == "error"
+    assert payload["message"] == "room_id must be a string."
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_send_includes_message_extras() -> None:
     """Send action should attach validated MindRoom message extras."""
     tool = MatrixMessageTools()

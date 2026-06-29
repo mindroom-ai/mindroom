@@ -143,9 +143,9 @@ async def test_matrix_voice_message_rejects_non_string_inputs(tmp_path: Path) ->
 
 
 def test_matrix_voice_message_rejects_invalid_response_format() -> None:
-    """Configured speech format should fail before provider calls."""
-    with pytest.raises(ValueError, match="response_format must be one of"):
-        MatrixVoiceMessageTools(api_key="sk-test", response_format="ogg")  # type: ignore[arg-type]
+    """Configured speech format should stay native Matrix voice-note compatible."""
+    with pytest.raises(ValueError, match="response_format must be one of: opus\\."):
+        MatrixVoiceMessageTools(api_key="sk-test", response_format="mp3")  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

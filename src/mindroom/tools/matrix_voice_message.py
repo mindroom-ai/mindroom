@@ -51,11 +51,6 @@ if TYPE_CHECKING:
             default="opus",
             options=[
                 {"label": "Opus", "value": "opus"},
-                {"label": "MP3", "value": "mp3"},
-                {"label": "AAC", "value": "aac"},
-                {"label": "FLAC", "value": "flac"},
-                {"label": "WAV", "value": "wav"},
-                {"label": "PCM", "value": "pcm"},
             ],
         ),
     ],

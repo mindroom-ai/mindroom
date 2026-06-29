@@ -144,6 +144,15 @@ class MatrixMessageTools(Toolkit):
                 message=str(exc),
             )
 
+    def _validate_optional_room_id(self, *, action: str, room_id: object) -> str | None:
+        if room_id is not None and not isinstance(room_id, str):
+            return self._payload(
+                "error",
+                action=action,
+                message="room_id must be a string.",
+            )
+        return None
+
     @classmethod
     def _check_rate_limit(
         cls,
@@ -313,6 +322,8 @@ class MatrixMessageTools(Toolkit):
                 action=normalized_action or action,
                 message=attachment_file_paths_error,
             )
+        if (room_id_error := self._validate_optional_room_id(action=normalized_action, room_id=room_id)) is not None:
+            return room_id_error
         resolved_room_id = resolve_optional_room_id(context, room_id)
         attachment_count = len(normalized_attachment_ids) + len(normalized_attachment_file_paths)
         validation_error = self._validate_matrix_message_request(
