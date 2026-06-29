@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from io import BytesIO
 from threading import Lock
 from typing import ClassVar
 
 from agno.tools import Toolkit
 from openai import APIStatusError, OpenAI
+from tinytag import TinyTag, TinyTagException
 
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.custom_tools.attachment_helpers import (
@@ -28,7 +30,6 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_ru
 _OPUS_RESPONSE_FORMAT = "opus"
 _OPUS_MIMETYPE = "audio/ogg"
 _OPUS_FILENAME = "voice-message.opus"
-_OPUS_SAMPLE_RATE_HZ = 48_000
 _VOICE_WAVEFORM_BINS = 30
 logger = get_logger(__name__)
 
@@ -50,53 +51,17 @@ class _VoiceMessagePreflight:
     api_key: str
 
 
-def _waveform_from_sizes(sizes: list[int]) -> tuple[int, ...]:
-    if not sizes:
-        return tuple([0] * _VOICE_WAVEFORM_BINS)
-    bins = [0] * _VOICE_WAVEFORM_BINS
-    counts = [0] * _VOICE_WAVEFORM_BINS
-    for index, size in enumerate(sizes):
-        bin_index = min(_VOICE_WAVEFORM_BINS - 1, index * _VOICE_WAVEFORM_BINS // len(sizes))
-        bins[bin_index] += size
-        counts[bin_index] += 1
-    averaged = [bins[index] // counts[index] if counts[index] else 0 for index in range(_VOICE_WAVEFORM_BINS)]
-    peak = max(averaged) or 1
-    return tuple(round(value * 1024 / peak) for value in averaged)
-
-
-def _ogg_opus_metadata(audio_bytes: bytes) -> _VoiceAudioMetadata | None:
-    offset = 0
-    pre_skip = 0
-    last_granule_position: int | None = None
-    audio_page_sizes: list[int] = []
-    while offset + 27 <= len(audio_bytes):
-        if audio_bytes[offset : offset + 4] != b"OggS":
-            return None
-        granule_position = int.from_bytes(audio_bytes[offset + 6 : offset + 14], "little", signed=True)
-        segment_count = audio_bytes[offset + 26]
-        segment_table_start = offset + 27
-        payload_start = segment_table_start + segment_count
-        if payload_start > len(audio_bytes):
-            return None
-        segment_sizes = audio_bytes[segment_table_start:payload_start]
-        payload_size = sum(segment_sizes)
-        payload_end = payload_start + payload_size
-        if payload_end > len(audio_bytes):
-            return None
-        payload = audio_bytes[payload_start:payload_end]
-        if payload.startswith(b"OpusHead") and len(payload) >= 12:
-            pre_skip = int.from_bytes(payload[10:12], "little")
-        elif payload and not payload.startswith(b"OpusTags"):
-            audio_page_sizes.append(payload_size)
-        if granule_position >= 0:
-            last_granule_position = granule_position
-        offset = payload_end
-
-    if offset != len(audio_bytes) or last_granule_position is None:
+def _voice_metadata_from_tinytag(audio_bytes: bytes) -> _VoiceAudioMetadata | None:
+    try:
+        tag = TinyTag.get(filename=_OPUS_FILENAME, file_obj=BytesIO(audio_bytes), tags=False)
+    except TinyTagException:
         return None
-    duration_samples = max(0, last_granule_position - pre_skip)
-    duration_ms = max(1, round(duration_samples * 1000 / _OPUS_SAMPLE_RATE_HZ))
-    return _VoiceAudioMetadata(duration_ms=duration_ms, waveform=_waveform_from_sizes(audio_page_sizes))
+
+    if tag.duration is None or tag.duration <= 0:
+        return None
+
+    duration_ms = max(1, round(tag.duration * 1000))
+    return _VoiceAudioMetadata(duration_ms=duration_ms, waveform=tuple([0] * _VOICE_WAVEFORM_BINS))
 
 
 def _input_validation_error(
@@ -169,7 +134,7 @@ class MatrixVoiceMessageTools(Toolkit):
 
     @staticmethod
     def _voice_audio_metadata(audio_bytes: bytes) -> _VoiceAudioMetadata | None:
-        return _ogg_opus_metadata(audio_bytes)
+        return _voice_metadata_from_tinytag(audio_bytes)
 
     def _api_key_for_context(self, context: ToolRuntimeContext) -> str | None:
         return self._api_key or get_secret_from_env("OPENAI_API_KEY", context.runtime_paths)

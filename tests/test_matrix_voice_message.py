@@ -42,40 +42,6 @@ def _matrix_voice_message_function() -> Function:
     return function
 
 
-def _ogg_page(payload: bytes, *, granule_position: int, sequence: int) -> bytes:
-    segment_sizes = []
-    remaining = len(payload)
-    while remaining >= 255:
-        segment_sizes.append(255)
-        remaining -= 255
-    segment_sizes.append(remaining)
-    return b"".join(
-        [
-            b"OggS",
-            b"\x00\x00",
-            granule_position.to_bytes(8, "little", signed=True),
-            (1).to_bytes(4, "little"),
-            sequence.to_bytes(4, "little"),
-            b"\x00\x00\x00\x00",
-            bytes([len(segment_sizes)]),
-            bytes(segment_sizes),
-            payload,
-        ],
-    )
-
-
-def _one_second_ogg_opus() -> bytes:
-    pre_skip = 312
-    opus_head = b"OpusHead\x01\x01" + pre_skip.to_bytes(2, "little") + b"\x80\xbb\x00\x00\x00\x00\x00"
-    return b"".join(
-        [
-            _ogg_page(opus_head, granule_position=0, sequence=0),
-            _ogg_page(b"OpusTags" + b"\x00" * 8, granule_position=0, sequence=1),
-            _ogg_page(b"\x01" * 100, granule_position=48_000 + pre_skip, sequence=2),
-        ],
-    )
-
-
 def _mock_client() -> AsyncMock:
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = "@mindroom_general:localhost"
@@ -164,14 +130,16 @@ async def test_matrix_voice_message_rejects_unauthorized_room(tmp_path: Path) ->
 async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread(tmp_path: Path) -> None:
     """Successful calls should synthesize speech and send it to the active Matrix thread."""
     context = _context(tmp_path, thread_id="$thread-root")
-    speech_response = SimpleNamespace(content=_one_second_ogg_opus())
+    speech_response = SimpleNamespace(content=b"ogg-opus-bytes")
 
     with (
         tool_runtime_context(context),
         patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+        patch("mindroom.custom_tools.matrix_voice_message.TinyTag.get") as mock_tinytag_get,
         patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
     ):
         mock_openai.return_value.audio.speech.create.return_value = speech_response
+        mock_tinytag_get.return_value = SimpleNamespace(duration=1.25)
         mock_send.return_value = "$voice-event"
 
         result = await MatrixVoiceMessageTools(
@@ -187,6 +155,7 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
         input="Read this aloud",
         response_format="opus",
     )
+    mock_tinytag_get.assert_called_once()
     context.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
         "!room:localhost",
         "$thread-root",
@@ -200,8 +169,8 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
         mimetype="audio/ogg",
         filename="voice-message.opus",
         caption="Voice reply",
-        duration_ms=1000,
-        waveform=(1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        duration_ms=1250,
+        waveform=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
         thread_id="$thread-root",
         latest_thread_event_id="$latest",
         conversation_cache=context.conversation_cache,
