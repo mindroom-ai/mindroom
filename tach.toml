@@ -1735,7 +1735,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.client_delivery"
-depends_on = ["mindroom.config.matrix"]
+depends_on = ["mindroom.config.matrix", "mindroom.matrix.voice_message"]
 visibility = [
     "mindroom.approval_transport",
     "mindroom.conversation_resolver",
@@ -1751,6 +1751,11 @@ visibility = [
     "mindroom.streaming",
     "mindroom.thread_summary",
 ]
+
+[[modules]]
+path = "mindroom.matrix.voice_message"
+depends_on = []
+visibility = ["mindroom.matrix.client_delivery"]
 
 [[modules]]
 path = "mindroom.matrix.client_room_admin"
@@ -3071,11 +3076,13 @@ from = ["mindroom.matrix.client_session"]
 [[interfaces]]
 expose = [
     "DeliveredMatrixEvent",
+    "PreparedVoiceAudio",
     "build_edit_event_content",
     "build_threaded_edit_content",
     "can_send_to_encrypted_room",
     "cached_room",
     "edit_message_result",
+    "prepare_voice_audio_bytes",
     "send_audio_message",
     "send_file_message",
     "send_message_result",

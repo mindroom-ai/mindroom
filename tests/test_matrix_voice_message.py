@@ -12,7 +12,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_voice_message import MatrixVoiceMessageTools
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, PreparedVoiceAudio
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
@@ -27,6 +27,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.tools.function import Function
+
+
+@pytest.fixture(autouse=True)
+def _reset_matrix_voice_message_rate_limit() -> None:
+    MatrixVoiceMessageTools._recent_actions.clear()
 
 
 def _payload(raw: str) -> dict[str, object]:
@@ -49,6 +54,15 @@ def _mock_client() -> AsyncMock:
     room.encrypted = False
     client.rooms = {"!room:localhost": room}
     return client
+
+
+def _prepared_voice_audio() -> PreparedVoiceAudio:
+    return PreparedVoiceAudio(
+        audio_bytes=b"prepared-opus-bytes",
+        duration_ms=1250,
+        waveform=[512] * 30,
+        mimetype="audio/ogg",
+    )
 
 
 def _context(
@@ -135,11 +149,14 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
     with (
         tool_runtime_context(context),
         patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
-        patch("mindroom.custom_tools.matrix_voice_message.TinyTag.get") as mock_tinytag_get,
+        patch(
+            "mindroom.custom_tools.matrix_voice_message.prepare_voice_audio_bytes",
+            new_callable=AsyncMock,
+            return_value=_prepared_voice_audio(),
+        ) as mock_voice_payload,
         patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
     ):
         mock_openai.return_value.audio.speech.create.return_value = speech_response
-        mock_tinytag_get.return_value = SimpleNamespace(duration=1.25)
         mock_send.return_value = "$voice-event"
 
         result = await MatrixVoiceMessageTools(
@@ -155,7 +172,7 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
         input="Read this aloud",
         response_format="opus",
     )
-    mock_tinytag_get.assert_called_once()
+    mock_voice_payload.assert_awaited_once()
     context.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
         "!room:localhost",
         "$thread-root",
@@ -164,13 +181,13 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
     mock_send.assert_awaited_once_with(
         context.client,
         "!room:localhost",
-        speech_response.content,
+        b"prepared-opus-bytes",
         config=context.config,
         mimetype="audio/ogg",
         filename="voice-message.opus",
         caption="Voice reply",
         duration_ms=1250,
-        waveform=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        waveform=[512] * 30,
         thread_id="$thread-root",
         latest_thread_event_id="$latest",
         conversation_cache=context.conversation_cache,
@@ -196,6 +213,11 @@ async def test_matrix_voice_message_resolves_room_alias_before_send(tmp_path: Pa
         tool_runtime_context(context),
         patch("mindroom.custom_tools.matrix_voice_message.room_access_allowed", return_value=True) as mock_access,
         patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+        patch(
+            "mindroom.custom_tools.matrix_voice_message.prepare_voice_audio_bytes",
+            new_callable=AsyncMock,
+            return_value=_prepared_voice_audio(),
+        ),
         patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
     ):
         mock_openai.return_value.audio.speech.create.return_value = SimpleNamespace(content=b"voice-bytes")
@@ -223,6 +245,11 @@ async def test_matrix_voice_message_room_sentinel_forces_room_level_send(tmp_pat
     with (
         tool_runtime_context(context),
         patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+        patch(
+            "mindroom.custom_tools.matrix_voice_message.prepare_voice_audio_bytes",
+            new_callable=AsyncMock,
+            return_value=_prepared_voice_audio(),
+        ),
         patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
     ):
         mock_openai.return_value.audio.speech.create.return_value = SimpleNamespace(content=b"voice-bytes")
@@ -266,6 +293,11 @@ async def test_matrix_voice_message_companion_message_sends_to_same_thread(tmp_p
         patch(
             "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             side_effect=capture_text_send,
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_voice_message.prepare_voice_audio_bytes",
+            new_callable=AsyncMock,
+            return_value=_prepared_voice_audio(),
         ),
         patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
     ):
@@ -316,6 +348,11 @@ async def test_matrix_voice_message_voice_failure_reports_sent_companion(tmp_pat
         tool_runtime_context(context),
         patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
         patch("mindroom.custom_tools.matrix_conversation_operations.send_message_result", side_effect=text_send),
+        patch(
+            "mindroom.custom_tools.matrix_voice_message.prepare_voice_audio_bytes",
+            new_callable=AsyncMock,
+            return_value=_prepared_voice_audio(),
+        ),
         patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
     ):
         mock_openai.return_value.audio.speech.create.return_value = SimpleNamespace(content=b"voice-bytes")
@@ -375,6 +412,43 @@ async def test_matrix_voice_message_missing_thread_fallback_is_structured_error(
     assert payload["message"] == "Failed to resolve Matrix thread fallback for voice message."
 
 
+@pytest.mark.asyncio
+async def test_matrix_voice_message_can_use_local_openai_compatible_tts(tmp_path: Path) -> None:
+    """Local TTS base URLs should not require or send the user's OpenAI key."""
+    context = _context(tmp_path, thread_id=None)
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+        patch(
+            "mindroom.custom_tools.matrix_voice_message.prepare_voice_audio_bytes",
+            new_callable=AsyncMock,
+            return_value=_prepared_voice_audio(),
+        ),
+        patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
+    ):
+        mock_openai.return_value.audio.speech.create.return_value = SimpleNamespace(content=b"wav-bytes")
+        mock_send.return_value = "$voice-event"
+
+        result = await MatrixVoiceMessageTools(
+            model="kokoro",
+            base_url="http://pc.local:10201",
+            voice="af_heart",
+            response_format="wav",
+        ).matrix_voice_message("local speech")
+
+    mock_openai.assert_called_once_with(api_key="sk-no-key-required", base_url="http://pc.local:10201/v1")
+    mock_openai.return_value.audio.speech.create.assert_called_once_with(
+        model="kokoro",
+        voice="af_heart",
+        input="local speech",
+        response_format="wav",
+    )
+    mock_send.assert_awaited_once()
+    payload = _payload(result)
+    assert payload["status"] == "ok"
+
+
 def test_matrix_voice_message_description_covers_critical_behavior() -> None:
     """Processed description should explain the key Matrix voice behavior."""
     function = _matrix_voice_message_function()
@@ -382,7 +456,7 @@ def test_matrix_voice_message_description_covers_critical_behavior() -> None:
 
     assert description is not None
     assert "send a Matrix voice message" in description
-    assert "OpenAI text-to-speech" in description
+    assert "configured text-to-speech" in description
     assert 'thread_id="room"' in description
     assert "companion_message" in description
 
