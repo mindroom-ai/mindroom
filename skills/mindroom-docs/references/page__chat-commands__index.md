@@ -66,7 +66,7 @@ Show the welcome message for the current room, listing available agents and team
 
 Schedule a one-time or recurring task using natural language.
 
-Tasks run in the thread where they were created.
+Tasks run in the current room or thread scope.
 
 ```
 !schedule <natural-language-request>

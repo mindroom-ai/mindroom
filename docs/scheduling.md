@@ -6,7 +6,8 @@ icon: lucide/calendar
 
 Schedule agents or teams to perform tasks at specific times or intervals using natural language.
 
-Tasks run in the thread where they were created.
+By default, tasks run in the current room or thread scope.
+The `scheduler` tool can pass `new_thread=True` to create a fresh room-level thread root every time the schedule fires.
 
 ## Commands
 
