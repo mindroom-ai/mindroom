@@ -62,7 +62,6 @@ def resolve_history_execution_plan(
             replay_budget_tokens = hard_replay_budget_tokens
 
     return ResolvedHistoryExecutionPlan(
-        authored_compaction_config=has_authored_compaction_config,
         authored_compaction_enabled=has_authored_compaction_config and compaction_config.enabled,
         destructive_compaction_available=unavailable_reason is None,
         explicit_compaction_model=compaction_config.model is not None,

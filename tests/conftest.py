@@ -54,6 +54,7 @@ from mindroom.history import (
     finalize_history_preparation,
     open_scope_session_context,
     prepare_scope_history,
+    resolve_agent_preparation_inputs,
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
@@ -188,22 +189,28 @@ async def prepare_history_for_run_for_test(
 ) -> PreparedHistoryState:
     """Compose the production history-preparation seams for one test run."""
     resolved_scope = scope or _history_scope_for_agent(agent)
+    resolved_inputs = resolve_agent_preparation_inputs(
+        agent=agent,
+        agent_name=agent_name,
+        full_prompt=full_prompt,
+        config=config,
+        history_settings=history_settings,
+        compaction_config=compaction_config,
+        has_authored_compaction_config=has_authored_compaction_config,
+        active_model_name=active_model_name,
+        active_context_window=active_context_window,
+        static_prompt_tokens=static_prompt_tokens,
+        execution_plan=execution_plan,
+    )
     scope_history_kwargs = {
         "agent": agent,
         "agent_name": agent_name,
-        "full_prompt": full_prompt,
+        "resolved_inputs": resolved_inputs,
         "runtime_paths": runtime_paths,
         "config": config,
         "compaction_outcomes_collector": compaction_outcomes_collector,
-        "history_settings": history_settings,
-        "compaction_config": compaction_config,
-        "has_authored_compaction_config": has_authored_compaction_config,
-        "active_model_name": active_model_name,
-        "active_context_window": active_context_window,
-        "static_prompt_tokens": static_prompt_tokens,
         "available_history_budget": available_history_budget,
         "scope": resolved_scope,
-        "execution_plan": execution_plan,
         "compaction_lifecycle": compaction_lifecycle,
     }
     if storage is not None and resolved_scope is not None and session_id is not None:

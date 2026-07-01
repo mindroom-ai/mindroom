@@ -85,7 +85,6 @@ def _make_outcome(**overrides: object) -> CompactionOutcome:
 
 def _make_execution_plan(**overrides: object) -> ResolvedHistoryExecutionPlan:
     defaults: dict[str, object] = {
-        "authored_compaction_config": True,
         "authored_compaction_enabled": True,
         "destructive_compaction_available": True,
         "explicit_compaction_model": False,
@@ -105,7 +104,6 @@ def _make_execution_plan(**overrides: object) -> ResolvedHistoryExecutionPlan:
 
 def _make_policy_plan() -> ResolvedHistoryExecutionPlan:
     return ResolvedHistoryExecutionPlan(
-        authored_compaction_config=True,
         authored_compaction_enabled=True,
         destructive_compaction_available=True,
         explicit_compaction_model=False,

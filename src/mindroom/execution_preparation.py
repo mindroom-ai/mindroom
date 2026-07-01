@@ -36,6 +36,7 @@ from mindroom.history import (
     prepare_bound_scope_history,
     prepare_scope_history,
     read_scope_seen_event_ids,
+    resolve_agent_preparation_inputs,
     team_static_token_estimator,
 )
 from mindroom.logging_config import get_logger
@@ -829,17 +830,23 @@ async def prepare_agent_execution_context(
     async def _prepare_agent_scope_history(
         prepared_prompt: str,
     ) -> PreparedScopeHistory:
-        return await prepare_scope_history(
+        resolved_inputs = resolve_agent_preparation_inputs(
             agent=agent,
             agent_name=agent_name,
             full_prompt=prepared_prompt,
+            config=config,
+            active_model_name=runtime_model.model_name,
+            active_context_window=runtime_model.context_window,
+            static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
+        )
+        return await prepare_scope_history(
+            agent=agent,
+            agent_name=agent_name,
+            resolved_inputs=resolved_inputs,
             runtime_paths=runtime_paths,
             config=config,
             compaction_outcomes_collector=compaction_outcomes_collector,
             scope_context=scope_context,
-            active_model_name=runtime_model.model_name,
-            active_context_window=runtime_model.context_window,
-            static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
             timing_scope=timing_scope,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,

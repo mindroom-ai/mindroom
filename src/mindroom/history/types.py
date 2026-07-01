@@ -112,7 +112,6 @@ class HistoryScopeState:
 class ResolvedHistoryExecutionPlan:
     """Single source of truth for history-budget policy in one run scope."""
 
-    authored_compaction_config: bool
     authored_compaction_enabled: bool
     destructive_compaction_available: bool
     explicit_compaction_model: bool

@@ -2351,7 +2351,6 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     )
 
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_config=True,
         authored_compaction_enabled=True,
         destructive_compaction_available=True,
         explicit_compaction_model=True,
@@ -2475,7 +2474,6 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     )
 
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_config=True,
         authored_compaction_enabled=True,
         destructive_compaction_available=True,
         explicit_compaction_model=True,
@@ -2596,7 +2594,6 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     assert before_tokens > replay_budget
 
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_config=True,
         authored_compaction_enabled=True,
         destructive_compaction_available=True,
         explicit_compaction_model=True,
@@ -2770,7 +2767,6 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     )
 
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_config=True,
         authored_compaction_enabled=True,
         destructive_compaction_available=True,
         explicit_compaction_model=True,
@@ -4165,7 +4161,7 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert (
         estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
     )
-    assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == expected_static_prompt_tokens
+    assert mock_prepare.await_args.kwargs["resolved_inputs"].static_prompt_tokens == expected_static_prompt_tokens
 
 
 def test_private_ad_hoc_bound_team_scope_is_requester_partitioned(tmp_path: Path) -> None:
@@ -4986,7 +4982,6 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
 
 def test_classify_compaction_decision_forced_compaction_takes_priority() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_config=True,
         authored_compaction_enabled=True,
         destructive_compaction_available=True,
         explicit_compaction_model=True,
@@ -5012,7 +5007,6 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
 
 def test_classify_compaction_decision_does_not_compact_when_over_trigger_but_within_hard_budget() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_config=True,
         authored_compaction_enabled=True,
         destructive_compaction_available=True,
         explicit_compaction_model=True,
@@ -5200,7 +5194,7 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
         )
 
     assert mock_prepare.await_args is not None
-    assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == estimate_agent_static_tokens(
+    assert mock_prepare.await_args.kwargs["resolved_inputs"].static_prompt_tokens == estimate_agent_static_tokens(
         live_agent,
         "Current prompt",
     )
@@ -5250,8 +5244,8 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
     assert mock_create_agent.call_args is not None
     assert mock_create_agent.call_args.kwargs["active_model_name"] == "large"
     assert mock_prepare.await_args is not None
-    assert mock_prepare.await_args.kwargs["active_model_name"] == "large"
-    assert mock_prepare.await_args.kwargs["active_context_window"] == 48_000
+    assert mock_prepare.await_args.kwargs["resolved_inputs"].active_model_name == "large"
+    assert mock_prepare.await_args.kwargs["resolved_inputs"].active_context_window == 48_000
 
 
 @pytest.mark.asyncio

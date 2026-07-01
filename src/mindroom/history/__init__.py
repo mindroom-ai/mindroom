@@ -17,6 +17,7 @@ from mindroom.history.policy import (
     resolve_history_execution_plan,
 )
 from mindroom.history.runtime import (
+    HistoryPreparationInputs,
     PreparedScopeHistory,
     ScopeSessionContext,
     apply_replay_plan,
@@ -31,6 +32,7 @@ from mindroom.history.runtime import (
     open_scope_session_context,
     prepare_bound_scope_history,
     prepare_scope_history,
+    resolve_agent_preparation_inputs,
     resolve_bound_team_scope_context,
 )
 from mindroom.history.storage import (
@@ -72,6 +74,7 @@ __all__ = [
     "CompactionOutcome",
     "CompactionReplyOutcome",
     "HistoryPolicy",
+    "HistoryPreparationInputs",
     "HistoryScope",
     "HistoryScopeMetadata",
     "HistoryScopeState",
@@ -105,6 +108,7 @@ __all__ = [
     "read_scope_seen_event_ids",
     "read_scope_state",
     "request_compaction_before_next_reply",
+    "resolve_agent_preparation_inputs",
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
     "team_static_token_estimator",
