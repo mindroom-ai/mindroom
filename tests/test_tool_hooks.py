@@ -1595,6 +1595,52 @@ async def test_sync_execute_async_tool_entrypoint_still_runs_approval_gate(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_request_network_access_static_allowlist_bypasses_matrix_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Static-allowlisted egress requests should reach the tool without a Matrix approval card."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={"rules": [{"match": "request_network_access", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    async def request_network_access(**kwargs: object) -> str:
+        return str(kwargs["hostname"])
+
+    result = await bridge(
+        "request_network_access",
+        request_network_access,
+        {"hostname": "docs.example.com", "ttl_minutes": 5, "reason": "Need docs."},
+    )
+
+    assert result == "docs.example.com"
+    sender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: Path) -> None:
     """Approval-gated sync tools should resume after approval resolves on another loop."""
     runtime_paths = test_runtime_paths(tmp_path)

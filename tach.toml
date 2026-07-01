@@ -2312,6 +2312,7 @@ depends_on = ["mindroom.constants"]
 [[modules]]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
+    "mindroom.egress",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
     "mindroom.sync_bridge_state",
