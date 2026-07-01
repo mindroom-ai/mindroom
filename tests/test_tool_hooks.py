@@ -74,7 +74,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Mapping
+    from collections.abc import Awaitable, Callable, Generator, Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -1637,6 +1637,24 @@ def _request_network_access_config(
     )
 
 
+def _request_network_access_bridge(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    bypass_result_transform: Callable[[Callable[..., object] | None, object, dict[str, object]], object] | None = None,
+) -> Callable[..., Awaitable[object]]:
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+        bypass_result_transform=bypass_result_transform,
+    )
+    assert bridge is not None
+    return bridge
+
+
 @pytest.mark.asyncio
 async def test_tool_approval_bypass_honors_falsey_approval_entrypoint() -> None:
     """A falsey wrapped entrypoint should still be used for approval-bypass identity."""
@@ -1672,76 +1690,33 @@ async def test_tool_approval_bypass_honors_falsey_approval_entrypoint() -> None:
 
 
 @pytest.mark.parametrize(
-    ("arguments", "expected_error"),
+    ("allowlist", "arguments", "expected_error"),
     [
-        ({"ttl_minutes": 5, "reason": "Need docs."}, TypeError),
-        ({"hostname": 123, "ttl_minutes": 5, "reason": "Need docs."}, TypeError),
-        ({"hostname": "https://docs.example.com", "ttl_minutes": 5, "reason": "Need docs."}, ValueError),
+        (False, {"ttl_minutes": 5, "reason": "Need docs."}, TypeError),
+        (False, {"hostname": 123, "ttl_minutes": 5, "reason": "Need docs."}, TypeError),
+        (False, {"hostname": "https://docs.example.com", "ttl_minutes": 5, "reason": "Need docs."}, ValueError),
+        (True, {"hostname": "docs.example.com", "ttl_minutes": 5}, TypeError),
+        (True, {"hostname": "docs.example.com", "ttl_minutes": 0, "reason": "Need docs."}, ValueError),
     ],
 )
 @pytest.mark.asyncio
-async def test_request_network_access_malformed_hostname_bypasses_matrix_approval(
+async def test_request_network_access_invalid_arguments_bypass_matrix_approval(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    allowlist: bool,
     arguments: dict[str, object],
     expected_error: type[Exception],
 ) -> None:
-    """Malformed egress requests should fail in the tool without creating a Matrix approval card."""
+    """Invalid egress requests should fail in the tool without creating a Matrix approval card."""
     runtime_paths = test_runtime_paths(tmp_path)
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH", str(tmp_path / "missing-allowlist.txt"))
+    if allowlist:
+        monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    else:
+        monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH", str(tmp_path / "missing-allowlist.txt"))
     config = _request_network_access_config(runtime_paths)
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    toolkit = _approved_egress._ApprovedEgressTools()
-
-    with pytest.raises(expected_error):
-        await bridge(
-            "request_network_access",
-            toolkit.async_functions["request_network_access"].entrypoint,
-            arguments,
-        )
-
-    sender.assert_not_awaited()
-
-
-@pytest.mark.parametrize(
-    ("arguments", "expected_error"),
-    [
-        ({"hostname": "docs.example.com", "ttl_minutes": 5}, TypeError),
-        ({"hostname": "docs.example.com", "ttl_minutes": 0, "reason": "Need docs."}, ValueError),
-    ],
-)
-@pytest.mark.asyncio
-async def test_request_network_access_static_allowlist_invalid_metadata_bypasses_matrix_approval(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    arguments: dict[str, object],
-    expected_error: type[Exception],
-) -> None:
-    """Allowlisted malformed egress requests should fail in the tool without approval."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
-    config = _request_network_access_config(runtime_paths)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
+    bridge = _request_network_access_bridge(config, runtime_paths)
     toolkit = _approved_egress._ApprovedEgressTools()
 
     with pytest.raises(expected_error):
@@ -1764,14 +1739,7 @@ async def test_request_network_access_static_allowlist_bypasses_approval_in_func
     monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
     config = _request_network_access_config(runtime_paths, timeout=True)
     client, _ = _initialize_router_approval_store(runtime_paths)
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
+    bridge = _request_network_access_bridge(config, runtime_paths)
 
     toolkit = _approved_egress._ApprovedEgressTools()
     function = toolkit.async_functions["request_network_access"]
@@ -1803,15 +1771,11 @@ async def test_request_network_access_bypass_result_uses_output_file_wrapper(
     config = _request_network_access_config(runtime_paths, include_approved_egress_tool=True)
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
+    bridge = _request_network_access_bridge(
+        config,
+        runtime_paths,
         bypass_result_transform=apply_output_file_handling_to_result,
     )
-    assert bridge is not None
     toolkit = build_agent_toolkit(
         "approved_egress",
         agent_name="code",
@@ -1868,14 +1832,7 @@ async def test_request_network_access_static_allowlist_bypass_cannot_create_gran
         raise AssertionError(msg)
 
     monkeypatch.setattr(_approved_egress, "_post_grant", post_grant)
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
+    bridge = _request_network_access_bridge(config, runtime_paths)
 
     toolkit = _approved_egress._ApprovedEgressTools()
     function = toolkit.async_functions["request_network_access"]
@@ -1906,14 +1863,7 @@ async def test_request_network_access_same_named_non_egress_tool_still_uses_matr
     monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
     config = _request_network_access_config(runtime_paths, timeout=True)
     client, _ = _initialize_router_approval_store(runtime_paths)
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
+    bridge = _request_network_access_bridge(config, runtime_paths)
 
     executed = False
 
@@ -1953,14 +1903,7 @@ async def test_request_network_access_subclass_override_still_uses_matrix_approv
     monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
     config = _request_network_access_config(runtime_paths, timeout=True)
     client, _ = _initialize_router_approval_store(runtime_paths)
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
+    bridge = _request_network_access_bridge(config, runtime_paths)
 
     toolkit = SpoofedApprovedEgressTools()
 
@@ -1985,14 +1928,7 @@ async def test_request_network_access_blocked_host_still_uses_matrix_approval(
     monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
     config = _request_network_access_config(runtime_paths, timeout=True)
     client, _ = _initialize_router_approval_store(runtime_paths)
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
+    bridge = _request_network_access_bridge(config, runtime_paths)
 
     toolkit = _approved_egress._ApprovedEgressTools()
 

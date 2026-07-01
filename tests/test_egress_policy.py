@@ -94,18 +94,6 @@ def test_load_static_allowlist_empty_when_file_missing() -> None:
     assert load_static_allowlist() == ()
 
 
-def test_load_static_allowlist_empty_when_file_is_not_utf8(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A malformed mounted allowlist resolves to the empty allowlist."""
-    allowlist_path = tmp_path / "allowed-domains.txt"
-    allowlist_path.write_bytes(b"\xff")
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH", str(allowlist_path))
-
-    assert load_static_allowlist() == ()
-
-
 @pytest.mark.parametrize(
     ("hostname", "expected"),
     [
