@@ -449,11 +449,12 @@ async def _emit_after_call(
 async def _maybe_block_for_tool_approval(
     *,
     resolved_context: _ResolvedToolContext,
+    func: Callable[..., Any],
     args: dict[str, Any],
     tool_name: str,
     workflow_origin: ToolCallWorkflowOrigin | None,
 ) -> str | None:
-    if should_bypass_tool_approval(tool_name, args):
+    if should_bypass_tool_approval(tool_name, func, args):
         return None
     if resolved_context.config is None or resolved_context.runtime_paths is None:
         return None
@@ -714,6 +715,7 @@ async def _execute_bridge(
     approval_started_at = time.perf_counter()
     blocked_result = await _maybe_block_for_tool_approval(
         resolved_context=resolved_context,
+        func=func,
         args=args,
         tool_name=tool_name,
         workflow_origin=workflow_origin,

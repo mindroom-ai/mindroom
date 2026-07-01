@@ -12,6 +12,7 @@ import ipaddress
 import json
 import os
 import unicodedata
+from types import MethodType
 from typing import TYPE_CHECKING, cast
 from urllib import error, parse, request
 
@@ -32,9 +33,9 @@ from mindroom.tool_system.runtime_context import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
     from http.client import HTTPMessage
-    from typing import IO
+    from typing import IO, Any
 
     from mindroom.egress.policy import EgressGrantSubject
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -81,7 +82,7 @@ def _request_network_access_description() -> str:
     )
 
 
-def _request_network_access_bypasses_approval(arguments: Mapping[str, object]) -> bool:
+def _request_network_access_arguments_bypass_approval(arguments: Mapping[str, object]) -> bool:
     hostname = arguments.get("hostname")
     if not isinstance(hostname, str):
         return True
@@ -90,9 +91,6 @@ def _request_network_access_bypasses_approval(arguments: Mapping[str, object]) -
     except ValueError:
         return True
     return is_hostname_allowed(host, resolve_worker_egress_policy())
-
-
-register_tool_approval_bypass("request_network_access", _request_network_access_bypasses_approval)
 
 
 def _is_plain_http_api_host_allowed(hostname: str) -> bool:
@@ -291,6 +289,20 @@ class _ApprovedEgressTools(Toolkit):
             f"Approved temporary network access to {host} for {effective_ttl_seconds // 60} minutes. "
             f"Expires at Unix time {expiry}.{capped}"
         )
+
+
+def _request_network_access_bypasses_approval(
+    entrypoint: Callable[..., Any],
+    arguments: Mapping[str, object],
+) -> bool:
+    if not isinstance(entrypoint, MethodType):
+        return False
+    if not isinstance(entrypoint.__self__, _ApprovedEgressTools):
+        return False
+    return _request_network_access_arguments_bypass_approval(arguments)
+
+
+register_tool_approval_bypass("request_network_access", _request_network_access_bypasses_approval)
 
 
 @register_tool_with_metadata(

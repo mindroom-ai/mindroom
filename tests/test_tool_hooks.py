@@ -61,7 +61,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
-from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers approval bypass predicate
+from mindroom.tools import approved_egress as _approved_egress
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import (
     bind_runtime_paths,
@@ -1628,7 +1628,60 @@ async def test_request_network_access_static_allowlist_bypasses_matrix_approval(
     )
     assert bridge is not None
 
+    toolkit = _approved_egress._ApprovedEgressTools()
+
+    result = await bridge(
+        "request_network_access",
+        toolkit.async_functions["request_network_access"].entrypoint,
+        {"hostname": "docs.example.com", "ttl_minutes": 5, "reason": "Need docs."},
+    )
+
+    assert (
+        result == "docs.example.com is already allowed by the static egress allowlist. No temporary grant was created."
+    )
+    sender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_request_network_access_same_named_non_egress_tool_still_uses_matrix_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only the approved_egress tool should bypass approval for static-allowlisted hostnames."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "timeout_days": 0.000001,
+                "rules": [{"match": "request_network_access", "action": "require_approval"}],
+            },
+        ),
+        runtime_paths,
+    )
+    client, _ = _initialize_router_approval_store(runtime_paths)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    executed = False
+
     async def request_network_access(**kwargs: object) -> str:
+        nonlocal executed
+        executed = True
         return str(kwargs["hostname"])
 
     result = await bridge(
@@ -1637,8 +1690,14 @@ async def test_request_network_access_static_allowlist_bypasses_matrix_approval(
         {"hostname": "docs.example.com", "ttl_minutes": 5, "reason": "Need docs."},
     )
 
-    assert result == "docs.example.com"
-    sender.assert_not_awaited()
+    assert result == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: request_network_access\n"
+        "Reason: Tool approval request timed out.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    assert executed is False
+    client.room_send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
