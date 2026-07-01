@@ -288,7 +288,7 @@ agents:
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-4-6
+    id: claude-sonnet-5
 
 mindroom_user:
   username: mindroom_user  # Set this before first run; the account-creation request is immutable after account creation
