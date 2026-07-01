@@ -92,12 +92,16 @@ async def prepare_voice_audio_bytes(audio_bytes: bytes, *, response_format: str)
     generated_path: Path | None = None
     voice_payload: VoiceMessagePayload | None = None
     try:
-        generated_path = _write_generated_audio_bytes(audio_bytes, response_format=response_format)
+        generated_path = await asyncio.to_thread(
+            _write_generated_audio_bytes,
+            audio_bytes,
+            response_format=response_format,
+        )
         voice_payload = await build_voice_message_payload(generated_path)
         if voice_payload is None:
             return None
         return PreparedVoiceAudio(
-            audio_bytes=voice_payload.source_path.read_bytes(),
+            audio_bytes=await asyncio.to_thread(voice_payload.source_path.read_bytes),
             mimetype=voice_payload.mimetype,
             duration_ms=voice_payload.duration_ms,
             waveform=voice_payload.waveform,
