@@ -756,6 +756,7 @@ depends_on = [
     "mindroom.custom_tools.matrix_helpers",
     "mindroom.custom_tools.tool_payloads",
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix.voice_message",
     "mindroom.model_defaults",
     "mindroom.tool_system.runtime_context",
 ]
@@ -1751,6 +1752,11 @@ visibility = [
     "mindroom.streaming",
     "mindroom.thread_summary",
 ]
+
+[[modules]]
+path = "mindroom.matrix.voice_message"
+depends_on = []
+visibility = ["mindroom.custom_tools.matrix_voice_message"]
 
 [[modules]]
 path = "mindroom.matrix.client_room_admin"
@@ -3081,6 +3087,13 @@ expose = [
     "send_message_result",
 ]
 from = ["mindroom.matrix.client_delivery"]
+
+[[interfaces]]
+expose = [
+    "PreparedVoiceAudio",
+    "prepare_voice_audio_bytes",
+]
+from = ["mindroom.matrix.voice_message"]
 
 [[interfaces]]
 expose = [

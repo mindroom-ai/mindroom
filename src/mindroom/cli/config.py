@@ -21,10 +21,10 @@ from mindroom import constants
 from mindroom.model_defaults import (
     CONFIG_INIT_MODEL_ALTERNATIVES,
     CONFIG_INIT_MODEL_PRESETS,
-    LLAMA_CPP_API_KEY_DEFAULT,
     LLAMA_CPP_BASE_URL_DEFAULT,
     LLAMA_CPP_GEMMA,
     LLAMA_CPP_QWEN,
+    LOCAL_OPENAI_API_KEY_DEFAULT,
     LOCAL_QWEN_CONTEXT_WINDOW,
     LOCAL_QWEN_PRESET_NAME,
     OLLAMA_GEMMA,
@@ -80,7 +80,6 @@ _ProviderPreset = Literal[
 
 _OLLAMA_HOST = OLLAMA_HOST_DEFAULT
 _LLAMA_CPP_BASE_URL = LLAMA_CPP_BASE_URL_DEFAULT
-_LLAMA_CPP_API_KEY = LLAMA_CPP_API_KEY_DEFAULT
 _PROVIDER_PRESET_ALIASES: dict[str, _ProviderPreset] = {
     "anthropic": "anthropic",
     "bedrock_claude": "bedrock_claude",
@@ -775,7 +774,7 @@ def _model_template_block(provider_preset: _ProviderPreset) -> str:
         lines.extend(
             [
                 "extra_kwargs:",
-                f"  api_key: {_LLAMA_CPP_API_KEY}",
+                f"  api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}",
                 f"  base_url: {_LLAMA_CPP_BASE_URL}",
             ],
         )
@@ -799,7 +798,7 @@ def _additional_models_template_block(provider_preset: _ProviderPreset) -> str:
             f"    id: {LLAMA_CPP_QWEN}\n"
             f"    context_window: {LOCAL_QWEN_CONTEXT_WINDOW}\n"
             "    extra_kwargs:\n"
-            f"      api_key: {_LLAMA_CPP_API_KEY}\n"
+            f"      api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}\n"
             f"      base_url: {_LLAMA_CPP_BASE_URL}"
         )
     return ""
@@ -1087,7 +1086,7 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:  # noqa: PL
         return textwrap.dedent(f"""\
         # llama.cpp OpenAI-compatible local server
         OPENAI_BASE_URL={_LLAMA_CPP_BASE_URL}
-        OPENAI_API_KEY={_LLAMA_CPP_API_KEY}
+        OPENAI_API_KEY={LOCAL_OPENAI_API_KEY_DEFAULT}
 
         # Start llama.cpp with one of the configured local models before running MindRoom.
         # {llama_cpp_server_command(LLAMA_CPP_GEMMA)}
