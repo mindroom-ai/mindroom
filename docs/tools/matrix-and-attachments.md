@@ -88,16 +88,21 @@ matrix_message(action="react", target="$event123", message="✅")
 
 ### What It Does
 
-`matrix_voice_message(text, room_id=None, thread_id=None, caption=None, companion_message=None)` calls OpenAI text-to-speech and sends one Opus `m.audio` event with Matrix voice-note metadata.
+`matrix_voice_message(text, room_id=None, thread_id=None, caption=None, companion_message=None)` calls the configured text-to-speech endpoint and sends one Opus `m.audio` event with Matrix voice-note metadata.
 When both `room_id` and `thread_id` are omitted, it targets the active Matrix room and active thread.
 Pass `thread_id="room"` to force room-level delivery.
 Use `caption` for the audio event body and `companion_message` for a separate readable text event in the same target.
 
 ### Configuration
 
-`matrix_voice_message` requires OpenAI text-to-speech access through a stored credential or `OPENAI_API_KEY` / `OPENAI_API_KEY_FILE`.
-Defaults: `model=gpt-4o-mini-tts`, `voice=alloy`.
-The tool always requests Opus output because Matrix voice notes need Opus audio with duration and waveform metadata.
+By default `matrix_voice_message` uses OpenAI text-to-speech through a stored credential or `OPENAI_API_KEY` / `OPENAI_API_KEY_FILE`.
+Set the `base_url` tool config (or the `TTS_URL` secret) to target any OpenAI-compatible speech endpoint instead, such as a local Kokoro server.
+When a `base_url` is configured without an explicit `api_key`, the tool sends a dummy API key so the real OpenAI credential never leaves the machine.
+`base_url` accepts a bare host, a `/v1` URL, or a full `/audio/speech` endpoint URL, and full endpoint URLs are honored verbatim.
+Defaults: `model=gpt-4o-mini-tts`, `voice=alloy`, `response_format=opus`.
+`response_format` must be one of `aac`, `flac`, `mp3`, `opus`, or `wav`, matching what the endpoint returns.
+Generated audio is probed with `ffprobe` and, when not already Opus/Ogg, transcoded with `ffmpeg` into a Matrix voice payload with duration and waveform metadata.
+Non-opus response formats therefore require `ffmpeg` and `ffprobe` on the backend host; opus output still works without them but is sent without duration metadata.
 
 ### Example
 
