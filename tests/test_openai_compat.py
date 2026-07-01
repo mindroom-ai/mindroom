@@ -49,6 +49,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import _PreparedExecutionContext
+from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import CompactionDecision, HistoryScope, ResolvedReplayPlan
 from mindroom.knowledge.availability import KnowledgeAvailability
@@ -164,14 +165,12 @@ def _prepared_team_execution_context(
 ) -> SimpleNamespace:
     prepared_context = _PreparedExecutionContext(
         messages=tuple(messages or [Message(role="user", content=final_prompt)]),
-        replay_plan=replay_plan,
         unseen_event_ids=[],
-        replays_persisted_history=replays_persisted_history,
-        compaction_outcomes=[],
-        compaction_decision=CompactionDecision(mode="none", reason="unclassified"),
-        compaction_reply_outcome="none",
-        prepared_context_tokens=prepared_context_tokens,
-        estimated_context_tokens=prepared_context_tokens,
+        prepared_history=PreparedHistoryState(
+            replay_plan=replay_plan,
+            replays_persisted_history=replays_persisted_history,
+            prepared_context_tokens=prepared_context_tokens,
+        ),
     )
     return SimpleNamespace(
         messages=prepared_context.messages,
@@ -184,7 +183,6 @@ def _prepared_team_execution_context(
         compaction_decision=CompactionDecision(mode="none", reason="unclassified"),
         compaction_reply_outcome="none",
         prepared_context_tokens=prepared_context_tokens,
-        estimated_context_tokens=prepared_context_tokens,
         prepared_history=prepared_context.prepared_history,
     )
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, get_type_hints
@@ -30,7 +31,6 @@ from mindroom.history.runtime import ScopeSessionContext, open_scope_session_con
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import (
     CompactionLifecycleStart,
-    CompactionLifecycleSuccess,
     CompactionOutcome,
     HistoryScope,
     HistoryScopeState,
@@ -509,11 +509,7 @@ async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_
         )
         await bot._delivery_gateway.edit_compaction_lifecycle_success(
             target=target,
-            event=CompactionLifecycleSuccess(
-                notice_event_id=event_id,
-                outcome=outcome,
-                duration_ms=123,
-            ),
+            outcome=replace(outcome, lifecycle_notice_event_id=event_id, duration_ms=123),
         )
 
     assert event_id == "$notice"

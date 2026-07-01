@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
         CompactionLifecycleFailure,
         CompactionLifecycleProgress,
         CompactionLifecycleStart,
-        CompactionLifecycleSuccess,
+        CompactionOutcome,
     )
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
@@ -270,11 +270,11 @@ class MatrixCompactionLifecycle:
             event=event,
         )
 
-    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
+    async def complete_success(self, outcome: CompactionOutcome) -> None:
         """Edit the lifecycle notice after successful compaction."""
         await self.delivery_gateway.edit_compaction_lifecycle_success(
             target=self.target,
-            event=event,
+            outcome=outcome,
         )
 
     async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
@@ -916,15 +916,14 @@ class DeliveryGateway:
         self,
         *,
         target: MessageTarget,
-        event: CompactionLifecycleSuccess,
+        outcome: CompactionOutcome,
     ) -> None:
         """Edit the foreground compaction lifecycle notice after success."""
-        if event.notice_event_id is None:
+        if outcome.lifecycle_notice_event_id is None:
             return
-        outcome = replace(event.outcome, duration_ms=event.duration_ms)
         await self._edit_compaction_lifecycle_notice(
             target=target,
-            event_id=event.notice_event_id,
+            event_id=outcome.lifecycle_notice_event_id,
             body=outcome.format_notice(),
             metadata=outcome.to_notice_metadata(),
         )

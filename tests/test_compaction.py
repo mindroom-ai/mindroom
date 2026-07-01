@@ -296,10 +296,8 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
 
     prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="x" * 248),),
-        replay_plan=None,
         unseen_event_ids=[],
-        replays_persisted_history=False,
-        compaction_outcomes=[_make_outcome()],
+        prepared_history=PreparedHistoryState(compaction_outcomes=[_make_outcome()]),
     )
 
     with (

@@ -27,6 +27,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -333,10 +334,8 @@ async def test_prepare_agent_and_prompt_applies_system_enrichment_to_agent_addit
         assert agent.additional_context == rendered
         return _PreparedExecutionContext(
             messages=(Message(role="user", content="prepared prompt"),),
-            replay_plan=None,
             unseen_event_ids=[],
-            replays_persisted_history=False,
-            compaction_outcomes=[],
+            prepared_history=PreparedHistoryState(),
         )
 
     with (
@@ -402,10 +401,8 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
         assert all(agent.additional_context == rendered for agent in agents)
         return _PreparedExecutionContext(
             messages=(Message(role="user", content="prepared team prompt"),),
-            replay_plan=None,
             unseen_event_ids=[],
-            replays_persisted_history=False,
-            compaction_outcomes=[],
+            prepared_history=PreparedHistoryState(),
         )
 
     with (
@@ -488,10 +485,8 @@ async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_pa
     async def fake_prepare_bound_team_execution_context(**_kwargs: object) -> _PreparedExecutionContext:
         return _PreparedExecutionContext(
             messages=(Message(role="user", content="prepared team prompt"),),
-            replay_plan=None,
             unseen_event_ids=[],
-            replays_persisted_history=False,
-            compaction_outcomes=[],
+            prepared_history=PreparedHistoryState(),
         )
 
     assert "PreparedMaterializedTeamExecution" not in teams_module.__all__
