@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -37,4 +38,4 @@ def evaluate_tool_approval_bypass(
     predicate = _BYPASS_PREDICATES.get(function_name)
     if predicate is None:
         return False
-    return predicate(entrypoint, arguments)
+    return predicate(inspect.unwrap(entrypoint), arguments)

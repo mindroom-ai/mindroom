@@ -70,7 +70,7 @@ _DECLINED_RESULT_TEMPLATE = (
 )
 _APPROVAL_POLICY_FAILURE_REASON = "Tool approval policy failed."
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
-_BOUND_BRIDGE_HOOK_BASE_IDS: dict[int, int] = {}
+_BOUND_BRIDGE_HOOK_BASES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
 _ToolHookResult = Any
 # Agno does not currently expose a hook-chain extension point for unwrapping MindRoom's
 # deferred sync-bridge results. Keep these wrappers covered by tests when bumping Agno
@@ -1015,9 +1015,7 @@ def _prepend_function_tool_hook(function: Function, bridge: Callable[..., Any]) 
     bridge_hook_ids = {id(hook) for hook in bridge_hooks}
 
     existing_hooks = [
-        hook
-        for hook in list(function.tool_hooks or [])
-        if id(hook) not in bridge_hook_ids and _BOUND_BRIDGE_HOOK_BASE_IDS.get(id(hook)) not in bridge_hook_ids
+        hook for hook in list(function.tool_hooks or []) if not _is_bridge_hook_for_bases(hook, bridge_hook_ids)
     ]
     function.tool_hooks = [
         *[_bind_bridge_hook_to_entrypoint(hook, function.entrypoint) for hook in bridge_hooks],
@@ -1035,12 +1033,22 @@ def _bind_bridge_hook_to_entrypoint(
         async def async_bound_bridge_hook(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
             return await hook(name, func, args, approval_entrypoint=approval_entrypoint)
 
-        _BOUND_BRIDGE_HOOK_BASE_IDS[id(async_bound_bridge_hook)] = id(hook)
+        _BOUND_BRIDGE_HOOK_BASES[async_bound_bridge_hook] = hook
         return async_bound_bridge_hook
 
     @wraps(hook)
     def bound_bridge_hook(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
         return hook(name, func, args, approval_entrypoint=approval_entrypoint)
 
-    _BOUND_BRIDGE_HOOK_BASE_IDS[id(bound_bridge_hook)] = id(hook)
+    _BOUND_BRIDGE_HOOK_BASES[bound_bridge_hook] = hook
     return bound_bridge_hook
+
+
+def _is_bridge_hook_for_bases(hook: Callable[..., Any], bridge_hook_ids: set[int]) -> bool:
+    if id(hook) in bridge_hook_ids:
+        return True
+    try:
+        base_hook = _BOUND_BRIDGE_HOOK_BASES.get(hook)
+    except TypeError:
+        return False
+    return base_hook is not None and id(base_hook) in bridge_hook_ids

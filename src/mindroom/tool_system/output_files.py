@@ -725,6 +725,7 @@ def _wrap_entrypoint(
     wrapper.__name__ = getattr(entrypoint, "__name__", "tool_entrypoint")
     wrapper.__doc__ = _docstring_with_output_path(getattr(entrypoint, "__doc__", None))
     wrapper.__module__ = getattr(entrypoint, "__module__", __name__)
+    wrapper.__dict__["__wrapped__"] = entrypoint
     wrapper.__dict__["__signature__"] = _signature_with_output_path(entrypoint)
     _copy_annotations_with_output_path(wrapper, entrypoint)
     setattr(wrapper, _WRAPPED_ATTR, True)
