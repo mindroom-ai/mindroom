@@ -42,6 +42,7 @@ from mindroom.history.storage import (
     prune_reintroduced_runs,
     read_scope_state,
     remove_runs_by_id,
+    update_scope_state_on_latest,
     write_scope_state,
 )
 from mindroom.history.summary_call import (
@@ -198,6 +199,60 @@ def test_prune_reintroduced_runs_is_a_no_op_without_resurrected_runs() -> None:
     assert prune_reintroduced_runs(session, HistoryScopeState(compacted_run_ids=("gone",))) is False
     assert prune_reintroduced_runs(session, HistoryScopeState()) is False
     assert [run.run_id for run in session.runs or []] == ["kept"]
+
+
+def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: Path) -> None:
+    """The update callable sees the latest persisted state, and the write lands on that row."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stale_session = _session([_completed_run("run-1")])
+    write_scope_state(stale_session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(stale_session)
+
+    concurrent_session = get_agent_session(storage, "session-1")
+    assert concurrent_session is not None
+    concurrent_state = HistoryScopeState(force_compact_before_next_run=True, compacted_run_ids=("older-run",))
+    write_scope_state(concurrent_session, _SCOPE, concurrent_state)
+    concurrent_session.runs = [*(concurrent_session.runs or []), _completed_run("run-2")]
+    storage.upsert_session(concurrent_session)
+
+    seen_states: list[HistoryScopeState] = []
+
+    def clear_force(latest: HistoryScopeState) -> HistoryScopeState:
+        seen_states.append(latest)
+        return HistoryScopeState(force_compact_before_next_run=False, compacted_run_ids=latest.compacted_run_ids)
+
+    returned_state = update_scope_state_on_latest(storage, stale_session, _SCOPE, clear_force)
+
+    assert seen_states == [concurrent_state]
+    assert returned_state.force_compact_before_next_run is False
+    assert returned_state.compacted_run_ids == ("older-run",)
+    persisted_session = get_agent_session(storage, "session-1")
+    assert persisted_session is not None
+    assert read_scope_state(persisted_session, _SCOPE) == returned_state
+    assert [run.run_id for run in stale_session.runs or []] == ["run-1", "run-2"]
+
+
+def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(tmp_path: Path) -> None:
+    """A no-op update must not upsert but still syncs the session from the freshest row."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stale_session = _session([_completed_run("run-1")])
+    persisted_state = HistoryScopeState(compacted_run_ids=("older-run",))
+    write_scope_state(stale_session, _SCOPE, persisted_state)
+    storage.upsert_session(stale_session)
+
+    concurrent_session = get_agent_session(storage, "session-1")
+    assert concurrent_session is not None
+    concurrent_session.runs = [*(concurrent_session.runs or []), _completed_run("run-2")]
+    storage.upsert_session(concurrent_session)
+
+    with patch.object(storage, "upsert_session", wraps=storage.upsert_session) as upsert_spy:
+        returned_state = update_scope_state_on_latest(storage, stale_session, _SCOPE, lambda latest: latest)
+
+    upsert_spy.assert_not_called()
+    assert returned_state == persisted_state
+    assert [run.run_id for run in stale_session.runs or []] == ["run-1", "run-2"]
 
 
 def test_remove_runs_by_id_removes_descendants() -> None:

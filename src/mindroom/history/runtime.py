@@ -259,7 +259,7 @@ class _SafeCompactionLifecycle:
         )
 
     @staticmethod
-    async def _deliver(delivery: Awaitable[str | None], *, phase: str, session_id: str, scope: str) -> str | None:
+    async def _deliver[T](delivery: Awaitable[T], *, phase: str, session_id: str, scope: str) -> T | None:
         try:
             return await delivery
         except Exception:
