@@ -10512,6 +10512,42 @@
       "config_fields": [
         {
           "authored_override": true,
+          "default": 5,
+          "description": null,
+          "label": "Max Results",
+          "name": "max_results",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "scholarly"
+      ],
+      "description": "Search academic publications on Google Scholar",
+      "display_name": "Google Scholar",
+      "docs_url": "https://github.com/scholarly-python-package/scholarly",
+      "function_names": [
+        "search_google_scholar"
+      ],
+      "helper_text": null,
+      "icon": "SiGooglescholar",
+      "icon_color": "text-blue-500",
+      "name": "google_scholar",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "research",
+      "config_fields": [
+        {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Search",
