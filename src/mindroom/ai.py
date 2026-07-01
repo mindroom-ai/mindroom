@@ -1267,15 +1267,7 @@ async def _prepare_agent_and_prompt(
             timing_scope=timing_scope,
         )
         enriched_outcomes = [replace(o, **breakdown) for o in prepared_history.compaction_outcomes]
-        prepared_history = PreparedHistoryState(
-            compaction_outcomes=enriched_outcomes,
-            replay_plan=prepared_history.replay_plan,
-            replays_persisted_history=prepared_history.replays_persisted_history,
-            compaction_decision=prepared_history.compaction_decision,
-            compaction_reply_outcome=prepared_history.compaction_reply_outcome,
-            prepared_context_tokens=prepared_history.prepared_context_tokens,
-            estimated_context_tokens=prepared_history.estimated_context_tokens,
-        )
+        prepared_history = replace(prepared_history, compaction_outcomes=enriched_outcomes)
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.clear()
             compaction_outcomes_collector.extend(enriched_outcomes)
@@ -1648,7 +1640,7 @@ async def ai_response(  # noqa: C901, PLR0915
                     model=response.model,
                     model_provider=response.model_provider,
                     metrics=response.metrics,
-                    context_input_tokens=prepared_run.prepared_history.estimated_context_tokens,
+                    context_input_tokens=prepared_run.prepared_history.prepared_context_tokens,
                     tool_count=len(response.tools) if response.tools is not None else 0,
                     prepared_history=prepared_run.prepared_history,
                 )
@@ -2181,7 +2173,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             agent = prepared_run.agent
             run_input = run_context.run_input
             unseen_event_ids = prepared_run.unseen_event_ids
-            prepared_context_input_tokens = prepared_run.prepared_history.estimated_context_tokens
+            prepared_context_input_tokens = prepared_run.prepared_history.prepared_context_tokens
             metadata = run_context.metadata
             run_extra_content = run_context.run_extra_content
 

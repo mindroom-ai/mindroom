@@ -253,7 +253,6 @@ def _prepared_prompt_result(
     agent: object,
     *,
     prompt: str = "test prompt",
-    estimated_context_tokens: int | None = None,
     prepared_context_tokens: int | None = None,
     runtime_model_name: str = "default",
 ) -> _PreparedAgentRun:
@@ -262,7 +261,6 @@ def _prepared_prompt_result(
         messages=(Message(role="user", content=prompt),),
         unseen_event_ids=[],
         prepared_history=PreparedHistoryState(
-            estimated_context_tokens=estimated_context_tokens,
             prepared_context_tokens=prepared_context_tokens,
         ),
         runtime_model_name=runtime_model_name,
@@ -4778,14 +4776,8 @@ class TestUserIdPassthrough:
         mock_agent.additional_context = "existing context"
         prepared_execution = _PreparedExecutionContext(
             messages=(Message(role="user", content="prepared prompt"),),
-            replay_plan=None,
             unseen_event_ids=[],
-            replays_persisted_history=False,
-            compaction_outcomes=[],
-            compaction_decision=None,
-            compaction_reply_outcome="none",
-            prepared_context_tokens=None,
-            estimated_context_tokens=None,
+            prepared_history=PreparedHistoryState(),
         )
 
         with (
@@ -6909,7 +6901,7 @@ class TestUserIdPassthrough:
         )
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-            mock_prepare.return_value = _prepared_prompt_result(mock_agent, estimated_context_tokens=1500)
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, prepared_context_tokens=1500)
             run_metadata: dict[str, object] = {}
             await ai_response(
                 agent_name="general",
@@ -7833,7 +7825,7 @@ class TestUserIdPassthrough:
         )
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-            mock_prepare.return_value = _prepared_prompt_result(mock_agent, estimated_context_tokens=900)
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, prepared_context_tokens=900)
             run_metadata: dict[str, object] = {}
             async for _chunk in stream_agent_response(
                 agent_name="general",
@@ -7966,7 +7958,7 @@ class TestUserIdPassthrough:
         )
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-            mock_prepare.return_value = _prepared_prompt_result(mock_agent, estimated_context_tokens=900)
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, prepared_context_tokens=900)
             run_metadata: dict[str, object] = {}
             async for _chunk in stream_agent_response(
                 agent_name="general",

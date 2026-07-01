@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 
     from mindroom.attachments import AttachmentRecord
     from mindroom.config.main import Config
-    from mindroom.history import CompactionDecision, CompactionLifecycle, CompactionOutcome, CompactionReplyOutcome
+    from mindroom.history import CompactionLifecycle, CompactionOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.timing import DispatchPipelineTiming
 
@@ -79,14 +79,8 @@ class _PreparedExecutionContext:
     """Final request-scoped input planning result."""
 
     messages: tuple[Message, ...]
-    replay_plan: ResolvedReplayPlan | None
     unseen_event_ids: list[str]
-    replays_persisted_history: bool
-    compaction_outcomes: list[CompactionOutcome]
-    compaction_decision: CompactionDecision | None = None
-    compaction_reply_outcome: CompactionReplyOutcome = "none"
-    prepared_context_tokens: int | None = None
-    estimated_context_tokens: int | None = None
+    prepared_history: PreparedHistoryState
 
     @property
     def final_prompt(self) -> str:
@@ -99,20 +93,9 @@ class _PreparedExecutionContext:
         return self.messages[:-1]
 
     @property
-    def prepared_history(self) -> PreparedHistoryState:
-        """Return the history diagnostics prepared for this execution."""
-        default_decision = PreparedHistoryState().compaction_decision
-        return PreparedHistoryState(
-            compaction_outcomes=self.compaction_outcomes,
-            replay_plan=self.replay_plan,
-            replays_persisted_history=self.replays_persisted_history,
-            compaction_decision=(
-                self.compaction_decision if self.compaction_decision is not None else default_decision
-            ),
-            compaction_reply_outcome=self.compaction_reply_outcome,
-            prepared_context_tokens=self.prepared_context_tokens,
-            estimated_context_tokens=self.estimated_context_tokens,
-        )
+    def replay_plan(self) -> ResolvedReplayPlan | None:
+        """Return the resolved persisted-replay plan for this execution."""
+        return self.prepared_history.replay_plan
 
 
 @dataclass(frozen=True)
@@ -770,24 +753,14 @@ async def _prepare_execution_context_common(
         fallback_context_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
         if prepared_history.replay_plan is not None:
             fallback_context_tokens += prepared_history.replay_plan.estimated_tokens
-        prepared_history = replace(
-            prepared_history,
-            prepared_context_tokens=fallback_context_tokens,
-            estimated_context_tokens=fallback_context_tokens,
-        )
+        prepared_history = replace(prepared_history, prepared_context_tokens=fallback_context_tokens)
     if pipeline_timing is not None:
         pipeline_timing.mark("prompt_assembly_ready")
 
     return _PreparedExecutionContext(
         messages=final_messages,
-        replay_plan=prepared_history.replay_plan,
-        estimated_context_tokens=prepared_history.estimated_context_tokens,
         unseen_event_ids=unseen_event_ids,
-        replays_persisted_history=prepared_history.replays_persisted_history,
-        compaction_outcomes=prepared_history.compaction_outcomes,
-        compaction_decision=prepared_history.compaction_decision,
-        compaction_reply_outcome=prepared_history.compaction_reply_outcome,
-        prepared_context_tokens=prepared_history.prepared_context_tokens,
+        prepared_history=prepared_history,
     )
 
 

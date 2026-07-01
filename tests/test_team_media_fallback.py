@@ -44,7 +44,7 @@ from mindroom.history.interrupted_replay import _render_interrupted_replay_conte
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import CompactionDecision, CompactionReplyOutcome
+from mindroom.history.types import CompactionDecision, CompactionReplyOutcome, PreparedHistoryState
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.media_inputs import MediaInputs
@@ -116,13 +116,13 @@ def _prepared_team_execution_context(
 ) -> _PreparedExecutionContext:
     return _PreparedExecutionContext(
         messages=(*context_messages, Message(role="user", content=final_prompt)),
-        replay_plan=None,
         unseen_event_ids=unseen_event_ids or [],
-        replays_persisted_history=replays_persisted_history,
-        compaction_outcomes=[],
-        compaction_decision=compaction_decision,
-        compaction_reply_outcome=compaction_reply_outcome,
-        prepared_context_tokens=prepared_context_tokens,
+        prepared_history=PreparedHistoryState(
+            replays_persisted_history=replays_persisted_history,
+            compaction_decision=compaction_decision or CompactionDecision(mode="none", reason="unclassified"),
+            compaction_reply_outcome=compaction_reply_outcome,
+            prepared_context_tokens=prepared_context_tokens,
+        ),
     )
 
 
@@ -3931,7 +3931,7 @@ async def test_private_ad_hoc_team_second_turn_replays_first_scoped_run() -> Non
         )
 
     assert second_team.id == scope_context.scope.scope_id
-    assert prepared.replays_persisted_history is True
+    assert prepared.prepared_history.replays_persisted_history is True
 
 
 @pytest.mark.asyncio

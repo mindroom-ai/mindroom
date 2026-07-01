@@ -50,7 +50,6 @@ from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
     CompactionLifecycleStart,
-    CompactionLifecycleSuccess,
     CompactionReplyOutcome,
     HistoryPolicy,
     HistoryScope,
@@ -200,7 +199,6 @@ class PreparedScopeHistory:
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
-    prepared_context_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -225,15 +223,15 @@ class _SafeCompactionLifecycle:
             scope=event.scope,
         )
 
-    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
+    async def complete_success(self, outcome: CompactionOutcome) -> None:
         """Edit the lifecycle notice after successful compaction."""
-        if self.lifecycle is None or event.notice_event_id is None:
+        if self.lifecycle is None or outcome.lifecycle_notice_event_id is None:
             return
         await self._deliver(
-            self.lifecycle.complete_success(event),
+            self.lifecycle.complete_success(outcome),
             phase="success",
-            session_id=event.outcome.session_id,
-            scope=event.outcome.scope,
+            session_id=outcome.session_id,
+            scope=outcome.scope,
         )
 
     async def progress(self, event: CompactionLifecycleProgress) -> None:
@@ -509,13 +507,7 @@ async def _run_scope_compaction_with_lifecycle(
         lifecycle_notice_event_id=notice_event_id,
         duration_ms=duration_ms,
     )
-    await lifecycle.complete_success(
-        CompactionLifecycleSuccess(
-            notice_event_id=notice_event_id,
-            outcome=outcome,
-            duration_ms=duration_ms,
-        ),
-    )
+    await lifecycle.complete_success(outcome)
     return _ScopeCompactionLifecycleResult(outcome=outcome, reply_outcome="success")
 
 
@@ -560,17 +552,6 @@ async def _run_scope_compaction(
         progress_callback=progress_callback,
     )
     return outcome
-
-
-def _estimated_context_tokens(
-    *,
-    static_prompt_tokens: int | None,
-    replay_plan: ResolvedReplayPlan | None,
-) -> int | None:
-    if static_prompt_tokens is None:
-        return None
-    replay_tokens = replay_plan.estimated_tokens if replay_plan is not None else 0
-    return static_prompt_tokens + replay_tokens
 
 
 def finalize_history_preparation(
@@ -629,10 +610,6 @@ def finalize_history_preparation(
         return PreparedHistoryState(
             compaction_outcomes=prepared_scope_history.compaction_outcomes,
             replay_plan=replay_plan,
-            estimated_context_tokens=_estimated_context_tokens(
-                static_prompt_tokens=resolved_static_prompt_tokens,
-                replay_plan=replay_plan,
-            ),
             replays_persisted_history=False,
             compaction_decision=prepared_scope_history.compaction_decision,
             compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
@@ -674,10 +651,6 @@ def finalize_history_preparation(
     return PreparedHistoryState(
         compaction_outcomes=prepared_scope_history.compaction_outcomes,
         replay_plan=replay_plan,
-        estimated_context_tokens=_estimated_context_tokens(
-            static_prompt_tokens=resolved_static_prompt_tokens,
-            replay_plan=replay_plan,
-        ),
         replays_persisted_history=_has_effective_persisted_replay(
             session=prepared_scope_history.session,
             scope=prepared_scope_history.scope,

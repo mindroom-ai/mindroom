@@ -99,7 +99,6 @@ from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
     CompactionLifecycleStart,
-    CompactionLifecycleSuccess,
     CompactionOutcome,
     HistoryPolicy,
     HistoryScope,
@@ -193,8 +192,8 @@ class RecordingCompactionLifecycle:
         self.events.append(event)
         return self.start_event_id
 
-    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
-        self.events.append(event)
+    async def complete_success(self, outcome: CompactionOutcome) -> None:
+        self.events.append(outcome)
 
     async def progress(self, event: CompactionLifecycleProgress) -> None:
         self.events.append(event)
@@ -834,8 +833,8 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
     assert prepared.compaction_decision.mode == "required"
     assert prepared.compaction_reply_outcome == "success"
     assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
-    assert isinstance(lifecycle.events[1], CompactionLifecycleSuccess)
-    assert lifecycle.events[1].notice_event_id == "$compaction"
+    assert isinstance(lifecycle.events[1], CompactionOutcome)
+    assert lifecycle.events[1].lifecycle_notice_event_id == "$compaction"
 
 
 @pytest.mark.asyncio
@@ -2663,7 +2662,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     progress_events = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleProgress)]
     assert progress_events
     assert progress_events[-1].runs_remaining > 0
-    assert isinstance(lifecycle.events[-1], CompactionLifecycleSuccess)
+    assert isinstance(lifecycle.events[-1], CompactionOutcome)
 
     persisted.runs = [
         _completed_run(
@@ -5582,10 +5581,8 @@ async def test_prepare_agent_and_prompt_syncs_enriched_compaction_outcomes_back_
     collector = [original_outcome]
     prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
-        replay_plan=None,
         unseen_event_ids=[],
-        replays_persisted_history=False,
-        compaction_outcomes=[original_outcome],
+        prepared_history=PreparedHistoryState(compaction_outcomes=[original_outcome]),
     )
 
     with (
@@ -5630,10 +5627,8 @@ async def test_prepare_agent_and_prompt_populates_empty_collector_with_enriched_
     collector: list[CompactionOutcome] = []
     prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
-        replay_plan=None,
         unseen_event_ids=[],
-        replays_persisted_history=False,
-        compaction_outcomes=[original_outcome],
+        prepared_history=PreparedHistoryState(compaction_outcomes=[original_outcome]),
     )
 
     with (
@@ -5678,10 +5673,8 @@ async def test_prepare_agent_and_prompt_enriches_compaction_outcomes_without_col
     original_outcome = _make_test_compaction_outcome()
     prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
-        replay_plan=None,
         unseen_event_ids=[],
-        replays_persisted_history=False,
-        compaction_outcomes=[original_outcome],
+        prepared_history=PreparedHistoryState(compaction_outcomes=[original_outcome]),
     )
 
     with (
@@ -5721,10 +5714,8 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
     original_outcome = _make_test_compaction_outcome()
     prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="x" * 248),),
-        replay_plan=None,
         unseen_event_ids=[],
-        replays_persisted_history=False,
-        compaction_outcomes=[original_outcome],
+        prepared_history=PreparedHistoryState(compaction_outcomes=[original_outcome]),
     )
 
     with (
@@ -5763,10 +5754,8 @@ async def test_prepare_agent_and_prompt_keeps_empty_collector_when_no_compaction
     collector: list[CompactionOutcome] = []
     prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
-        replay_plan=None,
         unseen_event_ids=[],
-        replays_persisted_history=False,
-        compaction_outcomes=[],
+        prepared_history=PreparedHistoryState(),
     )
 
     with (

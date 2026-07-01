@@ -175,7 +175,7 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
         fallback_static_token_budget=100,
     )
 
-    assert prepared.replays_persisted_history is True
+    assert prepared.prepared_history.replays_persisted_history is True
     assert prepared.context_messages[0].content == "@alice:localhost: older context"
 
 
@@ -242,8 +242,10 @@ async def test_prepare_agent_execution_context_reuses_function_schema_processing
 
     preparation_process_entrypoint_calls = process_entrypoint_calls
     count_schema_processing = False
-    assert prepared.prepared_context_tokens == estimate_agent_static_tokens(agent, prepared.final_prompt)
-    assert prepared.estimated_context_tokens == prepared.prepared_context_tokens
+    assert prepared.prepared_history.prepared_context_tokens == estimate_agent_static_tokens(
+        agent,
+        prepared.final_prompt,
+    )
     assert preparation_process_entrypoint_calls == 1
     assert prepare_scope_history.await_count == 1
 

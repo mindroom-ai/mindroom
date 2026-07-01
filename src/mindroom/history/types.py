@@ -167,15 +167,6 @@ class CompactionLifecycleStart:
 
 
 @dataclass(frozen=True)
-class CompactionLifecycleSuccess:
-    """Visible lifecycle notice payload emitted after successful foreground compaction."""
-
-    notice_event_id: str | None
-    outcome: CompactionOutcome
-    duration_ms: int
-
-
-@dataclass(frozen=True)
 class CompactionLifecycleProgress:
     """Visible lifecycle progress payload emitted after persisted compaction chunks."""
 
@@ -250,7 +241,7 @@ class CompactionLifecycle(Protocol):
     async def start(self, event: CompactionLifecycleStart) -> str | None:
         """Send the initial compaction notice and return its Matrix event id."""
 
-    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
+    async def complete_success(self, outcome: CompactionOutcome) -> None:
         """Edit the lifecycle notice after successful compaction."""
 
     async def progress(self, event: CompactionLifecycleProgress) -> None:
@@ -372,4 +363,3 @@ class PreparedHistoryState:
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     prepared_context_tokens: int | None = None
-    estimated_context_tokens: int | None = None
