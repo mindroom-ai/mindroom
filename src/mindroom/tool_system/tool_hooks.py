@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import threading
 import time
+from collections.abc import Callable
 from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass
@@ -47,7 +48,7 @@ from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure,
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Coroutine
 
     from agno.tools import Toolkit
     from agno.tools.function import Function
@@ -62,6 +63,8 @@ if TYPE_CHECKING:
         HookRoomStateQuerier,
     )
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+_ToolBypassResultTransform = Callable[[Callable[..., Any] | None, object, dict[str, Any]], object]
 _DECLINED_RESULT_TEMPLATE = (
     "[TOOL CALL DECLINED]\n"
     "Tool: {tool_name}\n"
@@ -717,6 +720,7 @@ async def _execute_bridge(
     has_before_hooks: bool,
     has_after_hooks: bool,
     workflow_origin: ToolCallWorkflowOrigin | None,
+    bypass_result_transform: _ToolBypassResultTransform | None,
 ) -> _ToolHookResult:
     started_at = time.perf_counter()
     timing = _ToolBridgeTiming(started_at=started_at)
@@ -774,6 +778,10 @@ async def _execute_bridge(
     )
     timing.approval_ms = elapsed_ms_since(approval_started_at, clock=time.perf_counter, ndigits=2)
     if isinstance(approval_gate_result, ToolApprovalBypassResult):
+        bypass_entrypoint = approval_entrypoint if approval_entrypoint is not None else func
+        result = approval_gate_result.result
+        if bypass_result_transform is not None:
+            result = bypass_result_transform(bypass_entrypoint, result, args)
         return await _finish_successful_tool_call(
             timing=timing,
             hook_registry=hook_registry,
@@ -782,7 +790,7 @@ async def _execute_bridge(
             hook_arguments=hook_arguments,
             args=args,
             tool_name=tool_name,
-            result=approval_gate_result.result,
+            result=result,
             has_after_hooks=has_after_hooks,
             outcome="approval_bypass_result",
         )
@@ -923,6 +931,7 @@ def build_tool_hook_bridge(
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
     workflow_origin: ToolCallWorkflowOrigin | None = None,
+    bypass_result_transform: _ToolBypassResultTransform | None = None,
 ) -> Callable[..., Any]:
     """Return one Agno-compatible tool hook bridge."""
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
@@ -947,6 +956,7 @@ def build_tool_hook_bridge(
             has_before_hooks=has_before_hooks,
             has_after_hooks=has_after_hooks,
             workflow_origin=workflow_origin,
+            bypass_result_transform=bypass_result_transform,
         )
 
     def sync_bridge(
@@ -970,6 +980,7 @@ def build_tool_hook_bridge(
                     has_before_hooks=has_before_hooks,
                     has_after_hooks=has_after_hooks,
                     workflow_origin=workflow_origin,
+                    bypass_result_transform=bypass_result_transform,
                 ),
             )
         return _run_coroutine_from_sync(
@@ -986,6 +997,7 @@ def build_tool_hook_bridge(
                 has_before_hooks=has_before_hooks,
                 has_after_hooks=has_after_hooks,
                 workflow_origin=workflow_origin,
+                bypass_result_transform=bypass_result_transform,
             ),
         )
 

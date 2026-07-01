@@ -54,6 +54,7 @@ from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import ToolCallWorkflowOrigin, _shutdown_approval_store
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory, register_tool_with_metadata
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, apply_output_file_handling_to_result
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     ToolRuntimeContext,
@@ -1846,6 +1847,76 @@ async def test_request_network_access_output_wrapped_toolkit_preserves_approval_
         result.result
         == "docs.example.com is already allowed by the static egress allowlist. No temporary grant was created."
     )
+    sender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_request_network_access_bypass_result_uses_output_file_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Approval-bypass results should still honor mindroom_output_path on wrapped tools."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                    tools=["approved_egress"],
+                    include_default_tools=False,
+                    memory_backend="file",
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={"rules": [{"match": "request_network_access", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+        bypass_result_transform=apply_output_file_handling_to_result,
+    )
+    assert bridge is not None
+    toolkit = build_agent_toolkit(
+        "approved_egress",
+        agent_name="code",
+        config=config,
+        runtime_paths=runtime_paths,
+        worker_tools=[],
+        runtime_overrides=None,
+        execution_identity=None,
+    )
+    assert toolkit is not None
+    function = toolkit.async_functions["request_network_access"]
+    prepend_tool_hook_bridge(toolkit, bridge)
+
+    result = await FunctionCall(
+        function=function,
+        arguments={
+            "hostname": "docs.example.com",
+            "ttl_minutes": 5,
+            "reason": "Need docs.",
+            OUTPUT_PATH_ARGUMENT: "egress.txt",
+        },
+        call_id="call-1",
+    ).aexecute()
+
+    assert result.status == "success"
+    saved = result.result["mindroom_tool_output"]
+    assert saved["status"] == "saved_to_file"
+    assert saved["path"] == "egress.txt"
+    saved_paths = list(tmp_path.rglob("egress.txt"))
+    assert len(saved_paths) == 1
+    assert "docs.example.com is already allowed" in saved_paths[0].read_text(encoding="utf-8")
     sender.assert_not_awaited()
 
 

@@ -41,6 +41,8 @@ _AUTO_SAVE_PREVIEW_BYTES = 8192
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
 _DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
 _AUTO_SAVE_ROOT = "mindroom_tool_outputs"
+_WRAPPER_POLICY_ATTR = "__mindroom_output_file_policy__"
+_WRAPPER_TOOL_NAME_ATTR = "__mindroom_output_file_tool_name__"
 _TEXT_FALLBACK_HEADER = (
     "MindRoom tool output serialized with text fallback because the result was not JSON-normalizable.\n\n"
 )
@@ -616,6 +618,26 @@ def _auto_save_large_result(
     return auto_saved_result
 
 
+def apply_output_file_handling_to_result(
+    entrypoint: Callable[..., object] | None,
+    result: object,
+    arguments: Mapping[str, object],
+) -> object:
+    """Apply output-file wrapper behavior to a result produced outside the wrapper."""
+    if entrypoint is None or not getattr(entrypoint, _WRAPPED_ATTR, False):
+        return result
+
+    policy = cast("ToolOutputFilePolicy", getattr(entrypoint, _WRAPPER_POLICY_ATTR))
+    tool_name = cast("str", getattr(entrypoint, _WRAPPER_TOOL_NAME_ATTR))
+    normalized_output_path = _normalize_output_path_argument(arguments.get(OUTPUT_PATH_ARGUMENT))
+    if normalized_output_path is None:
+        return _auto_save_large_result(result, policy=policy, tool_name=tool_name)
+    validated_path = _validate_output_path(policy, normalized_output_path)
+    if isinstance(validated_path, str):
+        return _error_receipt(validated_path)
+    return _redirect_result_to_file(result, policy=policy, validated_path=validated_path)
+
+
 def _write_auto_saved_result(
     serialized: _SerializedToolOutput,
     *,
@@ -727,6 +749,8 @@ def _wrap_entrypoint(
     wrapper.__module__ = getattr(entrypoint, "__module__", __name__)
     wrapper.__dict__["__wrapped__"] = entrypoint
     wrapper.__dict__["__signature__"] = _signature_with_output_path(entrypoint)
+    wrapper.__dict__[_WRAPPER_POLICY_ATTR] = policy
+    wrapper.__dict__[_WRAPPER_TOOL_NAME_ATTR] = tool_name
     _copy_annotations_with_output_path(wrapper, entrypoint)
     setattr(wrapper, _WRAPPED_ATTR, True)
     return wrapper
