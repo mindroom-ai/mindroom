@@ -3467,6 +3467,51 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     assert "second result" in summary_input
 
 
+def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages() -> None:
+    """The estimation path reads persisted messages without copying; pin that it never mutates them."""
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="use tools"),
+                    Message(
+                        role="assistant",
+                        content="first tool",
+                        tool_calls=[
+                            {"id": "call-1", "type": "function", "function": {"name": "first", "arguments": "{}"}},
+                        ],
+                    ),
+                    Message(role="tool", content="first result", tool_call_id="call-1"),
+                    Message(
+                        role="assistant",
+                        content="second tool",
+                        tool_calls=[
+                            {"id": "call-2", "type": "function", "function": {"name": "second", "arguments": "{}"}},
+                        ],
+                    ),
+                    Message(role="tool", content="second result", tool_call_id="call-2"),
+                ],
+            ),
+        ],
+    )
+    original_snapshots = [message.model_dump() for run in session.runs or [] for message in run.messages or []]
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=1,
+    )
+
+    estimated_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=history_settings,
+    )
+
+    assert estimated_tokens > 0
+    assert [message.model_dump() for run in session.runs or [] for message in run.messages or []] == original_snapshots
+
+
 def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt_roles() -> None:
     conversation_messages = [
         Message(role="user", content="user request"),
