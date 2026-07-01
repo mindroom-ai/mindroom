@@ -35,7 +35,7 @@ from mindroom.tool_approval import (
     ToolCallWorkflowOrigin,
     request_tool_approval_for_call,
 )
-from mindroom.tool_system.approval_bypass import should_bypass_tool_approval
+from mindroom.tool_system.approval_bypass import ToolApprovalBypassResult, evaluate_tool_approval_bypass
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -70,7 +70,7 @@ _DECLINED_RESULT_TEMPLATE = (
 )
 _APPROVAL_POLICY_FAILURE_REASON = "Tool approval policy failed."
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
-_BOUND_BRIDGE_HOOK_BASES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
+_BOUND_BRIDGE_HOOK_BASE_IDS: dict[int, int] = {}
 _ToolHookResult = Any
 # Agno does not currently expose a hook-chain extension point for unwrapping MindRoom's
 # deferred sync-bridge results. Keep these wrappers covered by tests when bumping Agno
@@ -447,7 +447,7 @@ async def _emit_after_call(
     await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
 
 
-async def _maybe_block_for_tool_approval(
+async def _resolve_tool_approval_gate(
     *,
     resolved_context: _ResolvedToolContext,
     func: Callable[..., Any],
@@ -455,8 +455,11 @@ async def _maybe_block_for_tool_approval(
     args: dict[str, Any],
     tool_name: str,
     workflow_origin: ToolCallWorkflowOrigin | None,
-) -> str | None:
-    if should_bypass_tool_approval(tool_name, approval_entrypoint or func, args):
+) -> str | ToolApprovalBypassResult | None:
+    bypass_decision = evaluate_tool_approval_bypass(tool_name, approval_entrypoint or func, args)
+    if isinstance(bypass_decision, ToolApprovalBypassResult):
+        return bypass_decision
+    if bypass_decision:
         return None
     if resolved_context.config is None or resolved_context.runtime_paths is None:
         return None
@@ -655,6 +658,50 @@ async def _maybe_emit_after_call_timed(
     )
 
 
+async def _finish_successful_tool_call(
+    *,
+    timing: _ToolBridgeTiming,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    dispatch_context: ToolDispatchContext | None,
+    hook_arguments: dict[str, Any] | None,
+    args: dict[str, Any],
+    tool_name: str,
+    result: _ToolHookResult,
+    has_after_hooks: bool,
+    outcome: str,
+) -> _ToolHookResult:
+    duration_ms = timing.mark_result_ready()
+    _record_debug_tool_success(
+        tool_name=tool_name,
+        arguments=args,
+        result=result,
+        duration_ms=duration_ms,
+        timing=timing.record_timing(),
+        resolved_context=resolved_context,
+        dispatch_context=dispatch_context,
+    )
+    await _maybe_emit_after_call_timed(
+        has_after_hooks=has_after_hooks,
+        timing=timing,
+        hook_registry=hook_registry,
+        resolved_context=resolved_context,
+        hook_arguments=hook_arguments,
+        args=args,
+        tool_name=tool_name,
+        result=result,
+        error=None,
+        blocked=False,
+        duration_ms=duration_ms,
+    )
+    timing.emit_finish(
+        tool_name=tool_name,
+        agent_name=resolved_context.agent_name or None,
+        outcome=outcome,
+    )
+    return result
+
+
 async def _execute_bridge(
     *,
     hook_registry: HookRegistry,
@@ -716,7 +763,7 @@ async def _execute_bridge(
         )
 
     approval_started_at = time.perf_counter()
-    blocked_result = await _maybe_block_for_tool_approval(
+    approval_gate_result = await _resolve_tool_approval_gate(
         resolved_context=resolved_context,
         func=func,
         approval_entrypoint=approval_entrypoint,
@@ -725,7 +772,20 @@ async def _execute_bridge(
         workflow_origin=workflow_origin,
     )
     timing.approval_ms = elapsed_ms_since(approval_started_at, clock=time.perf_counter, ndigits=2)
-    if blocked_result is not None:
+    if isinstance(approval_gate_result, ToolApprovalBypassResult):
+        return await _finish_successful_tool_call(
+            timing=timing,
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            dispatch_context=effective_dispatch_context,
+            hook_arguments=hook_arguments,
+            args=args,
+            tool_name=tool_name,
+            result=approval_gate_result.result,
+            has_after_hooks=has_after_hooks,
+            outcome="approval_bypass_result",
+        )
+    if approval_gate_result is not None:
         return await _finish_blocked_tool_call(
             timing=timing,
             hook_registry=hook_registry,
@@ -733,7 +793,7 @@ async def _execute_bridge(
             hook_arguments=hook_arguments,
             args=args,
             tool_name=tool_name,
-            blocked_result=blocked_result,
+            blocked_result=approval_gate_result,
             has_after_hooks=has_after_hooks,
             outcome="blocked_approval",
         )
@@ -841,35 +901,18 @@ async def _execute_bridge(
         )
         raise
 
-    duration_ms = timing.mark_result_ready()
-    _record_debug_tool_success(
-        tool_name=tool_name,
-        arguments=args,
-        result=result,
-        duration_ms=duration_ms,
-        timing=timing.record_timing(),
-        resolved_context=resolved_context,
-        dispatch_context=effective_dispatch_context,
-    )
-    await _maybe_emit_after_call_timed(
-        has_after_hooks=has_after_hooks,
+    return await _finish_successful_tool_call(
         timing=timing,
         hook_registry=hook_registry,
         resolved_context=resolved_context,
+        dispatch_context=effective_dispatch_context,
         hook_arguments=hook_arguments,
         args=args,
         tool_name=tool_name,
         result=result,
-        error=error,
-        blocked=False,
-        duration_ms=duration_ms,
-    )
-    timing.emit_finish(
-        tool_name=tool_name,
-        agent_name=resolved_context.agent_name or None,
+        has_after_hooks=has_after_hooks,
         outcome="success",
     )
-    return result
 
 
 def build_tool_hook_bridge(
@@ -969,11 +1012,12 @@ def prepend_tool_hook_bridge(
 def _prepend_function_tool_hook(function: Function, bridge: Callable[..., Any]) -> None:
     sync_bridge = _SYNC_BRIDGES.get(bridge)
     bridge_hooks = [sync_bridge if sync_bridge is not None else bridge]
+    bridge_hook_ids = {id(hook) for hook in bridge_hooks}
 
     existing_hooks = [
         hook
         for hook in list(function.tool_hooks or [])
-        if hook not in bridge_hooks and _BOUND_BRIDGE_HOOK_BASES.get(hook) not in bridge_hooks
+        if id(hook) not in bridge_hook_ids and _BOUND_BRIDGE_HOOK_BASE_IDS.get(id(hook)) not in bridge_hook_ids
     ]
     function.tool_hooks = [
         *[_bind_bridge_hook_to_entrypoint(hook, function.entrypoint) for hook in bridge_hooks],
@@ -991,12 +1035,12 @@ def _bind_bridge_hook_to_entrypoint(
         async def async_bound_bridge_hook(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
             return await hook(name, func, args, approval_entrypoint=approval_entrypoint)
 
-        _BOUND_BRIDGE_HOOK_BASES[async_bound_bridge_hook] = hook
+        _BOUND_BRIDGE_HOOK_BASE_IDS[id(async_bound_bridge_hook)] = id(hook)
         return async_bound_bridge_hook
 
     @wraps(hook)
     def bound_bridge_hook(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
         return hook(name, func, args, approval_entrypoint=approval_entrypoint)
 
-    _BOUND_BRIDGE_HOOK_BASES[bound_bridge_hook] = hook
+    _BOUND_BRIDGE_HOOK_BASE_IDS[id(bound_bridge_hook)] = id(hook)
     return bound_bridge_hook

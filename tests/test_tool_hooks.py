@@ -31,6 +31,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
+from mindroom.egress.policy import WorkerEgressPolicy
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -1697,6 +1698,72 @@ async def test_request_network_access_static_allowlist_bypasses_approval_in_func
 
 
 @pytest.mark.asyncio
+async def test_request_network_access_static_allowlist_bypass_cannot_create_grant_after_policy_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Skipping approval for a static allowlist match must not later mint a temporary grant."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "timeout_days": 0.000001,
+                "rules": [{"match": "request_network_access", "action": "require_approval"}],
+            },
+        ),
+        runtime_paths,
+    )
+    client, _ = _initialize_router_approval_store(runtime_paths)
+    policies = iter(
+        (
+            WorkerEgressPolicy(static_allowlist=(".example.com",)),
+            WorkerEgressPolicy(static_allowlist=()),
+        ),
+    )
+    monkeypatch.setattr(_approved_egress, "resolve_worker_egress_policy", lambda: next(policies))
+
+    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
+        msg = "static allowlist approval bypass must not create a temporary grant"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(_approved_egress, "_post_grant", post_grant)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    toolkit = _approved_egress._ApprovedEgressTools()
+    function = toolkit.async_functions["request_network_access"]
+    prepend_tool_hook_bridge(toolkit, bridge)
+
+    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+        result = await FunctionCall(
+            function=function,
+            arguments={"hostname": "docs.example.com", "ttl_minutes": 5, "reason": "Need docs."},
+            call_id="call-1",
+        ).aexecute()
+
+    assert result.status == "success"
+    assert (
+        result.result
+        == "docs.example.com is already allowed by the static egress allowlist. No temporary grant was created."
+    )
+    client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_request_network_access_same_named_non_egress_tool_still_uses_matrix_approval(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3162,6 +3229,47 @@ async def test_prepend_tool_hook_bridge_preserves_existing_function_hooks() -> N
     assert result.status == "success"
     assert result.result == "hi"
     assert seen == ["bridge-before", "existing-before:echo", "tool", "existing-after"]
+
+
+def test_prepend_tool_hook_bridge_preserves_non_weakrefable_existing_hooks() -> None:
+    """Existing Agno hooks may be callable objects that cannot be weak-referenced."""
+    seen: list[str] = []
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        def echo(self, text: str) -> str:
+            seen.append("tool")
+            return text
+
+    class ExistingHook:
+        __slots__ = ()
+
+        def __call__(self, name: str, func: object, args: dict[str, object]) -> object:
+            del name
+            seen.append("existing-before")
+            result = func(**args)
+            seen.append("existing-after")
+            return result
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    existing_hook = ExistingHook()
+    function.tool_hooks = [existing_hook]
+
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
+    assert bridge is not None
+    prepend_tool_hook_bridge(toolkit, bridge)
+
+    assert function.tool_hooks is not None
+    assert function.tool_hooks[1] is existing_hook
+
+    result = FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute()
+
+    assert result.status == "success"
+    assert result.result == "hi"
+    assert seen == ["existing-before", "tool", "existing-after"]
 
 
 @pytest.mark.asyncio

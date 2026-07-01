@@ -25,7 +25,7 @@ from mindroom.egress.policy import (
     resolve_grant_subject,
     resolve_worker_egress_policy,
 )
-from mindroom.tool_system.approval_bypass import register_tool_approval_bypass
+from mindroom.tool_system.approval_bypass import ToolApprovalBypassResult, register_tool_approval_bypass
 from mindroom.tool_system.metadata import SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -82,7 +82,13 @@ def _request_network_access_description() -> str:
     )
 
 
-def _request_network_access_arguments_bypass_approval(arguments: Mapping[str, object]) -> bool:
+def _static_allowlist_no_grant_result(host: str) -> str:
+    return f"{host} is already allowed by the static egress allowlist. No temporary grant was created."
+
+
+def _request_network_access_arguments_bypass_approval(
+    arguments: Mapping[str, object],
+) -> bool | ToolApprovalBypassResult:
     hostname = arguments.get("hostname")
     if not isinstance(hostname, str):
         return True
@@ -90,7 +96,9 @@ def _request_network_access_arguments_bypass_approval(arguments: Mapping[str, ob
         host = canonical_hostname(hostname)
     except ValueError:
         return True
-    return is_hostname_allowed(host, resolve_worker_egress_policy())
+    if is_hostname_allowed(host, resolve_worker_egress_policy()):
+        return ToolApprovalBypassResult(_static_allowlist_no_grant_result(host))
+    return False
 
 
 def _is_plain_http_api_host_allowed(hostname: str) -> bool:
@@ -257,7 +265,7 @@ class _ApprovedEgressTools(Toolkit):
         """Request temporary worker egress to one exact external hostname."""
         host = canonical_hostname(hostname)
         if is_hostname_allowed(host, resolve_worker_egress_policy()):
-            return f"{host} is already allowed by the static egress allowlist. No temporary grant was created."
+            return _static_allowlist_no_grant_result(host)
         normalized_reason = _normalize_reason(reason)
         requested_ttl_seconds = ttl_minutes * 60
         effective_ttl_seconds = _effective_ttl_seconds(requested_ttl_seconds)
@@ -294,7 +302,7 @@ class _ApprovedEgressTools(Toolkit):
 def _request_network_access_bypasses_approval(
     entrypoint: Callable[..., Any],
     arguments: Mapping[str, object],
-) -> bool:
+) -> bool | ToolApprovalBypassResult:
     if not isinstance(entrypoint, MethodType):
         return False
     if not isinstance(entrypoint.__self__, _ApprovedEgressTools):

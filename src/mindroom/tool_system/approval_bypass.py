@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
-_ToolApprovalBypassPredicate = Callable[[Callable[..., Any], Mapping[str, object]], bool]
+
+@dataclass(frozen=True, slots=True)
+class ToolApprovalBypassResult:
+    """A tool-owned approval bypass that also supplies the final tool result."""
+
+    result: object
+
+
+_ToolApprovalBypassDecision = bool | ToolApprovalBypassResult
+_ToolApprovalBypassPredicate = Callable[[Callable[..., Any], Mapping[str, object]], _ToolApprovalBypassDecision]
 
 _BYPASS_PREDICATES: dict[str, _ToolApprovalBypassPredicate] = {}
 
@@ -18,11 +28,11 @@ def register_tool_approval_bypass(function_name: str, predicate: _ToolApprovalBy
     _BYPASS_PREDICATES[function_name] = predicate
 
 
-def should_bypass_tool_approval(
+def evaluate_tool_approval_bypass(
     function_name: str,
     entrypoint: Callable[..., Any],
     arguments: Mapping[str, object],
-) -> bool:
+) -> _ToolApprovalBypassDecision:
     """Return whether a registered tool wants this call to skip Matrix approval."""
     predicate = _BYPASS_PREDICATES.get(function_name)
     if predicate is None:
