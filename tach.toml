@@ -2310,13 +2310,17 @@ path = "mindroom.tool_system.tool_calls"
 depends_on = ["mindroom.constants"]
 
 [[modules]]
+path = "mindroom.tool_system.approval_bypass"
+depends_on = []
+
+[[modules]]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
-    "mindroom.egress",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
     "mindroom.sync_bridge_state",
     "mindroom.tool_approval",
+    "mindroom.tool_system.approval_bypass",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_calls",
     "mindroom.tool_system.worker_routing",

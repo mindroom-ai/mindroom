@@ -61,6 +61,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers approval bypass predicate
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import (
     bind_runtime_paths,

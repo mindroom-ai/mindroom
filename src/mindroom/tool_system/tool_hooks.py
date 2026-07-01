@@ -16,7 +16,6 @@ from weakref import WeakKeyDictionary
 
 from agno.tools.function import FunctionCall
 
-from mindroom.egress.policy import canonical_hostname, is_hostname_allowed, resolve_worker_egress_policy
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -36,6 +35,7 @@ from mindroom.tool_approval import (
     ToolCallWorkflowOrigin,
     request_tool_approval_for_call,
 )
+from mindroom.tool_system.approval_bypass import should_bypass_tool_approval
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -69,7 +69,6 @@ _DECLINED_RESULT_TEMPLATE = (
     "Adjust your approach — try a different tool or different arguments."
 )
 _APPROVAL_POLICY_FAILURE_REASON = "Tool approval policy failed."
-_APPROVED_EGRESS_TOOL_FUNCTION_NAME = "request_network_access"
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
 _ToolHookResult = Any
 # Agno does not currently expose a hook-chain extension point for unwrapping MindRoom's
@@ -454,7 +453,7 @@ async def _maybe_block_for_tool_approval(
     tool_name: str,
     workflow_origin: ToolCallWorkflowOrigin | None,
 ) -> str | None:
-    if _request_network_access_bypasses_approval(tool_name, args):
+    if should_bypass_tool_approval(tool_name, args):
         return None
     if resolved_context.config is None or resolved_context.runtime_paths is None:
         return None
@@ -484,19 +483,6 @@ async def _maybe_block_for_tool_approval(
         tool_name,
         _approval_status_reason(approval_decision.status, approval_decision.reason),
     )
-
-
-def _request_network_access_bypasses_approval(tool_name: str, args: dict[str, Any]) -> bool:
-    if tool_name != _APPROVED_EGRESS_TOOL_FUNCTION_NAME:
-        return False
-    hostname = args.get("hostname")
-    if not isinstance(hostname, str):
-        return True
-    try:
-        host = canonical_hostname(hostname)
-    except ValueError:
-        return True
-    return is_hostname_allowed(host, resolve_worker_egress_policy())
 
 
 async def _maybe_block_for_before_hooks(
