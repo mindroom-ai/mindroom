@@ -55,6 +55,7 @@ from mindroom.history import (
     open_scope_session_context,
     prepare_scope_history,
 )
+from mindroom.history.runtime import _resolve_history_scope
 from mindroom.hooks import MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
@@ -152,17 +153,6 @@ RuntimeBot = AgentBot | TeamBot
 TestFunction = Callable[..., object]
 
 
-def _history_scope_for_agent(agent: "Agent") -> HistoryScope | None:
-    """Return the persisted history scope addressed by one live agent."""
-    team_id = agent.team_id
-    if isinstance(team_id, str) and team_id:
-        return HistoryScope(kind="team", scope_id=team_id)
-    agent_id = agent.id
-    if isinstance(agent_id, str) and agent_id:
-        return HistoryScope(kind="agent", scope_id=agent_id)
-    return None
-
-
 async def prepare_history_for_run_for_test(
     *,
     agent: "Agent",
@@ -187,7 +177,7 @@ async def prepare_history_for_run_for_test(
     compaction_lifecycle: CompactionLifecycle | None = None,
 ) -> PreparedHistoryState:
     """Compose the production history-preparation seams for one test run."""
-    resolved_scope = scope or _history_scope_for_agent(agent)
+    resolved_scope = scope or _resolve_history_scope(agent)
     scope_history_kwargs = {
         "agent": agent,
         "agent_name": agent_name,

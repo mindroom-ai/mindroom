@@ -181,7 +181,7 @@ async def test_large_edit_preserves_mindroom_metadata_in_both_payload_layers() -
     text = "z" * 30000
     extra_content = {
         AI_RUN_METADATA_KEY: {"version": 1, "usage": {"total_tokens": 10}},
-        "io.mindroom.compaction": {"version": 1, "compacted": False},
+        "io.mindroom.compaction": {"version": 3, "compacted": False},
     }
     content = {"body": text, "msgtype": "m.text", "formatted_body": f"<p>{text}</p>"}
 
