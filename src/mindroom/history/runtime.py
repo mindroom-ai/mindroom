@@ -26,10 +26,8 @@ from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.history.compaction import (
     compact_scope_history,
     completed_top_level_runs,
-    estimate_agent_static_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
-    estimate_team_static_tokens,
     runs_for_scope,
 )
 from mindroom.history.policy import (
@@ -37,6 +35,7 @@ from mindroom.history.policy import (
     describe_compaction_unavailability,
     resolve_history_execution_plan,
 )
+from mindroom.history.prompt_tokens import estimate_agent_static_tokens, estimate_team_static_tokens
 from mindroom.history.storage import (
     clear_force_compaction_state,
     consume_pending_force_compaction_scope,

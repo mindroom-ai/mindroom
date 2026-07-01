@@ -36,8 +36,8 @@ from mindroom.history import (
     PreparedScopeHistory,
     ResolvedHistorySettings,
 )
-from mindroom.history.compaction import estimate_agent_static_tokens
 from mindroom.history.policy import resolve_history_execution_plan
+from mindroom.history.prompt_tokens import estimate_agent_static_tokens
 from mindroom.tool_schema_cache import clear_tool_schema_cache
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import FakeModel, bind_runtime_paths, make_visible_message

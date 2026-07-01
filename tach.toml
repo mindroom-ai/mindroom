@@ -43,7 +43,7 @@ depends_on = []
 path = "mindroom.tool_schema_cache"
 depends_on = []
 visibility = [
-    "mindroom.history.compaction",
+    "mindroom.history.prompt_tokens",
     "mindroom.tool_system.plugins",
 ]
 
@@ -872,6 +872,7 @@ depends_on = [
     "mindroom.history.agno_team_patch",
     "mindroom.history.compaction",
     "mindroom.history.policy",
+    "mindroom.history.prompt_tokens",
     "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.types",
@@ -891,9 +892,16 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.logging_config",
     "mindroom.timing",
-    "mindroom.tool_schema_cache",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.history.prompt_tokens"
+depends_on = [
+    "mindroom.timing",
+    "mindroom.token_budget",
+    "mindroom.tool_schema_cache",
 ]
 
 [[modules]]
@@ -908,7 +916,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.history.policy"
 depends_on = [
-    "mindroom.history.compaction",
     "mindroom.history.types",
     "mindroom.token_budget",
 ]
@@ -955,6 +962,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.history.compaction",
     "mindroom.history.policy",
+    "mindroom.history.prompt_tokens",
     "mindroom.history.storage",
     "mindroom.history.types",
     "mindroom.logging_config",

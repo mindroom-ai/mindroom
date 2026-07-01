@@ -21,8 +21,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.execution_preparation import _PreparedExecutionContext
-from mindroom.history.compaction import _estimate_tool_definition_tokens, compute_prompt_token_breakdown
 from mindroom.history.policy import classify_compaction_decision
+from mindroom.history.prompt_tokens import _estimate_tool_definition_tokens, compute_prompt_token_breakdown
 from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import (
