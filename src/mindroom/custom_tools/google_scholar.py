@@ -18,6 +18,8 @@ _RATE_LIMIT_MESSAGE = "Google Scholar is currently blocking automated requests. 
 
 def _search_publications(query: str, limit: int) -> list[dict[str, Any]]:
     """Collect publication summaries from a blocking scholarly search."""
+    if limit <= 0:
+        return []
     publications: list[dict[str, Any]] = []
     for publication in scholarly.search_pubs(query):
         bib = publication.get("bib", {})
