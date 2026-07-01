@@ -11,9 +11,10 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.custom_tools.matrix_voice_message import MatrixVoiceMessageTools
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent, PreparedVoiceAudio
+from mindroom.custom_tools.matrix_voice_message import MatrixVoiceMessageTools, _normalize_openai_base_url
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
+from mindroom.matrix.voice_message import PreparedVoiceAudio
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -447,6 +448,46 @@ async def test_matrix_voice_message_can_use_local_openai_compatible_tts(tmp_path
     mock_send.assert_awaited_once()
     payload = _payload(result)
     assert payload["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_matrix_voice_message_rejects_unknown_response_format(tmp_path: Path) -> None:
+    """Unsupported response formats should fail preflight before any TTS call."""
+    context = _context(tmp_path, thread_id=None)
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+    ):
+        result = await MatrixVoiceMessageTools(
+            api_key="sk-test",
+            response_format="pcm",
+        ).matrix_voice_message("hello")
+
+    mock_openai.assert_not_called()
+    payload = _payload(result)
+    assert payload["status"] == "error"
+    assert payload["message"] == "response_format must be one of: aac, flac, mp3, opus, wav."
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("http://pc.local:10201", "http://pc.local:10201/v1"),
+        ("http://pc.local:10201/", "http://pc.local:10201/v1"),
+        ("http://pc.local:10201/v1", "http://pc.local:10201/v1"),
+        ("http://pc.local:10201/v1/", "http://pc.local:10201/v1"),
+        ("http://pc.local:10201/v1/audio/speech", "http://pc.local:10201/v1"),
+        # A full endpoint URL without /v1 means the server serves without a /v1 prefix.
+        ("http://pc.local:10201/audio/speech", "http://pc.local:10201"),
+    ],
+)
+def test_normalize_openai_base_url(base_url: str | None, expected: str | None) -> None:
+    """Base URLs should normalize to what the OpenAI client expects."""
+    assert _normalize_openai_base_url(base_url) == expected
 
 
 def test_matrix_voice_message_description_covers_critical_behavior() -> None:

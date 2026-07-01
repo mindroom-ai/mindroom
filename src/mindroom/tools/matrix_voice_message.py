@@ -39,9 +39,10 @@ if TYPE_CHECKING:
         ConfigField(
             name="base_url",
             label="OpenAI-Compatible TTS Base URL",
-            type="text",
+            type="url",
             required=False,
             default=None,
+            description="OpenAI-compatible speech endpoint (e.g. a local Kokoro server); leave empty to use OpenAI.",
         ),
         ConfigField(
             name="voice",
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default="opus",
+            description="Audio format the TTS endpoint returns: aac, flac, mp3, opus, or wav. Non-opus formats require ffmpeg and ffprobe.",
         ),
     ],
     dependencies=["openai"],

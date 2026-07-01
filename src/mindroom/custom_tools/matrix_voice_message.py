@@ -6,7 +6,7 @@ import asyncio
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from threading import Lock
-from typing import ClassVar, Literal, cast
+from typing import ClassVar, Literal, cast, get_args
 
 from agno.tools import Toolkit
 from openai import APIStatusError, OpenAI
@@ -21,14 +21,15 @@ from mindroom.custom_tools.matrix_conversation_operations import MatrixMessageOp
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import prepare_voice_audio_bytes, send_audio_message
-from mindroom.model_defaults import OPENAI_TTS
+from mindroom.matrix.client_delivery import send_audio_message
+from mindroom.matrix.voice_message import prepare_voice_audio_bytes
+from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_TTS
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 _OPUS_FILENAME = "voice-message.opus"
 _DEFAULT_RESPONSE_FORMAT = "opus"
-_LOCAL_TTS_API_KEY = "sk-no-key-required"
-_SpeechResponseFormat = Literal["mp3", "opus", "aac", "flac", "wav", "pcm"]
+_SpeechResponseFormat = Literal["aac", "flac", "mp3", "opus", "wav"]
+_ALLOWED_RESPONSE_FORMATS = frozenset(get_args(_SpeechResponseFormat))
 logger = get_logger(__name__)
 
 
@@ -46,8 +47,6 @@ def _normalize_openai_base_url(base_url: str | None) -> str | None:
     normalized = base_url.strip().rstrip("/") if isinstance(base_url, str) else ""
     if not normalized:
         return None
-    if normalized.endswith("/v1/audio/speech"):
-        return normalized[: -len("/audio/speech")]
     if normalized.endswith("/audio/speech"):
         return normalized[: -len("/audio/speech")]
     if normalized.endswith("/v1"):
@@ -134,7 +133,7 @@ class MatrixVoiceMessageTools(Toolkit):
         if self._api_key:
             return self._api_key
         if base_url is not None:
-            return _LOCAL_TTS_API_KEY
+            return LOCAL_OPENAI_API_KEY_DEFAULT
         return get_secret_from_env("OPENAI_API_KEY", context.runtime_paths)
 
     def _generate_speech_bytes(self, *, api_key: str, base_url: str | None, text: str) -> bytes:
@@ -211,6 +210,12 @@ class MatrixVoiceMessageTools(Toolkit):
         normalized_text = text.strip()
         if not normalized_text:
             return None, self._payload("error", message="text is required and must be non-empty.")
+
+        if self._response_format not in _ALLOWED_RESPONSE_FORMATS:
+            return None, self._payload(
+                "error",
+                message=f"response_format must be one of: {', '.join(sorted(_ALLOWED_RESPONSE_FORMATS))}.",
+            )
 
         resolved_room_id = resolve_optional_room_id(context, room_id)
         if not room_access_allowed(context, resolved_room_id):
@@ -364,12 +369,18 @@ class MatrixVoiceMessageTools(Toolkit):
 
         prepared_audio = await prepare_voice_audio_bytes(audio_bytes, response_format=self._response_format)
         if prepared_audio is None:
+            logger.error(
+                "matrix_voice_audio_preparation_failed",
+                room_id=preflight.room_id,
+                thread_id=effective_thread_id,
+                response_format=self._response_format,
+            )
             return self._payload(
                 "error",
                 room_id=preflight.room_id,
                 thread_id=effective_thread_id,
                 companion_event_id=companion_event_id,
-                message="Failed to prepare generated audio as a Matrix voice message.",
+                message="Failed to prepare generated audio as a Matrix voice message; non-opus response formats require ffmpeg and ffprobe.",
             )
         event_id = await send_audio_message(
             context.client,

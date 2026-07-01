@@ -756,6 +756,7 @@ depends_on = [
     "mindroom.custom_tools.matrix_helpers",
     "mindroom.custom_tools.tool_payloads",
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix.voice_message",
     "mindroom.model_defaults",
     "mindroom.tool_system.runtime_context",
 ]
@@ -1735,7 +1736,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.client_delivery"
-depends_on = ["mindroom.config.matrix", "mindroom.matrix.voice_message"]
+depends_on = ["mindroom.config.matrix"]
 visibility = [
     "mindroom.approval_transport",
     "mindroom.conversation_resolver",
@@ -1755,7 +1756,7 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.voice_message"
 depends_on = []
-visibility = ["mindroom.matrix.client_delivery"]
+visibility = ["mindroom.custom_tools.matrix_voice_message"]
 
 [[modules]]
 path = "mindroom.matrix.client_room_admin"
@@ -3076,18 +3077,23 @@ from = ["mindroom.matrix.client_session"]
 [[interfaces]]
 expose = [
     "DeliveredMatrixEvent",
-    "PreparedVoiceAudio",
     "build_edit_event_content",
     "build_threaded_edit_content",
     "can_send_to_encrypted_room",
     "cached_room",
     "edit_message_result",
-    "prepare_voice_audio_bytes",
     "send_audio_message",
     "send_file_message",
     "send_message_result",
 ]
 from = ["mindroom.matrix.client_delivery"]
+
+[[interfaces]]
+expose = [
+    "PreparedVoiceAudio",
+    "prepare_voice_audio_bytes",
+]
+from = ["mindroom.matrix.voice_message"]
 
 [[interfaces]]
 expose = [

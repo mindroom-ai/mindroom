@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
-import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +21,6 @@ from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.media import upload_content_uri, upload_media_bytes
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_matrix_edit_content
-from mindroom.matrix.voice_message import VoiceMessagePayload, build_voice_message_payload
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
@@ -44,72 +42,11 @@ class DeliveredMatrixEvent:
     content_sent: dict[str, Any]
 
 
-@dataclass(frozen=True, slots=True)
-class PreparedVoiceAudio:
-    """Prepared in-memory Opus/Ogg payload for a Matrix voice message."""
-
-    audio_bytes: bytes
-    mimetype: str
-    duration_ms: int
-    waveform: list[int]
-
-
 def _sanitized_delivery_error_message(error: Exception) -> str:
     """Return a log-safe Matrix delivery failure message."""
     if isinstance(error, OlmTrustError):
         return _MATRIX_TRUST_DELIVERY_ERROR_MESSAGE
     return _MATRIX_GENERIC_DELIVERY_ERROR_MESSAGE
-
-
-_GENERATED_AUDIO_SUFFIXES = {
-    "aac": ".aac",
-    "flac": ".flac",
-    "mp3": ".mp3",
-    "opus": ".opus",
-    "pcm": ".pcm",
-    "wav": ".wav",
-}
-
-
-def _write_generated_audio_bytes(audio_bytes: bytes, *, response_format: str) -> Path:
-    suffix = _GENERATED_AUDIO_SUFFIXES.get(response_format, f".{response_format}")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as audio_file:
-        audio_file.write(audio_bytes)
-        return Path(audio_file.name)
-
-
-def _unlink_generated_audio(path: Path | None) -> None:
-    if path is None:
-        return
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        return
-
-
-async def prepare_voice_audio_bytes(audio_bytes: bytes, *, response_format: str) -> PreparedVoiceAudio | None:
-    """Convert generated speech bytes into an in-memory Matrix voice payload."""
-    generated_path: Path | None = None
-    voice_payload: VoiceMessagePayload | None = None
-    try:
-        generated_path = await asyncio.to_thread(
-            _write_generated_audio_bytes,
-            audio_bytes,
-            response_format=response_format,
-        )
-        voice_payload = await build_voice_message_payload(generated_path)
-        if voice_payload is None:
-            return None
-        return PreparedVoiceAudio(
-            audio_bytes=await asyncio.to_thread(voice_payload.source_path.read_bytes),
-            mimetype=voice_payload.mimetype,
-            duration_ms=voice_payload.duration_ms,
-            waveform=voice_payload.waveform,
-        )
-    finally:
-        if voice_payload is not None and voice_payload.cleanup:
-            _unlink_generated_audio(voice_payload.source_path)
-        _unlink_generated_audio(generated_path)
 
 
 def _log_matrix_delivery_exception(
@@ -681,13 +618,11 @@ async def edit_message_result(
 
 __all__ = [
     "DeliveredMatrixEvent",
-    "PreparedVoiceAudio",
     "build_edit_event_content",
     "build_threaded_edit_content",
     "cached_room",
     "can_send_to_encrypted_room",
     "edit_message_result",
-    "prepare_voice_audio_bytes",
     "send_audio_message",
     "send_file_message",
     "send_message_result",

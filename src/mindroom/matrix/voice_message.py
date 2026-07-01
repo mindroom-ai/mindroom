@@ -11,24 +11,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-_FFMPEG = shutil.which("ffmpeg")
-_FFPROBE = shutil.which("ffprobe")
-_VOICE_TIMEOUT_SECONDS = 30
-_MAX_VOICE_DURATION_MS = 5 * 60 * 1000
+_MEDIA_COMMAND_TIMEOUT_SECONDS = 30
 _VOICE_WAVEFORM_SAMPLE_COUNT = 30
 _VOICE_WAVEFORM_VALUE = 512
 _VOICE_MIMETYPE = "audio/ogg"
+_OPUS_RESPONSE_FORMAT = "opus"
 
 
 @dataclass(frozen=True, slots=True)
-class VoiceMessagePayload:
-    """Prepared Opus/Ogg payload metadata for a Matrix voice message."""
+class PreparedVoiceAudio:
+    """Prepared Opus/Ogg payload for a Matrix voice message."""
 
-    source_path: Path
-    cleanup: bool
-    duration_ms: int
-    waveform: list[int]
+    audio_bytes: bytes
     mimetype: str
+    duration_ms: int | None
+    waveform: list[int] | None
 
 
 async def _kill_media_process(proc: asyncio.subprocess.Process) -> None:
@@ -41,29 +38,20 @@ async def _kill_media_process(proc: asyncio.subprocess.Process) -> None:
     await proc.wait()
 
 
-def _unlink_tempfile(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        return
-
-
-async def _run_media_command(*args: str) -> tuple[int, bytes, bytes] | None:
+async def _run_media_command(*args: str) -> tuple[int, bytes] | None:
     try:
         proc = await asyncio.create_subprocess_exec(*args, stdout=PIPE, stderr=PIPE)
     except OSError:
         return None
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_VOICE_TIMEOUT_SECONDS)
+        stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=_MEDIA_COMMAND_TIMEOUT_SECONDS)
     except TimeoutError:
         await _kill_media_process(proc)
         return None
     except asyncio.CancelledError:
         await _kill_media_process(proc)
         raise
-    if proc.returncode is None:
-        return None
-    return proc.returncode, stdout, stderr
+    return await proc.wait(), stdout
 
 
 def _parse_duration_ms(probe_payload: dict[str, Any]) -> int | None:
@@ -77,9 +65,7 @@ def _parse_duration_ms(probe_payload: dict[str, Any]) -> int | None:
         duration_ms = round(float(duration_value) * 1000)
     except ValueError:
         return None
-    if duration_ms <= 0 or duration_ms > _MAX_VOICE_DURATION_MS:
-        return None
-    return duration_ms
+    return duration_ms if duration_ms > 0 else None
 
 
 def _is_opus_ogg(probe_payload: dict[str, Any]) -> bool:
@@ -99,11 +85,9 @@ def _voice_waveform() -> list[int]:
     return [_VOICE_WAVEFORM_VALUE] * _VOICE_WAVEFORM_SAMPLE_COUNT
 
 
-async def _probe_audio(audio_path: Path) -> dict[str, Any] | None:
-    if _FFPROBE is None:
-        return None
+async def _probe_audio(ffprobe: str, audio_path: Path) -> dict[str, Any] | None:
     result = await _run_media_command(
-        _FFPROBE,
+        ffprobe,
         "-v",
         "error",
         "-of",
@@ -114,7 +98,7 @@ async def _probe_audio(audio_path: Path) -> dict[str, Any] | None:
     )
     if result is None:
         return None
-    returncode, stdout, _stderr = result
+    returncode, stdout = result
     if returncode != 0:
         return None
     try:
@@ -124,21 +108,12 @@ async def _probe_audio(audio_path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-async def _transcode_voice_payload(
-    input_path: Path,
-    *,
-    duration_ms: int,
-    waveform: list[int],
-) -> VoiceMessagePayload | None:
-    if _FFMPEG is None:
-        return None
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tempfile_handle:
-        output_path = Path(tempfile_handle.name)
-
-    keep_output = False
+async def _transcode_to_opus_ogg(ffmpeg: str, input_path: Path) -> bytes | None:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as output_handle:
+        output_path = Path(output_handle.name)
     try:
         result = await _run_media_command(
-            _FFMPEG,
+            ffmpeg,
             "-y",
             "-hide_banner",
             "-loglevel",
@@ -159,41 +134,61 @@ async def _transcode_voice_payload(
             "-1",
             str(output_path),
         )
-        valid_output = result is not None and result[0] == 0 and output_path.exists() and output_path.stat().st_size > 0
-        if not valid_output:
+        if result is None or result[0] != 0:
             return None
-        keep_output = True
-        return VoiceMessagePayload(
-            source_path=output_path,
-            cleanup=True,
+        output_bytes = await asyncio.to_thread(output_path.read_bytes)
+        return output_bytes or None
+    finally:
+        output_path.unlink(missing_ok=True)
+
+
+def _write_audio_tempfile(audio_bytes: bytes, *, suffix: str) -> Path:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as audio_handle:
+        audio_handle.write(audio_bytes)
+        return Path(audio_handle.name)
+
+
+async def prepare_voice_audio_bytes(audio_bytes: bytes, *, response_format: str) -> PreparedVoiceAudio | None:
+    """Prepare generated speech bytes as an Opus/Ogg Matrix voice payload.
+
+    Opus input passes through unchanged and other formats are transcoded with ffmpeg.
+    Without ffmpeg/ffprobe on PATH, opus input is returned without duration or waveform metadata and other formats return None.
+    Returns None when the audio cannot be probed or transcoded.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if ffmpeg is None or ffprobe is None:
+        if response_format == _OPUS_RESPONSE_FORMAT:
+            return PreparedVoiceAudio(
+                audio_bytes=audio_bytes,
+                mimetype=_VOICE_MIMETYPE,
+                duration_ms=None,
+                waveform=None,
+            )
+        return None
+
+    input_path = await asyncio.to_thread(_write_audio_tempfile, audio_bytes, suffix=f".{response_format}")
+    try:
+        probe_payload = await _probe_audio(ffprobe, input_path)
+        if probe_payload is None:
+            return None
+        duration_ms = _parse_duration_ms(probe_payload)
+        waveform = _voice_waveform() if duration_ms is not None else None
+        if _is_opus_ogg(probe_payload):
+            return PreparedVoiceAudio(
+                audio_bytes=audio_bytes,
+                mimetype=_VOICE_MIMETYPE,
+                duration_ms=duration_ms,
+                waveform=waveform,
+            )
+        transcoded_bytes = await _transcode_to_opus_ogg(ffmpeg, input_path)
+        if transcoded_bytes is None:
+            return None
+        return PreparedVoiceAudio(
+            audio_bytes=transcoded_bytes,
+            mimetype=_VOICE_MIMETYPE,
             duration_ms=duration_ms,
             waveform=waveform,
-            mimetype=_VOICE_MIMETYPE,
         )
     finally:
-        if not keep_output:
-            _unlink_tempfile(output_path)
-
-
-async def build_voice_message_payload(audio_path: Path) -> VoiceMessagePayload | None:
-    """Return prepared voice payload, or None so callers can fall back to plain m.audio."""
-    if _FFMPEG is None or _FFPROBE is None:
-        return None
-
-    input_path = audio_path.expanduser().resolve()
-    probe_payload = await _probe_audio(input_path)
-    if probe_payload is None:
-        return None
-    duration_ms = _parse_duration_ms(probe_payload)
-    if duration_ms is None:
-        return None
-    waveform = _voice_waveform()
-    if _is_opus_ogg(probe_payload):
-        return VoiceMessagePayload(
-            source_path=input_path,
-            cleanup=False,
-            duration_ms=duration_ms,
-            waveform=waveform,
-            mimetype=_VOICE_MIMETYPE,
-        )
-    return await _transcode_voice_payload(input_path, duration_ms=duration_ms, waveform=waveform)
+        input_path.unlink(missing_ok=True)
