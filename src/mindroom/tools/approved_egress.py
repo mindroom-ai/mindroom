@@ -305,7 +305,9 @@ def _request_network_access_bypasses_approval(
 ) -> bool | ToolApprovalBypassResult:
     if not isinstance(entrypoint, MethodType):
         return False
-    if not isinstance(entrypoint.__self__, _ApprovedEgressTools):
+    if type(entrypoint.__self__) is not _ApprovedEgressTools:
+        return False
+    if entrypoint.__func__ is not _ApprovedEgressTools.request_network_access:
         return False
     return _request_network_access_arguments_bypass_approval(arguments)
 

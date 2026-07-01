@@ -91,7 +91,7 @@ def load_static_allowlist() -> tuple[str, ...]:
         if allowlist_path:
             try:
                 text = Path(allowlist_path).read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, UnicodeError):
                 text = ""
     entries = (line for raw in text.splitlines() if (line := raw.split("#", 1)[0].strip()))
     return tuple(dict.fromkeys(entries))

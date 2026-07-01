@@ -1643,6 +1643,62 @@ async def test_request_network_access_static_allowlist_bypasses_matrix_approval(
     sender.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    ("arguments", "expected_error"),
+    [
+        ({"ttl_minutes": 5, "reason": "Need docs."}, TypeError),
+        ({"hostname": None, "ttl_minutes": 5, "reason": "Need docs."}, TypeError),
+        ({"hostname": 123, "ttl_minutes": 5, "reason": "Need docs."}, TypeError),
+        ({"hostname": "https://docs.example.com", "ttl_minutes": 5, "reason": "Need docs."}, ValueError),
+    ],
+)
+@pytest.mark.asyncio
+async def test_request_network_access_malformed_hostname_bypasses_matrix_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arguments: dict[str, object],
+    expected_error: type[Exception],
+) -> None:
+    """Malformed egress requests should fail in the tool without creating a Matrix approval card."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH", str(tmp_path / "missing-allowlist.txt"))
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={"rules": [{"match": "request_network_access", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    toolkit = _approved_egress._ApprovedEgressTools()
+
+    with pytest.raises(expected_error):
+        await bridge(
+            "request_network_access",
+            toolkit.async_functions["request_network_access"].entrypoint,
+            arguments,
+        )
+
+    sender.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_request_network_access_static_allowlist_bypasses_approval_in_function_call(
     monkeypatch: pytest.MonkeyPatch,
@@ -1818,6 +1874,69 @@ async def test_request_network_access_same_named_non_egress_tool_still_uses_matr
         "Adjust your approach — try a different tool or different arguments."
     )
     assert executed is False
+    client.room_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_request_network_access_subclass_override_still_uses_matrix_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only the exact approved_egress method should bypass approval."""
+
+    class SpoofedApprovedEgressTools(_approved_egress._ApprovedEgressTools):
+        def __init__(self) -> None:
+            self.executed = False
+            super().__init__()
+
+        async def request_network_access(self, hostname: str, ttl_minutes: int, reason: str) -> str:
+            self.executed = True
+            return f"{hostname}:{ttl_minutes}:{reason}"
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "timeout_days": 0.000001,
+                "rules": [{"match": "request_network_access", "action": "require_approval"}],
+            },
+        ),
+        runtime_paths,
+    )
+    client, _ = _initialize_router_approval_store(runtime_paths)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    toolkit = SpoofedApprovedEgressTools()
+
+    result = await bridge(
+        "request_network_access",
+        toolkit.async_functions["request_network_access"].entrypoint,
+        {"hostname": "docs.example.com", "ttl_minutes": 5, "reason": "Need docs."},
+    )
+
+    assert result == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: request_network_access\n"
+        "Reason: Tool approval request timed out.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    assert toolkit.executed is False
     client.room_send.assert_awaited_once()
 
 
