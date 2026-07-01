@@ -83,12 +83,10 @@ def classify_compaction_decision(  # noqa: PLR0911
     plan: ResolvedHistoryExecutionPlan,
     force_compact_before_next_run: bool,
     current_history_tokens: int | None,
-    trigger_budget_tokens: int | None = None,
-    hard_budget_tokens: int | None = None,
 ) -> CompactionDecision:
     """Classify compaction as none or required before the next reply."""
-    resolved_trigger_budget = plan.replay_budget_tokens if trigger_budget_tokens is None else trigger_budget_tokens
-    resolved_hard_budget = plan.hard_replay_budget_tokens if hard_budget_tokens is None else hard_budget_tokens
+    resolved_trigger_budget = plan.replay_budget_tokens
+    resolved_hard_budget = plan.hard_replay_budget_tokens
 
     if force_compact_before_next_run:
         if plan.destructive_compaction_available:

@@ -157,7 +157,14 @@ def _clear_forced_compaction_after_failure(
     scope: HistoryScope,
     state: HistoryScopeState,
 ) -> None:
-    """Clear a consumed manual force marker after a compaction failure."""
+    """Clear a consumed manual force marker after a compaction failure.
+
+    Clears against the freshest row unconditionally so a failing manual
+    compaction cannot retry-loop on every reply. This deliberately differs
+    from the no-candidates path (_persist_cleared_force_state_if_needed in
+    compaction.py), which refuses to clear when a concurrent write moved the
+    durable row, so a fresh manual request placed mid-run survives.
+    """
     if session is None or not state.force_compact_before_next_run:
         return
     update_scope_state_on_latest(
@@ -282,7 +289,7 @@ def _resolve_history_scope(agent: Agent) -> HistoryScope | None:
 
 
 @timed("system_prompt_assembly.history_prepare.scope_history")
-async def prepare_scope_history(  # noqa: C901
+async def prepare_scope_history(
     *,
     agent: Agent,
     agent_name: str,
@@ -291,7 +298,6 @@ async def prepare_scope_history(  # noqa: C901
     config: Config,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     scope_context: ScopeSessionContext | None = None,
-    available_history_budget: int | None = None,
     scope: HistoryScope | None = None,
     timing_scope: str | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
@@ -308,13 +314,6 @@ async def prepare_scope_history(  # noqa: C901
         )
 
     execution_plan = resolved_inputs.execution_plan
-    trigger_history_budget = available_history_budget
-    if trigger_history_budget is None:
-        trigger_history_budget = execution_plan.replay_budget_tokens
-    hard_history_budget = available_history_budget
-    if hard_history_budget is None:
-        hard_history_budget = execution_plan.hard_replay_budget_tokens or execution_plan.replay_budget_tokens
-
     session = scope_context.session
     if pipeline_timing is not None:
         pipeline_timing.mark("history_classify_start")
@@ -336,16 +335,14 @@ async def prepare_scope_history(  # noqa: C901
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
         current_history_tokens=current_history_tokens,
-        trigger_budget_tokens=trigger_history_budget,
-        hard_budget_tokens=hard_history_budget,
     )
     logger.info(
         "History preparation check",
         agent=agent_name,
         auto_enabled=execution_plan.authored_compaction_enabled and execution_plan.destructive_compaction_available,
         compaction_available=execution_plan.destructive_compaction_available,
-        trigger_budget=trigger_history_budget,
-        hard_budget=hard_history_budget,
+        trigger_budget=execution_plan.replay_budget_tokens,
+        hard_budget=execution_plan.hard_replay_budget_tokens,
         replay_window=execution_plan.replay_window_tokens,
         static_prompt_tokens=execution_plan.static_prompt_tokens,
         current_tokens=current_history_tokens,
@@ -375,7 +372,7 @@ async def prepare_scope_history(  # noqa: C901
             scope=scope_context.scope,
             state=state,
             resolved_inputs=resolved_inputs,
-            history_budget=hard_history_budget,
+            history_budget=execution_plan.hard_replay_budget_tokens,
             current_history_tokens=current_history_tokens,
             runs_before=len(visible_runs),
             config=config,
@@ -562,7 +559,11 @@ def finalize_history_preparation(
     available_history_budget: int | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedHistoryState:
-    """Return the final persisted-replay decision after durable history prep."""
+    """Return the final persisted-replay decision after durable history prep.
+
+    ``available_history_budget`` is an explicit replay-budget override; when
+    None the budget derives from the freshly resolved execution plan.
+    """
     if pipeline_timing is not None:
         pipeline_timing.mark("replay_plan_start")
     resolved_inputs = prepared_scope_history.resolved_inputs
@@ -627,6 +628,7 @@ def finalize_history_preparation(
             scope=prepared_scope_history.scope,
             history_settings=resolved_inputs.history_settings,
             available_history_budget=history_budget,
+            current_history_tokens=current_history_tokens,
         )
         _log_replay_plan(
             replay_plan=replay_plan,
@@ -1212,17 +1214,13 @@ def _plan_replay_that_fits(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
+    current_history_tokens: int,
 ) -> ResolvedReplayPlan:
     """Return the safest persisted-replay plan that fits the current run budget."""
-    current_tokens = estimate_prompt_visible_history_tokens(
-        session=session,
-        scope=scope,
-        history_settings=history_settings,
-    )
-    if current_tokens <= available_history_budget:
+    if current_history_tokens <= available_history_budget:
         return _configured_replay_plan(
             history_settings=history_settings,
-            estimated_tokens=current_tokens,
+            estimated_tokens=current_history_tokens,
         )
 
     limit_mode, max_limit = _context_window_guard_limit_bounds(

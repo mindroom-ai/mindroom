@@ -192,6 +192,17 @@ async def prepare_history_for_run_for_test(
         static_prompt_tokens=static_prompt_tokens,
         execution_plan=execution_plan,
     )
+    if available_history_budget is not None:
+        # prepare_scope_history reads its trigger/hard budgets from the execution
+        # plan, so express the test budget override through the plan itself.
+        resolved_inputs = replace(
+            resolved_inputs,
+            execution_plan=replace(
+                resolved_inputs.execution_plan,
+                replay_budget_tokens=available_history_budget,
+                hard_replay_budget_tokens=available_history_budget,
+            ),
+        )
     scope_history_kwargs = {
         "agent": agent,
         "agent_name": agent_name,
@@ -199,7 +210,6 @@ async def prepare_history_for_run_for_test(
         "runtime_paths": runtime_paths,
         "config": config,
         "compaction_outcomes_collector": compaction_outcomes_collector,
-        "available_history_budget": available_history_budget,
         "scope": resolved_scope,
         "compaction_lifecycle": compaction_lifecycle,
     }

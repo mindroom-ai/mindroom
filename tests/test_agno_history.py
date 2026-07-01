@@ -2360,6 +2360,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
         reserve_tokens=0,
         static_prompt_tokens=0,
         replay_budget_tokens=replay_budget,
+        hard_replay_budget_tokens=replay_budget,
         summary_input_budget_tokens=summary_input_budget,
     )
 
@@ -2483,6 +2484,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         reserve_tokens=0,
         static_prompt_tokens=0,
         replay_budget_tokens=1,
+        hard_replay_budget_tokens=1,
         summary_input_budget_tokens=summary_input_budget,
     )
 
@@ -2603,6 +2605,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         reserve_tokens=0,
         static_prompt_tokens=0,
         replay_budget_tokens=replay_budget,
+        hard_replay_budget_tokens=replay_budget,
         summary_input_budget_tokens=summary_input_budget,
     )
 
@@ -2776,6 +2779,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         reserve_tokens=0,
         static_prompt_tokens=0,
         replay_budget_tokens=replay_budget,
+        hard_replay_budget_tokens=replay_budget,
         summary_input_budget_tokens=summary_input_budget,
     )
     summary_mock = AsyncMock(
@@ -5036,6 +5040,7 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
         reserve_tokens=16_384,
         static_prompt_tokens=2_000,
         replay_budget_tokens=10_000,
+        hard_replay_budget_tokens=10_000,
         summary_input_budget_tokens=5_000,
     )
 
@@ -5097,14 +5102,21 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: P
         ],
     )
 
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="runs", limit=2),
+        max_tool_calls_from_history=None,
+    )
     replay_plan = _plan_replay_that_fits(
         session=session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="runs", limit=2),
-            max_tool_calls_from_history=None,
-        ),
+        scope=scope,
+        history_settings=history_settings,
         available_history_budget=250,
+        current_history_tokens=estimate_prompt_visible_history_tokens(
+            session=session,
+            scope=scope,
+            history_settings=history_settings,
+        ),
     )
 
     assert replay_plan.mode == "limited"
@@ -6004,14 +6016,21 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
         ],
     )
 
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+    )
     replay_plan = _plan_replay_that_fits(
         session=session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=None,
-        ),
+        scope=scope,
+        history_settings=history_settings,
         available_history_budget=available_history_budget,
+        current_history_tokens=estimate_prompt_visible_history_tokens(
+            session=session,
+            scope=scope,
+            history_settings=history_settings,
+        ),
     )
     apply_replay_plan(target=agent, replay_plan=replay_plan)
 
