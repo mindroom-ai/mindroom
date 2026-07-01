@@ -10538,6 +10538,7 @@
       "icon": "SiGooglescholar",
       "icon_color": "text-blue-500",
       "name": "google_scholar",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
