@@ -2,7 +2,8 @@
 
 Schedule agents or teams to perform tasks at specific times or intervals using natural language.
 
-Tasks run in the thread where they were created.
+By default, tasks run in the same scope where they were created: the room timeline for room-level schedules, or the current thread for threaded schedules.
+The `schedule()` tool accepts `new_thread=True` to post each fire as a top-level room message that can become its own thread, instead of continuing in the current thread.
 
 ## Commands
 

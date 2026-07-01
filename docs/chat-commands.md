@@ -70,7 +70,7 @@ Show the welcome message for the current room, listing available agents and team
 
 Schedule a one-time or recurring task using natural language.
 
-Tasks run in the thread where they were created.
+Tasks run in the same scope where they were created: the room timeline for room-level schedules, or the current thread for threaded schedules.
 
 ```
 !schedule <natural-language-request>
