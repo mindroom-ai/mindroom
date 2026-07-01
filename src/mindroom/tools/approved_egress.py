@@ -86,23 +86,27 @@ def _static_allowlist_no_grant_result(host: str) -> str:
     return f"{host} is already allowed by the static egress allowlist. No temporary grant was created."
 
 
+def _request_network_access_invalid_result(message: str) -> ToolApprovalBypassResult:
+    return ToolApprovalBypassResult(f"request_network_access failed before approval: {message}")
+
+
 def _request_network_access_arguments_bypass_approval(
     arguments: Mapping[str, object],
 ) -> bool | ToolApprovalBypassResult:
     hostname = arguments.get("hostname")
     if not isinstance(hostname, str):
-        return True
+        return _request_network_access_invalid_result("hostname must be a string")
     try:
         host = canonical_hostname(hostname)
-    except ValueError:
-        return True
+    except (TypeError, ValueError) as exc:
+        return _request_network_access_invalid_result(str(exc))
     try:
         _validate_request_metadata(
             cast("int", arguments.get("ttl_minutes")),
             cast("str", arguments.get("reason")),
         )
-    except (TypeError, ValueError):
-        return True
+    except (TypeError, ValueError) as exc:
+        return _request_network_access_invalid_result(str(exc))
     if is_hostname_allowed(host, resolve_worker_egress_policy()):
         return ToolApprovalBypassResult(_static_allowlist_no_grant_result(host))
     return False

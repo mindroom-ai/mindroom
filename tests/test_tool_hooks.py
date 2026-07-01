@@ -1690,13 +1690,21 @@ async def test_tool_approval_bypass_honors_falsey_approval_entrypoint() -> None:
 
 
 @pytest.mark.parametrize(
-    ("allowlist", "arguments", "expected_error"),
+    ("allowlist", "arguments", "expected_message"),
     [
-        (False, {"ttl_minutes": 5, "reason": "Need docs."}, TypeError),
-        (False, {"hostname": 123, "ttl_minutes": 5, "reason": "Need docs."}, TypeError),
-        (False, {"hostname": "https://docs.example.com", "ttl_minutes": 5, "reason": "Need docs."}, ValueError),
-        (True, {"hostname": "docs.example.com", "ttl_minutes": 5}, TypeError),
-        (True, {"hostname": "docs.example.com", "ttl_minutes": 0, "reason": "Need docs."}, ValueError),
+        (False, {"ttl_minutes": 5, "reason": "Need docs."}, "hostname must be a string"),
+        (False, {"hostname": 123, "ttl_minutes": 5, "reason": "Need docs."}, "hostname must be a string"),
+        (
+            False,
+            {"hostname": "https://docs.example.com", "ttl_minutes": 5, "reason": "Need docs."},
+            "hostname must not include a scheme, path, query, or credentials",
+        ),
+        (True, {"hostname": "docs.example.com", "ttl_minutes": 5}, "reason must be a string"),
+        (
+            True,
+            {"hostname": "docs.example.com", "ttl_minutes": 0, "reason": "Need docs."},
+            "ttl_minutes must be positive",
+        ),
     ],
 )
 @pytest.mark.asyncio
@@ -1705,7 +1713,7 @@ async def test_request_network_access_invalid_arguments_bypass_matrix_approval(
     tmp_path: Path,
     allowlist: bool,
     arguments: dict[str, object],
-    expected_error: type[Exception],
+    expected_message: str,
 ) -> None:
     """Invalid egress requests should fail in the tool without creating a Matrix approval card."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1719,14 +1727,48 @@ async def test_request_network_access_invalid_arguments_bypass_matrix_approval(
     bridge = _request_network_access_bridge(config, runtime_paths)
     toolkit = _approved_egress._ApprovedEgressTools()
 
-    with pytest.raises(expected_error):
-        await bridge(
-            "request_network_access",
-            toolkit.async_functions["request_network_access"].entrypoint,
-            arguments,
-        )
+    result = await bridge(
+        "request_network_access",
+        toolkit.async_functions["request_network_access"].entrypoint,
+        arguments,
+    )
 
+    assert result == f"request_network_access failed before approval: {expected_message}"
     sender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_request_network_access_processed_invalid_ttl_does_not_bypass_to_grant(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Raw invalid approval args must not reach Agno's Pydantic-coerced entrypoint."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH", str(tmp_path / "missing-allowlist.txt"))
+    config = _request_network_access_config(runtime_paths, timeout=True)
+    client, _ = _initialize_router_approval_store(runtime_paths)
+
+    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
+        msg = "raw invalid request_network_access args must not create a grant"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(_approved_egress, "_post_grant", post_grant)
+    bridge = _request_network_access_bridge(config, runtime_paths)
+    toolkit = _approved_egress._ApprovedEgressTools()
+    function = toolkit.async_functions["request_network_access"].model_copy(deep=True)
+    function.process_entrypoint()
+    toolkit.async_functions["request_network_access"] = function
+    prepend_tool_hook_bridge(toolkit, bridge)
+
+    result = await FunctionCall(
+        function=function,
+        arguments={"hostname": "docs.other.test", "ttl_minutes": "5", "reason": "Need docs."},
+        call_id="call-1",
+    ).aexecute()
+
+    assert result.status == "success"
+    assert result.result == "request_network_access failed before approval: ttl_minutes must be an integer"
+    client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
