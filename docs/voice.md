@@ -211,10 +211,14 @@ Reply-permission checks still use the original human sender, not a later router 
 MindRoom also supports text-to-speech (TTS) through agent tools.
 These are separate from voice message transcription and allow agents to generate audio responses:
 
+- **Matrix Voice Message** - One-call OpenAI TTS delivery to the current Matrix room or thread via `matrix_voice_message`
 - **OpenAI** - Speech synthesis via `openai` tool
 - **ElevenLabs** - High-quality AI voices and sound effects via `eleven_labs` tool
 - **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
 - **Groq** - Fast speech generation via `groq` tool
+
+Use `matrix_voice_message` when an agent should send a playable Opus Matrix voice note directly.
+It defaults to the current room and active thread, accepts `thread_id="room"` for room-level delivery, and can add readable text through `companion_message`.
 
 See the [Tools documentation](tools/index.md) for configuration details.
 

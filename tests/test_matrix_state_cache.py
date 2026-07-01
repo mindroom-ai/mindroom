@@ -99,6 +99,19 @@ def test_load_rooms_room_value_is_isolated(tmp_path: Path) -> None:
     assert rooms_after_mutation["dev"].room_id == "!dev:localhost"
 
 
+def test_resolve_room_aliases_accepts_room_key_and_full_alias(tmp_path: Path) -> None:
+    """Room target resolution should accept both managed room keys and full aliases."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _seed_state(runtime_paths, "dev", "!dev:localhost")
+    _load_matrix_state_file_cached.cache_clear()
+
+    assert matrix_state.resolve_room_aliases(["dev", "#dev:localhost", "!external:localhost"], runtime_paths) == [
+        "!dev:localhost",
+        "!dev:localhost",
+        "!external:localhost",
+    ]
+
+
 def test_resolve_room_aliases_does_not_reparse_yaml(
     tmp_path: Path,
     monkeypatch,  # noqa: ANN001

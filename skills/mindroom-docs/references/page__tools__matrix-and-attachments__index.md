@@ -10,6 +10,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 ## Tools On This Page
 
 - [`matrix_message`] - Send, reply, react, read, edit, or inspect Matrix conversation context.
+- [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
 - [`thread_summary`] - Set or update a Matrix thread summary from the current room and thread context.
 - [`thread_model`] - Show, switch, or reset the model override for the current Matrix thread.
@@ -21,7 +22,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 These tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation.
 `matrix_message` implies `attachments` through `Config.IMPLIED_TOOLS`, so enabling `matrix_message` makes the `attachments` toolkit available even when you do not list it separately.
 Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run.
-Current source in this worktree exposes `matrix_message`, `thread_tags`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
+Current source in this worktree exposes `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
 
 ## [`matrix_message`]
 
@@ -76,6 +77,45 @@ matrix_message(action="react", target="$event123", message="✅")
 - Use `action="context"` before a follow-up write when you want to inspect the resolved `room_id`, `thread_id`, and `reply_to_event_id`.
 - Successful attachment sends also return `attachment_thread_id`, which identifies the thread root used for the uploaded files.
 - If you need to send existing conversation files, pass `attachment_ids` from the current context or use the `attachments` tool to inspect them first.
+
+## [`matrix_voice_message`]
+
+`matrix_voice_message` lets agents generate speech from text and send it as a Matrix voice message in one tool call.
+
+### What It Does
+
+`matrix_voice_message(text, room_id=None, thread_id=None, caption=None, companion_message=None)` calls OpenAI text-to-speech and sends one Opus `m.audio` event with Matrix voice-note metadata.
+When both `room_id` and `thread_id` are omitted, it targets the active Matrix room and active thread.
+Pass `thread_id="room"` to force room-level delivery.
+Use `caption` for the audio event body and `companion_message` for a separate readable text event in the same target.
+
+### Configuration
+
+`matrix_voice_message` requires OpenAI text-to-speech access through a stored credential or `OPENAI_API_KEY` / `OPENAI_API_KEY_FILE`.
+Defaults: `model=gpt-4o-mini-tts`, `voice=alloy`.
+The tool always requests Opus output because Matrix voice notes need Opus audio with duration and waveform metadata.
+
+### Example
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - matrix_voice_message
+```
+
+```python
+matrix_voice_message("Here is the quick audio version.")
+matrix_voice_message(
+    "The build finished successfully.",
+    companion_message="The build finished successfully.",
+)
+```
+
+### Notes
+
+- The tool returns `event_id` for the voice event and `companion_event_id` when companion text was sent.
+- The tool rate-limits each `(agent_name, requester_id, room_id)` combination to six voice sends per 30 seconds.
 
 ## [`thread_tags`]
 

@@ -733,6 +733,7 @@ path = "mindroom.custom_tools.matrix_helpers"
 depends_on = []
 visibility = [
     "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.matrix_voice_message",
     "mindroom.custom_tools.matrix_room",
 ]
 
@@ -742,6 +743,19 @@ depends_on = [
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.matrix_helpers",
     "mindroom.custom_tools.matrix_conversation_operations",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.matrix_voice_message"
+depends_on = [
+    "mindroom.credentials_sync",
+    "mindroom.custom_tools.attachment_helpers",
+    "mindroom.custom_tools.matrix_conversation_operations",
+    "mindroom.custom_tools.matrix_helpers",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.matrix.client_delivery",
+    "mindroom.model_defaults",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -759,7 +773,10 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.mentions",
 ]
-visibility = ["mindroom.custom_tools.matrix_message"]
+visibility = [
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.matrix_voice_message",
+]
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_room"
@@ -1723,6 +1740,7 @@ visibility = [
     "mindroom.conversation_resolver",
     "mindroom.custom_tools.attachments",
     "mindroom.custom_tools.matrix_conversation_operations",
+    "mindroom.custom_tools.matrix_voice_message",
     "mindroom.custom_tools.subagents",
     "mindroom.delivery_gateway",
     "mindroom.hooks.sender",
@@ -3059,6 +3077,7 @@ expose = [
     "can_send_to_encrypted_room",
     "cached_room",
     "edit_message_result",
+    "send_audio_message",
     "send_file_message",
     "send_message_result",
 ]
