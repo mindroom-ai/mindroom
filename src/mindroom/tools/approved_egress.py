@@ -96,6 +96,13 @@ def _request_network_access_arguments_bypass_approval(
         host = canonical_hostname(hostname)
     except ValueError:
         return True
+    try:
+        _validate_request_metadata(
+            cast("int", arguments.get("ttl_minutes")),
+            cast("str", arguments.get("reason")),
+        )
+    except (TypeError, ValueError):
+        return True
     if is_hostname_allowed(host, resolve_worker_egress_policy()):
         return ToolApprovalBypassResult(_static_allowlist_no_grant_result(host))
     return False
@@ -147,6 +154,16 @@ def _normalize_reason(value: str) -> str:
         msg = "reason must not be empty"
         raise ValueError(msg)
     return normalized[:_MAX_REASON_CHARS]
+
+
+def _validate_request_metadata(ttl_minutes: int, reason: str) -> tuple[str, int]:
+    if type(ttl_minutes) is not int:
+        msg = "ttl_minutes must be an integer"
+        raise TypeError(msg)
+    if ttl_minutes <= 0:
+        msg = "ttl_minutes must be positive"
+        raise ValueError(msg)
+    return _normalize_reason(reason), ttl_minutes * 60
 
 
 def _effective_ttl_seconds(requested_ttl_seconds: int) -> int:
@@ -264,10 +281,9 @@ class _ApprovedEgressTools(Toolkit):
     ) -> str:
         """Request temporary worker egress to one exact external hostname."""
         host = canonical_hostname(hostname)
+        normalized_reason, requested_ttl_seconds = _validate_request_metadata(ttl_minutes, reason)
         if is_hostname_allowed(host, resolve_worker_egress_policy()):
             return _static_allowlist_no_grant_result(host)
-        normalized_reason = _normalize_reason(reason)
-        requested_ttl_seconds = ttl_minutes * 60
         effective_ttl_seconds = _effective_ttl_seconds(requested_ttl_seconds)
 
         context = get_tool_runtime_context()

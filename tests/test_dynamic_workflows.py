@@ -2360,6 +2360,10 @@ def test_ephemeral_participant_tool_bridge_carries_workflow_origin(tmp_path: Pat
         workflow_id="competitor-research-report",
         participant_id="writer",
     )
+    assert (
+        bridge_mock.call_args.kwargs["bypass_result_transform"]
+        is dynamic_workflow_module.apply_output_file_handling_to_result
+    )
 
 
 def test_ephemeral_participant_without_grants_runs_with_empty_tools(tmp_path: Path) -> None:
