@@ -1254,7 +1254,7 @@ def estimate_prompt_visible_history_tokens(
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run."""
     summary_tokens = estimate_session_summary_tokens(_current_summary_text(session))
-    history_messages = _history_messages_for_session(
+    history_messages = _history_messages_for_estimation(
         session=session,
         scope=scope,
         history_settings=history_settings,
@@ -1350,21 +1350,27 @@ def _stable_compaction_run_ids(
     return tuple(run.run_id for run in runs if isinstance(run.run_id, str) and run.run_id)
 
 
-def _history_messages_for_session(
+def _history_messages_for_estimation(
     *,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    session_messages = _session_history_messages(
-        session=session,
-        scope=scope,
-        history_settings=history_settings,
+    """Return the prompt-visible history messages for token estimation only.
+
+    No deepcopy: filter_tool_calls copies any message it modifies and only the
+    list itself is mutated. Stale Anthropic replay fields are left in place
+    because the char estimate never counts them.
+    """
+    history_messages = list(
+        _session_history_messages(
+            session=session,
+            scope=scope,
+            history_settings=history_settings,
+        ),
     )
-    history_messages = [deepcopy(message) for message in session_messages]
     if history_settings.max_tool_calls_from_history is not None and history_messages:
         filter_tool_calls(history_messages, history_settings.max_tool_calls_from_history)
-    _strip_stale_anthropic_replay_fields(history_messages)
     return history_messages
 
 
