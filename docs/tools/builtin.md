@@ -16,7 +16,7 @@ icon: lucide/box
 | **Data & Databases** | sql, postgres, neo4j, duckdb, csv, pandas, google_drive, google_sheets, yfinance | [→ data-and-databases](data-and-databases.md) |
 | **Web Search** | duckduckgo, googlesearch, tavily, exa, serpapi, serper, searxng | [→ web-search](web-search.md) |
 | **Web Scraping & Browser** | firecrawl, crawl4ai, browser, jina, website, trafilatura | [→ web-scraping-and-browser](web-scraping-and-browser.md) |
-| **Research Sources** | arxiv, wikipedia, pubmed, hackernews | [→ research-sources](research-sources.md) |
+| **Research Sources** | arxiv, google_scholar, wikipedia, pubmed, hackernews | [→ research-sources](research-sources.md) |
 | **AI & Generation** | openai, gemini, groq, replicate, fal, dalle, eleven_labs | [→ ai-and-generation](ai-and-generation.md) |
 | **Media & Content** | youtube, spotify, giphy, moviepy, unsplash, brandfetch | [→ media-and-content](media-and-content.md) |
 | **Matrix & Attachments** | matrix_message, matrix_voice_message, thread_tags, thread_summary, thread_model, matrix_api, attachments | [→ matrix-and-attachments](matrix-and-attachments.md) |

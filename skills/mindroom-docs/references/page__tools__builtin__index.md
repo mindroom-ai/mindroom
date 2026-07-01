@@ -12,7 +12,7 @@
 | **Data & Databases** | sql, postgres, neo4j, duckdb, csv, pandas, google_drive, google_sheets, yfinance | [→ data-and-databases](https://docs.mindroom.chat/tools/data-and-databases/) |
 | **Web Search** | duckduckgo, googlesearch, tavily, exa, serpapi, serper, searxng | [→ web-search](https://docs.mindroom.chat/tools/web-search/) |
 | **Web Scraping & Browser** | firecrawl, crawl4ai, browser, jina, website, trafilatura | [→ web-scraping-and-browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) |
-| **Research Sources** | arxiv, wikipedia, pubmed, hackernews | [→ research-sources](https://docs.mindroom.chat/tools/research-sources/) |
+| **Research Sources** | arxiv, google_scholar, wikipedia, pubmed, hackernews | [→ research-sources](https://docs.mindroom.chat/tools/research-sources/) |
 | **AI & Generation** | openai, gemini, groq, replicate, fal, dalle, eleven_labs | [→ ai-and-generation](https://docs.mindroom.chat/tools/ai-and-generation/) |
 | **Media & Content** | youtube, spotify, giphy, moviepy, unsplash, brandfetch | [→ media-and-content](https://docs.mindroom.chat/tools/media-and-content/) |
 | **Matrix & Attachments** | matrix_message, matrix_voice_message, thread_tags, thread_summary, thread_model, matrix_api, attachments | [→ matrix-and-attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) |
