@@ -471,7 +471,6 @@ async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_
         after_tokens=12_000,
         window_tokens=100_000,
         threshold_tokens=80_000,
-        reserve_tokens=4_096,
         runs_before=20,
         runs_after=8,
         compacted_run_count=12,

@@ -936,6 +936,7 @@ path = "mindroom.history.interrupted_replay"
 depends_on = [
     "mindroom.agent_storage",
     "mindroom.constants",
+    "mindroom.history.storage",
     "mindroom.tool_system.events",
 ]
 visibility = [
@@ -3366,16 +3367,12 @@ expose = [
     "CompactionOutcome",
     "HistoryPolicy",
     "HistoryScope",
-    "HistoryPreparationInputs",
-    "HistoryScopeState",
     "PreparedHistoryState",
     "PreparedScopeHistory",
-    "ResolvedHistoryExecutionPlan",
     "ResolvedHistorySettings",
     "ResolvedReplayPlan",
     "ScopeSessionContext",
     "StaticTokenEstimator",
-    "add_pending_force_compaction_scope",
     "agent_static_token_estimator",
     "agent_tool_definition_payloads_for_logging",
     "apply_replay_plan",
@@ -3384,15 +3381,11 @@ expose = [
     "compute_prompt_token_breakdown",
     "context_budget_after_reserve",
     "create_scope_session_storage",
-    "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
     "has_pending_force_compaction_scope",
-    "manual_compaction_unavailable_message",
-    "normalize_compaction_budget_tokens",
     "note_prepared_history_timing",
     "open_bound_scope_session_context",
     "open_resolved_scope_session_context",
-    "open_scope_session_context",
     "prepare_bound_scope_history",
     "prepare_scope_history",
     "read_scope_seen_event_ids",
@@ -3403,7 +3396,6 @@ expose = [
     "team_static_token_estimator",
     "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",
-    "write_scope_state",
 ]
 from = ["mindroom.history"]
 

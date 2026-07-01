@@ -362,7 +362,7 @@ def compute_prompt_token_breakdown(
         elif isinstance(instructions, list):
             for instruction in instructions:
                 sys_chars += len(str(instruction))
-        breakdown["role_instructions_tokens"] = sys_chars // 4
+        breakdown["role_instructions_tokens"] = sys_chars // 4  # same floor as estimate_text_tokens
 
     tool_tokens = 0
     if agent is not None:
@@ -373,6 +373,6 @@ def compute_prompt_token_breakdown(
     breakdown["tool_definition_tokens"] = tool_tokens
 
     if full_prompt is not None:
-        breakdown["current_prompt_tokens"] = len(full_prompt) // 4
+        breakdown["current_prompt_tokens"] = estimate_text_tokens(full_prompt)
 
     return breakdown

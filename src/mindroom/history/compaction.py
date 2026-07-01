@@ -173,13 +173,12 @@ async def compact_scope_history(
     active_context_window: int | None,
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
-    reserve_tokens: int,
     summary_prompt: str,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
-) -> tuple[HistoryScopeState, CompactionOutcome | None]:
+) -> CompactionOutcome | None:
     """Compact one scope by rewriting session.summary and session.runs."""
-    visible_runs = runs_for_scope(completed_top_level_runs(session), scope)
+    visible_runs = scope_visible_runs(session, scope)
     compactable_runs = _select_compaction_candidates(
         visible_runs=visible_runs,
         session=session,
@@ -189,26 +188,26 @@ async def compact_scope_history(
         available_history_budget=available_history_budget,
     )
     if not compactable_runs:
-        cleared_state = _persist_cleared_force_state_if_needed(
+        _persist_cleared_force_state_if_needed(
             storage=storage,
             session=session,
             scope=scope,
             state=state,
         )
-        return cleared_state, None
+        return None
     selected_run_ids = _stable_compaction_run_ids(
         compactable_runs,
         session_id=session.session_id,
         scope=scope,
     )
     if not selected_run_ids:
-        cleared_state = _persist_cleared_force_state_if_needed(
+        _persist_cleared_force_state_if_needed(
             storage=storage,
             session=session,
             scope=scope,
             state=state,
         )
-        return cleared_state, None
+        return None
 
     before_tokens = estimate_prompt_visible_history_tokens(
         session=session,
@@ -253,13 +252,13 @@ async def compact_scope_history(
         before_persist_callback=emit_before_persist,
     )
     if rewrite_result is None:
-        cleared_state = _persist_cleared_force_state_if_needed(
+        _persist_cleared_force_state_if_needed(
             storage=storage,
             session=session,
             scope=scope,
             state=state,
         )
-        return cleared_state, None
+        return None
 
     compacted_at = _iso_utc_now()
     new_state = HistoryScopeState(
@@ -287,7 +286,7 @@ async def compact_scope_history(
         model=_model_identifier(summary_model),
     )
 
-    after_visible_runs = runs_for_scope(completed_top_level_runs(session), scope)
+    after_visible_runs = scope_visible_runs(session, scope)
     after_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         scope=scope,
@@ -304,7 +303,6 @@ async def compact_scope_history(
         after_tokens=after_tokens,
         window_tokens=resolved_window_tokens,
         threshold_tokens=threshold_tokens or 0,
-        reserve_tokens=reserve_tokens,
         runs_before=before_run_count,
         runs_after=len(after_visible_runs),
         compacted_run_count=rewrite_result.compacted_run_count,
@@ -320,7 +318,7 @@ async def compact_scope_history(
         token_count_after=after_tokens,
         compaction_summary=rewrite_result.summary_text,
     )
-    return new_state, outcome
+    return outcome
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
@@ -355,7 +353,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     pending_selected_run_ids = set(selected_run_ids)
 
     while pending_selected_run_ids:
-        working_visible_runs = runs_for_scope(completed_top_level_runs(working_session), scope)
+        working_visible_runs = scope_visible_runs(working_session, scope)
         compactable_runs = [
             run
             for run in working_visible_runs
@@ -441,7 +439,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
 
     if total_compacted_run_count == 0:
         return None
-    for run in runs_for_scope(completed_top_level_runs(working_session), scope):
+    for run in scope_visible_runs(working_session, scope):
         _strip_stale_anthropic_replay_fields(run.messages or [])
     return _CompactionRewriteResult(
         summary_text=final_summary_text,
@@ -469,7 +467,7 @@ async def _emit_lifecycle_progress_after_persist(
     selected_runs_remaining: int,
 ) -> None:
     """Emit lifecycle progress after a compaction chunk has been durably persisted."""
-    remaining_runs = runs_for_scope(completed_top_level_runs(working_session), scope)
+    remaining_runs = scope_visible_runs(working_session, scope)
     if progress_callback is None or not remaining_runs:
         return
     after_tokens = estimate_prompt_visible_history_tokens(
@@ -1055,7 +1053,7 @@ def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str]:
     return sorted(prompt_roles_for_history_storage(history_settings.system_message_role))
 
 
-def completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
+def _completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
     """Return completed top-level runs that can contribute to persisted replay."""
     skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
     return [
@@ -1065,7 +1063,15 @@ def completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOut
     ]
 
 
-def runs_for_scope(
+def scope_visible_runs(
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+) -> list[RunOutput | TeamRunOutput]:
+    """Return this scope's completed top-level runs in stored order."""
+    return _runs_for_scope(_completed_top_level_runs(session), scope)
+
+
+def _runs_for_scope(
     runs: Sequence[RunOutput | TeamRunOutput],
     scope: HistoryScope,
 ) -> list[RunOutput | TeamRunOutput]:

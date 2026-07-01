@@ -348,7 +348,6 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
             active_context_window=64_000,
             replay_window_tokens=64_000,
             threshold_tokens=None,
-            reserve_tokens=0,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
         )
 

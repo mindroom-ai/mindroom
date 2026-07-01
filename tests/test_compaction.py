@@ -71,7 +71,6 @@ def _make_outcome(**overrides: object) -> CompactionOutcome:
         "window_tokens": 100_000,
         "history_budget_tokens": 100_000,
         "threshold_tokens": 80_000,
-        "reserve_tokens": 4_096,
         "runs_before": 20,
         "runs_after": 8,
         "compacted_run_count": 12,

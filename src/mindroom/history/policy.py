@@ -184,7 +184,7 @@ def _resolve_summary_input_budget(
     if compaction_context_window is None:
         return None, "no_context_window"
 
-    normalized_reserve_tokens = normalize_compaction_budget_tokens(
+    normalized_reserve_tokens = _normalize_compaction_budget_tokens(
         reserve_tokens,
         compaction_context_window,
     )
@@ -199,7 +199,7 @@ def _resolve_summary_input_budget(
 
 def context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int, spent_tokens: int = 0) -> int:
     """Return the usable context budget after clamped reserve and known prompt cost."""
-    normalized_reserve_tokens = normalize_compaction_budget_tokens(reserve_tokens, context_window_tokens)
+    normalized_reserve_tokens = _normalize_compaction_budget_tokens(reserve_tokens, context_window_tokens)
     return max(0, context_window_tokens - normalized_reserve_tokens - spent_tokens)
 
 
@@ -248,7 +248,7 @@ def _resolve_effective_compaction_threshold(compaction_config: CompactionConfig,
     return int(context_window * 0.8)
 
 
-def normalize_compaction_budget_tokens(tokens: int, context_window: int | None) -> int:
+def _normalize_compaction_budget_tokens(tokens: int, context_window: int | None) -> int:
     """Clamp one compaction knob against half of the available model window."""
     if context_window is None or context_window <= 0:
         return tokens

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from agno.models.message import Message
@@ -22,6 +21,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
 )
+from mindroom.history.storage import new_scope_session
 from mindroom.tool_system.events import (
     ToolTraceEntry,
     format_tool_completed_event,
@@ -260,7 +260,7 @@ def persist_interrupted_replay_snapshot(
     if persisted_session is None:
         persisted_session = session
     if persisted_session is None:
-        persisted_session = _new_session(
+        persisted_session = new_scope_session(
             session_id=session_id,
             scope_id=scope_id,
             is_team=is_team,
@@ -325,29 +325,3 @@ def _load_persisted_session(
     if is_team:
         return get_team_session(storage, session_id)
     return get_agent_session(storage, session_id)
-
-
-def _new_session(
-    *,
-    session_id: str,
-    scope_id: str,
-    is_team: bool,
-) -> AgentSession | TeamSession:
-    created_at = int(datetime.now(UTC).timestamp())
-    if is_team:
-        return TeamSession(
-            session_id=session_id,
-            team_id=scope_id,
-            metadata={},
-            runs=[],
-            created_at=created_at,
-            updated_at=created_at,
-        )
-    return AgentSession(
-        session_id=session_id,
-        agent_id=scope_id,
-        metadata={},
-        runs=[],
-        created_at=created_at,
-        updated_at=created_at,
-    )

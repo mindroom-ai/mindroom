@@ -48,15 +48,14 @@ from mindroom.history import (
     CompactionOutcome,
     HistoryScope,
     PreparedHistoryState,
-    ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
     ScopeSessionContext,
     finalize_history_preparation,
-    open_scope_session_context,
     prepare_scope_history,
     resolve_agent_preparation_inputs,
 )
-from mindroom.history.runtime import _resolve_history_scope
+from mindroom.history.runtime import _resolve_history_scope, open_scope_session_context
+from mindroom.history.types import ResolvedHistoryExecutionPlan
 from mindroom.hooks import MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata

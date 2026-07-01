@@ -78,9 +78,9 @@ from mindroom.history.prompt_tokens import (
 )
 from mindroom.history.runtime import (
     ScopeSessionContext,
+    _estimate_preparation_static_tokens_for_team,
     _plan_replay_that_fits,
     apply_replay_plan,
-    estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
     open_bound_scope_session_context,
     open_scope_session_context,
@@ -1746,7 +1746,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
     ):
-        _state, outcome = await compact_scope_history(
+        outcome = await compact_scope_history(
             storage=storage,
             session=session,
             scope=scope,
@@ -1759,7 +1759,6 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             active_context_window=16_000,
             replay_window_tokens=16_000,
             threshold_tokens=1,
-            reserve_tokens=0,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
         )
 
@@ -3884,7 +3883,7 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(return_value=SessionSummary(summary="summary", updated_at=datetime.now(UTC))),
     ) as mock_generate:
-        next_state, outcome = await compact_scope_history(
+        outcome = await compact_scope_history(
             storage=storage,
             session=working_session,
             summary_model=FakeModel(id="summary-model", provider="fake"),
@@ -3900,12 +3899,13 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
             active_context_window=64_000,
             replay_window_tokens=64_000,
             threshold_tokens=None,
-            reserve_tokens=0,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
         )
 
     assert outcome is None
-    assert next_state.force_compact_before_next_run is False
+    # The durable row moved relative to the state this run read (nothing was
+    # ever persisted), so the concurrent-writer-wins clear refuses to write.
+    assert get_agent_session(storage, "session-1") is None
     assert mock_generate.await_count == 0
     assert working_session.summary is None
     assert working_session.runs == [unremovable_run]
@@ -3976,7 +3976,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(return_value=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))),
     ):
-        _state, outcome = await compact_scope_history(
+        outcome = await compact_scope_history(
             storage=storage,
             session=session,
             scope=scope,
@@ -3992,7 +3992,6 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             active_context_window=16_000,
             replay_window_tokens=16_000,
             threshold_tokens=1,
-            reserve_tokens=0,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
         )
 
@@ -4209,7 +4208,8 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
     assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+beta")
     assert (
-        estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
+        _estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt")
+        == expected_static_prompt_tokens
     )
     assert mock_prepare.await_args.kwargs["resolved_inputs"].static_prompt_tokens == expected_static_prompt_tokens
 
@@ -4398,7 +4398,8 @@ def test_estimate_preparation_static_tokens_for_team_includes_agentic_state_tool
     expected_static_prompt_tokens += len(stable_serialize(expected_payloads)) // 4
 
     assert (
-        estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt") == expected_static_prompt_tokens
+        _estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt")
+        == expected_static_prompt_tokens
     )
 
 
@@ -4415,7 +4416,7 @@ def test_estimate_preparation_static_tokens_for_team_preserves_tool_instructions
     )
     team._tool_instructions = ["keep me"]
 
-    estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt")
+    _estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt")
 
     assert team._tool_instructions == ["keep me"]
 
@@ -5122,8 +5123,8 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: P
     )
 
     assert replay_plan.mode == "limited"
-    assert replay_plan.history_limit_mode == "runs"
-    assert replay_plan.history_limit == 1
+    assert replay_plan.num_history_runs == 1
+    assert replay_plan.num_history_messages is None
 
 
 def test_build_matrix_prompt_with_thread_history_preserves_verbatim_bodies_in_cdata() -> None:
@@ -5569,7 +5570,6 @@ def _make_test_compaction_outcome() -> CompactionOutcome:
         after_tokens=12_000,
         window_tokens=128_000,
         threshold_tokens=96_000,
-        reserve_tokens=4_096,
         runs_before=20,
         runs_after=8,
         compacted_run_count=12,

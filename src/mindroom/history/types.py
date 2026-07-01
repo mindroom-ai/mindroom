@@ -89,7 +89,6 @@ class ResolvedHistorySettings:
     policy: HistoryPolicy
     max_tool_calls_from_history: int | None
     system_message_role: str = "system"
-    skip_history_system_role: bool = True
 
 
 @dataclass(frozen=True)
@@ -136,8 +135,6 @@ class ResolvedReplayPlan:
     add_history_to_context: bool
     num_history_runs: int | None = None
     num_history_messages: int | None = None
-    history_limit_mode: Literal["runs", "messages"] | None = None
-    history_limit: int | None = None
 
 
 @dataclass(frozen=True)
@@ -285,7 +282,6 @@ class CompactionOutcome:
     after_tokens: int
     window_tokens: int
     threshold_tokens: int
-    reserve_tokens: int
     runs_before: int
     runs_after: int
     compacted_run_count: int

@@ -4,8 +4,6 @@ from mindroom.history import agno_team_patch
 from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.history.policy import (
     context_budget_after_reserve,
-    manual_compaction_unavailable_message,
-    normalize_compaction_budget_tokens,
     resolve_history_execution_plan,
 )
 from mindroom.history.prompt_tokens import (
@@ -24,24 +22,20 @@ from mindroom.history.runtime import (
     close_agent_runtime_state_dbs,
     close_team_runtime_state_dbs,
     create_scope_session_storage,
-    estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
     note_prepared_history_timing,
     open_bound_scope_session_context,
     open_resolved_scope_session_context,
-    open_scope_session_context,
     prepare_bound_scope_history,
     prepare_scope_history,
     resolve_agent_preparation_inputs,
     resolve_bound_team_scope_context,
 )
 from mindroom.history.storage import (
-    add_pending_force_compaction_scope,
     has_pending_force_compaction_scope,
     read_scope_seen_event_ids,
     read_scope_state,
     update_scope_seen_event_ids,
-    write_scope_state,
 )
 from mindroom.history.types import (
     CompactionDecision,
@@ -54,13 +48,13 @@ from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
     HistoryScopeMetadata,
-    HistoryScopeState,
     PreparedHistoryState,
-    ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
 
+# Applied on package import so every entry point that touches persisted history
+# gets the Team roleful-input and inline-media dedupe patch before any Agno run.
 agno_team_patch.apply_patch()
 
 __all__ = [
@@ -75,15 +69,12 @@ __all__ = [
     "HistoryPreparationInputs",
     "HistoryScope",
     "HistoryScopeMetadata",
-    "HistoryScopeState",
     "PreparedHistoryState",
     "PreparedScopeHistory",
-    "ResolvedHistoryExecutionPlan",
     "ResolvedHistorySettings",
     "ResolvedReplayPlan",
     "ScopeSessionContext",
     "StaticTokenEstimator",
-    "add_pending_force_compaction_scope",
     "agent_static_token_estimator",
     "agent_tool_definition_payloads_for_logging",
     "apply_replay_plan",
@@ -92,15 +83,11 @@ __all__ = [
     "compute_prompt_token_breakdown",
     "context_budget_after_reserve",
     "create_scope_session_storage",
-    "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
     "has_pending_force_compaction_scope",
-    "manual_compaction_unavailable_message",
-    "normalize_compaction_budget_tokens",
     "note_prepared_history_timing",
     "open_bound_scope_session_context",
     "open_resolved_scope_session_context",
-    "open_scope_session_context",
     "prepare_bound_scope_history",
     "prepare_scope_history",
     "read_scope_seen_event_ids",
@@ -112,5 +99,4 @@ __all__ = [
     "team_static_token_estimator",
     "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",
-    "write_scope_state",
 ]

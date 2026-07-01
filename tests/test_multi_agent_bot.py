@@ -79,8 +79,9 @@ from mindroom.dispatch_source import (
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
-from mindroom.history import CompactionLifecycleStart, CompactionOutcome, HistoryScopeState, write_scope_state
-from mindroom.history.types import HistoryScope
+from mindroom.history import CompactionLifecycleStart, CompactionOutcome
+from mindroom.history.storage import write_scope_state
+from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -1111,7 +1112,6 @@ def _make_compaction_outcome(*, mode: str = "auto") -> CompactionOutcome:
         after_tokens=12000,
         window_tokens=200000,
         threshold_tokens=100000,
-        reserve_tokens=16384,
         runs_before=18,
         runs_after=7,
         compacted_run_count=12,

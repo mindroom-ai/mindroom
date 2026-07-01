@@ -28,11 +28,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.constants import (
@@ -48,12 +50,33 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from agno.db.base import BaseDb
-    from agno.session.agent import AgentSession
 
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
 _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
 _COMPACTED_RUN_ID_RETENTION_LIMIT = 1_024
+
+
+def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> AgentSession | TeamSession:
+    """Return one empty session row for a scope with no stored session yet."""
+    created_at = int(datetime.now(UTC).timestamp())
+    if is_team:
+        return TeamSession(
+            session_id=session_id,
+            team_id=scope_id,
+            metadata={},
+            runs=[],
+            created_at=created_at,
+            updated_at=created_at,
+        )
+    return AgentSession(
+        session_id=session_id,
+        agent_id=scope_id,
+        metadata={},
+        runs=[],
+        created_at=created_at,
+        updated_at=created_at,
+    )
 
 
 def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -> HistoryScopeState:

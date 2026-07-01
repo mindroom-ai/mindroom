@@ -4394,8 +4394,6 @@ class TestTeamCompletion:
                     add_history_to_context=True,
                     num_history_runs=1,
                     num_history_messages=None,
-                    history_limit_mode="runs",
-                    history_limit=1,
                 ),
                 replays_persisted_history=True,
             )
