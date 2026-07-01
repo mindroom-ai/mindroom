@@ -1642,6 +1642,64 @@ async def test_request_network_access_static_allowlist_bypasses_matrix_approval(
 
 
 @pytest.mark.asyncio
+async def test_request_network_access_blocked_host_still_uses_matrix_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Blocked egress requests should still go through Matrix approval before reaching the tool."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "timeout_days": 0.000001,
+                "rules": [{"match": "request_network_access", "action": "require_approval"}],
+            },
+        ),
+        runtime_paths,
+    )
+    client, _ = _initialize_router_approval_store(runtime_paths)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    executed = False
+
+    async def request_network_access(**kwargs: object) -> str:
+        nonlocal executed
+        executed = True
+        return str(kwargs["hostname"])
+
+    result = await bridge(
+        "request_network_access",
+        request_network_access,
+        {"hostname": "docs.other.test", "ttl_minutes": 5, "reason": "Need docs."},
+    )
+
+    assert result == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: request_network_access\n"
+        "Reason: Tool approval request timed out.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    assert executed is False
+    client.room_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: Path) -> None:
     """Approval-gated sync tools should resume after approval resolves on another loop."""
     runtime_paths = test_runtime_paths(tmp_path)
