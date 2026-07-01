@@ -24,6 +24,7 @@ from mindroom.egress.policy import (
     resolve_grant_subject,
     resolve_worker_egress_policy,
 )
+from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.metadata import SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -31,6 +32,7 @@ from mindroom.tool_system.runtime_context import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from http.client import HTTPMessage
     from typing import IO
 
@@ -77,6 +79,28 @@ def _request_network_access_description() -> str:
         "Use this only when the worker needs a hostname that is not already allowed.\n\n"
         f"{_static_allowlist_description()}"
     )
+
+
+def _request_network_access_is_approval_exempt(arguments: Mapping[str, object]) -> bool:
+    """True when the hostname is already statically allowed, so approval would be redundant.
+
+    Fails closed: anything that is not a provably allowlisted hostname keeps the
+    Matrix approval card. The tool re-checks the allowlist at execution and
+    returns the no-grant result, so a skipped card can only mint a grant if the
+    allowlist itself shrinks between this check and execution — an accepted
+    operator-edit race measured in microseconds.
+    """
+    hostname = arguments.get("hostname")
+    if not isinstance(hostname, str):
+        return False
+    try:
+        host = canonical_hostname(hostname)
+    except ValueError:
+        return False
+    return is_hostname_allowed(host, resolve_worker_egress_policy())
+
+
+register_tool_approval_exemption("request_network_access", _request_network_access_is_approval_exempt)
 
 
 def _is_plain_http_api_host_allowed(hostname: str) -> bool:

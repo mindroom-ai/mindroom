@@ -61,6 +61,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tools import approved_egress as _approved_egress
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import (
     bind_runtime_paths,
@@ -71,7 +72,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Awaitable, Callable, Generator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -1592,6 +1593,99 @@ async def test_sync_execute_async_tool_entrypoint_still_runs_approval_gate(tmp_p
     assert executed == []
     client.room_send.assert_awaited_once()
     mock_log_warning.assert_not_called()
+
+
+def _request_network_access_config(runtime_paths: RuntimePaths) -> Config:
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(display_name="Code", role="Help with coding.", rooms=["!room:localhost"]),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "timeout_days": 0.000001,
+                "rules": [{"match": "request_network_access", "action": "require_approval"}],
+            },
+        ),
+        runtime_paths,
+    )
+
+
+def _request_network_access_bridge(config: Config, runtime_paths: RuntimePaths) -> Callable[..., Awaitable[object]]:
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+    return bridge
+
+
+@pytest.mark.parametrize("ttl_minutes", [5, "5"])
+@pytest.mark.asyncio
+async def test_request_network_access_static_allowlist_skips_matrix_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ttl_minutes: object,
+) -> None:
+    """Static-allowlisted egress requests should answer without an approval card or a grant."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    config = _request_network_access_config(runtime_paths)
+    client, _ = _initialize_router_approval_store(runtime_paths)
+    bridge = _request_network_access_bridge(config, runtime_paths)
+
+    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
+        msg = "a static-allowlisted request must not create a temporary grant"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(_approved_egress, "_post_grant", post_grant)
+    toolkit = _approved_egress._ApprovedEgressTools()
+    function = toolkit.async_functions["request_network_access"]
+    prepend_tool_hook_bridge(toolkit, bridge)
+
+    result = await FunctionCall(
+        function=function,
+        arguments={"hostname": "docs.example.com", "ttl_minutes": ttl_minutes, "reason": "Need docs."},
+        call_id="call-1",
+    ).aexecute()
+
+    assert result.status == "success"
+    assert (
+        result.result
+        == "docs.example.com is already allowed by the static egress allowlist. No temporary grant was created."
+    )
+    client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_request_network_access_blocked_host_still_uses_matrix_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Blocked egress requests should still go through Matrix approval before reaching the tool."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    config = _request_network_access_config(runtime_paths)
+    client, _ = _initialize_router_approval_store(runtime_paths)
+    bridge = _request_network_access_bridge(config, runtime_paths)
+    toolkit = _approved_egress._ApprovedEgressTools()
+
+    result = await bridge(
+        "request_network_access",
+        toolkit.async_functions["request_network_access"].entrypoint,
+        {"hostname": "docs.other.test", "ttl_minutes": 5, "reason": "Need docs."},
+    )
+
+    assert result == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: request_network_access\n"
+        "Reason: Tool approval request timed out.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    client.room_send.assert_awaited_once()
 
 
 @pytest.mark.asyncio

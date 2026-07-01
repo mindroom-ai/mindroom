@@ -219,12 +219,12 @@ participants:
   - id: critic
     kind: ephemeral_agent
     name: Source Critic
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     tools: []
   - id: writer
     kind: ephemeral_agent
     name: Report Writer
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     tools: []
 workflow:
   - id: plan
@@ -255,7 +255,7 @@ permissions:
   max_total_agents: 3
   models:
     - claude-haiku-4-5
-    - claude-sonnet-4-6
+    - claude-sonnet-5
   tools: []
   data:
     matrix_history: none

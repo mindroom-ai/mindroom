@@ -28,6 +28,7 @@ from mindroom.approval_manager import (
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.approval_exemptions import tool_call_is_approval_exempt
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -218,6 +219,9 @@ async def evaluate_tool_approval(
     approval_config = config.tool_approval
     require_approval = approval_config.default == "require_approval"
     timeout_seconds = approval_config.timeout_days * 24 * 60 * 60
+
+    if tool_call_is_approval_exempt(tool_name, arguments):
+        return False, timeout_seconds
 
     rule = _matching_tool_approval_rule(config, tool_name)
     if rule is None:

@@ -45,6 +45,7 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
     tool_requires_approval_for_openai_compat,
 )
+from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
@@ -2400,6 +2401,45 @@ async def test_evaluate_tool_approval_rule_action_requires_approval(tmp_path: Pa
 
     assert requires_approval is True
     assert timeout_seconds > 0
+
+
+@pytest.mark.parametrize(
+    ("hostname", "expected"),
+    [
+        ("docs.example.com", False),
+        ("docs.other.test", True),
+        (123, True),
+        ("https://docs.example.com", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_evaluate_tool_approval_honors_tool_approval_exemption(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    hostname: object,
+    expected: bool,
+) -> None:
+    """request_network_access calls for statically allowlisted hostnames need no approval."""
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Help with coding")},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            tool_approval={"rules": [{"match": "request_network_access", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+
+    requires_approval, _ = await evaluate_tool_approval(
+        config,
+        runtime_paths,
+        "request_network_access",
+        {"hostname": hostname, "ttl_minutes": 5, "reason": "Need docs."},
+        "code",
+    )
+
+    assert requires_approval is expected
 
 
 @pytest.mark.asyncio

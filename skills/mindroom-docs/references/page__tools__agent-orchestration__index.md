@@ -235,7 +235,7 @@ create_workflow(
                 "id": "writer",
                 "kind": "ephemeral_agent",
                 "name": "Report Writer",
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-5",
                 "tools": ["duckduckgo", "website"],
             },
         ],
@@ -252,7 +252,7 @@ create_workflow(
             "max_runtime_seconds": 1800,
             "max_concurrent_agents": 4,
             "max_total_agents": 8,
-            "models": ["claude-sonnet-4-6"],
+            "models": ["claude-sonnet-5"],
             "tools": ["duckduckgo", "website"],
             "data": {"matrix_history": "none", "attachments": "none", "knowledge_bases": []},
         },
@@ -570,7 +570,7 @@ agents:
     model: default
     tools:
       - claude_agent:
-          model: claude-sonnet-4-6
+          model: claude-sonnet-5
           cwd: /workspace/project
           permission_mode: acceptEdits
           continue_conversation: true
@@ -581,7 +581,7 @@ agents:
 ```json
 {
   "api_key": "sk-ant-or-proxy-key",
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5",
   "permission_mode": "default",
   "continue_conversation": true,
   "session_ttl_minutes": 60,

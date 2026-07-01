@@ -294,6 +294,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.identity",
+    "mindroom.tool_system.approval_exemptions",
 ]
 visibility = [
     "mindroom.agents",
@@ -2321,6 +2322,10 @@ depends_on = ["mindroom.tool_system.worker_routing"]
 
 [[modules]]
 path = "mindroom.tool_system.events"
+depends_on = []
+
+[[modules]]
+path = "mindroom.tool_system.approval_exemptions"
 depends_on = []
 
 [[modules]]
