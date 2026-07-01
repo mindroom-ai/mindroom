@@ -73,7 +73,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator, Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -1641,6 +1641,40 @@ async def test_request_network_access_static_allowlist_bypasses_matrix_approval(
         result == "docs.example.com is already allowed by the static egress allowlist. No temporary grant was created."
     )
     sender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tool_approval_bypass_honors_falsey_approval_entrypoint() -> None:
+    """A falsey wrapped entrypoint should still be used for approval-bypass identity."""
+    seen_entrypoints: list[Callable[..., object]] = []
+
+    class FalseyCallable:
+        def __call__(self) -> object:
+            return None
+
+        def __bool__(self) -> bool:
+            return False
+
+    approval_entrypoint = FalseyCallable()
+
+    def fallback() -> str:
+        return "fallback"
+
+    def fake_evaluate_bypass(
+        _function_name: str,
+        entrypoint: Callable[..., object],
+        _arguments: Mapping[str, object],
+    ) -> bool:
+        seen_entrypoints.append(entrypoint)
+        return False
+
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
+
+    with patch("mindroom.tool_system.tool_hooks.evaluate_tool_approval_bypass", fake_evaluate_bypass):
+        result = await bridge("tool", fallback, {}, approval_entrypoint=approval_entrypoint)
+
+    assert result == "fallback"
+    assert seen_entrypoints == [approval_entrypoint]
 
 
 @pytest.mark.parametrize(

@@ -456,7 +456,8 @@ async def _resolve_tool_approval_gate(
     tool_name: str,
     workflow_origin: ToolCallWorkflowOrigin | None,
 ) -> str | ToolApprovalBypassResult | None:
-    bypass_decision = evaluate_tool_approval_bypass(tool_name, approval_entrypoint or func, args)
+    bypass_entrypoint = approval_entrypoint if approval_entrypoint is not None else func
+    bypass_decision = evaluate_tool_approval_bypass(tool_name, bypass_entrypoint, args)
     if isinstance(bypass_decision, ToolApprovalBypassResult):
         return bypass_decision
     if bypass_decision:
