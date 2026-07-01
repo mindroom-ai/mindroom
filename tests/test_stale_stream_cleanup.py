@@ -2012,7 +2012,7 @@ async def test_cleanup_preserves_multiple_mindroom_metadata_keys(tmp_path: Path)
     client.rooms = _joined_room_cache()
     input_keys = {
         "io.mindroom.stream_status": "streaming",
-        "io.mindroom.compaction": {"version": 1, "compacted": False},
+        "io.mindroom.compaction": {"version": 3, "compacted": False},
         "io.mindroom.thread_summary": {"version": 1, "summary": "Draft summary"},
     }
     expected_keys = {**input_keys, "io.mindroom.stream_status": "error"}
