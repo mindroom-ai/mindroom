@@ -78,7 +78,7 @@ def _invoke_with_runtime(
 
 def _write_minimal_runtime_config(path: Path) -> None:
     path.write_text(
-        "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+        "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
         "agents:\n  general:\n    display_name: General Agent\n    model: default\n"
         "router:\n  model: default\n"
         "matrix_space:\n  enabled: false\n"
@@ -395,7 +395,7 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "vertexai_claude"
-        assert config["models"]["default"]["id"] == "claude-sonnet-4-6"
+        assert config["models"]["default"]["id"] == "claude-sonnet-5"
 
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
@@ -935,7 +935,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "anthropic"
-        assert config["models"]["default"]["id"] == "claude-sonnet-4-6"
+        assert config["models"]["default"]["id"] == "claude-sonnet-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
         env_content = (tmp_path / ".env").read_text()
@@ -949,7 +949,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "openrouter"
-        assert config["models"]["default"]["id"] == "anthropic/claude-sonnet-4.6"
+        assert config["models"]["default"]["id"] == "anthropic/claude-sonnet-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
     def test_init_azure_preset_uses_azure_openai_models(self, tmp_path: Path) -> None:
@@ -988,7 +988,7 @@ class TestConfigInit:
 
         config_text = target.read_text(encoding="utf-8")
         assert "# sonnet:" in config_text
-        assert "#   id: global.anthropic.claude-sonnet-4-6" in config_text
+        assert "#   id: global.anthropic.claude-sonnet-5" in config_text
         assert "# haiku:" in config_text
         assert "#   id: global.anthropic.claude-haiku-4-5" in config_text
 
@@ -1058,7 +1058,7 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "anthropic"
-        assert config["models"]["default"]["id"] == "claude-sonnet-4-6"
+        assert config["models"]["default"]["id"] == "claude-sonnet-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
         assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
@@ -1075,7 +1075,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "vertexai_claude"
-        assert config["models"]["default"]["id"] == "claude-sonnet-4-6"
+        assert config["models"]["default"]["id"] == "claude-sonnet-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
         env_content = (tmp_path / ".env").read_text()
@@ -1454,7 +1454,7 @@ class TestConfigValidate:
         """Config validate reports success for a valid config."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -1487,7 +1487,7 @@ class TestConfigValidate:
         )
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n"
             "plugins:\n  - ./plugins/bad-name\n",
@@ -1509,7 +1509,7 @@ class TestConfigValidate:
         )
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n"
             "plugins:\n  - ./plugins/bad-manifest\n",
@@ -1525,7 +1525,7 @@ class TestConfigValidate:
         """Config validate should stay strict about missing plugin paths."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n"
             "plugins:\n  - ./plugins/this-plugin-does-not-exist\n",
@@ -1575,7 +1575,7 @@ class TestConfigValidate:
         """Config validate should warn about missing Vertex AI project settings."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: vertexai_claude\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: vertexai_claude\n    id: claude-sonnet-5\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -1802,7 +1802,7 @@ class TestRunErrorHandling:
         )
         bad_cfg = tmp_path / "config.yaml"
         bad_cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n"
             "plugins:\n  - ./plugins/bad-name\n",
@@ -1820,7 +1820,7 @@ class TestRunErrorHandling:
         """Run should let the orchestrator start when an optional plugin path is missing."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n"
             "plugins:\n  - ./plugins/this-plugin-does-not-exist\n",
@@ -1850,7 +1850,7 @@ class TestRunErrorHandling:
         """Permanent startup failures should not dump an implementation traceback."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: vertexai_claude\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: vertexai_claude\n    id: claude-sonnet-5\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
             encoding="utf-8",
@@ -1871,7 +1871,7 @@ class TestRunErrorHandling:
         """Avatar generation should exit cleanly when generation fails."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n"
@@ -2010,7 +2010,7 @@ class TestRunApiFlags:
     @staticmethod
     def _write_minimal_config(path: Path) -> None:
         path.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
@@ -2033,7 +2033,7 @@ class TestRunApiFlags:
         """Run passes api=True, port=8765, host=0.0.0.0 by default."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
@@ -2052,7 +2052,7 @@ class TestRunApiFlags:
         """Run --no-api passes api=False to bot main."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
@@ -2067,7 +2067,7 @@ class TestRunApiFlags:
         """Run --api-port and --api-host are forwarded to bot main."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
@@ -2141,7 +2141,7 @@ class TestRunApiFlags:
         """Run should thread `--storage-path` through the explicit runtime context."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
@@ -2205,7 +2205,7 @@ class TestAvatarsCommands:
         """Avatar generation command should invoke the generation workflow."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
@@ -2221,7 +2221,7 @@ class TestAvatarsCommands:
         """Avatar generation command should expose an explicit force flag."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
@@ -2239,7 +2239,7 @@ class TestAvatarsCommands:
         """Avatar sync command should invoke the Matrix sync workflow."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
@@ -2257,7 +2257,7 @@ class TestAvatarsCommands:
         """Avatar sync command should expose an explicit force flag."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
@@ -2275,7 +2275,7 @@ class TestAvatarsCommands:
         """Unexpected avatar sync failures should propagate for debugging."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
@@ -2297,7 +2297,7 @@ class TestAvatarsCommands:
         """Avatar sync should fail when the router account has not been initialized yet."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
@@ -2317,18 +2317,18 @@ class TestAvatarsCommands:
 # ---------------------------------------------------------------------------
 
 _VALID_CONFIG = (
-    "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+    "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
     "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
     "router:\n  model: default\n"
 )
 _VALID_VERTEXAI_CLAUDE_CONFIG = (
-    "models:\n  default:\n    provider: vertexai_claude\n    id: claude-sonnet-4-6\n"
+    "models:\n  default:\n    provider: vertexai_claude\n    id: claude-sonnet-5\n"
     "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
     "router:\n  model: default\n"
 )
 _VALID_MULTI_VERTEXAI_CLAUDE_CONFIG = (
     "models:\n"
-    "  default:\n    provider: vertexai_claude\n    id: claude-sonnet-4-6\n"
+    "  default:\n    provider: vertexai_claude\n    id: claude-sonnet-5\n"
     "  fast:\n    provider: vertexai_claude\n    id: claude-haiku-4-5\n"
     "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
     "router:\n  model: default\n"
@@ -2555,7 +2555,7 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n"
-            "  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "  fast:\n    provider: anthropic\n    id: claude-haiku-4-5\n"
             "  gpt:\n    provider: openai\n    id: gpt-4o\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
@@ -2609,16 +2609,16 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "vertexai_claude connection valid for claude-sonnet-4-6" in result.output
-        assert called["model_id"] == "claude-sonnet-4-6"
+        assert "vertexai_claude connection valid for claude-sonnet-5" in result.output
+        assert called["model_id"] == "claude-sonnet-5"
         assert called["client_kwargs"] == {
-            "id": "claude-sonnet-4-6",
+            "id": "claude-sonnet-5",
             "project_id": "mindroom-test",
             "region": "us-central1",
             "timeout": 10,
         }
         assert called["kwargs"] == {
-            "model": "claude-sonnet-4-6",
+            "model": "claude-sonnet-5",
             "max_tokens": 1,
             "messages": [{"role": "user", "content": "Reply with OK."}],
             "timeout": 10,
@@ -2671,7 +2671,7 @@ class TestDoctor:
         assert result.exit_code == 0
         assert called["adc_path"] == str((tmp_path / "adc.json").resolve())
         assert called["client_kwargs"] == {
-            "id": "claude-sonnet-4-6",
+            "id": "claude-sonnet-5",
             "project_id": "mindroom-test",
             "region": "us-central1",
             "timeout": 10,
@@ -2715,10 +2715,10 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "vertexai_claude connection valid for claude-sonnet-4-6" in result.output
+        assert "vertexai_claude connection valid for claude-sonnet-5" in result.output
         assert "vertexai_claude connection valid for claude-haiku-4-5" in result.output
-        assert created_models == ["claude-sonnet-4-6", "claude-haiku-4-5"]
-        assert requested_models == ["claude-sonnet-4-6", "claude-haiku-4-5"]
+        assert created_models == ["claude-sonnet-5", "claude-haiku-4-5"]
+        assert requested_models == ["claude-sonnet-5", "claude-haiku-4-5"]
 
     def test_vertexai_claude_missing_env_is_warning(
         self,
@@ -2799,7 +2799,7 @@ class TestDoctor:
 
         assert result.exit_code == 1
         output = normalize_console_output(result.output)
-        assert "vertexai_claude connection failed for claude-sonnet-4-6" in output
+        assert "vertexai_claude connection failed for claude-sonnet-5" in output
         assert "GOOGLE_APPLICATION_CREDENTIALS points to a file that does not exist" in output
 
     def test_vertexai_claude_invalid_adc_file_is_failure(
@@ -2823,7 +2823,7 @@ class TestDoctor:
 
         assert result.exit_code == 1
         output = normalize_console_output(result.output)
-        assert "vertexai_claude connection failed for claude-sonnet-4-6" in output
+        assert "vertexai_claude connection failed for claude-sonnet-5" in output
         assert "Failed to load GOOGLE_APPLICATION_CREDENTIALS" in output
 
     def test_vertexai_claude_api_rejection_is_failure(
@@ -2861,7 +2861,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 1
-        assert "vertexai_claude connection failed for claude-sonnet-4-6" in result.output
+        assert "vertexai_claude connection failed for claude-sonnet-5" in result.output
         assert "HTTP 403" in result.output
 
     def test_custom_base_url_validation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2908,7 +2908,7 @@ class TestDoctor:
         """Doctor checks ollama embedder reachability via /api/tags."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
@@ -2934,7 +2934,7 @@ class TestDoctor:
         """Doctor validates configured memory LLM API key."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
@@ -2961,7 +2961,7 @@ class TestDoctor:
         """Doctor warns when memory LLM API key is not set."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
@@ -2987,7 +2987,7 @@ class TestDoctor:
         """Doctor uses openai_base_url from mem0 LLM config when host is absent."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
@@ -3028,7 +3028,7 @@ class TestDoctor:
         """Doctor validates custom OpenAI embedder hosts using /embeddings."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
@@ -3064,7 +3064,7 @@ class TestDoctor:
         """Doctor adds a local-network hint for .local routing failures."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
@@ -3101,7 +3101,7 @@ class TestDoctor:
         """Doctor validates sentence-transformers embedders by loading the local model."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
