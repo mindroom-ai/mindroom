@@ -168,29 +168,57 @@ def test_config_accepts_top_level_mcp_servers(tmp_path: Path) -> None:
     assert "mcp_chrome_devtools" in config.get_agent_available_tools("code")
 
 
-def test_config_rejects_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> None:
-    """Keep MCP tools restricted to shared-scope integrations."""
+def test_config_allows_non_oauth_mcp_tools_on_private_per_user_agents(tmp_path: Path) -> None:
+    """Private per-user agents may list non-OAuth MCP tools; calls use the shared MCP session."""
     runtime_paths = _runtime_paths(tmp_path)
-    with pytest.raises(ValueError, match="Shared-only integrations"):
-        Config.validate_with_runtime(
-            {
-                "mcp_servers": {
-                    "demo": {
-                        "transport": "stdio",
-                        "command": "npx",
-                    },
-                },
-                "agents": {
-                    "code": {
-                        "display_name": "Code",
-                        "role": "Write code",
-                        "worker_scope": "user",
-                        "tools": ["mcp_demo"],
-                    },
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
                 },
             },
-            runtime_paths,
-        )
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "private": {"per": "user_agent"},
+                    "tools": ["mcp_demo"],
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+    assert config.get_agent_execution_scope("code") == "user_agent"
+    assert "mcp_demo" in config.get_agent_available_tools("code")
+
+
+def test_config_allows_non_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> None:
+    """Non-OAuth MCP tools are valid on isolating worker scopes and stay shared-session at runtime."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "worker_scope": "user",
+                    "tools": ["mcp_demo"],
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+    assert "mcp_demo" in config.get_agent_available_tools("code")
 
 
 def test_config_allows_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> None:

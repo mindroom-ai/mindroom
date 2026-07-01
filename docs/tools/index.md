@@ -97,8 +97,8 @@ Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for deployment det
 ## Shared-Only Integrations
 
 Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
-The current shared-only integrations are `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
-OAuth-backed remote MCP tools are requester-scoped and can be used with isolating worker scopes.
+The current shared-only integrations are `spotify` and `homeassistant`.
+MCP `mcp_<server_id>` tools work on isolating worker scopes: OAuth-backed servers are requester-scoped, while non-OAuth servers always call through the shared server session without requester credentials.
 
 ## Automatic Dependency Installation
 

@@ -38,7 +38,6 @@ logger = get_logger(__name__)
 
 _MCP_TOOL_PREFIX = "mcp_"
 _MCP_TOOL_NAMES: set[str] = set()
-_MCP_OAUTH_TOOL_NAMES: set[str] = set()
 _MCP_TOOL_FACTORY_MARKER = "__mindroom_mcp_tool_factory__"
 # MindRoomMCPToolkit declares these constructor args for every MCP tool; metadata
 # mirrors that contract even though credentials are used only by OAuth-backed servers.
@@ -63,11 +62,6 @@ def mcp_server_id_from_tool_name(tool_name: str) -> str | None:
         return None
     server_id = tool_name.removeprefix(_MCP_TOOL_PREFIX)
     return server_id or None
-
-
-def mcp_tool_name_is_oauth_backed(tool_name: str) -> bool:
-    """Return whether one registry-owned MCP tool uses requester-scoped OAuth."""
-    return tool_name in _MCP_OAUTH_TOOL_NAMES
 
 
 def _registered_mcp_tool_names() -> set[str]:
@@ -244,15 +238,6 @@ def sync_mcp_tool_registry(config: Config | None) -> None:
     )
     _MCP_TOOL_NAMES.clear()
     _MCP_TOOL_NAMES.update(desired_tool_names)
-    _MCP_OAUTH_TOOL_NAMES.clear()
-    if config is not None:
-        _MCP_OAUTH_TOOL_NAMES.update(
-            mcp_tool_name(server_id)
-            for server_id, server_config in config.mcp_servers.items()
-            if server_config.enabled
-            and server_config.auth is not None
-            and mcp_tool_name(server_id) in desired_tool_names
-        )
 
 
 def resolved_mcp_tool_state(

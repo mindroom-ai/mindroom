@@ -158,10 +158,9 @@ agents:
 These per-agent overrides filter the already discovered catalog for that agent assignment.
 They are useful when one server exposes many tools but one agent should see only a focused subset.
 
-Non-OAuth MCP integrations are treated as shared-only integrations.
-Agents using `worker_scope: user` or `worker_scope: user_agent` cannot use non-OAuth `mcp_<server_id>` tools.
-Use unscoped execution or `worker_scope: shared` for unauthenticated MCP servers and static-header MCP servers.
-OAuth-backed remote MCP servers are the exception because MindRoom loads a scoped OAuth token for the current requester at tool-call time.
+MCP tools are available on every worker scope, including private per-user agents.
+Non-OAuth `mcp_<server_id>` tools always execute through the shared MCP server session; requester identity and requester credentials are never passed to the server.
+OAuth-backed remote MCP servers instead load a scoped OAuth token for the current requester at tool-call time and keep one session per requester scope.
 
 ## OAuth-Backed Remote MCP
 
@@ -428,8 +427,8 @@ If the catalog changed, MindRoom restarts the agents and teams that reference th
 
 - Phase 1 supports MCP tools only.
 - MCP resources and prompts are not exposed in MindRoom yet.
-- Non-OAuth MCP integrations are shared-only and cannot be used with `worker_scope: user` or `worker_scope: user_agent`.
-- OAuth-backed remote MCP integrations use requester-scoped OAuth credentials and can be used with isolating worker scopes.
+- Non-OAuth MCP integrations always use the shared server session, even on isolating worker scopes; per-requester isolation requires an OAuth-backed server.
+- OAuth-backed remote MCP integrations use requester-scoped OAuth credentials and sessions.
 - OAuth-backed remote MCP typed functions appear only after MindRoom has cached a requester-specific remote catalog.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.

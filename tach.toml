@@ -2308,7 +2308,6 @@ depends_on = ["mindroom.tool_system.plugin_imports"]
 [[modules]]
 path = "mindroom.tool_system.worker_routing"
 depends_on = [
-    "mindroom.mcp.registry",
     "mindroom.tool_system.context_bound_streams",
 ]
 

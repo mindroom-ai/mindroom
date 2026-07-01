@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.types import MCPServerState
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
 
 _MessageHandler = Callable[[object], Awaitable[None]]
@@ -259,7 +259,7 @@ def _oauth_mcp_config() -> MCPServerConfig:
     )
 
 
-def _worker_target(requester_id: str) -> ResolvedWorkerTarget:
+def _worker_target(requester_id: str, *, worker_scope: WorkerScope = "user") -> ResolvedWorkerTarget:
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="code",
@@ -271,7 +271,7 @@ def _worker_target(requester_id: str) -> ResolvedWorkerTarget:
         tenant_id="tenant",
         account_id=None,
     )
-    return resolve_worker_target("user", "code", identity)
+    return resolve_worker_target(worker_scope, "code", identity)
 
 
 def _shared_worker_target(requester_id: str, *, agent_name: str = "code") -> ResolvedWorkerTarget:
@@ -421,6 +421,55 @@ async def test_mcp_manager_syncs_catalog_and_calls_tool(monkeypatch: pytest.Monk
     assert changed == {"demo"}
     result = await manager.call_tool("demo", "echo", {"value": "ping"})
     assert result.content == "pong"
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_non_oauth_calls_use_shared_session_without_requester_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Non-OAuth MCP calls from isolating scopes share one session and never resolve requester credentials."""
+    _patch_manager(monkeypatch)
+
+    def _fail_credential_resolution(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("non-OAuth MCP calls must not resolve requester-scoped credentials")
+
+    monkeypatch.setattr(
+        "mindroom.mcp.manager.refresh_scoped_oauth_credentials_with_result",
+        _fail_credential_resolution,
+    )
+    monkeypatch.setattr("mindroom.mcp.manager.load_scoped_credentials", _fail_credential_resolution)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="pong-alice")]),
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="pong-bob")]),
+    ]
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    await manager.sync_servers(config)
+
+    alice_result = await manager.call_tool(
+        "demo",
+        "echo",
+        {"value": "ping"},
+        credentials_manager=credentials_manager,
+        worker_target=_worker_target("@alice:example.test", worker_scope="user_agent"),
+    )
+    bob_result = await manager.call_tool(
+        "demo",
+        "echo",
+        {"value": "ping"},
+        credentials_manager=credentials_manager,
+        worker_target=_worker_target("@bob:example.test", worker_scope="user_agent"),
+    )
+
+    assert alice_result.content == "pong-alice"
+    assert bob_result.content == "pong-bob"
+    assert len(_FakeClientSession.sessions) == 1
+    assert _FakeClientSession.transport_extra_headers == [{}]
+    assert manager._scoped_states == {}
 
 
 @pytest.mark.asyncio
