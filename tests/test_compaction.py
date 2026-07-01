@@ -259,7 +259,7 @@ class TestCompactionOutcome:
     def test_to_notice_metadata_basic(self) -> None:
         outcome = _make_outcome()
         meta = outcome.to_notice_metadata()
-        assert meta["version"] == 2
+        assert meta["version"] == 3
         assert meta["before_tokens"] == 30_000
         assert meta["after_tokens"] == 12_000
         assert meta["history_budget_tokens"] == 100_000
@@ -269,10 +269,10 @@ class TestCompactionOutcome:
         assert "tool_definition_tokens" not in meta
         assert "current_prompt_tokens" not in meta
 
-    def test_to_notice_metadata_keeps_v1_window_tokens_when_history_budget_unknown(self) -> None:
+    def test_to_notice_metadata_keeps_window_tokens_when_history_budget_unknown(self) -> None:
         outcome = _make_outcome(history_budget_tokens=None)
         meta = outcome.to_notice_metadata()
-        assert meta["version"] == 1
+        assert meta["version"] == 3
         assert meta["window_tokens"] == 100_000
 
     def test_to_notice_metadata_with_breakdown(self) -> None:
@@ -282,7 +282,7 @@ class TestCompactionOutcome:
             current_prompt_tokens=100,
         )
         meta = outcome.to_notice_metadata()
-        assert meta["version"] == 2
+        assert meta["version"] == 3
         assert meta["history_budget_tokens"] == 100_000
         assert meta["threshold_tokens"] == 80_000
         assert meta["role_instructions_tokens"] == 2_000

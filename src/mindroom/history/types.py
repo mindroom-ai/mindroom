@@ -310,9 +310,8 @@ class CompactionOutcome:
 
     def to_notice_metadata(self) -> dict[str, object]:
         """Return serialized notice metadata for Matrix compaction messages."""
-        version = 2 if self.history_budget_tokens is not None else 1
         meta: dict[str, object] = {
-            "version": version,
+            "version": 3,
             "status": self.status,
             "mode": self.mode,
             "session_id": self.session_id,

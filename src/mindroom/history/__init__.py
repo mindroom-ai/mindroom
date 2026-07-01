@@ -2,11 +2,12 @@
 
 from mindroom.history import agno_team_patch
 from mindroom.history.compaction import (
-    AgentStaticTokenEstimator,
-    TeamStaticTokenEstimator,
+    StaticTokenEstimator,
+    agent_static_token_estimator,
     agent_tool_definition_payloads_for_logging,
     compute_prompt_token_breakdown,
     normalize_compaction_budget_tokens,
+    team_static_token_estimator,
     team_tool_definition_payloads_for_logging,
 )
 from mindroom.history.manual import request_compaction_before_next_reply
@@ -22,7 +23,6 @@ from mindroom.history.runtime import (
     close_agent_runtime_state_dbs,
     close_team_runtime_state_dbs,
     create_scope_session_storage,
-    estimate_preparation_static_tokens,
     estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
     note_prepared_history_timing,
@@ -30,7 +30,6 @@ from mindroom.history.runtime import (
     open_resolved_scope_session_context,
     open_scope_session_context,
     prepare_bound_scope_history,
-    prepare_history_for_run,
     prepare_scope_history,
     resolve_bound_team_scope_context,
 )
@@ -64,7 +63,6 @@ from mindroom.history.types import (
 agno_team_patch.apply_patch()
 
 __all__ = [
-    "AgentStaticTokenEstimator",
     "CompactionDecision",
     "CompactionLifecycle",
     "CompactionLifecycleFailure",
@@ -83,8 +81,9 @@ __all__ = [
     "ResolvedHistorySettings",
     "ResolvedReplayPlan",
     "ScopeSessionContext",
-    "TeamStaticTokenEstimator",
+    "StaticTokenEstimator",
     "add_pending_force_compaction_scope",
+    "agent_static_token_estimator",
     "agent_tool_definition_payloads_for_logging",
     "apply_replay_plan",
     "close_agent_runtime_state_dbs",
@@ -92,7 +91,6 @@ __all__ = [
     "compute_prompt_token_breakdown",
     "context_budget_after_reserve",
     "create_scope_session_storage",
-    "estimate_preparation_static_tokens",
     "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
     "has_pending_force_compaction_scope",
@@ -103,13 +101,13 @@ __all__ = [
     "open_resolved_scope_session_context",
     "open_scope_session_context",
     "prepare_bound_scope_history",
-    "prepare_history_for_run",
     "prepare_scope_history",
     "read_scope_seen_event_ids",
     "read_scope_state",
     "request_compaction_before_next_reply",
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
+    "team_static_token_estimator",
     "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",
     "write_scope_state",

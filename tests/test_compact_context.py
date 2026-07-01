@@ -437,7 +437,7 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
     outcome = prepared.compaction_outcomes[0]
     assert outcome.window_tokens == 0
     assert outcome.history_budget_tokens is None
-    assert outcome.to_notice_metadata()["version"] == 1
+    assert outcome.to_notice_metadata()["version"] == 3
     assert outcome.to_notice_metadata()["window_tokens"] == 0
     assert "history budget" not in outcome.format_notice()
     assert "/ 0 " not in outcome.format_notice()
@@ -522,7 +522,7 @@ async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_
     assert start_content["io.mindroom.compaction"]["threshold_tokens"] == 80_000
     assert mock_edit.await_args is not None
     sent_content = mock_edit.await_args.args[3]
-    assert sent_content["io.mindroom.compaction"]["version"] == 2
+    assert sent_content["io.mindroom.compaction"]["version"] == 3
     assert sent_content["io.mindroom.compaction"]["history_budget_tokens"] == 100_000
     assert sent_content["io.mindroom.compaction"]["threshold_tokens"] == 80_000
     assert sent_content["io.mindroom.compaction"]["duration_ms"] == 123

@@ -56,8 +56,7 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history import PreparedHistoryState
 from mindroom.history.compaction import (
-    AgentStaticTokenEstimator,
-    TeamStaticTokenEstimator,
+    StaticTokenEstimator,
     _build_summary_input,
     _compaction_replay_messages,
     _emit_compaction_hook,
@@ -494,8 +493,7 @@ def test_estimate_static_tokens_includes_tool_definitions() -> None:
 
 
 def test_static_token_estimator_cache_fields_are_not_constructor_inputs() -> None:
-    assert "_non_prompt_tokens" not in inspect.signature(AgentStaticTokenEstimator).parameters
-    assert "_non_prompt_tokens" not in inspect.signature(TeamStaticTokenEstimator).parameters
+    assert "_non_prompt_tokens" not in inspect.signature(StaticTokenEstimator).parameters
 
 
 def test_estimate_agent_static_tokens_uses_real_system_message_builder() -> None:
@@ -5316,7 +5314,7 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
     with (
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.execution_preparation.AgentStaticTokenEstimator", FakeAgentStaticTokenEstimator),
+        patch("mindroom.execution_preparation.agent_static_token_estimator", FakeAgentStaticTokenEstimator),
         patch(
             "mindroom.execution_preparation.prepare_scope_history",
             new=AsyncMock(return_value=MagicMock()),

@@ -25,18 +25,18 @@ from mindroom.constants import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history import (
-    AgentStaticTokenEstimator,
     PreparedHistoryState,
     PreparedScopeHistory,
     ResolvedReplayPlan,
     ScopeSessionContext,
-    TeamStaticTokenEstimator,
+    agent_static_token_estimator,
     apply_replay_plan,
     context_budget_after_reserve,
     finalize_history_preparation,
     prepare_bound_scope_history,
     prepare_scope_history,
     read_scope_seen_event_ids,
+    team_static_token_estimator,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
@@ -824,7 +824,7 @@ async def prepare_agent_execution_context(
         thread_id=thread_id,
         runtime_paths=runtime_paths,
     )
-    static_token_estimator = AgentStaticTokenEstimator(agent)
+    static_token_estimator = agent_static_token_estimator(agent)
 
     async def _prepare_agent_scope_history(
         prepared_prompt: str,
@@ -903,7 +903,7 @@ async def _prepare_bound_team_execution_context(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
-    static_token_estimator = TeamStaticTokenEstimator(team)
+    static_token_estimator = team_static_token_estimator(team)
 
     async def _prepare_team_scope_history(
         prepared_prompt: str,

@@ -50,10 +50,7 @@ def resolve_history_execution_plan(
             static_prompt_tokens=static_prompt_tokens,
         )
         if compaction_config.enabled:
-            threshold_tokens = _resolve_replay_threshold_tokens(
-                compaction_config=compaction_config,
-                replay_window_tokens=replay_window_tokens,
-            )
+            threshold_tokens = resolve_effective_compaction_threshold(compaction_config, replay_window_tokens)
             replay_budget_tokens = _resolve_replay_budget_tokens(
                 compaction_config=compaction_config,
                 has_authored_compaction_config=has_authored_compaction_config,
@@ -211,17 +208,6 @@ def context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int
     """Return the usable context budget after clamped reserve and known prompt cost."""
     normalized_reserve_tokens = normalize_compaction_budget_tokens(reserve_tokens, context_window_tokens)
     return max(0, context_window_tokens - normalized_reserve_tokens - spent_tokens)
-
-
-def _resolve_replay_threshold_tokens(
-    *,
-    compaction_config: CompactionConfig,
-    replay_window_tokens: int,
-) -> int:
-    threshold_tokens = compaction_config.threshold_tokens
-    if threshold_tokens is not None:
-        return threshold_tokens
-    return resolve_effective_compaction_threshold(compaction_config, replay_window_tokens)
 
 
 def _resolve_replay_budget_tokens(

@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from html import escape
 from typing import TYPE_CHECKING, TypeGuard, cast
 from uuid import uuid4
@@ -75,37 +76,27 @@ type _ToolDefinition = dict[str, object]
 
 
 @dataclass(slots=True)
-class AgentStaticTokenEstimator:
-    """Request-local static-token estimator for one prepared agent response."""
+class StaticTokenEstimator:
+    """Request-local static-token estimator that caches the non-prompt cost once."""
 
-    agent: Agent
+    non_prompt_tokens_fn: Callable[[], int]
     _non_prompt_tokens: int | None = field(default=None, init=False)
 
     def estimate(self, full_prompt: str) -> int:
         """Estimate static prompt tokens while reusing Agno-prepared tools."""
-        return estimate_text_tokens(full_prompt) + self._resolved_non_prompt_tokens()
-
-    def _resolved_non_prompt_tokens(self) -> int:
         if self._non_prompt_tokens is None:
-            self._non_prompt_tokens = _estimate_agent_non_prompt_static_tokens(self.agent)
-        return self._non_prompt_tokens
+            self._non_prompt_tokens = self.non_prompt_tokens_fn()
+        return estimate_text_tokens(full_prompt) + self._non_prompt_tokens
 
 
-@dataclass(slots=True)
-class TeamStaticTokenEstimator:
-    """Request-local static-token estimator for one prepared team response."""
+def agent_static_token_estimator(agent: Agent) -> StaticTokenEstimator:
+    """Return a request-local static-token estimator for one prepared agent response."""
+    return StaticTokenEstimator(partial(_estimate_agent_non_prompt_static_tokens, agent))
 
-    team: Team
-    _non_prompt_tokens: int | None = field(default=None, init=False)
 
-    def estimate(self, full_prompt: str) -> int:
-        """Estimate static prompt tokens while reusing Agno-prepared team tools."""
-        return estimate_text_tokens(full_prompt) + self._resolved_non_prompt_tokens()
-
-    def _resolved_non_prompt_tokens(self) -> int:
-        if self._non_prompt_tokens is None:
-            self._non_prompt_tokens = _estimate_team_non_prompt_static_tokens(self.team)
-        return self._non_prompt_tokens
+def team_static_token_estimator(team: Team) -> StaticTokenEstimator:
+    """Return a request-local static-token estimator for one prepared team response."""
+    return StaticTokenEstimator(partial(_estimate_team_non_prompt_static_tokens, team))
 
 
 @dataclass(frozen=True)
@@ -557,7 +548,7 @@ async def _emit_lifecycle_progress_after_persist(
 
 def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:
     """Estimate the non-history agent prompt using Agno's real system-message builder."""
-    return AgentStaticTokenEstimator(agent).estimate(full_prompt)
+    return agent_static_token_estimator(agent).estimate(full_prompt)
 
 
 def _estimate_agent_non_prompt_static_tokens(agent: Agent) -> int:
@@ -590,7 +581,7 @@ def _estimate_tool_definition_tokens(agent: Agent) -> int:
 
 def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
     """Estimate the non-history team prompt using Agno's team system-message builder."""
-    return TeamStaticTokenEstimator(team).estimate(full_prompt)
+    return team_static_token_estimator(team).estimate(full_prompt)
 
 
 def _estimate_team_non_prompt_static_tokens(team: Team) -> int:
