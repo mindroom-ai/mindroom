@@ -70,6 +70,7 @@ _DECLINED_RESULT_TEMPLATE = (
 )
 _APPROVAL_POLICY_FAILURE_REASON = "Tool approval policy failed."
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
+_BOUND_BRIDGE_HOOK_BASES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
 _ToolHookResult = Any
 # Agno does not currently expose a hook-chain extension point for unwrapping MindRoom's
 # deferred sync-bridge results. Keep these wrappers covered by tests when bumping Agno
@@ -450,11 +451,12 @@ async def _maybe_block_for_tool_approval(
     *,
     resolved_context: _ResolvedToolContext,
     func: Callable[..., Any],
+    approval_entrypoint: Callable[..., Any] | None,
     args: dict[str, Any],
     tool_name: str,
     workflow_origin: ToolCallWorkflowOrigin | None,
 ) -> str | None:
-    if should_bypass_tool_approval(tool_name, func, args):
+    if should_bypass_tool_approval(tool_name, approval_entrypoint or func, args):
         return None
     if resolved_context.config is None or resolved_context.runtime_paths is None:
         return None
@@ -658,6 +660,7 @@ async def _execute_bridge(
     hook_registry: HookRegistry,
     tool_name: str,
     func: Callable[..., Any],
+    approval_entrypoint: Callable[..., Any] | None,
     args: dict[str, Any],
     agent_name: str | None,
     dispatch_context: ToolDispatchContext | None,
@@ -716,6 +719,7 @@ async def _execute_bridge(
     blocked_result = await _maybe_block_for_tool_approval(
         resolved_context=resolved_context,
         func=func,
+        approval_entrypoint=approval_entrypoint,
         args=args,
         tool_name=tool_name,
         workflow_origin=workflow_origin,
@@ -880,11 +884,17 @@ def build_tool_hook_bridge(
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
 
-    async def bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
+    async def bridge(
+        name: str,
+        func: Callable[..., Any],
+        args: dict[str, Any],
+        approval_entrypoint: Callable[..., Any] | None = None,
+    ) -> _ToolHookResult:
         return await _execute_bridge(
             hook_registry=hook_registry,
             tool_name=name,
             func=func,
+            approval_entrypoint=approval_entrypoint,
             args=args,
             agent_name=agent_name,
             dispatch_context=dispatch_context,
@@ -895,13 +905,19 @@ def build_tool_hook_bridge(
             workflow_origin=workflow_origin,
         )
 
-    def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
+    def sync_bridge(
+        name: str,
+        func: Callable[..., Any],
+        args: dict[str, Any],
+        approval_entrypoint: Callable[..., Any] | None = None,
+    ) -> _ToolHookResult:
         if inspect.iscoroutinefunction(func):
             return _DeferredAsyncToolHookResult(
                 _execute_bridge(
                     hook_registry=hook_registry,
                     tool_name=name,
                     func=func,
+                    approval_entrypoint=approval_entrypoint,
                     args=args,
                     agent_name=agent_name,
                     dispatch_context=dispatch_context,
@@ -917,6 +933,7 @@ def build_tool_hook_bridge(
                 hook_registry=hook_registry,
                 tool_name=name,
                 func=func,
+                approval_entrypoint=approval_entrypoint,
                 args=args,
                 agent_name=agent_name,
                 dispatch_context=dispatch_context,
@@ -953,5 +970,33 @@ def _prepend_function_tool_hook(function: Function, bridge: Callable[..., Any]) 
     sync_bridge = _SYNC_BRIDGES.get(bridge)
     bridge_hooks = [sync_bridge if sync_bridge is not None else bridge]
 
-    existing_hooks = [hook for hook in list(function.tool_hooks or []) if hook not in bridge_hooks]
-    function.tool_hooks = [*bridge_hooks, *existing_hooks]
+    existing_hooks = [
+        hook
+        for hook in list(function.tool_hooks or [])
+        if hook not in bridge_hooks and _BOUND_BRIDGE_HOOK_BASES.get(hook) not in bridge_hooks
+    ]
+    function.tool_hooks = [
+        *[_bind_bridge_hook_to_entrypoint(hook, function.entrypoint) for hook in bridge_hooks],
+        *existing_hooks,
+    ]
+
+
+def _bind_bridge_hook_to_entrypoint(
+    hook: Callable[..., Any],
+    approval_entrypoint: Callable[..., Any] | None,
+) -> Callable[..., Any]:
+    if inspect.iscoroutinefunction(hook):
+
+        @wraps(hook)
+        async def async_bound_bridge_hook(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
+            return await hook(name, func, args, approval_entrypoint=approval_entrypoint)
+
+        _BOUND_BRIDGE_HOOK_BASES[async_bound_bridge_hook] = hook
+        return async_bound_bridge_hook
+
+    @wraps(hook)
+    def bound_bridge_hook(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
+        return hook(name, func, args, approval_entrypoint=approval_entrypoint)
+
+    _BOUND_BRIDGE_HOOK_BASES[bound_bridge_hook] = hook
+    return bound_bridge_hook
