@@ -100,7 +100,6 @@ class TestMemoryIntegration:
                 config,
                 runtime_paths,
                 execution_identity=None,
-                timing_scope="test_session",
             )
 
             # Verify enhanced prompt was used
@@ -146,7 +145,6 @@ class TestMemoryIntegration:
                 config,
                 runtime_paths,
                 execution_identity=None,
-                timing_scope="test_session",
             )
 
             # Note: Memory storage now happens at the bot level, not in ai_response

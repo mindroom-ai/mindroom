@@ -77,9 +77,8 @@ async def _create_mem0_memory_instance(
     resolved_storage_path: Path,
     config: Config,
     create_memory: _MemoryFactory,
-    timing_scope: str | None,
 ) -> ScopedMemoryCrud:
-    return await create_memory(resolved_storage_path, config, timing_scope=timing_scope)
+    return await create_memory(resolved_storage_path, config)
 
 
 @timed("system_prompt_assembly.memory_search.mem0.agent_search")
@@ -327,7 +326,6 @@ class Mem0MemoryBackend:
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
-        timing_scope: str | None = None,
     ) -> list[MemoryResult]:
         """Search mem0 memories visible to an agent."""
         resolved_storage_path = _primary_mem0_storage_path(
@@ -341,7 +339,6 @@ class Mem0MemoryBackend:
             resolved_storage_path,
             config,
             self.create_memory,
-            timing_scope,
         )
         results = await _search_mem0_agent_scope(memory, query, agent_name, limit)
         existing_memories = {result.get("memory", "") for result in results}
@@ -558,8 +555,7 @@ class Mem0MemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-        timing_scope: str | None = None,
     ) -> str:
         """Return no stable entrypoint context; mem0 has no curated `MEMORY.md`."""
-        del agent_name, storage_path, config, execution_identity, timing_scope
+        del agent_name, storage_path, config, execution_identity
         return ""

@@ -26,6 +26,7 @@ from mindroom.memory import search_agent_memories as public_search_agent_memorie
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.timing import timing_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -356,23 +357,26 @@ async def test_semantic_memory_search_emits_nested_query_timings(
 
     emitted: list[tuple[str, str | None]] = []
 
-    def emit_timing(label: str, _start: float, **event_data: object) -> None:
-        emitted.append((label, event_data.get("timing_scope")))
+    def emit_timing(label: str, _start: float, **_event_data: object) -> None:
+        emitted.append((label, timing_scope.get()))
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", lambda *_args, **_kwargs: [memory_file.resolve()])
     monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
     monkeypatch.setattr(semantic_file_search, "emit_elapsed_timing", emit_timing)
 
-    results = await semantic_file_search.search_semantic_file_memories(
-        "semantic memory",
-        scope_user_id="agent_general",
-        root=root,
-        config=config,
-        runtime_paths=runtime_paths,
-        search_config=config.memory.search,
-        limit=5,
-        timing_scope="scope-123",
-    )
+    token = timing_scope.set("scope-123")
+    try:
+        results = await semantic_file_search.search_semantic_file_memories(
+            "semantic memory",
+            scope_user_id="agent_general",
+            root=root,
+            config=config,
+            runtime_paths=runtime_paths,
+            search_config=config.memory.search,
+            limit=5,
+        )
+    finally:
+        timing_scope.reset(token)
 
     assert [result["memory"] for result in results] == ["Published semantic memory."]
     assert ("system_prompt_assembly.memory_search.semantic.published_index.resolve", "scope-123") in emitted

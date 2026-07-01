@@ -208,10 +208,8 @@ async def generate_compaction_summary(
     summary_input: str,
     summary_prompt: str,
     timeout_seconds: float | None = None,
-    timing_scope: str | None = None,
 ) -> SessionSummary:
     """Issue one compaction summary call with tuned provider config and one timeout."""
-    del timing_scope
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     configured_model = configure_summary_model(model, timeout_seconds=resolved_timeout)
     summary_output_limit = _summary_output_token_limit(configured_model)

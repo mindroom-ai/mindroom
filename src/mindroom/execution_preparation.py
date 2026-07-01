@@ -657,11 +657,9 @@ async def _prepare_execution_context_common(
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     fallback_static_token_budget: int | None = None,
     attachment_context: _ThreadAttachmentContext | None = None,
-    timing_scope: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
-    del timing_scope
     seen_event_ids = _scope_seen_event_ids(scope_context)
 
     provisional_messages = _messages_with_current_prompt(
@@ -784,7 +782,6 @@ async def prepare_agent_execution_context(
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
     include_openai_compat_guidance: bool = False,
-    timing_scope: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
@@ -820,7 +817,6 @@ async def prepare_agent_execution_context(
             config=config,
             compaction_outcomes_collector=compaction_outcomes_collector,
             scope_context=scope_context,
-            timing_scope=timing_scope,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
         )
@@ -853,7 +849,6 @@ async def prepare_agent_execution_context(
             storage_path=runtime_paths.storage_root,
             room_id=room_id,
         ),
-        timing_scope=timing_scope,
         pipeline_timing=pipeline_timing,
     )
 

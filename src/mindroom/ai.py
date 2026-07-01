@@ -78,7 +78,7 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs, MediaKind
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
-from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed
+from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timing_scope
 from mindroom.tool_system.events import StreamingToolTracker, complete_pending_tool_block, format_tool_combined
 
 if TYPE_CHECKING:
@@ -369,21 +369,12 @@ def _advance_dynamic_continuation(
 @timed("system_prompt_assembly.system_enrichment_render")
 def _render_system_enrichment_context(
     system_enrichment_items: Sequence[EnrichmentItem],
-    *,
-    timing_scope: str | None = None,
 ) -> str:
-    del timing_scope
     return render_system_enrichment_block(system_enrichment_items)
 
 
 @timed("system_prompt_assembly.compaction_token_breakdown")
-def _compute_compaction_token_breakdown(
-    agent: Agent,
-    full_prompt: str,
-    *,
-    timing_scope: str | None = None,
-) -> dict[str, int]:
-    del timing_scope
+def _compute_compaction_token_breakdown(agent: Agent, full_prompt: str) -> dict[str, int]:
     return compute_prompt_token_breakdown(agent=agent, full_prompt=full_prompt)
 
 
@@ -435,7 +426,6 @@ class _AgentRunContext:
     reply_to_event_id: str | None
     requester_id: str | None
     correlation_id: str
-    timing_scope: str
     prepared_run: _PreparedAgentRun
     run_input: list[Message]
     metadata: dict[str, Any] | None
@@ -969,10 +959,8 @@ async def _run_cached_agent_attempt(
     run_id_callback: Callable[[str], None] | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
-    timing_scope: str | None = None,
 ) -> RunOutput:
     """Run one non-streaming Agno request with timing instrumentation."""
-    del timing_scope
     return await ai_runtime.cached_agent_run(
         agent,
         run_input,
@@ -1028,7 +1016,6 @@ async def _run_non_streaming_agent_attempts(
                         run_id_callback=run_id_callback,
                         media=attempt.attempt_media_inputs,
                         metadata=run_context.metadata,
-                        timing_scope=run_context.timing_scope,
                     )
             except Exception as e:
                 retry_decision = retry_media_inputs_after_failure(
@@ -1155,7 +1142,6 @@ async def _prepare_agent_and_prompt(
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     include_openai_compat_guidance: bool = False,
-    timing_scope: str | None = None,
     model_prompt: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
@@ -1176,7 +1162,6 @@ async def _prepare_agent_and_prompt(
         config,
         runtime_paths,
         execution_identity=execution_identity,
-        timing_scope=timing_scope,
     )
     current_turn_prompt = _compose_current_turn_prompt(
         raw_prompt=prompt,
@@ -1216,7 +1201,6 @@ async def _prepare_agent_and_prompt(
             execution_identity=execution_identity,
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
-            timing_scope=timing_scope,
             dynamic_tool_continuation=True,
         )
         return runtime_model, agent
@@ -1226,10 +1210,7 @@ async def _prepare_agent_and_prompt(
     if system_enrichment_items:
         _append_additional_context(
             agent,
-            _render_system_enrichment_context(
-                system_enrichment_items,
-                timing_scope=timing_scope,
-            ),
+            _render_system_enrichment_context(system_enrichment_items),
         )
     _mark_pipeline_timing(pipeline_timing, "agent_build_ready")
 
@@ -1251,7 +1232,6 @@ async def _prepare_agent_and_prompt(
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
         include_openai_compat_guidance=include_openai_compat_guidance,
-        timing_scope=timing_scope,
         pipeline_timing=pipeline_timing,
     )
     prepared_history = prepared_execution.prepared_history
@@ -1261,11 +1241,7 @@ async def _prepare_agent_and_prompt(
     run_messages = prepared_execution.messages
 
     if prepared_history.compaction_outcomes:
-        breakdown = _compute_compaction_token_breakdown(
-            agent,
-            render_prepared_messages_text(run_messages),
-            timing_scope=timing_scope,
-        )
+        breakdown = _compute_compaction_token_breakdown(agent, render_prepared_messages_text(run_messages))
         enriched_outcomes = [replace(o, **breakdown) for o in prepared_history.compaction_outcomes]
         prepared_history = replace(prepared_history, compaction_outcomes=enriched_outcomes)
         if compaction_outcomes_collector is not None:
@@ -1307,7 +1283,6 @@ async def _prepare_agent_run_context(
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     system_enrichment_items: Sequence[EnrichmentItem],
-    timing_scope: str,
     model_prompt: str | None,
     current_timestamp_ms: float | None,
     current_prompt_is_structured: bool,
@@ -1342,7 +1317,6 @@ async def _prepare_agent_run_context(
         refresh_scheduler=refresh_scheduler,
         system_enrichment_items=system_enrichment_items,
         include_openai_compat_guidance=include_openai_compat_guidance,
-        timing_scope=timing_scope,
         model_prompt=model_prompt,
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
@@ -1388,7 +1362,6 @@ async def _prepare_agent_run_context(
         reply_to_event_id=reply_to_event_id,
         requester_id=requester_id,
         correlation_id=correlation_id,
-        timing_scope=timing_scope,
         prepared_run=prepared_run,
         run_input=prepared_run.run_input,
         metadata=metadata,
@@ -1532,11 +1505,15 @@ async def ai_response(  # noqa: C901, PLR0915
             tool_trace_collector=tool_trace_collector,
         )
 
-    timing_scope = _build_timing_scope(
-        reply_to_event_id=reply_to_event_id,
-        run_id=run_id,
-        session_id=session_id,
-        agent_name=agent_name,
+    # Bind the timing scope for this turn; asyncio task contexts isolate it and
+    # the next turn in a reused task overwrites it.
+    timing_scope.set(
+        _build_timing_scope(
+            reply_to_event_id=reply_to_event_id,
+            run_id=run_id,
+            session_id=session_id,
+            agent_name=agent_name,
+        ),
     )
     media_inputs = media or MediaInputs()
     resolved_requester_id = user_id
@@ -1585,7 +1562,6 @@ async def ai_response(  # noqa: C901, PLR0915
                     delegation_depth=delegation_depth,
                     refresh_scheduler=refresh_scheduler,
                     system_enrichment_items=system_enrichment_items,
-                    timing_scope=timing_scope,
                     model_prompt=continuation_state.active_model_prompt,
                     current_timestamp_ms=continuation_state.active_current_timestamp_ms,
                     current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
@@ -1810,14 +1786,12 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     agent_name: str,
     media_inputs: MediaInputs,
     retried_after_media_fallback: bool,
-    timing_scope: str,
     media_route: ModelMediaRoute | None,
     context_media_kinds: frozenset[MediaKind],
     state_updated: Callable[[], None] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Consume one streaming attempt, yielding chunks and mutating *state*."""
-    del timing_scope
     try:
         async for event in stream_generator:
             if isinstance(event, RunContentEvent):
@@ -1986,7 +1960,6 @@ async def _stream_agent_attempt_chunks(
             media_inputs=attempt.attempt_media_inputs,
             context_media_kinds=attempt.remaining_context_media_kinds,
             retried_after_media_fallback=retried_after_media_fallback,
-            timing_scope=run_context.timing_scope,
             state_updated=state_updated,
             pipeline_timing=pipeline_timing,
         ):
@@ -2096,11 +2069,15 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
     """
     logger.info("AI streaming request", agent=agent_name, room_id=room_id)
-    timing_scope = _build_timing_scope(
-        reply_to_event_id=reply_to_event_id,
-        run_id=run_id,
-        session_id=session_id,
-        agent_name=agent_name,
+    # Bind the timing scope for this turn; asyncio task contexts isolate it and
+    # the next turn in a reused task overwrites it.
+    timing_scope.set(
+        _build_timing_scope(
+            reply_to_event_id=reply_to_event_id,
+            run_id=run_id,
+            session_id=session_id,
+            agent_name=agent_name,
+        ),
     )
     media_inputs = media or MediaInputs()
     resolved_requester_id = user_id
@@ -2154,7 +2131,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     delegation_depth=delegation_depth,
                     refresh_scheduler=refresh_scheduler,
                     system_enrichment_items=system_enrichment_items,
-                    timing_scope=timing_scope,
                     model_prompt=continuation_state.active_model_prompt,
                     current_timestamp_ms=continuation_state.active_current_timestamp_ms,
                     current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,

@@ -347,9 +347,7 @@ def _search_scope_memory_entries(
     config: Config,
     *,
     limit: int,
-    timing_scope: str | None = None,
 ) -> list[MemoryResult]:
-    del timing_scope
     id_entries, _ = _load_scope_entries_for_search(scope_user_id, resolution, config)
     query_tokens = _extract_query_tokens(query)
 
@@ -572,10 +570,8 @@ def _load_scope_entrypoint_context(
     scope_user_id: str,
     resolution: FileMemoryResolution,
     config: Config,
-    timing_scope: str | None = None,
 ) -> str:
     """Load the scoped `MEMORY.md` entrypoint text."""
-    del timing_scope
     entrypoint_path = _scope_entrypoint_path(_scope_dir(scope_user_id, resolution, config, create=False))
     if not entrypoint_path.exists():
         return ""
@@ -744,7 +740,6 @@ def _search_agent_file_scope_memories(
     resolution: FileMemoryResolution,
     config: Config,
     limit: int,
-    timing_scope: str | None,
 ) -> list[MemoryResult]:
     return _search_scope_memory_entries(
         agent_scope_user_id(agent_name),
@@ -752,7 +747,6 @@ def _search_agent_file_scope_memories(
         resolution,
         config,
         limit=limit,
-        timing_scope=timing_scope,
     )
 
 
@@ -763,7 +757,6 @@ def _search_team_file_scope_memories(
     resolution: FileMemoryResolution,
     config: Config,
     limit: int,
-    timing_scope: str | None,
 ) -> list[MemoryResult]:
     return _search_scope_memory_entries(
         team_id,
@@ -771,7 +764,6 @@ def _search_team_file_scope_memories(
         resolution,
         config,
         limit=limit,
-        timing_scope=timing_scope,
     )
 
 
@@ -785,7 +777,6 @@ def _merge_team_scope_results(
     runtime_paths: RuntimePaths,
     limit: int,
     execution_identity: ToolExecutionIdentity | None,
-    timing_scope: str | None,
 ) -> list[MemoryResult]:
     """Merge keyword team-scope matches into one ranked result list (filesystem-bound)."""
     existing_memories = {result.get("memory", "") for result in results}
@@ -810,7 +801,6 @@ def _merge_team_scope_results(
                 team_resolution,
                 config,
                 limit,
-                timing_scope,
             ):
                 memory_text = memory.get("memory", "")
                 if memory_text in existing_memories:
@@ -871,7 +861,6 @@ class FileMemoryBackend:
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
-        timing_scope: str | None = None,
     ) -> list[MemoryResult]:
         """Search file-backed memories visible to an agent.
 
@@ -895,7 +884,6 @@ class FileMemoryBackend:
                 agent_resolution,
                 config,
                 limit,
-                timing_scope,
             )
             for result in results:
                 _tag_keyword_mode(result)
@@ -914,7 +902,6 @@ class FileMemoryBackend:
                     search_config=search_config,
                     limit=limit,
                     execution_identity=execution_identity,
-                    timing_scope=timing_scope,
                 )
             except SemanticFileMemoryIndexUnavailableError:
                 logger.debug(
@@ -941,7 +928,6 @@ class FileMemoryBackend:
             runtime_paths=self.runtime_paths,
             limit=limit,
             execution_identity=execution_identity,
-            timing_scope=timing_scope,
         )
 
     async def list_all(
@@ -1191,7 +1177,6 @@ class FileMemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-        timing_scope: str | None = None,
     ) -> str:
         """Load the stable scoped `MEMORY.md` entrypoint text for one agent."""
         resolution = resolve_file_memory_resolution(
@@ -1205,5 +1190,4 @@ class FileMemoryBackend:
             agent_scope_user_id(agent_name),
             resolution,
             config,
-            timing_scope=timing_scope,
         )

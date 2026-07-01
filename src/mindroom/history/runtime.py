@@ -298,7 +298,6 @@ async def prepare_scope_history(
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     scope_context: ScopeSessionContext | None = None,
     scope: HistoryScope | None = None,
-    timing_scope: str | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedScopeHistory:
@@ -376,7 +375,6 @@ async def prepare_scope_history(
             runs_before=len(visible_runs),
             config=config,
             runtime_paths=runtime_paths,
-            timing_scope=timing_scope,
             compaction_lifecycle=compaction_lifecycle,
         )
         outcome = compaction_result.outcome
@@ -419,7 +417,6 @@ async def _run_scope_compaction_with_lifecycle(
     runs_before: int,
     config: Config,
     runtime_paths: RuntimePaths,
-    timing_scope: str | None,
     compaction_lifecycle: CompactionLifecycle | None,
 ) -> _ScopeCompactionLifecycleResult:
     execution_plan = resolved_inputs.execution_plan
@@ -466,7 +463,6 @@ async def _run_scope_compaction_with_lifecycle(
             history_budget=history_budget,
             config=config,
             runtime_paths=runtime_paths,
-            timing_scope=timing_scope,
             lifecycle_notice_event_id=notice_event_id,
             progress_callback=progress_callback,
         )
@@ -517,7 +513,6 @@ async def _run_scope_compaction(
     history_budget: int | None,
     config: Config,
     runtime_paths: RuntimePaths,
-    timing_scope: str | None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
 ) -> CompactionOutcome | None:
@@ -543,7 +538,6 @@ async def _run_scope_compaction(
         threshold_tokens=execution_plan.trigger_threshold_tokens,
         reserve_tokens=execution_plan.reserve_tokens,
         summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
-        timing_scope=timing_scope,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
     )

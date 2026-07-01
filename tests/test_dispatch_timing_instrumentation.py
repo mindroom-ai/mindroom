@@ -82,7 +82,6 @@ async def test_stream_processing_marks_tool_call_started() -> None:
                 agent_name="code",
                 media_inputs=MediaInputs(),
                 retried_after_media_fallback=False,
-                timing_scope="test",
                 media_route=None,
                 context_media_kinds=frozenset(),
             )

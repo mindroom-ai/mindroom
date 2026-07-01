@@ -149,14 +149,12 @@ def _search_knowledge_with_timing(
     *,
     query: str,
     limit: int,
-    timing_scope: str | None,
 ) -> list[Document]:
     search_start = time.monotonic()
     documents = knowledge.search(query=query, max_results=limit)
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.knowledge_search",
         search_start,
-        timing_scope=timing_scope,
         result_count=len(documents),
     )
     return documents
@@ -172,7 +170,6 @@ async def search_semantic_file_memories(
     search_config: MemorySearchConfig,
     limit: int,
     execution_identity: ToolExecutionIdentity | None = None,
-    timing_scope: str | None = None,
 ) -> list[MemoryResult]:
     """Search one file-memory scope through the published knowledge index pipeline."""
     base_id = _memory_knowledge_base_id(root, scope_user_id)
@@ -188,7 +185,6 @@ async def search_semantic_file_memories(
     emit_elapsed_timing(
         "system_prompt_assembly.memory_search.semantic.file_listing",
         list_start,
-        timing_scope=timing_scope,
         file_count=len(files),
         include_pattern_count=len(search_config.include),
         include_entrypoint=search_config.include_entrypoint,
@@ -207,7 +203,6 @@ async def search_semantic_file_memories(
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.published_index.resolve",
         resolve_start,
-        timing_scope=timing_scope,
         availability=resolution.availability.value,
     )
     refresh_scheduled = False
@@ -224,13 +219,11 @@ async def search_semantic_file_memories(
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.published_index.schedule_refresh",
         schedule_start,
-        timing_scope=timing_scope,
         refresh_scheduled=refresh_scheduled,
     )
     emit_elapsed_timing(
         "system_prompt_assembly.memory_search.semantic.published_index_access",
         access_start,
-        timing_scope=timing_scope,
         availability=resolution.availability.value,
         refresh_scheduled=refresh_scheduled,
     )
@@ -244,12 +237,10 @@ async def search_semantic_file_memories(
         resolution.knowledge,
         query=query,
         limit=limit,
-        timing_scope=timing_scope,
     )
     emit_elapsed_timing(
         "system_prompt_assembly.memory_search.semantic.vector_query",
         query_start,
-        timing_scope=timing_scope,
         availability=resolution.availability.value,
     )
     results_start = time.monotonic()
@@ -257,7 +248,6 @@ async def search_semantic_file_memories(
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.result_conversion",
         results_start,
-        timing_scope=timing_scope,
         result_count=len(results),
     )
     return results

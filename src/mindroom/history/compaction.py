@@ -175,7 +175,6 @@ async def compact_scope_history(
     threshold_tokens: int | None,
     reserve_tokens: int,
     summary_prompt: str,
-    timing_scope: str | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
 ) -> tuple[HistoryScopeState, CompactionOutcome | None]:
@@ -252,7 +251,6 @@ async def compact_scope_history(
         progress_callback=progress_callback,
         collect_compaction_hook_messages=collect_compaction_hook_messages,
         before_persist_callback=emit_before_persist,
-        timing_scope=timing_scope,
     )
     if rewrite_result is None:
         cleared_state = _persist_cleared_force_state_if_needed(
@@ -348,7 +346,6 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     collect_compaction_hook_messages: bool,
     summary_prompt: str,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
-    timing_scope: str | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     total_compacted_run_count = 0
@@ -396,7 +393,6 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             scope=scope,
             history_settings=history_settings,
             summary_prompt=summary_prompt,
-            timing_scope=timing_scope,
         )
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
@@ -511,7 +507,6 @@ async def _generate_compaction_summary_with_retry(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     summary_prompt: str,
-    timing_scope: str | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, shrinking the input per the retry policy when safe."""
     summary_input = initial_summary_input
@@ -538,7 +533,6 @@ async def _generate_compaction_summary_with_retry(
                 model=model,
                 summary_input=summary_input,
                 summary_prompt=summary_prompt,
-                timing_scope=timing_scope,
             )
         except Exception as exc:
             duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)

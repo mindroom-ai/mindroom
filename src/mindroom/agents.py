@@ -1175,7 +1175,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     disabled_tool_names: frozenset[str] = frozenset(),
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    timing_scope: str | None = None,
     dynamic_tool_continuation: bool = False,
 ) -> Agent:
     """Create an agent instance from configuration.
@@ -1207,8 +1206,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             infinite recursion when agents delegate to each other.
         refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
             passed through to delegated child agents.
-        timing_scope: Optional correlated timing scope id for nested
-            `system_prompt_assembly` sub-timers.
         dynamic_tool_continuation: Whether this agent runs under the standalone
             ai.py turn loop that resumes after a dynamic load/unload. Only that
             loop stops the dynamic tools manager mid-turn; team members and other
@@ -1224,7 +1221,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     """
 
     def agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
-        return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=timing_scope, **event_data)
+        return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
 
     resolved_storage_path = runtime_paths.storage_root
     create_runtime_state = not disable_runtime_capabilities

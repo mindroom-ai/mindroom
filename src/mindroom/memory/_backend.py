@@ -54,7 +54,6 @@ class ResolvedMemoryBackend(Protocol):
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
-        timing_scope: str | None = None,
     ) -> list[MemoryResult]:
         """Search memories visible to an agent, including its team scopes."""
 
@@ -125,7 +124,6 @@ class ResolvedMemoryBackend(Protocol):
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-        timing_scope: str | None = None,
     ) -> str:
         """Return the stable session preamble context for an agent, if any."""
 

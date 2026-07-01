@@ -88,7 +88,6 @@ async def search_agent_memories(
     runtime_paths: RuntimePaths,
     limit: int = 3,
     execution_identity: ToolExecutionIdentity | None = None,
-    timing_scope: str | None = None,
 ) -> list[MemoryResult]:
     """Search agent memories including team memories."""
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
@@ -100,7 +99,6 @@ async def search_agent_memories(
         config,
         limit=limit,
         execution_identity=execution_identity,
-        timing_scope=timing_scope,
     )
 
 
@@ -197,7 +195,6 @@ async def build_memory_prompt_parts(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-    timing_scope: str | None = None,
 ) -> MemoryPromptParts:
     """Split stable entrypoint context from turn-local searched memories."""
     logger.debug("Building enhanced prompt", agent=agent_name)
@@ -211,7 +208,6 @@ async def build_memory_prompt_parts(
         config,
         runtime_paths,
         execution_identity=execution_identity,
-        timing_scope=timing_scope,
     )
     if agent_memories:
         logger.debug("Agent memories added", count=len(agent_memories))
@@ -225,7 +221,6 @@ async def build_memory_prompt_parts(
         storage_path,
         config,
         execution_identity=execution_identity,
-        timing_scope=timing_scope,
     )
     if agent_entrypoint:
         session_preamble = f"{config.get_prompt('FILE_MEMORY_ENTRYPOINT_HEADER')}\n{agent_entrypoint}"
@@ -252,7 +247,6 @@ async def build_memory_enhanced_prompt(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-    timing_scope: str | None = None,
 ) -> str:
     """Compatibility wrapper that preserves the legacy monolithic prompt shape."""
     prompt_parts = await build_memory_prompt_parts(
@@ -262,7 +256,6 @@ async def build_memory_enhanced_prompt(
         config,
         runtime_paths,
         execution_identity=execution_identity,
-        timing_scope=timing_scope,
     )
     prompt_chunks = [chunk for chunk in (prompt_parts.session_preamble, prompt_parts.turn_context, prompt) if chunk]
     return "\n\n".join(prompt_chunks)

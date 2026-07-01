@@ -142,7 +142,6 @@ async def create_memory_instance(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
-    timing_scope: str | None = None,
 ) -> AsyncMemory:
     """Create a Mem0 memory instance with ChromaDB backend.
 
@@ -150,13 +149,11 @@ async def create_memory_instance(
         storage_path: Base directory for memory storage
         config: Application configuration
         runtime_paths: Explicit runtime context for credential-backed provider settings.
-        timing_scope: Optional correlated timing scope id for nested logs.
 
     Returns:
         Configured AsyncMemory instance
 
     """
-    del timing_scope
     config_dict = _get_memory_config(storage_path, config, runtime_paths)
     if config.memory.embedder.provider == "sentence_transformers":
         ensure_sentence_transformers_dependencies(runtime_paths)
