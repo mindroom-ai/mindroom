@@ -216,7 +216,12 @@ class _SafeCompactionLifecycle:
         """Send the initial compaction notice and return its Matrix event id."""
         if self.lifecycle is None:
             return None
-        return await self._deliver(self.lifecycle.start(event), session_id=event.session_id, scope=event.scope)
+        return await self._deliver(
+            self.lifecycle.start(event),
+            phase="start",
+            session_id=event.session_id,
+            scope=event.scope,
+        )
 
     async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
         """Edit the lifecycle notice after successful compaction."""
@@ -224,6 +229,7 @@ class _SafeCompactionLifecycle:
             return
         await self._deliver(
             self.lifecycle.complete_success(event),
+            phase="success",
             session_id=event.outcome.session_id,
             scope=event.outcome.scope,
         )
@@ -232,21 +238,32 @@ class _SafeCompactionLifecycle:
         """Edit the lifecycle notice after persisted compaction progress."""
         if self.lifecycle is None or event.notice_event_id is None:
             return
-        await self._deliver(self.lifecycle.progress(event), session_id=event.session_id, scope=event.scope)
+        await self._deliver(
+            self.lifecycle.progress(event),
+            phase="progress",
+            session_id=event.session_id,
+            scope=event.scope,
+        )
 
     async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
         """Edit the lifecycle notice after failed compaction."""
         if self.lifecycle is None or event.notice_event_id is None:
             return
-        await self._deliver(self.lifecycle.complete_failure(event), session_id=event.session_id, scope=event.scope)
+        await self._deliver(
+            self.lifecycle.complete_failure(event),
+            phase=f"failure:{event.status}",
+            session_id=event.session_id,
+            scope=event.scope,
+        )
 
     @staticmethod
-    async def _deliver(delivery: Awaitable[str | None], *, session_id: str, scope: str) -> str | None:
+    async def _deliver(delivery: Awaitable[str | None], *, phase: str, session_id: str, scope: str) -> str | None:
         try:
             return await delivery
         except Exception:
             logger.exception(
                 "Compaction lifecycle notice delivery failed",
+                phase=phase,
                 session_id=session_id,
                 scope=scope,
             )
