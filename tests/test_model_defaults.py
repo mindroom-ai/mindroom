@@ -63,6 +63,24 @@ def test_saas_default_uses_current_gemini_flash() -> None:
     assert old_preview_model not in {preset.id for preset in model_defaults.SAAS_MODEL_PRESETS.values()}
 
 
+def test_sonnet_presets_use_current_generation() -> None:
+    """Sonnet presets should track the current provider-specific Sonnet generation."""
+    bedrock_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["bedrock_claude"])
+
+    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["anthropic"].id == "claude-sonnet-5"
+    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["vertexai_claude"].id == "claude-sonnet-5"
+    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["openrouter"].id == "anthropic/claude-sonnet-5"
+    assert model_defaults.SAAS_MODEL_PRESETS["sonnet"].id == "anthropic/claude-sonnet-5"
+    assert bedrock_alternatives["sonnet"].id == "global.anthropic.claude-sonnet-5"
+    assert "claude-sonnet-4-6" not in {
+        model_defaults.CONFIG_INIT_MODEL_PRESETS["anthropic"].id,
+        model_defaults.CONFIG_INIT_MODEL_PRESETS["vertexai_claude"].id,
+        model_defaults.CONFIG_INIT_MODEL_PRESETS["openrouter"].id,
+        model_defaults.SAAS_MODEL_PRESETS["sonnet"].id,
+        bedrock_alternatives["sonnet"].id,
+    }
+
+
 def test_config_init_openrouter_alternatives_cover_saas_openrouter_models() -> None:
     """Config init should comment every non-default OpenRouter model alias we expose elsewhere."""
     openrouter_saas_aliases = {

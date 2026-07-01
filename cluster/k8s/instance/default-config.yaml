@@ -403,7 +403,7 @@ models:
     context_window: 1000000
   sonnet:
     provider: openrouter
-    id: anthropic/claude-sonnet-4.6
+    id: anthropic/claude-sonnet-5
     context_window: 1000000
   haiku:
     provider: openrouter

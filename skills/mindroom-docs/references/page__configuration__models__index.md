@@ -37,8 +37,8 @@ models:
   # Anthropic Claude
   sonnet:
     provider: anthropic
-    id: claude-sonnet-4-6
-    context_window: 200000
+    id: claude-sonnet-5
+    context_window: 1000000
 
   haiku:
     provider: anthropic
@@ -74,7 +74,7 @@ models:
   # Anthropic Claude on Vertex AI
   vertex_claude:
     provider: vertexai_claude
-    id: claude-sonnet-4-6
+    id: claude-sonnet-5
     extra_kwargs:
       project_id: your-gcp-project
       region: us-central1
@@ -88,7 +88,7 @@ models:
   # OpenRouter (access to many model providers)
   openrouter:
     provider: openrouter
-    id: anthropic/claude-sonnet-4.6
+    id: anthropic/claude-sonnet-5
 
   # Groq (fast inference)
   groq:
@@ -206,8 +206,8 @@ If needed, that replay plan can reduce raw replay, fall back to summary-only rep
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-4-6
-    context_window: 200000  # 200K tokens
+    id: claude-sonnet-5
+    context_window: 1000000  # 1M tokens
 ```
 
 This is useful for models with smaller context windows or long-running conversations that accumulate persisted history.

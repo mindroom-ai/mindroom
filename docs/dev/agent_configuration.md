@@ -56,7 +56,7 @@ models:
 
   openrouter:
     provider: "openrouter"
-    id: "anthropic/claude-sonnet-4-6"
+    id: "anthropic/claude-sonnet-5"
 ```
 
 Each model entry supports these fields:
@@ -635,7 +635,7 @@ models:
 
   smart:
     provider: "anthropic"
-    id: "claude-sonnet-4-6"
+    id: "claude-sonnet-5"
 
 # Agent configurations
 agents:

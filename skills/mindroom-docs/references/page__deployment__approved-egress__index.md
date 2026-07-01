@@ -27,7 +27,8 @@ approvedEgress:
 
 The chart renders the proxy Deployment, Service, ServiceAccount, RBAC, allowlist ConfigMap, persistence PVC, worker egress NetworkPolicy, and proxy ingress NetworkPolicy.
 The chart also sets `MINDROOM_APPROVED_EGRESS_ENABLED`, `MINDROOM_APPROVED_EGRESS_API_URL`, `MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH`, `MINDROOM_APPROVED_EGRESS_TOKEN`, and `MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS` on the MindRoom container.
-When `MINDROOM_APPROVED_EGRESS_ENABLED=true`, MindRoom adds `approved_egress` to defaults and requires Matrix approval for `request_network_access` at runtime.
+When `MINDROOM_APPROVED_EGRESS_ENABLED=true`, MindRoom adds `approved_egress` to defaults and requires Matrix approval for blocked-host `request_network_access` grant requests at runtime.
+Requests for static-allowlisted hostnames skip the approval card and return that no temporary grant is needed.
 These runtime-derived entries are not written back to `config.yaml` by dashboard or API saves.
 Set `approvedEgress.manageRuntimeConfig: false` to keep the proxy wiring but skip the runtime config overlay, for example when the authored config assigns `approved_egress` to specific agents instead of `defaults.tools`.
 
@@ -107,7 +108,7 @@ The toolkit is built into MindRoom and uses the chart-provided policy API URL, t
 
 Agents call `request_network_access(hostname, ttl_minutes, reason)` when a worker needs one blocked external hostname.
 The tool rejects schemes, ports, paths, wildcards, IP literals, single-label names, localhost names, cluster-local names, and known metadata hostnames before it calls the policy API.
-If the hostname already matches the static allowlist, the tool reports that no dynamic grant is needed.
+If the hostname already matches the static allowlist, the tool reports that no dynamic grant is needed without sending a Matrix approval card.
 When `worker_scope: user_agent` is active, the tool creates a `worker_key` grant for the exact requester-owned worker.
 Shared or unscoped workers receive an `agent` grant.
 Requests for `worker_scope: user` are rejected because one user-scoped worker can serve multiple agents.
