@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.history.compaction import (
-    normalize_compaction_budget_tokens,
-    resolve_compaction_runtime_settings,
-    resolve_effective_compaction_threshold,
-)
 from mindroom.history.types import CompactionAvailabilityReason, CompactionDecision, ResolvedHistoryExecutionPlan
 from mindroom.token_budget import compute_compaction_input_budget
 
@@ -27,7 +23,7 @@ def resolve_history_execution_plan(
     static_prompt_tokens: int | None,
 ) -> ResolvedHistoryExecutionPlan:
     """Resolve all history-budget policy for one run scope in one place."""
-    compaction_runtime = resolve_compaction_runtime_settings(
+    compaction_runtime = _resolve_compaction_runtime_settings(
         config=config,
         compaction_config=compaction_config,
         active_model_name=active_model_name,
@@ -50,7 +46,7 @@ def resolve_history_execution_plan(
             static_prompt_tokens=static_prompt_tokens,
         )
         if compaction_config.enabled:
-            threshold_tokens = resolve_effective_compaction_threshold(compaction_config, replay_window_tokens)
+            threshold_tokens = _resolve_effective_compaction_threshold(compaction_config, replay_window_tokens)
             replay_budget_tokens = _resolve_replay_budget_tokens(
                 compaction_config=compaction_config,
                 has_authored_compaction_config=has_authored_compaction_config,
@@ -231,3 +227,50 @@ def _resolve_replay_budget_without_compaction(
     static_prompt_tokens: int,
 ) -> int:
     return context_budget_after_reserve(replay_window_tokens, compaction_config.reserve_tokens, static_prompt_tokens)
+
+
+@dataclass(frozen=True)
+class _ResolvedCompactionRuntime:
+    """Resolved model/window inputs needed for one compaction attempt."""
+
+    model_name: str
+    context_window: int | None
+
+
+def _resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
+    """Resolve the soft replay trigger budget in tokens."""
+    threshold_tokens = compaction_config.threshold_tokens
+    if threshold_tokens is not None:
+        return threshold_tokens
+    threshold_percent = compaction_config.threshold_percent
+    if threshold_percent is not None:
+        return int(context_window * threshold_percent)
+    return int(context_window * 0.8)
+
+
+def normalize_compaction_budget_tokens(tokens: int, context_window: int | None) -> int:
+    """Clamp one compaction knob against half of the available model window."""
+    if context_window is None or context_window <= 0:
+        return tokens
+    return min(tokens, context_window // 2)
+
+
+def _resolve_compaction_runtime_settings(
+    *,
+    config: Config,
+    compaction_config: CompactionConfig,
+    active_model_name: str,
+    active_context_window: int | None,
+) -> _ResolvedCompactionRuntime:
+    """Resolve the effective compaction model name and usable window for one run."""
+    model_name = compaction_config.model or active_model_name
+    model_context_window = config.get_model_context_window(model_name)
+    if compaction_config.model is not None:
+        return _ResolvedCompactionRuntime(
+            model_name=model_name,
+            context_window=model_context_window,
+        )
+    return _ResolvedCompactionRuntime(
+        model_name=model_name,
+        context_window=model_context_window or active_context_window,
+    )

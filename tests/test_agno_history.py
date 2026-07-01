@@ -56,16 +56,13 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history import PreparedHistoryState
 from mindroom.history.compaction import (
-    StaticTokenEstimator,
     _build_summary_input,
     _compaction_replay_messages,
     _emit_compaction_hook,
     _estimate_history_messages_tokens,
-    _estimate_tool_definition_tokens,
     _rewrite_working_session_for_compaction,
     _strip_stale_anthropic_replay_fields,
     compact_scope_history,
-    estimate_agent_static_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
 )
@@ -73,6 +70,11 @@ from mindroom.history.policy import (
     classify_compaction_decision,
     context_budget_after_reserve,
     resolve_history_execution_plan,
+)
+from mindroom.history.prompt_tokens import (
+    StaticTokenEstimator,
+    _estimate_tool_definition_tokens,
+    estimate_agent_static_tokens,
 )
 from mindroom.history.runtime import (
     ScopeSessionContext,
