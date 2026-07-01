@@ -27,14 +27,12 @@ from pydantic import BaseModel
 
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, prompt_roles_for_history_storage
 from mindroom.history.storage import (
-    adopt_session_fields,
     compacted_run_ids_with,
-    latest_persisted_session,
-    read_scope_state,
     record_compaction_chunk,
     remove_runs_by_id,
     seen_event_ids_for_runs,
     update_scope_seen_event_ids,
+    update_scope_state_on_latest,
     write_scope_state,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
@@ -141,18 +139,16 @@ def _persist_cleared_force_state_if_needed(
     scope: HistoryScope,
     state: HistoryScopeState,
 ) -> HistoryScopeState:
-    cleared_state = replace(state, force_compact_before_next_run=False)
-    if cleared_state == state:
-        return cleared_state
-    target_session = latest_persisted_session(storage, session)
-    latest_state = read_scope_state(target_session, scope)
-    if latest_state != state:
-        adopt_session_fields(session, target_session)
-        return latest_state
-    write_scope_state(target_session, scope, cleared_state)
-    storage.upsert_session(target_session)
-    adopt_session_fields(session, target_session)
-    return cleared_state
+    if not state.force_compact_before_next_run:
+        return state
+    return update_scope_state_on_latest(
+        storage,
+        session,
+        scope,
+        # Only clear when the durable row still matches the state this run read;
+        # a concurrent write (for example a fresh manual request) wins otherwise.
+        lambda latest: replace(latest, force_compact_before_next_run=False) if latest == state else latest,
+    )
 
 
 async def _emit_compaction_hook(

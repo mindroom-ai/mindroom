@@ -38,14 +38,12 @@ from mindroom.history.policy import (
     resolve_history_execution_plan,
 )
 from mindroom.history.storage import (
-    adopt_session_fields,
     clear_force_compaction_state,
     consume_pending_force_compaction_scope,
-    latest_persisted_session,
     prune_reintroduced_runs,
     read_scope_state,
     set_force_compaction_state,
-    write_scope_state,
+    update_scope_state_on_latest,
 )
 from mindroom.history.types import (
     CompactionDecision,
@@ -163,15 +161,12 @@ def _clear_forced_compaction_after_failure(
     """Clear a consumed manual force marker after a compaction failure."""
     if session is None or not state.force_compact_before_next_run:
         return
-    target_session = latest_persisted_session(storage, session)
-    latest_state = read_scope_state(target_session, scope)
-    cleared_state = replace(latest_state, force_compact_before_next_run=False)
-    if cleared_state == latest_state:
-        adopt_session_fields(session, target_session)
-        return
-    write_scope_state(target_session, scope, cleared_state)
-    storage.upsert_session(target_session)
-    adopt_session_fields(session, target_session)
+    update_scope_state_on_latest(
+        storage,
+        session,
+        scope,
+        lambda latest: replace(latest, force_compact_before_next_run=False),
+    )
 
 
 @dataclass(frozen=True)
@@ -206,114 +201,56 @@ class PreparedScopeHistory:
     prepared_context_tokens: int | None = None
 
 
-async def _start_compaction_lifecycle(
-    lifecycle: CompactionLifecycle | None,
-    event: CompactionLifecycleStart,
-) -> str | None:
-    if lifecycle is None:
-        return None
-    try:
-        return await lifecycle.start(event)
-    except Exception:
-        logger.exception(
-            "Failed to send compaction lifecycle notice",
-            session_id=event.session_id,
-            scope=event.scope,
-        )
-        return None
+@dataclass(frozen=True)
+class _SafeCompactionLifecycle:
+    """Best-effort compaction notice delivery: failures are logged, never raised."""
 
+    lifecycle: CompactionLifecycle | None
 
-async def _complete_compaction_lifecycle_success(
-    lifecycle: CompactionLifecycle | None,
-    event: CompactionLifecycleSuccess,
-) -> None:
-    if lifecycle is None or event.notice_event_id is None:
-        return
-    try:
-        await lifecycle.complete_success(event)
-    except Exception:
-        logger.exception(
-            "Failed to edit compaction lifecycle success notice",
+    @property
+    def enabled(self) -> bool:
+        """Return whether lifecycle notices are delivered at all."""
+        return self.lifecycle is not None
+
+    async def start(self, event: CompactionLifecycleStart) -> str | None:
+        """Send the initial compaction notice and return its Matrix event id."""
+        if self.lifecycle is None:
+            return None
+        return await self._deliver(self.lifecycle.start(event), session_id=event.session_id, scope=event.scope)
+
+    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
+        """Edit the lifecycle notice after successful compaction."""
+        if self.lifecycle is None or event.notice_event_id is None:
+            return
+        await self._deliver(
+            self.lifecycle.complete_success(event),
             session_id=event.outcome.session_id,
             scope=event.outcome.scope,
         )
 
+    async def progress(self, event: CompactionLifecycleProgress) -> None:
+        """Edit the lifecycle notice after persisted compaction progress."""
+        if self.lifecycle is None or event.notice_event_id is None:
+            return
+        await self._deliver(self.lifecycle.progress(event), session_id=event.session_id, scope=event.scope)
 
-async def _update_compaction_lifecycle_progress(
-    lifecycle: CompactionLifecycle | None,
-    event: CompactionLifecycleProgress,
-) -> None:
-    if lifecycle is None or event.notice_event_id is None:
-        return
-    try:
-        await lifecycle.progress(event)
-    except Exception:
-        logger.exception(
-            "Failed to edit compaction lifecycle progress notice",
-            session_id=event.session_id,
-            scope=event.scope,
-        )
+    async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
+        """Edit the lifecycle notice after failed compaction."""
+        if self.lifecycle is None or event.notice_event_id is None:
+            return
+        await self._deliver(self.lifecycle.complete_failure(event), session_id=event.session_id, scope=event.scope)
 
-
-def _compaction_progress_callback(
-    lifecycle: CompactionLifecycle | None,
-    compaction_start: float,
-) -> Callable[[CompactionLifecycleProgress], Awaitable[None]] | None:
-    """Return a progress callback for visible compactions."""
-    if lifecycle is None:
-        return None
-
-    async def progress_callback(event: CompactionLifecycleProgress) -> None:
-        await _update_compaction_lifecycle_progress(
-            lifecycle,
-            replace(event, duration_ms=_elapsed_ms(compaction_start)),
-        )
-
-    return progress_callback
-
-
-async def _complete_compaction_lifecycle_failure(
-    lifecycle: CompactionLifecycle | None,
-    event: CompactionLifecycleFailure,
-) -> None:
-    if lifecycle is None or event.notice_event_id is None:
-        return
-    try:
-        await lifecycle.complete_failure(event)
-    except Exception:
-        logger.exception(
-            "Failed to edit compaction lifecycle failure notice",
-            session_id=event.session_id,
-            scope=event.scope,
-            status=event.status,
-        )
-
-
-async def _complete_no_compactable_history_failure(
-    lifecycle: CompactionLifecycle | None,
-    *,
-    notice_event_id: str | None,
-    mode: Literal["auto", "manual"],
-    session_id: str,
-    scope: str,
-    summary_model: str,
-    duration_ms: int,
-    history_budget_tokens: int | None,
-) -> None:
-    await _complete_compaction_lifecycle_failure(
-        lifecycle,
-        CompactionLifecycleFailure(
-            notice_event_id=notice_event_id,
-            mode=mode,
-            session_id=session_id,
-            scope=scope,
-            summary_model=summary_model,
-            status="failed",
-            duration_ms=duration_ms,
-            failure_reason="No compactable history remained.",
-            history_budget_tokens=history_budget_tokens,
-        ),
-    )
+    @staticmethod
+    async def _deliver(delivery: Awaitable[str | None], *, session_id: str, scope: str) -> str | None:
+        try:
+            return await delivery
+        except Exception:
+            logger.exception(
+                "Compaction lifecycle notice delivery failed",
+                session_id=session_id,
+                scope=scope,
+            )
+            return None
 
 
 def _resolve_history_scope(agent: Agent) -> HistoryScope | None:
@@ -494,10 +431,9 @@ async def _run_scope_compaction_with_lifecycle(
 ) -> _ScopeCompactionLifecycleResult:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
-    visible_compaction_lifecycle = compaction_lifecycle if runs_before else None
+    lifecycle = _SafeCompactionLifecycle(compaction_lifecycle if runs_before else None)
     compaction_start = time.monotonic()
-    notice_event_id = await _start_compaction_lifecycle(
-        visible_compaction_lifecycle,
+    notice_event_id = await lifecycle.start(
         CompactionLifecycleStart(
             mode=mode,
             session_id=session.session_id,
@@ -509,6 +445,24 @@ async def _run_scope_compaction_with_lifecycle(
             threshold_tokens=execution_plan.trigger_threshold_tokens,
         ),
     )
+
+    def _failure_event(status: Literal["failed", "timeout"], failure_reason: str) -> CompactionLifecycleFailure:
+        return CompactionLifecycleFailure(
+            notice_event_id=notice_event_id,
+            mode=mode,
+            session_id=session.session_id,
+            scope=scope.key,
+            summary_model=execution_plan.compaction_model_name,
+            status=status,
+            duration_ms=_elapsed_ms(compaction_start),
+            failure_reason=failure_reason,
+            history_budget_tokens=history_budget,
+        )
+
+    async def _progress(event: CompactionLifecycleProgress) -> None:
+        await lifecycle.progress(replace(event, duration_ms=_elapsed_ms(compaction_start)))
+
+    progress_callback = _progress if lifecycle.enabled else None
     try:
         outcome = await _run_scope_compaction(
             storage=storage,
@@ -521,24 +475,10 @@ async def _run_scope_compaction_with_lifecycle(
             runtime_paths=runtime_paths,
             timing_scope=timing_scope,
             lifecycle_notice_event_id=notice_event_id,
-            progress_callback=_compaction_progress_callback(visible_compaction_lifecycle, compaction_start),
+            progress_callback=progress_callback,
         )
     except asyncio.CancelledError as error:
-        duration_ms = _elapsed_ms(compaction_start)
-        await _complete_compaction_lifecycle_failure(
-            visible_compaction_lifecycle,
-            CompactionLifecycleFailure(
-                notice_event_id=notice_event_id,
-                mode=mode,
-                session_id=session.session_id,
-                scope=scope.key,
-                summary_model=execution_plan.compaction_model_name,
-                status="failed",
-                duration_ms=duration_ms,
-                failure_reason=str(error) or type(error).__name__,
-                history_budget_tokens=history_budget,
-            ),
-        )
+        await lifecycle.complete_failure(_failure_event("failed", str(error) or type(error).__name__))
         raise
     except Exception as error:
         _clear_forced_compaction_after_failure(
@@ -547,23 +487,8 @@ async def _run_scope_compaction_with_lifecycle(
             scope=scope,
             state=state,
         )
-        duration_ms = _elapsed_ms(compaction_start)
-        failure_reason = str(error) or type(error).__name__
         status = _compaction_failure_status(error)
-        await _complete_compaction_lifecycle_failure(
-            visible_compaction_lifecycle,
-            CompactionLifecycleFailure(
-                notice_event_id=notice_event_id,
-                mode=mode,
-                session_id=session.session_id,
-                scope=scope.key,
-                summary_model=execution_plan.compaction_model_name,
-                status=status,
-                duration_ms=duration_ms,
-                failure_reason=failure_reason,
-                history_budget_tokens=history_budget,
-            ),
-        )
+        await lifecycle.complete_failure(_failure_event(status, str(error) or type(error).__name__))
         logger.exception(
             "Compaction failed; continuing without compaction",
             session_id=session.session_id,
@@ -577,16 +502,7 @@ async def _run_scope_compaction_with_lifecycle(
 
     duration_ms = _elapsed_ms(compaction_start)
     if outcome is None:
-        await _complete_no_compactable_history_failure(
-            visible_compaction_lifecycle,
-            notice_event_id=notice_event_id,
-            mode=mode,
-            session_id=session.session_id,
-            scope=scope.key,
-            summary_model=execution_plan.compaction_model_name,
-            duration_ms=duration_ms,
-            history_budget_tokens=history_budget,
-        )
+        await lifecycle.complete_failure(_failure_event("failed", "No compactable history remained."))
         return _ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed")
 
     outcome = replace(
@@ -594,8 +510,7 @@ async def _run_scope_compaction_with_lifecycle(
         lifecycle_notice_event_id=notice_event_id,
         duration_ms=duration_ms,
     )
-    await _complete_compaction_lifecycle_success(
-        visible_compaction_lifecycle,
+    await lifecycle.complete_success(
         CompactionLifecycleSuccess(
             notice_event_id=notice_event_id,
             outcome=outcome,
