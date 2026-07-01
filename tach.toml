@@ -294,6 +294,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.identity",
+    "mindroom.tool_system.approval_exemptions",
 ]
 visibility = [
     "mindroom.agents",
@@ -2324,12 +2325,12 @@ path = "mindroom.tool_system.events"
 depends_on = []
 
 [[modules]]
-path = "mindroom.tool_system.tool_calls"
-depends_on = ["mindroom.constants"]
+path = "mindroom.tool_system.approval_exemptions"
+depends_on = []
 
 [[modules]]
-path = "mindroom.tool_system.approval_bypass"
-depends_on = []
+path = "mindroom.tool_system.tool_calls"
+depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.tool_system.tool_hooks"
@@ -2338,7 +2339,6 @@ depends_on = [
     "mindroom.llm_request_logging",
     "mindroom.sync_bridge_state",
     "mindroom.tool_approval",
-    "mindroom.tool_system.approval_bypass",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_calls",
     "mindroom.tool_system.worker_routing",

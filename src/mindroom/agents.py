@@ -46,11 +46,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     resolve_dynamic_tool_selection,
     visible_tool_surface,
 )
-from mindroom.tool_system.output_files import (
-    ToolOutputFilePolicy,
-    apply_output_file_handling_to_result,
-    wrap_toolkit_for_output_files,
-)
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.skills import build_agent_skills
@@ -1036,7 +1032,6 @@ def _build_agent_tool_hook_bridge(
         dispatch_context=dispatch_context,
         config=config,
         runtime_paths=runtime_paths,
-        bypass_result_transform=apply_output_file_handling_to_result,
     )
 
 

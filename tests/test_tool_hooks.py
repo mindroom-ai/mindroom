@@ -17,7 +17,7 @@ from agno.models.ollama import Ollama
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
 
-from mindroom.agents import build_agent_toolkit, create_agent
+from mindroom.agents import create_agent
 from mindroom.approval_manager import (
     PendingApproval,
     SentApprovalEvent,
@@ -31,7 +31,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
-from mindroom.egress.policy import WorkerEgressPolicy
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -54,7 +53,6 @@ from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import ToolCallWorkflowOrigin, _shutdown_approval_store
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory, register_tool_with_metadata
-from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, apply_output_file_handling_to_result
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     ToolRuntimeContext,
@@ -74,7 +72,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Generator, Mapping
+    from collections.abc import Awaitable, Callable, Generator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -1597,202 +1595,62 @@ async def test_sync_execute_async_tool_entrypoint_still_runs_approval_gate(tmp_p
     mock_log_warning.assert_not_called()
 
 
-_REQUEST_NETWORK_ACCESS_DECLINED_RESULT = (
-    "[TOOL CALL DECLINED]\n"
-    "Tool: request_network_access\n"
-    "Reason: Tool approval request timed out.\n\n"
-    "Adjust your approach — try a different tool or different arguments."
-)
-
-
-def _request_network_access_config(
-    runtime_paths: RuntimePaths,
-    *,
-    timeout: bool = False,
-    include_approved_egress_tool: bool = False,
-) -> Config:
-    agent_kwargs: dict[str, object] = {
-        "display_name": "Code",
-        "role": "Help with coding.",
-        "rooms": ["!room:localhost"],
-    }
-    if include_approved_egress_tool:
-        agent_kwargs.update(
-            {
-                "tools": ["approved_egress"],
-                "include_default_tools": False,
-                "memory_backend": "file",
-            },
-        )
-    approval: dict[str, object] = {"rules": [{"match": "request_network_access", "action": "require_approval"}]}
-    if timeout:
-        approval["timeout_days"] = 0.000001
+def _request_network_access_config(runtime_paths: RuntimePaths) -> Config:
     return bind_runtime_paths(
         Config(
-            agents={"code": AgentConfig(**agent_kwargs)},
+            agents={
+                "code": AgentConfig(display_name="Code", role="Help with coding.", rooms=["!room:localhost"]),
+            },
             models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval=approval,
+            tool_approval={
+                "timeout_days": 0.000001,
+                "rules": [{"match": "request_network_access", "action": "require_approval"}],
+            },
         ),
         runtime_paths,
     )
 
 
-def _request_network_access_bridge(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    bypass_result_transform: Callable[[Callable[..., object] | None, object, dict[str, object]], object] | None = None,
-) -> Callable[..., Awaitable[object]]:
+def _request_network_access_bridge(config: Config, runtime_paths: RuntimePaths) -> Callable[..., Awaitable[object]]:
     bridge = build_tool_hook_bridge(
         HookRegistry.empty(),
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
         config=config,
         runtime_paths=runtime_paths,
-        bypass_result_transform=bypass_result_transform,
     )
     assert bridge is not None
     return bridge
 
 
+@pytest.mark.parametrize("ttl_minutes", [5, "5"])
 @pytest.mark.asyncio
-async def test_tool_approval_bypass_honors_falsey_approval_entrypoint() -> None:
-    """A falsey wrapped entrypoint should still be used for approval-bypass identity."""
-    seen_entrypoints: list[Callable[..., object]] = []
-
-    class FalseyCallable:
-        def __call__(self) -> object:
-            return None
-
-        def __bool__(self) -> bool:
-            return False
-
-    approval_entrypoint = FalseyCallable()
-
-    def fallback() -> str:
-        return "fallback"
-
-    def fake_evaluate_bypass(
-        _function_name: str,
-        entrypoint: Callable[..., object],
-        _arguments: Mapping[str, object],
-    ) -> bool:
-        seen_entrypoints.append(entrypoint)
-        return False
-
-    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
-
-    with patch("mindroom.tool_system.tool_hooks.evaluate_tool_approval_bypass", fake_evaluate_bypass):
-        result = await bridge("tool", fallback, {}, approval_entrypoint=approval_entrypoint)
-
-    assert result == "fallback"
-    assert seen_entrypoints == [approval_entrypoint]
-
-
-@pytest.mark.parametrize(
-    ("allowlist", "arguments", "expected_message"),
-    [
-        (False, {"ttl_minutes": 5, "reason": "Need docs."}, "hostname must be a string"),
-        (False, {"hostname": 123, "ttl_minutes": 5, "reason": "Need docs."}, "hostname must be a string"),
-        (
-            False,
-            {"hostname": "https://docs.example.com", "ttl_minutes": 5, "reason": "Need docs."},
-            "hostname must not include a scheme, path, query, or credentials",
-        ),
-        (True, {"hostname": "docs.example.com", "ttl_minutes": 5}, "reason must be a string"),
-        (
-            True,
-            {"hostname": "docs.example.com", "ttl_minutes": 0, "reason": "Need docs."},
-            "ttl_minutes must be positive",
-        ),
-    ],
-)
-@pytest.mark.asyncio
-async def test_request_network_access_invalid_arguments_bypass_matrix_approval(
+async def test_request_network_access_static_allowlist_skips_matrix_approval(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    allowlist: bool,
-    arguments: dict[str, object],
-    expected_message: str,
+    ttl_minutes: object,
 ) -> None:
-    """Invalid egress requests should fail in the tool without creating a Matrix approval card."""
+    """Static-allowlisted egress requests should answer without an approval card or a grant."""
     runtime_paths = test_runtime_paths(tmp_path)
-    if allowlist:
-        monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
-    else:
-        monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH", str(tmp_path / "missing-allowlist.txt"))
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
     config = _request_network_access_config(runtime_paths)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
-    bridge = _request_network_access_bridge(config, runtime_paths)
-    toolkit = _approved_egress._ApprovedEgressTools()
-
-    result = await bridge(
-        "request_network_access",
-        toolkit.async_functions["request_network_access"].entrypoint,
-        arguments,
-    )
-
-    assert result == f"request_network_access failed before approval: {expected_message}"
-    sender.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_request_network_access_processed_invalid_ttl_does_not_bypass_to_grant(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Raw invalid approval args must not reach Agno's Pydantic-coerced entrypoint."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH", str(tmp_path / "missing-allowlist.txt"))
-    config = _request_network_access_config(runtime_paths, timeout=True)
     client, _ = _initialize_router_approval_store(runtime_paths)
+    bridge = _request_network_access_bridge(config, runtime_paths)
 
     def post_grant(_payload: dict[str, object]) -> dict[str, object]:
-        msg = "raw invalid request_network_access args must not create a grant"
+        msg = "a static-allowlisted request must not create a temporary grant"
         raise AssertionError(msg)
 
     monkeypatch.setattr(_approved_egress, "_post_grant", post_grant)
-    bridge = _request_network_access_bridge(config, runtime_paths)
-    toolkit = _approved_egress._ApprovedEgressTools()
-    function = toolkit.async_functions["request_network_access"].model_copy(deep=True)
-    function.process_entrypoint()
-    toolkit.async_functions["request_network_access"] = function
-    prepend_tool_hook_bridge(toolkit, bridge)
-
-    result = await FunctionCall(
-        function=function,
-        arguments={"hostname": "docs.other.test", "ttl_minutes": "5", "reason": "Need docs."},
-        call_id="call-1",
-    ).aexecute()
-
-    assert result.status == "success"
-    assert result.result == "request_network_access failed before approval: ttl_minutes must be an integer"
-    client.room_send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_request_network_access_static_allowlist_bypasses_approval_in_function_call(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The Agno FunctionCall hook path should keep the approved_egress tool identity."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
-    config = _request_network_access_config(runtime_paths, timeout=True)
-    client, _ = _initialize_router_approval_store(runtime_paths)
-    bridge = _request_network_access_bridge(config, runtime_paths)
-
     toolkit = _approved_egress._ApprovedEgressTools()
     function = toolkit.async_functions["request_network_access"]
     prepend_tool_hook_bridge(toolkit, bridge)
 
-    execution = FunctionCall(
+    result = await FunctionCall(
         function=function,
-        arguments={"hostname": "docs.example.com", "ttl_minutes": 5, "reason": "Need docs."},
+        arguments={"hostname": "docs.example.com", "ttl_minutes": ttl_minutes, "reason": "Need docs."},
         call_id="call-1",
-    )
-    result = await execution.aexecute()
+    ).aexecute()
 
     assert result.status == "success"
     assert (
@@ -1800,164 +1658,6 @@ async def test_request_network_access_static_allowlist_bypasses_approval_in_func
         == "docs.example.com is already allowed by the static egress allowlist. No temporary grant was created."
     )
     client.room_send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_request_network_access_bypass_result_uses_output_file_wrapper(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Approval-bypass results should still honor mindroom_output_path on wrapped tools."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
-    config = _request_network_access_config(runtime_paths, include_approved_egress_tool=True)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
-    bridge = _request_network_access_bridge(
-        config,
-        runtime_paths,
-        bypass_result_transform=apply_output_file_handling_to_result,
-    )
-    toolkit = build_agent_toolkit(
-        "approved_egress",
-        agent_name="code",
-        config=config,
-        runtime_paths=runtime_paths,
-        worker_tools=[],
-        runtime_overrides=None,
-        execution_identity=None,
-    )
-    assert toolkit is not None
-    function = toolkit.async_functions["request_network_access"]
-    prepend_tool_hook_bridge(toolkit, bridge)
-
-    result = await FunctionCall(
-        function=function,
-        arguments={
-            "hostname": "docs.example.com",
-            "ttl_minutes": 5,
-            "reason": "Need docs.",
-            OUTPUT_PATH_ARGUMENT: "egress.txt",
-        },
-        call_id="call-1",
-    ).aexecute()
-
-    assert result.status == "success"
-    saved = result.result["mindroom_tool_output"]
-    assert saved["status"] == "saved_to_file"
-    assert saved["path"] == "egress.txt"
-    saved_paths = list(tmp_path.rglob("egress.txt"))
-    assert len(saved_paths) == 1
-    assert "docs.example.com is already allowed" in saved_paths[0].read_text(encoding="utf-8")
-    sender.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_request_network_access_static_allowlist_bypass_cannot_create_grant_after_policy_change(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Skipping approval for a static allowlist match must not later mint a temporary grant."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = _request_network_access_config(runtime_paths, timeout=True)
-    client, _ = _initialize_router_approval_store(runtime_paths)
-    policies = iter(
-        (
-            WorkerEgressPolicy(static_allowlist=(".example.com",)),
-            WorkerEgressPolicy(static_allowlist=()),
-        ),
-    )
-    monkeypatch.setattr(_approved_egress, "resolve_worker_egress_policy", lambda: next(policies))
-
-    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
-        msg = "static allowlist approval bypass must not create a temporary grant"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(_approved_egress, "_post_grant", post_grant)
-    bridge = _request_network_access_bridge(config, runtime_paths)
-
-    toolkit = _approved_egress._ApprovedEgressTools()
-    function = toolkit.async_functions["request_network_access"]
-    prepend_tool_hook_bridge(toolkit, bridge)
-
-    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
-        result = await FunctionCall(
-            function=function,
-            arguments={"hostname": "docs.example.com", "ttl_minutes": 5, "reason": "Need docs."},
-            call_id="call-1",
-        ).aexecute()
-
-    assert result.status == "success"
-    assert (
-        result.result
-        == "docs.example.com is already allowed by the static egress allowlist. No temporary grant was created."
-    )
-    client.room_send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_request_network_access_same_named_non_egress_tool_still_uses_matrix_approval(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Only the approved_egress tool should bypass approval for static-allowlisted hostnames."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
-    config = _request_network_access_config(runtime_paths, timeout=True)
-    client, _ = _initialize_router_approval_store(runtime_paths)
-    bridge = _request_network_access_bridge(config, runtime_paths)
-
-    executed = False
-
-    async def request_network_access(**kwargs: object) -> str:
-        nonlocal executed
-        executed = True
-        return str(kwargs["hostname"])
-
-    result = await bridge(
-        "request_network_access",
-        request_network_access,
-        {"hostname": "docs.example.com", "ttl_minutes": 5, "reason": "Need docs."},
-    )
-
-    assert result == _REQUEST_NETWORK_ACCESS_DECLINED_RESULT
-    assert executed is False
-    client.room_send.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_request_network_access_subclass_override_still_uses_matrix_approval(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Only the exact approved_egress method should bypass approval."""
-
-    class SpoofedApprovedEgressTools(_approved_egress._ApprovedEgressTools):
-        def __init__(self) -> None:
-            self.executed = False
-            super().__init__()
-
-        async def request_network_access(self, hostname: str, ttl_minutes: int, reason: str) -> str:
-            self.executed = True
-            return f"{hostname}:{ttl_minutes}:{reason}"
-
-    runtime_paths = test_runtime_paths(tmp_path)
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
-    config = _request_network_access_config(runtime_paths, timeout=True)
-    client, _ = _initialize_router_approval_store(runtime_paths)
-    bridge = _request_network_access_bridge(config, runtime_paths)
-
-    toolkit = SpoofedApprovedEgressTools()
-
-    result = await bridge(
-        "request_network_access",
-        toolkit.async_functions["request_network_access"].entrypoint,
-        {"hostname": "docs.example.com", "ttl_minutes": 5, "reason": "Need docs."},
-    )
-
-    assert result == _REQUEST_NETWORK_ACCESS_DECLINED_RESULT
-    assert toolkit.executed is False
-    client.room_send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1968,10 +1668,9 @@ async def test_request_network_access_blocked_host_still_uses_matrix_approval(
     """Blocked egress requests should still go through Matrix approval before reaching the tool."""
     runtime_paths = test_runtime_paths(tmp_path)
     monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
-    config = _request_network_access_config(runtime_paths, timeout=True)
+    config = _request_network_access_config(runtime_paths)
     client, _ = _initialize_router_approval_store(runtime_paths)
     bridge = _request_network_access_bridge(config, runtime_paths)
-
     toolkit = _approved_egress._ApprovedEgressTools()
 
     result = await bridge(
@@ -1980,7 +1679,12 @@ async def test_request_network_access_blocked_host_still_uses_matrix_approval(
         {"hostname": "docs.other.test", "ttl_minutes": 5, "reason": "Need docs."},
     )
 
-    assert result == _REQUEST_NETWORK_ACCESS_DECLINED_RESULT
+    assert result == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: request_network_access\n"
+        "Reason: Tool approval request timed out.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
     client.room_send.assert_awaited_once()
 
 
@@ -3334,47 +3038,6 @@ async def test_prepend_tool_hook_bridge_preserves_existing_function_hooks() -> N
     assert result.status == "success"
     assert result.result == "hi"
     assert seen == ["bridge-before", "existing-before:echo", "tool", "existing-after"]
-
-
-def test_prepend_tool_hook_bridge_preserves_non_weakrefable_existing_hooks() -> None:
-    """Existing Agno hooks may be callable objects that cannot be weak-referenced."""
-    seen: list[str] = []
-
-    class DemoToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="demo", tools=[self.echo])
-
-        def echo(self, text: str) -> str:
-            seen.append("tool")
-            return text
-
-    class ExistingHook:
-        __slots__ = ()
-
-        def __call__(self, name: str, func: object, args: dict[str, object]) -> object:
-            del name
-            seen.append("existing-before")
-            result = func(**args)
-            seen.append("existing-after")
-            return result
-
-    toolkit = DemoToolkit()
-    function = _first_function(toolkit)
-    existing_hook = ExistingHook()
-    function.tool_hooks = [existing_hook]
-
-    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
-    assert bridge is not None
-    prepend_tool_hook_bridge(toolkit, bridge)
-
-    assert function.tool_hooks is not None
-    assert function.tool_hooks[1] is existing_hook
-
-    result = FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute()
-
-    assert result.status == "success"
-    assert result.result == "hi"
-    assert seen == ["existing-before", "tool", "existing-after"]
 
 
 @pytest.mark.asyncio

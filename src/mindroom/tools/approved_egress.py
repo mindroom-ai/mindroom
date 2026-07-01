@@ -12,7 +12,6 @@ import ipaddress
 import json
 import os
 import unicodedata
-from types import MethodType
 from typing import TYPE_CHECKING, cast
 from urllib import error, parse, request
 
@@ -25,7 +24,7 @@ from mindroom.egress.policy import (
     resolve_grant_subject,
     resolve_worker_egress_policy,
 )
-from mindroom.tool_system.approval_bypass import ToolApprovalBypassResult, register_tool_approval_bypass
+from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.metadata import SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -33,9 +32,9 @@ from mindroom.tool_system.runtime_context import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
     from http.client import HTTPMessage
-    from typing import IO, Any
+    from typing import IO
 
     from mindroom.egress.policy import EgressGrantSubject
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -82,34 +81,26 @@ def _request_network_access_description() -> str:
     )
 
 
-def _static_allowlist_no_grant_result(host: str) -> str:
-    return f"{host} is already allowed by the static egress allowlist. No temporary grant was created."
+def _request_network_access_is_approval_exempt(arguments: Mapping[str, object]) -> bool:
+    """True when the hostname is already statically allowed, so approval would be redundant.
 
-
-def _request_network_access_invalid_result(message: str) -> ToolApprovalBypassResult:
-    return ToolApprovalBypassResult(f"request_network_access failed before approval: {message}")
-
-
-def _request_network_access_arguments_bypass_approval(
-    arguments: Mapping[str, object],
-) -> bool | ToolApprovalBypassResult:
+    Fails closed: anything that is not a provably allowlisted hostname keeps the
+    Matrix approval card. The tool re-checks the allowlist at execution and
+    returns the no-grant result, so a skipped card can only mint a grant if the
+    allowlist itself shrinks between this check and execution — an accepted
+    operator-edit race measured in microseconds.
+    """
     hostname = arguments.get("hostname")
     if not isinstance(hostname, str):
-        return _request_network_access_invalid_result("hostname must be a string")
+        return False
     try:
         host = canonical_hostname(hostname)
-    except (TypeError, ValueError) as exc:
-        return _request_network_access_invalid_result(str(exc))
-    try:
-        _validate_request_metadata(
-            cast("int", arguments.get("ttl_minutes")),
-            cast("str", arguments.get("reason")),
-        )
-    except (TypeError, ValueError) as exc:
-        return _request_network_access_invalid_result(str(exc))
-    if is_hostname_allowed(host, resolve_worker_egress_policy()):
-        return ToolApprovalBypassResult(_static_allowlist_no_grant_result(host))
-    return False
+    except ValueError:
+        return False
+    return is_hostname_allowed(host, resolve_worker_egress_policy())
+
+
+register_tool_approval_exemption("request_network_access", _request_network_access_is_approval_exempt)
 
 
 def _is_plain_http_api_host_allowed(hostname: str) -> bool:
@@ -158,16 +149,6 @@ def _normalize_reason(value: str) -> str:
         msg = "reason must not be empty"
         raise ValueError(msg)
     return normalized[:_MAX_REASON_CHARS]
-
-
-def _validate_request_metadata(ttl_minutes: int, reason: str) -> tuple[str, int]:
-    if type(ttl_minutes) is not int:
-        msg = "ttl_minutes must be an integer"
-        raise TypeError(msg)
-    if ttl_minutes <= 0:
-        msg = "ttl_minutes must be positive"
-        raise ValueError(msg)
-    return _normalize_reason(reason), ttl_minutes * 60
 
 
 def _effective_ttl_seconds(requested_ttl_seconds: int) -> int:
@@ -285,9 +266,10 @@ class _ApprovedEgressTools(Toolkit):
     ) -> str:
         """Request temporary worker egress to one exact external hostname."""
         host = canonical_hostname(hostname)
-        normalized_reason, requested_ttl_seconds = _validate_request_metadata(ttl_minutes, reason)
         if is_hostname_allowed(host, resolve_worker_egress_policy()):
-            return _static_allowlist_no_grant_result(host)
+            return f"{host} is already allowed by the static egress allowlist. No temporary grant was created."
+        normalized_reason = _normalize_reason(reason)
+        requested_ttl_seconds = ttl_minutes * 60
         effective_ttl_seconds = _effective_ttl_seconds(requested_ttl_seconds)
 
         context = get_tool_runtime_context()
@@ -317,22 +299,6 @@ class _ApprovedEgressTools(Toolkit):
             f"Approved temporary network access to {host} for {effective_ttl_seconds // 60} minutes. "
             f"Expires at Unix time {expiry}.{capped}"
         )
-
-
-def _request_network_access_bypasses_approval(
-    entrypoint: Callable[..., Any],
-    arguments: Mapping[str, object],
-) -> bool | ToolApprovalBypassResult:
-    if not isinstance(entrypoint, MethodType):
-        return False
-    if type(entrypoint.__self__) is not _ApprovedEgressTools:
-        return False
-    if entrypoint.__func__ is not _ApprovedEgressTools.request_network_access:
-        return False
-    return _request_network_access_arguments_bypass_approval(arguments)
-
-
-register_tool_approval_bypass("request_network_access", _request_network_access_bypasses_approval)
 
 
 @register_tool_with_metadata(

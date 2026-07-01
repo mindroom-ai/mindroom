@@ -171,17 +171,6 @@ def test_wrapped_entrypoint_signature_exposes_mindroom_output_path(tmp_path: Pat
     assert OUTPUT_PATH_ARGUMENT in inspect.signature(function.entrypoint).parameters
 
 
-def test_wrapped_entrypoint_preserves_original_callable_for_introspection(tmp_path: Path) -> None:
-    toolkit = _EchoToolkit()
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
-
-    original_entrypoint = inspect.unwrap(_first_function(toolkit).entrypoint)
-
-    assert inspect.ismethod(original_entrypoint)
-    assert original_entrypoint.__self__ is toolkit
-    assert original_entrypoint.__func__ is _EchoToolkit.echo
-
-
 def test_wrapped_entrypoint_drops_mindroom_output_path_before_calling_original(tmp_path: Path) -> None:
     seen: list[object] = []
     toolkit = _EchoToolkit(seen, result="large marker")

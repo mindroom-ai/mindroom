@@ -30,7 +30,6 @@ from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_approval import ToolCallWorkflowOrigin
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
-from mindroom.tool_system.output_files import apply_output_file_handling_to_result
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
@@ -666,7 +665,6 @@ async def _aexecute_ephemeral_agent_participant(
         config=run_config,
         runtime_paths=context.runtime_paths,
         workflow_origin=ToolCallWorkflowOrigin(workflow_id=workflow_id, participant_id=participant_id),
-        bypass_result_transform=apply_output_file_handling_to_result,
     )
     agent = Agent(
         id=f"dynamic_workflow_{participant_id}",
