@@ -32,6 +32,7 @@ from mindroom.agent_policy import (
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import (
@@ -1161,6 +1162,10 @@ class Config(BaseModel):
             msg = f"Unknown entity: {entity_name}"
             raise ValueError(msg)
         return self.defaults.compaction is not None or override is not None
+
+    def resolve_entity(self, entity_name: str | None) -> ResolvedEntityView:
+        """Return the resolved config view for one entity, or the defaults-only scope for None."""
+        return ResolvedEntityView(_config=self, name=entity_name)
 
     def get_model_context_window(self, model_name: str) -> int | None:
         """Return the configured context window for one model name, when known."""

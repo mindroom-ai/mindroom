@@ -1262,11 +1262,16 @@ path = "mindroom.config.memory"
 depends_on = ["mindroom.path_globs"]
 
 [[modules]]
+path = "mindroom.config.entity_view"
+depends_on = []
+
+[[modules]]
 path = "mindroom.config.main"
 depends_on = [
     "mindroom.agent_policy",
     "mindroom.config.agent",
     "mindroom.config.auth",
+    "mindroom.config.entity_view",
     "mindroom.config.knowledge",
     "mindroom.config.matrix",
     "mindroom.config.memory",
