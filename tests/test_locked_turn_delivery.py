@@ -213,7 +213,13 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
 
 @pytest.mark.asyncio
 async def test_team_pre_delivery_failure_finalizes_terminal_note_and_reraises(tmp_path: Path) -> None:
-    """A team failure before delivery edits an error note and still re-raises."""
+    """A team failure before delivery cleans the thinking placeholder and re-raises.
+
+    The attempt runner already sent the thinking message but the local
+    run_message_id was never assigned (the attempt raised), so the transport
+    outcome must classify the tracked thinking event as placeholder-only —
+    otherwise the gateway leaves "Thinking..." dangling with no cleanup.
+    """
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
@@ -280,6 +286,10 @@ async def test_team_pre_delivery_failure_finalizes_terminal_note_and_reraises(tm
     transport_outcome = finalize_requests[0].stream_transport_outcome
     assert transport_outcome.terminal_status == "error"
     assert "team prep exploded" in str(transport_outcome.failure_reason)
+    # The dangling thinking placeholder must be classified for cleanup; a
+    # "none"-shaped outcome would leave "Thinking..." dangling forever.
+    assert transport_outcome.last_physical_stream_event_id == "$thinking"
+    assert transport_outcome.visible_body_state == "placeholder_only"
 
 
 async def _run_response_function_directly(**kwargs: object) -> str:
