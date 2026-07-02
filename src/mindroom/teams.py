@@ -2793,6 +2793,10 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             holder.attempt_run_id = attempt_run_id
                             media_fallback_retry_requested = True
                             break
+                        # The attempt handles its own delivery, so publish the
+                        # errored run's usage directly before ending the turn.
+                        if run_metadata_collector is not None and event_metadata_content is not None:
+                            run_metadata_collector.update(event_metadata_content)
                         yield get_user_friendly_error_message(Exception(error_text), team_label)
                         yield AttemptResolved(HandledAttempt())
                         return
@@ -2851,6 +2855,22 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         holder.attempt_run_id = attempt_run_id
                         media_fallback_retry_requested = True
                         break
+                    # The attempt handles its own delivery, so publish the
+                    # errored run's observed usage directly before ending the
+                    # turn; the driver never sees a resolution to publish from.
+                    if run_metadata_collector is not None:
+                        run_metadata_collector.update(
+                            _build_streamed_team_run_metadata_content(
+                                config=config,
+                                prepared_execution=prepared_execution,
+                                completed_run_event=None,
+                                usage=usage,
+                                run_id=event.run_id or attempt_run_id,
+                                session_id=event.session_id or session_id,
+                                status=RunStatus.error,
+                                tool_count=len(completed_tool_executions),
+                            ),
+                        )
                     yield get_user_friendly_error_message(Exception(error_text), team_label)
                     yield AttemptResolved(HandledAttempt())
                     return
