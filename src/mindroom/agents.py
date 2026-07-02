@@ -1311,10 +1311,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             tool_registry_preloaded=True,
         )
     workspace = agent_runtime.workspace
+    entity_view = config.resolve_entity(agent_name)
     tools: list[Toolkit] = []
     for tool_name in resolved_tool_configs:
         try:
-            runtime_overrides = config.resolve_entity(agent_name).tool_runtime_overrides(tool_name)
+            runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
             with agent_create_timing("toolkit_build.one", tool_name=tool_name):
                 toolkit = build_agent_toolkit(
                     tool_name,
@@ -1516,7 +1517,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         enable_agentic_culture = culture_settings.enable_agentic_culture
 
     # Shared history-policy source of truth with the team replay path.
-    history_settings = config.resolve_entity(agent_name).history_settings
+    history_settings = entity_view.history_settings
     history_policy = history_settings.policy
 
     compress_tool_results = (

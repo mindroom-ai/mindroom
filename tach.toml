@@ -2810,7 +2810,6 @@ expose = [
     "dashboard_credentials_supported_for_scope",
     "resolve_agent_policy_from_data",
     "get_agent_delegation_closure",
-    "get_private_team_targets",
     "get_unsupported_team_agents",
     "unsupported_team_agent_message",
     "resolve_agent_policy_index",

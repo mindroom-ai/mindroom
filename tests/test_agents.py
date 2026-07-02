@@ -365,7 +365,7 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
         },
         "browser",
     ]
-    assert config.get_agent_tool_runtime_overrides("openclaw", "shell") == {
+    assert config.resolve_entity("openclaw").tool_runtime_overrides("shell") == {
         "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
         "shell_path_prepend": "/run/wrappers/bin",
     }
@@ -531,7 +531,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    assert config.get_agent_available_tools("summary") == [
+    assert config.resolve_entity("summary").available_tools == [
         "openclaw_compat",
         "shell",
         "coding",
@@ -557,7 +557,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
     ]
     config.defaults.tools = ["openclaw_compat", "python", "scheduler"]
 
-    assert config.get_agent_available_tools("summary") == [
+    assert config.resolve_entity("summary").available_tools == [
         "browser",
         "openclaw_compat",
         "shell",
@@ -588,7 +588,7 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     _create_agent_for_test("summary", config=config)
 
     looked_up_tools = [call.args[0] for call in mock_get_tool_by_name.call_args_list]
-    assert looked_up_tools == config.get_agent_available_tools("summary")
+    assert looked_up_tools == config.resolve_entity("summary").available_tools
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -1255,7 +1255,7 @@ def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_private_bas
     )
 
     assert runtime.workspace is not None
-    private_base_id = config.get_agent_private_knowledge_base_id("general")
+    private_base_id = config.resolve_entity("general").private_knowledge_base_id
     assert private_base_id is not None
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert knowledge_link.is_symlink()
@@ -1409,7 +1409,7 @@ def test_resolve_agent_runtime_skips_workspace_knowledge_links_for_private_root_
     )
 
     assert runtime.workspace is not None
-    private_base_id = config.get_agent_private_knowledge_base_id("general")
+    private_base_id = config.resolve_entity("general").private_knowledge_base_id
     assert private_base_id is not None
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert not knowledge_link.exists()
@@ -1709,7 +1709,7 @@ def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) ->
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_available_tools("summary")
+    effective_tools = config.resolve_entity("summary").available_tools
     assert "openclaw_compat" in effective_tools
     assert "matrix_message" in effective_tools
 
@@ -1724,7 +1724,7 @@ def test_openclaw_compat_implied_matrix_message_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["openclaw_compat", "matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_available_tools("summary")
+    effective_tools = config.resolve_entity("summary").available_tools
     assert effective_tools.count("matrix_message") == 1
 
 
@@ -1734,7 +1734,7 @@ def test_matrix_message_implies_attachments_and_matrix_room_tools() -> None:
     config.agents["summary"].tools = ["matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_available_tools("summary")
+    effective_tools = config.resolve_entity("summary").available_tools
     assert effective_tools == ["matrix_message", "attachments", "matrix_room"]
 
 
@@ -1744,7 +1744,7 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["matrix_message", "attachments"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_available_tools("summary")
+    effective_tools = config.resolve_entity("summary").available_tools
     assert effective_tools.count("attachments") == 1
 
 
@@ -3091,8 +3091,8 @@ def test_config_resolves_per_agent_memory_backend_override() -> None:
         memory={"backend": "mem0"},
     )
 
-    assert config.get_agent_memory_backend("general") == "mem0"
-    assert config.get_agent_memory_backend("writer") == "file"
+    assert config.resolve_entity("general").memory_backend == "mem0"
+    assert config.resolve_entity("writer").memory_backend == "file"
 
 
 def test_config_reports_mixed_memory_backend_usage() -> None:
@@ -3106,8 +3106,8 @@ def test_config_reports_mixed_memory_backend_usage() -> None:
     )
 
     assert config.uses_file_memory() is True
-    assert config.get_agent_memory_backend("general") == "file"
-    assert config.get_agent_memory_backend("writer") == "mem0"
+    assert config.resolve_entity("general").memory_backend == "file"
+    assert config.resolve_entity("writer").memory_backend == "mem0"
 
 
 def test_config_rejects_memory_file_path_even_with_mem0_backend() -> None:
@@ -3605,7 +3605,7 @@ def test_config_accepts_private_knowledge_path_dot_for_private_root() -> None:
         },
     )
 
-    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    private_base_id = config.resolve_entity("mind").private_knowledge_base_id
     assert private_base_id is not None
     assert config.get_knowledge_base_config(private_base_id).path == "."
 
@@ -3745,9 +3745,9 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
         },
     )
 
-    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    private_base_id = config.resolve_entity("mind").private_knowledge_base_id
     assert private_base_id is not None
-    assert config.get_agent_knowledge_base_ids("mind") == ["company_docs", private_base_id]
+    assert config.resolve_entity("mind").knowledge_base_ids == ["company_docs", private_base_id]
     private_config = config.get_knowledge_base_config(private_base_id)
     assert private_config.path == "memory"
 
@@ -3766,8 +3766,8 @@ def test_template_dir_does_not_imply_private_knowledge() -> None:
         },
     )
 
-    assert config.get_agent_private_knowledge_base_id("mind") is None
-    assert config.get_agent_knowledge_base_ids("mind") == []
+    assert config.resolve_entity("mind").private_knowledge_base_id is None
+    assert config.resolve_entity("mind").knowledge_base_ids == []
 
 
 def test_get_private_knowledge_base_agent_requires_active_private_knowledge() -> None:
@@ -3852,12 +3852,12 @@ def test_config_accepts_valid_culture_assignment() -> None:
         },
     )
 
-    assignment = config.get_agent_culture("calculator")
+    assignment = config.resolve_entity("calculator").culture
     assert assignment is not None
     culture_name, culture_config = assignment
     assert culture_name == "engineering"
     assert culture_config.mode == "automatic"
-    assert config.get_agent_culture("unknown") is None
+    assert config.resolve_entity("unknown").culture is None
 
 
 def test_config_rejects_git_backed_private_knowledge_inside_private_memory_tree() -> None:

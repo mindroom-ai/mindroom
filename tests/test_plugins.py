@@ -1796,8 +1796,8 @@ def test_load_config_tolerates_agent_reference_to_tool_declared_by_broken_plugin
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert "broken_plugin_tool" not in config.get_agent_available_tools("assistant")
-        assert config.get_agent_available_tools("assistant") == ["shell", "scheduler"]
+        assert "broken_plugin_tool" not in config.resolve_entity("assistant").available_tools
+        assert config.resolve_entity("assistant").available_tools == ["shell", "scheduler"]
         assert any(
             call.args == ("Plugin tool unavailable because plugin failed to load",)
             and call.kwargs["tool_name"] == "broken_plugin_tool"
@@ -1849,7 +1849,7 @@ def test_load_config_tolerates_unavailable_ast_plugin_tool_with_authored_overrid
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert config.get_agent_available_tools("assistant") == ["scheduler"]
+        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
         assert any(
             call.args == ("Plugin tool unavailable because plugin failed to load",)
             and call.kwargs["tool_name"] == "broken_plugin_tool"
@@ -1952,7 +1952,7 @@ def test_load_config_tolerates_tool_declared_after_broken_plugin_registration(
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert config.get_agent_available_tools("assistant") == ["scheduler"]
+        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
         assert any(
             call.args == ("Plugin tool unavailable because plugin failed to load",)
             and call.kwargs["tool_name"] == "declared_after_failure"
@@ -2004,8 +2004,8 @@ def test_load_config_tolerates_deferred_reference_to_tool_declared_by_broken_plu
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert config.get_agent_authored_deferred_tool_configs("assistant") == []
-        assert config.get_agent_available_tools("assistant") == ["scheduler"]
+        assert config.resolve_entity("assistant").authored_deferred_tool_configs == []
+        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
         assert any(
             call.args == ("Plugin tool unavailable because plugin failed to load",)
             and call.kwargs["tool_name"] == "broken_plugin_tool"
@@ -2051,7 +2051,7 @@ def test_broken_plugin_unavailable_tool_does_not_shadow_builtin_tool(tmp_path: P
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert config.get_agent_available_tools("assistant") == ["shell", "scheduler"]
+        assert config.resolve_entity("assistant").available_tools == ["shell", "scheduler"]
 
 
 def test_broken_plugin_unavailable_tool_does_not_shadow_healthy_plugin_tool(tmp_path: Path) -> None:
@@ -2094,7 +2094,7 @@ def test_broken_plugin_unavailable_tool_does_not_shadow_healthy_plugin_tool(tmp_
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert config.get_agent_available_tools("assistant") == ["healthy_plugin_tool", "scheduler"]
+        assert config.resolve_entity("assistant").available_tools == ["healthy_plugin_tool", "scheduler"]
 
 
 def test_load_config_still_rejects_unknown_tool_without_broken_plugin_explanation(tmp_path: Path) -> None:
