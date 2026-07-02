@@ -72,6 +72,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.response_turn import (
     AttemptResolved,
+    BlockingAttemptResolution,
     BlockingTurnAdapter,
     CancelledAttempt,
     CompletedAttempt,
@@ -1219,11 +1220,11 @@ class _TeamTurnHolder:
     """Live per-turn team state shared between attempt closures and adapter callbacks."""
 
     team: Team | None = None
-    last_response: RunOutput | TeamRunOutput | None = None
+    last_response: RunOutput | TeamRunOutput | None = None  # blocking turns only
     attempt_started: bool = False
     attempt_run_id: str | None = None
-    render_partial: Callable[[], str] = _empty_partial_text
-    tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker)
+    render_partial: Callable[[], str] = _empty_partial_text  # streaming turns only
+    tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker)  # streaming turns only
 
 
 def materialize_exact_team_members(
@@ -1684,7 +1685,7 @@ async def team_response(  # noqa: C901, PLR0915
     async def _run_team_attempt(  # noqa: C901, PLR0912, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
-    ) -> CompletedAttempt | CancelledAttempt | ErroredAttempt:
+    ) -> BlockingAttemptResolution:
         """Run one team attempt, including its media-fallback retries."""
         team = build_materialized_team_instance(
             requested_agent_names=team_members.requested_agent_names,
