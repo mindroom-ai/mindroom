@@ -92,7 +92,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
-    from mindroom.history import CompactionOutcome, HistoryScope
+    from mindroom.history import HistoryScope
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -292,6 +292,19 @@ class _ResponseGenerationOutcome:
     delivery: FinalDeliveryOutcome
     run_succeeded: bool
     attempt_run_ids: tuple[str, ...] = ()
+
+
+def _generation_outcome(
+    delivery: FinalDeliveryOutcome,
+    turn_recorder: TurnRecorder,
+    attempt_run_ids: list[str],
+) -> _ResponseGenerationOutcome:
+    """Assemble one generation outcome from the turn's recorder and run ids."""
+    return _ResponseGenerationOutcome(
+        delivery=delivery,
+        run_succeeded=turn_recorder.outcome == "completed",
+        attempt_run_ids=tuple(attempt_run_ids),
+    )
 
 
 @dataclass(frozen=True)
@@ -1045,7 +1058,6 @@ class ResponseRunner:
             raise RuntimeError(msg)
         response_run_id = str(uuid4())
         final_delivery_outcome: FinalDeliveryOutcome | None = None
-        compaction_outcomes: list[CompactionOutcome] = []
         team_run_metadata_content: dict[str, Any] = {}
         tracked_event_id: str | None = request.existing_event_id
         delivery_stage_started = False
@@ -1112,7 +1124,6 @@ class ResponseRunner:
                             correlation_id=resolved_correlation_id,
                             active_event_ids=active_event_ids,
                             response_sender_id=self.deps.matrix_full_id,
-                            compaction_outcomes_collector=compaction_outcomes,
                             run_metadata_collector=team_run_metadata_content,
                             compaction_lifecycle=compaction_lifecycle,
                             configured_team_name=self.deps.agent_name
@@ -1212,7 +1223,6 @@ class ResponseRunner:
                                     correlation_id=resolved_correlation_id,
                                     active_event_ids=active_event_ids,
                                     response_sender_id=self.deps.matrix_full_id,
-                                    compaction_outcomes_collector=compaction_outcomes,
                                     run_metadata_collector=team_run_metadata_content,
                                     compaction_lifecycle=compaction_lifecycle,
                                     configured_team_name=self.deps.agent_name
@@ -1587,7 +1597,6 @@ class ResponseRunner:
         turn_recorder: TurnRecorder,
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
-        compaction_outcomes: list[CompactionOutcome],
         attempt_run_id_collector: list[str],
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> str:
@@ -1639,7 +1648,6 @@ class ResponseRunner:
                 tool_trace_collector=tool_trace,
                 run_metadata_collector=run_metadata_content,
                 execution_identity=runtime.tool_dispatch.execution_identity,
-                compaction_outcomes_collector=compaction_outcomes,
                 compaction_lifecycle=compaction_lifecycle,
                 refresh_scheduler=(
                     self.deps.runtime.orchestrator.knowledge_refresh_scheduler
@@ -1681,7 +1689,6 @@ class ResponseRunner:
         turn_recorder: TurnRecorder,
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
-        compaction_outcomes: list[CompactionOutcome],
         attempt_run_id_collector: list[str],
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> StreamTransportOutcome:
@@ -1731,7 +1738,6 @@ class ResponseRunner:
             show_tool_calls=self._show_tool_calls(),
             run_metadata_collector=run_metadata_content,
             execution_identity=runtime.tool_dispatch.execution_identity,
-            compaction_outcomes_collector=compaction_outcomes,
             compaction_lifecycle=compaction_lifecycle,
             refresh_scheduler=(
                 self.deps.runtime.orchestrator.knowledge_refresh_scheduler
@@ -1832,7 +1838,6 @@ class ResponseRunner:
             create_storage=history_storage_factory,
         )
         tool_trace: list[Any] = []
-        compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         attempt_run_ids: list[str] = []
         active_event_ids = self._active_response_event_ids(request.room_id)
@@ -1843,11 +1848,7 @@ class ResponseRunner:
         )
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
-            return _ResponseGenerationOutcome(
-                delivery=delivery,
-                run_succeeded=turn_recorder.outcome == "completed",
-                attempt_run_ids=tuple(attempt_run_ids),
-            )
+            return _generation_outcome(delivery, turn_recorder, attempt_run_ids)
 
         try:
             try:
@@ -1859,7 +1860,6 @@ class ResponseRunner:
                     turn_recorder=turn_recorder,
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
-                    compaction_outcomes=compaction_outcomes,
                     attempt_run_id_collector=attempt_run_ids,
                     pipeline_timing=request.pipeline_timing,
                 )
@@ -1974,7 +1974,6 @@ class ResponseRunner:
             thread_id=runtime.resolved_target.resolved_thread_id,
             create_storage=history_storage_factory,
         )
-        compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         attempt_run_ids: list[str] = []
         active_event_ids = self._active_response_event_ids(request.room_id)
@@ -1987,11 +1986,7 @@ class ResponseRunner:
         )
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
-            return _ResponseGenerationOutcome(
-                delivery=delivery,
-                run_succeeded=turn_recorder.outcome == "completed",
-                attempt_run_ids=tuple(attempt_run_ids),
-            )
+            return _generation_outcome(delivery, turn_recorder, attempt_run_ids)
 
         try:
             try:
@@ -2003,7 +1998,6 @@ class ResponseRunner:
                     turn_recorder=turn_recorder,
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
-                    compaction_outcomes=compaction_outcomes,
                     attempt_run_id_collector=attempt_run_ids,
                     pipeline_timing=request.pipeline_timing,
                 )
