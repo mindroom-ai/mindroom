@@ -1118,10 +1118,6 @@ async def _prepare_agent_and_prompt(
     )
     _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
 
-    resolved_session_id = ctx.session_id
-    if resolved_session_id is None and scope_context is not None and scope_context.session is not None:
-        resolved_session_id = scope_context.session.session_id
-
     _mark_pipeline_timing(pipeline_timing, "agent_build_start")
 
     def _resolve_model_and_build_agent() -> tuple[ResolvedRuntimeModel, Agent]:
@@ -1140,7 +1136,7 @@ async def _prepare_agent_and_prompt(
             agent_name,
             config,
             runtime_paths,
-            session_id=resolved_session_id,
+            session_id=ctx.session_id,
             history_storage=scope_context.storage if scope_context is not None else None,
             active_model_name=runtime_model.model_name,
             knowledge=knowledge,

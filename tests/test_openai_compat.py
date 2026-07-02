@@ -1058,6 +1058,25 @@ class TestChatCompletions:
             assert mock_ai.call_args.kwargs["include_interactive_questions"] is False
             assert mock_ai.call_args.args[0].active_event_ids == frozenset()
 
+    def test_agent_completion_mints_fresh_uuid_correlation_id(self, app_client: TestClient) -> None:
+        """Each OpenAI-compatible agent completion mints its own uuid-hex correlation id."""
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.return_value = "Response"
+
+            for _ in range(2):
+                app_client.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "general",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+
+            first_ctx, second_ctx = (call.args[0] for call in mock_ai.call_args_list)
+            assert re.fullmatch(r"[0-9a-f]{32}", first_ctx.correlation_id)
+            assert re.fullmatch(r"[0-9a-f]{32}", second_ctx.correlation_id)
+            assert first_ctx.correlation_id != second_ctx.correlation_id
+
     def test_passes_knowledge_none(self, app_client: TestClient) -> None:
         """Passes knowledge=None when agent has no knowledge_bases."""
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
