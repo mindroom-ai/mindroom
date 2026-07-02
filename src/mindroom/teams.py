@@ -1859,6 +1859,7 @@ async def prepare_materialized_team_execution(
         runtime_paths=runtime_paths,
     )
     prepared_execution = await prepare_bound_team_run_context(
+        ctx,
         scope_context=scope_context,
         agents=agents,
         team=team,
@@ -1869,9 +1870,6 @@ async def prepare_materialized_team_execution(
         entity_name=configured_team_name,
         active_model_name=active_model_name,
         active_context_window=runtime_model.context_window,
-        room_id=ctx.room_id,
-        reply_to_event_id=ctx.reply_to_event_id,
-        active_event_ids=ctx.active_event_ids,
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,

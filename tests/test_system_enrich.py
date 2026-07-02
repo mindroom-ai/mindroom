@@ -329,7 +329,10 @@ async def test_prepare_agent_and_prompt_applies_system_enrichment_to_agent_addit
     rendered = render_system_enrichment_block(system_items)
     prepared_agent = _agent("code", "CodeAgent")
 
-    async def fake_prepare_agent_execution_context(**kwargs: object) -> _PreparedExecutionContext:
+    async def fake_prepare_agent_execution_context(
+        _ctx: object,
+        **kwargs: object,
+    ) -> _PreparedExecutionContext:
         agent = kwargs["agent"]
         assert isinstance(agent, Agent)
         assert agent.additional_context == rendered
@@ -393,7 +396,10 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
     )
     rendered = render_system_enrichment_block(system_items)
 
-    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> _PreparedExecutionContext:
+    async def fake_prepare_bound_team_execution_context(
+        _ctx: object,
+        **kwargs: object,
+    ) -> _PreparedExecutionContext:
         team = kwargs["team"]
         agents = kwargs["agents"]
         assert isinstance(team, Team)
@@ -484,7 +490,10 @@ async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_pa
         failed_agent_names=[],
     )
 
-    async def fake_prepare_bound_team_execution_context(**_kwargs: object) -> _PreparedExecutionContext:
+    async def fake_prepare_bound_team_execution_context(
+        _ctx: object,
+        **_kwargs: object,
+    ) -> _PreparedExecutionContext:
         return _PreparedExecutionContext(
             messages=(Message(role="user", content="prepared team prompt"),),
             unseen_event_ids=[],

@@ -1143,17 +1143,13 @@ async def _prepare_agent_and_prompt(
     _mark_pipeline_timing(pipeline_timing, "agent_build_ready")
 
     prepared_execution = await prepare_agent_execution_context(
+        ctx,
         scope_context=scope_context,
         agent=agent,
-        agent_name=agent_name,
         prompt=current_turn_prompt,
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
-        room_id=ctx.room_id,
-        thread_id=ctx.thread_id,
-        reply_to_event_id=ctx.reply_to_event_id,
-        active_event_ids=ctx.active_event_ids,
         compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
         current_sender_id=None if include_openai_compat_guidance else ctx.requester_id,

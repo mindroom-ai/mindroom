@@ -377,7 +377,10 @@ async def test_team_response_retry_scrubs_queued_notice_before_second_attempt() 
     prepared_scope_context = None
     attempts = 0
 
-    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> _PreparedExecutionContext:
+    async def fake_prepare_bound_team_execution_context(
+        _ctx: object,
+        **kwargs: object,
+    ) -> _PreparedExecutionContext:
         nonlocal prepared_scope_context
         scope_context = kwargs["scope_context"]
         assert scope_context is not None
@@ -750,7 +753,10 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
 
     mock_team.arun = AsyncMock(side_effect=fake_arun)
 
-    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> _PreparedExecutionContext:
+    async def fake_prepare_bound_team_execution_context(
+        _ctx: object,
+        **kwargs: object,
+    ) -> _PreparedExecutionContext:
         nonlocal prepared_scope_context
         scope_context = kwargs["scope_context"]
         assert scope_context is not None
@@ -834,7 +840,10 @@ async def test_prepare_materialized_team_execution_scrubs_queued_notices_when_ca
         assert scope_context.session is not None
         mock_team = _make_test_team(name="General Team", team_id=scope_context.session.team_id)
 
-        async def fake_prepare_bound_team_execution_context(**kwargs: object) -> _PreparedExecutionContext:
+        async def fake_prepare_bound_team_execution_context(
+            _ctx: object,
+            **kwargs: object,
+        ) -> _PreparedExecutionContext:
             prepared_scope_context = kwargs["scope_context"]
             assert prepared_scope_context is not None
             assert prepared_scope_context.session is not None
@@ -870,7 +879,10 @@ async def test_prepare_materialized_team_execution_forwards_explicit_thread_hist
     fake_agent = _make_test_agent("GeneralAgent")
     mock_team = _make_test_team(name="General Team")
 
-    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> _PreparedExecutionContext:
+    async def fake_prepare_bound_team_execution_context(
+        _ctx: object,
+        **kwargs: object,
+    ) -> _PreparedExecutionContext:
         assert kwargs["thread_history_render_limits"] == ThreadHistoryRenderLimits(
             max_messages=30,
             max_message_length=200,
@@ -914,7 +926,10 @@ async def test_prepare_materialized_team_execution_appends_system_enrichment_con
     mock_team = _make_test_team(name="General Team")
     mock_team.additional_context = "team configured context"
 
-    async def fake_prepare_bound_team_execution_context(**_kwargs: object) -> _PreparedExecutionContext:
+    async def fake_prepare_bound_team_execution_context(
+        _ctx: object,
+        **_kwargs: object,
+    ) -> _PreparedExecutionContext:
         return _prepared_team_execution_context(final_prompt="Analyze this.")
 
     with patch(
@@ -963,7 +978,10 @@ async def test_prepare_materialized_team_execution_carries_compaction_metadata_a
         fitted_replay_tokens=9_000,
     )
 
-    async def fake_prepare_bound_team_run_context(**kwargs: object) -> _PreparedExecutionContext:
+    async def fake_prepare_bound_team_run_context(
+        _ctx: object,
+        **kwargs: object,
+    ) -> _PreparedExecutionContext:
         assert kwargs["pipeline_timing"] is timing
         return _prepared_team_execution_context(
             final_prompt="Analyze this.",
@@ -1021,6 +1039,7 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
 
     with patch("mindroom.execution_preparation.team_static_token_estimator", FakeTeamStaticTokenEstimator):
         prepared = await _prepare_bound_team_execution_context(
+            make_turn_context(),
             scope_context=None,
             agents=[fake_agent],
             team=mock_team,
@@ -1068,6 +1087,7 @@ async def test_prepare_bound_team_execution_context_truncates_long_fallback_mess
     exact_limit_body = "y" * 200
 
     prepared = await _prepare_bound_team_execution_context(
+        make_turn_context(),
         scope_context=None,
         agents=[fake_agent],
         team=mock_team,
@@ -1146,7 +1166,10 @@ async def test_team_response_scrubs_queued_notices_after_run_exception() -> None
 
     mock_team.arun = AsyncMock(side_effect=fake_arun)
 
-    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> _PreparedExecutionContext:
+    async def fake_prepare_bound_team_execution_context(
+        _ctx: object,
+        **kwargs: object,
+    ) -> _PreparedExecutionContext:
         nonlocal prepared_scope_context
         scope_context = kwargs["scope_context"]
         assert scope_context is not None
@@ -1237,7 +1260,10 @@ async def test_team_response_stream_scrubs_queued_notices_after_stream_exception
         )
         raise RuntimeError(boom_error)
 
-    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> _PreparedExecutionContext:
+    async def fake_prepare_bound_team_execution_context(
+        _ctx: object,
+        **kwargs: object,
+    ) -> _PreparedExecutionContext:
         nonlocal prepared_scope_context
         scope_context = kwargs["scope_context"]
         assert scope_context is not None
@@ -3090,7 +3116,10 @@ async def test_team_response_stream_retry_scrubs_queued_notice_before_second_att
     prepared_scope_context = None
     attempts = 0
 
-    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> _PreparedExecutionContext:
+    async def fake_prepare_bound_team_execution_context(
+        _ctx: object,
+        **kwargs: object,
+    ) -> _PreparedExecutionContext:
         nonlocal prepared_scope_context
         scope_context = kwargs["scope_context"]
         assert scope_context is not None
@@ -3927,6 +3956,7 @@ async def test_private_ad_hoc_team_second_turn_replays_first_scoped_run() -> Non
             execution_identity=identity,
         )
         prepared = await prepare_bound_team_run_context(
+            make_turn_context(),
             scope_context=scope_context,
             agents=agents,
             team=second_team,

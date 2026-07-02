@@ -40,7 +40,7 @@ from mindroom.history.prompt_tokens import estimate_agent_static_tokens
 from mindroom.history.runtime import HistoryPreparationInputs
 from mindroom.tool_schema_cache import clear_tool_schema_cache
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
-from tests.conftest import FakeModel, bind_runtime_paths, make_visible_message
+from tests.conftest import FakeModel, bind_runtime_paths, make_turn_context, make_visible_message
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -158,14 +158,13 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
     monkeypatch.setattr(execution_preparation, "_build_thread_history_messages", fail_if_fallback_context_is_built)
 
     prepared = await _prepare_execution_context_common(
+        make_turn_context(reply_to_event_id="$current", active_event_ids=frozenset()),
         scope_context=None,
         prompt="Current request",
         thread_history=[
             make_visible_message(sender="@alice:localhost", body="older context", event_id="$older"),
             make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
         ],
-        reply_to_event_id="$current",
-        active_event_ids=(),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),
@@ -222,9 +221,15 @@ async def test_prepare_agent_execution_context_reuses_function_schema_processing
     monkeypatch.setattr(Function, "process_entrypoint", counting_process_entrypoint)
 
     prepared = await prepare_agent_execution_context(
+        make_turn_context(
+            "test_agent",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            reply_to_event_id="$current",
+            active_event_ids=frozenset(),
+        ),
         scope_context=None,
         agent=agent,
-        agent_name="test_agent",
         prompt="Current request",
         thread_history=[
             make_visible_message(sender="@alice:localhost", body="Earlier context", event_id="$older"),
@@ -232,10 +237,6 @@ async def test_prepare_agent_execution_context_reuses_function_schema_processing
         ],
         runtime_paths=runtime_paths,
         config=config,
-        room_id="!room:localhost",
-        thread_id="$thread",
-        reply_to_event_id="$current",
-        active_event_ids=(),
         compaction_outcomes_collector=None,
         current_sender_id="@alice:localhost",
     )
@@ -291,9 +292,15 @@ async def test_prepare_agent_execution_context_reuses_function_schema_processing
 
     for prompt in ("Current request", "Follow-up request"):
         await prepare_agent_execution_context(
+            make_turn_context(
+                "test_agent",
+                room_id="!room:localhost",
+                thread_id="$thread",
+                reply_to_event_id="$current",
+                active_event_ids=frozenset(),
+            ),
             scope_context=None,
             agent=make_agent(),
-            agent_name="test_agent",
             prompt=prompt,
             thread_history=[
                 make_visible_message(sender="@alice:localhost", body="Earlier context", event_id="$older"),
@@ -301,10 +308,6 @@ async def test_prepare_agent_execution_context_reuses_function_schema_processing
             ],
             runtime_paths=runtime_paths,
             config=config,
-            room_id="!room:localhost",
-            thread_id="$thread",
-            reply_to_event_id="$current",
-            active_event_ids=(),
             compaction_outcomes_collector=None,
             current_sender_id="@alice:localhost",
         )
