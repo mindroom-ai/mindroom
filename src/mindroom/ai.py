@@ -71,6 +71,7 @@ from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.response_turn import (
     AttemptResolved,
+    BlockingAttemptResolution,
     BlockingTurnAdapter,
     CancelledAttempt,
     CompletedAttempt,
@@ -354,8 +355,8 @@ class _AgentTurnHolder:
 
     agent: Agent | None = None
     attempt: _MediaAttempt | None = None
-    state: _StreamingAttemptState | None = None
-    attempt_started: bool = False
+    state: _StreamingAttemptState | None = None  # streaming turns only
+    attempt_started: bool = False  # streaming turns only
 
 
 @dataclass(frozen=True)
@@ -407,6 +408,11 @@ def _build_agent_turn_callbacks(
     def _release_attempt_entity(scope_context: ScopeSessionContext | None) -> None:
         _close_runtime_dbs(scope_context)
         holder.agent = None
+        # Cancel snapshots taken between this release and the next attempt must
+        # not see the spent attempt's partials; its completed tools already
+        # carried over via the turn state.
+        holder.attempt = None
+        holder.state = None
 
     def _discard_empty_run(scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
         ai_runtime.discard_empty_completed_run(
@@ -474,7 +480,6 @@ class _AgentRunContext:
     prepared_run: _PreparedAgentRun
     run_input: list[Message]
     metadata: dict[str, Any] | None
-    run_extra_content: dict[str, Any] | None
     inline_media_fallback_prompt: str
 
 
@@ -1343,7 +1348,6 @@ async def _prepare_agent_run_context(
         prepared_run=prepared_run,
         run_input=prepared_run.run_input,
         metadata=metadata,
-        run_extra_content=run_extra_content,
         inline_media_fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
     )
 
@@ -1518,7 +1522,7 @@ async def ai_response(
     async def _run_blocking_attempt(
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
-    ) -> CompletedAttempt | CancelledAttempt | ErroredAttempt:
+    ) -> BlockingAttemptResolution:
         """Run one agent attempt, including its media-fallback retries."""
         try:
             run_context = await _prepare_agent_run_context(
@@ -1559,7 +1563,6 @@ async def ai_response(
         holder.agent = prepared_run.agent
         run.unseen_event_ids = prepared_run.unseen_event_ids
         run.run_metadata = run_context.metadata
-        run.run_extra_content = run_context.run_extra_content
 
         attempt = _MediaAttempt.initial(
             run_context.run_input,
@@ -2012,7 +2015,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901, PLR0915
+    async def _run_streaming_attempt(  # noqa: C901
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -2059,7 +2062,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         run.unseen_event_ids = prepared_run.unseen_event_ids
         prepared_context_input_tokens = prepared_run.prepared_history.prepared_context_tokens
         run.run_metadata = run_context.metadata
-        run.run_extra_content = run_context.run_extra_content
 
         attempt = _MediaAttempt.initial(
             run_context.run_input,
