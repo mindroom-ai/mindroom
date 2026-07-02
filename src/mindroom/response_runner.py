@@ -329,7 +329,7 @@ class _NonStreamingGeneration:
     """
 
     response_text: str
-    tool_trace: list[Any]
+    tool_trace: list[ToolTraceEntry]
     run_metadata_content: dict[str, Any]
 
 
@@ -1800,7 +1800,7 @@ class ResponseRunner:
             target=runtime.resolved_target,
             request=request,
         )
-        tool_trace: list[Any] = []
+        tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
 
         def note_attempt_run_id(current_run_id: str) -> None:
