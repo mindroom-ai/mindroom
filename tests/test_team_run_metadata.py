@@ -13,6 +13,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import ModelRequestCompletedEvent as TeamModelRequestCompletedEvent
 from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent
+from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom.history.turn_recorder import TurnRecorder
@@ -257,6 +258,54 @@ async def test_team_response_stream_falls_back_to_model_request_totals() -> None
 
     payload = collector["io.mindroom.ai_run"]
     assert payload["status"] == "completed"
+    assert payload["usage"]["input_tokens"] == 500
+    assert payload["usage"]["output_tokens"] == 80
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_publishes_usage_when_stream_errors() -> None:
+    """An errored team stream still publishes the usage it observed.
+
+    The error arm ends the turn with a handled attempt (the driver never sees
+    a resolution to publish from), so the attempt must fill the collector
+    itself — otherwise billed tokens vanish from the run metadata.
+    """
+    orchestrator, config = _make_orchestrator()
+
+    async def stream() -> AsyncIterator[object]:
+        yield TeamModelRequestCompletedEvent(
+            model="test-model",
+            model_provider="openai",
+            input_tokens=500,
+            output_tokens=80,
+            total_tokens=580,
+        )
+        yield TeamRunErrorEvent(content="provider exploded")
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(return_value=stream())
+    collector: dict[str, object] = {}
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                turn_recorder=TurnRecorder(user_message="Analyze this."),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                session_id="session-1",
+                run_metadata_collector=collector,
+            )
+        ]
+
+    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+    assert "error" in rendered.lower()
+    payload = collector["io.mindroom.ai_run"]
+    assert payload["status"] == "error"
     assert payload["usage"]["input_tokens"] == 500
     assert payload["usage"]["output_tokens"] == 80
 
