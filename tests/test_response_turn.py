@@ -547,6 +547,80 @@ def test_blocking_empty_retry_borrows_continuation_slot_within_shared_budget() -
     assert [discard.run_id for discard in log.discards] == ["run-empty"]
 
 
+def test_blocking_discarded_empty_run_metadata_stays_out_of_collector() -> None:
+    """A discarded empty run's payload must not ride out on a later resolution.
+
+    The retry's resolution owns the collector; here it errors without
+    metadata, so the collector must stay empty rather than describe a run
+    that was purged from session history.
+    """
+    log = _AdapterLog()
+    collector: dict[str, Any] = {}
+    attempts = 0
+
+    async def _attempt(
+        _run: TurnRunState,
+        _c: DynamicContinuationRunState,
+    ) -> CompletedAttempt | ErroredAttempt:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return CompletedAttempt(
+                is_empty=True,
+                run_id="run-empty",
+                metadata_content={"io.mindroom.ai_run": {"run_id": "run-empty", "status": "completed"}},
+            )
+        return ErroredAttempt("friendly error")
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(run_metadata_collector=collector),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert attempts == 2
+    assert result == "friendly error"
+    assert collector == {}
+
+
+def test_blocking_superseded_continuation_metadata_stays_out_of_collector() -> None:
+    """Only the terminal attempt's metadata reaches the collector on continuation."""
+    log = _AdapterLog()
+    collector: dict[str, Any] = {}
+    attempts = 0
+
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return CompletedAttempt(
+                attempt_run_id="run-1",
+                tool_executions=(_dynamic_tool_execution(),),
+                metadata_content={"io.mindroom.ai_run": {"run_id": "run-1"}},
+            )
+        return CompletedAttempt(
+            response_text="final",
+            replayable_text="final",
+            has_visible_content=True,
+            metadata_content={"io.mindroom.ai_run": {"run_id": "run-2"}},
+        )
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(run_metadata_collector=collector),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert result == "final"
+    assert collector == {"io.mindroom.ai_run": {"run_id": "run-2"}}
+
+
 def test_blocking_unexpected_error_reraises_without_shaper() -> None:
     """Unexpected exceptions propagate when no error shaper is configured."""
     log = _AdapterLog()
