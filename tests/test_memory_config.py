@@ -487,7 +487,7 @@ class TestMemoryConfig:
         )
 
         assert config.memory.backend == "none"
-        assert config.get_agent_memory_backend("scratch") == "none"
+        assert config.resolve_entity("scratch").memory_backend == "none"
         assert config.uses_file_memory() is False
 
     def test_config_accepts_per_agent_disabled_memory_backend(self) -> None:
@@ -501,8 +501,8 @@ class TestMemoryConfig:
             router=RouterConfig(model="default"),
         )
 
-        assert config.get_agent_memory_backend("general") == "mem0"
-        assert config.get_agent_memory_backend("scratch") == "none"
+        assert config.resolve_entity("general").memory_backend == "mem0"
+        assert config.resolve_entity("scratch").memory_backend == "none"
         assert config.uses_file_memory() is False
 
 
@@ -510,7 +510,7 @@ def test_memory_search_defaults_to_keyword_daily_files() -> None:
     """File-memory search should default to keyword mode over daily memory files."""
     config = Config(router=RouterConfig(model="default"))
 
-    search = config.get_agent_memory_search("missing_agent")
+    search = config.resolve_entity("missing_agent").memory_search
 
     assert search.mode == "keyword"
     assert search.include == ["memory/**/*.md"]
@@ -537,7 +537,7 @@ def test_agent_memory_search_override_merges_per_field() -> None:
         router=RouterConfig(model="default"),
     )
 
-    search = config.get_agent_memory_search("openclaw")
+    search = config.resolve_entity("openclaw").memory_search
 
     assert search.mode == "semantic"
     assert search.include == ["memory/**/*.md"]
@@ -567,7 +567,7 @@ def test_agent_memory_search_can_override_include_patterns() -> None:
         router=RouterConfig(model="default"),
     )
 
-    search = config.get_agent_memory_search("openclaw")
+    search = config.resolve_entity("openclaw").memory_search
 
     assert search.include == ["memory/**/*.md", "decisions/**/*.md"]
     assert search.include_entrypoint is True

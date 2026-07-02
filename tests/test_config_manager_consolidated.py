@@ -428,7 +428,7 @@ class TestConsolidatedConfigManager:
 
             config = load_config_yaml(config_path)
             assert config.agents["test_agent"].tool_names == ["openclaw_compat"]
-            effective = config.get_agent_available_tools("test_agent")
+            effective = config.resolve_entity("test_agent").available_tools
             assert effective[0] == "openclaw_compat"
             assert "shell" in effective
             assert "matrix_message" in effective
@@ -603,7 +603,7 @@ class TestConsolidatedConfigManager:
         assert config.defaults.tool_names == ["scheduler", "shell"]
         assert config.agents["code"].tool_names == ["file", "shell"]
 
-        resolved = config.get_agent_tool_configs("code")
+        resolved = config.resolve_entity("code").tool_configs
         assert [entry.name for entry in resolved[:3]] == ["file", "shell", "scheduler"]
         resolved_shell = next(entry for entry in resolved if entry.name == "shell")
         assert resolved_shell.tool_config_overrides == {
@@ -632,7 +632,7 @@ class TestConsolidatedConfigManager:
             _runtime_paths(),
         )
 
-        resolved = next(entry for entry in config.get_agent_tool_configs("code") if entry.name == "clickup")
+        resolved = next(entry for entry in config.resolve_entity("code").tool_configs if entry.name == "clickup")
         assert resolved.tool_config_overrides == {}
 
     def test_tool_approval_null_section_uses_default_config(self) -> None:
@@ -793,7 +793,7 @@ class TestConsolidatedConfigManager:
             _runtime_paths(),
         )
 
-        resolved = {entry.name: entry.tool_config_overrides for entry in config.get_agent_tool_configs("code")}
+        resolved = {entry.name: entry.tool_config_overrides for entry in config.resolve_entity("code").tool_configs}
         assert resolved["openclaw_compat"] == {}
         assert resolved["shell"] == {"enable_run_shell_command": False}
         assert resolved["coding"] == {}
@@ -1191,7 +1191,7 @@ class TestAgentWorkerScope:
                 "code": AgentConfig(display_name="Code", worker_scope="user_agent"),
             },
         )
-        assert config.get_agent_execution_scope("code") == "user_agent"
+        assert config.resolve_entity("code").execution_scope == "user_agent"
 
     def test_worker_scope_falls_back_to_defaults(self) -> None:
         """Worker scope should inherit from defaults when agent config omits it."""
@@ -1201,7 +1201,7 @@ class TestAgentWorkerScope:
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_execution_scope("code") == "user"
+        assert config.resolve_entity("code").execution_scope == "user"
 
 
 class TestWorkerGrantableCredentials:

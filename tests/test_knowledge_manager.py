@@ -2569,7 +2569,7 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
         ),
         runtime_paths,
     )
-    base_id = config.get_agent_private_knowledge_base_id("helper")
+    base_id = config.resolve_entity("helper").private_knowledge_base_id
     assert base_id is not None
     identity = _identity("@alice:localhost")
     key = resolve_published_index_key(
@@ -2657,7 +2657,7 @@ async def test_private_git_updated_refresh_preserves_execution_identity(
         ),
         runtime_paths,
     )
-    base_id = config.get_agent_private_knowledge_base_id("helper")
+    base_id = config.resolve_entity("helper").private_knowledge_base_id
     assert base_id is not None
     identity = _identity("@alice:localhost")
     key = resolve_published_index_key(
@@ -5273,7 +5273,7 @@ async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path
         ),
         runtime_paths,
     )
-    base_id = config.get_agent_private_knowledge_base_id("helper")
+    base_id = config.resolve_entity("helper").private_knowledge_base_id
     assert base_id is not None
     identity_a = _identity("@alice:localhost")
     identity_b = _identity("@bob:localhost")
@@ -5341,7 +5341,7 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
         ),
         runtime_paths,
     )
-    base_id = config.get_agent_private_knowledge_base_id("helper")
+    base_id = config.resolve_entity("helper").private_knowledge_base_id
     assert base_id is not None
     identity = _identity("@alice:localhost")
     key = resolve_published_index_key(
@@ -5412,7 +5412,7 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
         ),
         runtime_paths,
     )
-    base_id = config.get_agent_private_knowledge_base_id("helper")
+    base_id = config.resolve_entity("helper").private_knowledge_base_id
     assert base_id is not None
     max_entries = max(
         knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES,
@@ -5477,7 +5477,7 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
         ),
         runtime_paths,
     )
-    base_id = config.get_agent_private_knowledge_base_id("helper")
+    base_id = config.resolve_entity("helper").private_knowledge_base_id
     assert base_id is not None
     count = knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES + 10
 

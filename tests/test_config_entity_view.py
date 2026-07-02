@@ -105,6 +105,7 @@ def test_view_agent_fields_match_agent_accessors(agent_name: str) -> None:
     assert view.scope_label == config.get_agent_scope_label(agent_name)
     assert view.culture == config.get_agent_culture(agent_name)
     assert view.knowledge_base_ids == config.get_agent_knowledge_base_ids(agent_name)
+    assert view.private_knowledge_base_id == config.get_agent_private_knowledge_base_id(agent_name)
 
 
 def test_agent_only_fields_raise_for_defaults_scope() -> None:

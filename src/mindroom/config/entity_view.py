@@ -117,6 +117,11 @@ class ResolvedEntityView:
         return self._config.get_agent_knowledge_base_ids(self._agent_name())
 
     @cached_property
+    def private_knowledge_base_id(self) -> str | None:
+        """Synthetic knowledge base ID for this agent's private knowledge, if enabled."""
+        return self._config.get_agent_private_knowledge_base_id(self._agent_name())
+
+    @cached_property
     def execution_scope(self) -> WorkerScope | None:
         """Internal derived execution scope for this agent."""
         return self._config.get_agent_execution_scope(self._agent_name())
