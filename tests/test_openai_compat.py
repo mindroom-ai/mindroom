@@ -4547,7 +4547,7 @@ class TestTeamCompletion:
             assert scope_context is not None
             assert scope_context.session is not None
 
-            async def fake_prepare_bound_team_run_context(**kwargs: object) -> SimpleNamespace:
+            async def fake_prepare_bound_team_run_context(_ctx: object, **kwargs: object) -> SimpleNamespace:
                 prepared_scope_context = kwargs["scope_context"]
                 assert prepared_scope_context is not None
                 assert prepared_scope_context.session is not None
