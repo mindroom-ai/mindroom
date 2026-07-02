@@ -149,16 +149,18 @@ def _team_turn_recorder(message: str) -> TurnRecorder:
     return TurnRecorder(user_message=message)
 
 
-def test_team_response_requires_turn_recorder() -> None:
-    """Direct team helper calls should explicitly opt into lifecycle recording."""
+def test_team_response_turn_recorder_is_optional() -> None:
+    """Recorder-less team helper calls fall back to standalone interrupted replay."""
     turn_recorder = inspect.signature(team_response).parameters["turn_recorder"]
-    assert turn_recorder.default is inspect.Signature.empty
+    assert turn_recorder.default is None
+    assert turn_recorder.kind is inspect.Parameter.KEYWORD_ONLY
 
 
-def test_team_response_stream_requires_turn_recorder() -> None:
-    """Direct team stream helper calls should explicitly opt into lifecycle recording."""
+def test_team_response_stream_turn_recorder_is_optional() -> None:
+    """Recorder-less team stream helper calls fall back to standalone interrupted replay."""
     turn_recorder = inspect.signature(team_response_stream).parameters["turn_recorder"]
-    assert turn_recorder.default is inspect.Signature.empty
+    assert turn_recorder.default is None
+    assert turn_recorder.kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_resolve_live_shared_agent_names_returns_none_when_runtime_availability_is_unknown() -> None:

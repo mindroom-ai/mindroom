@@ -52,7 +52,11 @@ from mindroom.history import (
     team_tool_definition_payloads_for_logging,
     update_scope_seen_event_ids,
 )
-from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
+from mindroom.history.interrupted_replay import (
+    persist_interrupted_replay,
+    split_interrupted_tool_trace,
+    tool_execution_call_id,
+)
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
@@ -77,6 +81,7 @@ from mindroom.response_turn import (
     CompletedAttempt,
     ContinuationCapability,
     DynamicContinuationRunState,
+    EmptyRunCapability,
     ErroredAttempt,
     HandledAttempt,
     ResponseTurnContext,
@@ -116,7 +121,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
-    from mindroom.response_turn import TurnRunState
+    from mindroom.response_turn import EmptyRunDiscard, StandaloneReplaySnapshot, TurnRunState
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -1263,6 +1268,61 @@ def _empty_partial_text() -> str:
     return ""
 
 
+def _resolved_team_session_id(scope_context: ScopeSessionContext | None, session_id: str | None) -> str | None:
+    """Return the effective team session id, falling back to the opened scope session."""
+    if session_id is not None:
+        return session_id
+    if scope_context is not None and scope_context.session is not None:
+        return scope_context.session.session_id
+    return None
+
+
+def _build_team_turn_capabilities(
+    *,
+    message: str,
+    session_id: str | None,
+    entity_name: str,
+) -> tuple[EmptyRunCapability, Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None]]:
+    """Build the empty-run guard and standalone-replay persister for one team turn."""
+
+    def _discard_empty_team_run(scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
+        resolved_session_id = _resolved_team_session_id(scope_context, discard.session_id or session_id)
+        if resolved_session_id is None:
+            return
+        ai_runtime.discard_empty_completed_run(
+            scope_context=scope_context,
+            session_id=resolved_session_id,
+            run_id=discard.run_id,
+            session_type=SessionType.TEAM,
+            entity_name=entity_name,
+            output_tokens=discard.output_tokens,
+        )
+
+    def _persist_team_standalone_replay(
+        scope_context: ScopeSessionContext | None,
+        snapshot: StandaloneReplaySnapshot,
+    ) -> None:
+        resolved_session_id = _resolved_team_session_id(scope_context, snapshot.session_id or session_id)
+        if resolved_session_id is None:
+            return
+        persist_interrupted_replay(
+            scope_context=scope_context,
+            session_id=resolved_session_id,
+            run_id=snapshot.run_id,
+            user_message=message,
+            partial_text=snapshot.partial_text,
+            completed_tools=snapshot.completed_tools,
+            interrupted_tools=snapshot.interrupted_tools,
+            run_metadata=snapshot.run_metadata,
+            is_team=True,
+        )
+
+    return (
+        EmptyRunCapability(notice_text=ai_runtime.EMPTY_RESPONSE_NOTICE, discard=_discard_empty_team_run),
+        _persist_team_standalone_replay,
+    )
+
+
 @dataclass
 class _TeamTurnHolder:
     """Live per-turn team state shared between attempt closures and adapter callbacks."""
@@ -1680,7 +1740,7 @@ async def team_response(  # noqa: C901, PLR0915
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     pipeline_timing: DispatchPipelineTiming | None = None,
     *,
-    turn_recorder: TurnRecorder,
+    turn_recorder: TurnRecorder | None = None,
     reason_prefix: str = "Team request",
 ) -> str:
     """Create a team and execute response."""
@@ -1783,7 +1843,8 @@ async def team_response(  # noqa: C901, PLR0915
         run.unseen_event_ids = prepared_execution.unseen_event_ids
         run.run_metadata = prepared_execution.run_metadata
         run_metadata = run.run_metadata
-        turn_recorder.set_run_metadata(run_metadata)
+        if turn_recorder is not None:
+            turn_recorder.set_run_metadata(run_metadata)
         # Team runs flatten context messages to text, so media pinned to
         # thread-history messages is re-collected onto the current turn.
         context_media_inputs = ai_runtime.media_inputs_from_run_input(prepared_execution.messages)
@@ -1933,6 +1994,8 @@ async def team_response(  # noqa: C901, PLR0915
                 partial_text=partial_text,
                 completed_tools=tuple(completed_tools),
                 interrupted_tools=tuple(interrupted_tools),
+                session_id=response.session_id,
+                run_id=response.run_id or attempt_run_id,
                 metadata_content=metadata_content,
             )
         if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
@@ -1950,6 +2013,10 @@ async def team_response(  # noqa: C901, PLR0915
                 event_ids=_run_metadata_seen_event_ids(run_metadata),
             )
 
+        response_session_id: str | None = None
+        response_run_id: str | None = None
+        response_output_tokens: int | None = None
+        is_empty_run = False
         if isinstance(response, (TeamRunOutput, RunOutput)):
             if isinstance(response, TeamRunOutput) and response.member_responses:
                 logger.debug("team_member_response_count", response_count=len(response.member_responses))
@@ -1961,6 +2028,10 @@ async def team_response(  # noqa: C901, PLR0915
                 )
             team_response_text = _team_response_text(response)
             has_visible_output = _has_visible_team_output(response)
+            response_session_id = response.session_id
+            response_run_id = response.run_id
+            response_output_tokens = response.metrics.output_tokens if response.metrics is not None else None
+            is_empty_run = response.status is RunStatus.completed and not run_tool_executions and not has_visible_output
         else:
             logger.warning(
                 "team_response_unexpected_type",
@@ -1990,7 +2061,11 @@ async def team_response(  # noqa: C901, PLR0915
             response_text=response_text,
             replayable_text=response_text,
             has_visible_content=has_visible_output,
+            is_empty=is_empty_run,
+            session_id=response_session_id,
+            run_id=response_run_id,
             attempt_run_id=attempt_run_id,
+            output_tokens=response_output_tokens,
             tool_executions=tuple(run_tool_executions),
             completed_tools=tuple(
                 _extract_completed_team_tool_trace(response)
@@ -2011,6 +2086,11 @@ async def team_response(  # noqa: C901, PLR0915
             entity_name=configured_team_name or team_name,
         )
 
+    team_empty_run, persist_team_replay = _build_team_turn_capabilities(
+        message=message,
+        session_id=session_id,
+        entity_name=configured_team_name or team_name,
+    )
     adapter = BlockingTurnAdapter(
         open_scope=lambda: open_bound_scope_session_context(
             agents=agents,
@@ -2031,6 +2111,8 @@ async def team_response(  # noqa: C901, PLR0915
         finalize_attempt=_finalize_team_attempt,
         unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_name),
         continuation=ContinuationCapability(),
+        empty_run=team_empty_run,
+        persist_standalone_replay=persist_team_replay,
     )
     return await run_blocking_response_turn(
         ResponseTurnContext(
@@ -2146,7 +2228,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     pipeline_timing: DispatchPipelineTiming | None = None,
     *,
-    turn_recorder: TurnRecorder,
+    turn_recorder: TurnRecorder | None = None,
     reason_prefix: str = "Team request",
 ) -> AsyncIterator[_TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
@@ -2257,7 +2339,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
         run.run_metadata = prepared_execution.run_metadata
         run_metadata = run.run_metadata
         unseen_event_ids = run.unseen_event_ids
-        turn_recorder.set_run_metadata(run_metadata)
+        if turn_recorder is not None:
+            turn_recorder.set_run_metadata(run_metadata)
         logger.info("team_streaming_setup", agents=agent_names, display_names=display_names)
         # Team runs flatten context messages to text, so media pinned to
         # thread-history messages is re-collected onto the current turn.
@@ -2333,6 +2416,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
         holder.render_partial = _current_canonical_partial_text
 
         def _sync_live_turn_recorder() -> None:
+            if turn_recorder is None:
+                return
             turn_recorder.sync_partial_state(
                 run_metadata=run_metadata,
                 assistant_text=_current_canonical_partial_text(),
@@ -2570,12 +2655,21 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         event,
                         team_display_names=team_members.display_names,
                     )
+                    event_has_visible = _has_visible_team_output(event)
                     yield response_text
                     yield AttemptResolved(
                         CompletedAttempt(
                             replayable_text=response_text,
-                            has_visible_content=_has_visible_team_output(event),
+                            has_visible_content=event_has_visible,
+                            is_empty=(
+                                event.status is RunStatus.completed
+                                and not event_tool_executions
+                                and not event_has_visible
+                            ),
+                            session_id=event.session_id,
+                            run_id=event.run_id,
                             attempt_run_id=attempt_run_id,
+                            output_tokens=event.metrics.output_tokens if event.metrics is not None else None,
                             tool_executions=tuple(event_tool_executions),
                             completed_tools=tuple(_extract_completed_team_tool_trace(event)),
                             metadata_content=event_metadata_content,
@@ -2744,6 +2838,12 @@ async def team_response_stream(  # noqa: C901, PLR0915
             entity_name=configured_team_name or team_label,
         )
 
+    team_empty_run, persist_team_replay = _build_team_turn_capabilities(
+        message=message,
+        session_id=session_id,
+        entity_name=configured_team_name or team_label,
+    )
+
     def _snapshot_stream_partial() -> TurnPartialSnapshot:
         return TurnPartialSnapshot(
             assistant_text=holder.render_partial(),
@@ -2773,6 +2873,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
         make_notice_chunk=lambda text: text,
         unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_label),
         continuation=ContinuationCapability(),
+        empty_run=team_empty_run,
+        persist_standalone_replay=persist_team_replay,
     )
     response_stream = stream_response_turn(
         ResponseTurnContext(
