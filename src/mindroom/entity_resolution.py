@@ -365,7 +365,7 @@ def effective_entity_model_name(
         return "default"
     if room_override := resolve_room_scoped_model_override(config.room_models, room_id, runtime_paths):
         return room_override
-    return config.get_entity_model_name(entity_name)
+    return config.resolve_entity(entity_name).model_name
 
 
 def resolve_room_scoped_model_override(

@@ -268,7 +268,7 @@ def _schedule_agent_semantic_refresh(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
-    search_config = config.get_agent_memory_search(agent_name)
+    search_config = config.resolve_entity(agent_name).memory_search
     if search_config.mode != "semantic":
         return
     schedule_semantic_file_memory_refresh(
@@ -889,7 +889,7 @@ class FileMemoryBackend:
                 _tag_keyword_mode(result)
             return results
 
-        search_config = config.get_agent_memory_search(agent_name)
+        search_config = config.resolve_entity(agent_name).memory_search
         if search_config.mode == "semantic":
             scope_user_id = agent_scope_user_id(agent_name)
             try:

@@ -582,7 +582,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     shared_storage_path = shared_storage_root(storage_path)
 
     if tool_name == "memory":
-        if config.get_agent_memory_backend(agent_name) == "none":
+        if config.resolve_entity(agent_name).memory_backend == "none":
             return None
 
         from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415

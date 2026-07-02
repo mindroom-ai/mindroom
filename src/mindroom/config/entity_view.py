@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.config.memory import MemoryBackend, MemorySearchConfig
     from mindroom.config.models import CompactionConfig
     from mindroom.history.types import ResolvedHistorySettings
 
@@ -47,3 +48,25 @@ class ResolvedEntityView:
         if self.name is None:
             return self._config.has_authored_default_compaction_config()
         return self._config.has_authored_entity_compaction_config(self.name)
+
+    @cached_property
+    def memory_backend(self) -> MemoryBackend:
+        """Effective memory backend; non-agent scopes inherit the global backend."""
+        if self.name is None:
+            return self._config.memory.backend
+        return self._config.get_agent_memory_backend(self.name)
+
+    @cached_property
+    def memory_search(self) -> MemorySearchConfig:
+        """Effective file-memory search settings; non-agent scopes inherit the global settings."""
+        if self.name is None:
+            return self._config.memory.search
+        return self._config.get_agent_memory_search(self.name)
+
+    @cached_property
+    def model_name(self) -> str:
+        """Authored model name for this agent, team, or router."""
+        if self.name is None:
+            msg = "The defaults-only scope has no authored model"
+            raise ValueError(msg)
+        return self._config.get_entity_model_name(self.name)
