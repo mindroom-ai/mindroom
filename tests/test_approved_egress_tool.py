@@ -401,6 +401,30 @@ def test_request_network_access_posts_one_grant_per_blocked_hostname(
     assert "Already allowed by the static egress allowlist (no grant needed): docs.example.com." in result
 
 
+def test_request_network_access_reports_per_host_expiry_when_grants_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Differing grant expiries must be reported per hostname, not as one shared timestamp."""
+    expiries = iter([123, 124])
+
+    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
+        return {"expires_at": next(expiries)}
+
+    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
+    monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", _shared_worker_context)
+
+    result = asyncio.run(
+        _approved_egress_tool().request_network_access(
+            ["api.other.test", "cdn.other.test"],
+            5,
+            "Need APIs",
+        ),
+    )
+
+    assert "api.other.test expires at Unix time 123." in result
+    assert "cdn.other.test expires at Unix time 124." in result
+
+
 def test_request_network_access_reports_partial_grants_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

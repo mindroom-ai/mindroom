@@ -308,7 +308,7 @@ class _ApprovedEgressTools(Toolkit):
             raise RuntimeError(msg)
         subject = _grant_subject(context)
         granted: list[str] = []
-        expiry: object = None
+        expiries: list[object] = []
         for host in blocked:
             payload: dict[str, object] = {
                 "hostname": host,
@@ -330,7 +330,14 @@ class _ApprovedEgressTools(Toolkit):
                     raise RuntimeError(msg) from exc
                 raise
             granted.append(host)
-            expiry = grant.get("expires_at")
+            expiries.append(grant.get("expires_at"))
+        expiry_note = (
+            f"Expires at Unix time {expiries[0]}."
+            if all(expiry == expiries[0] for expiry in expiries)
+            else " ".join(
+                f"{host} expires at Unix time {expiry}." for host, expiry in zip(granted, expiries, strict=True)
+            )
+        )
         capped = " Deployment policy capped the requested TTL." if effective_ttl_seconds < requested_ttl_seconds else ""
         skipped = (
             f" Already allowed by the static egress allowlist (no grant needed): {', '.join(already_allowed)}."
@@ -339,7 +346,7 @@ class _ApprovedEgressTools(Toolkit):
         )
         return (
             f"Approved temporary network access to {', '.join(granted)} for {effective_ttl_seconds // 60} minutes. "
-            f"Expires at Unix time {expiry}.{capped}{skipped}"
+            f"{expiry_note}{capped}{skipped}"
         )
 
 
