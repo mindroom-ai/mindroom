@@ -1405,7 +1405,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "Partial answer\n\n[interrupted]"),
+        ("assistant", "Partial answer\n\n(turn interrupted by the user before completion)"),
     ]
 
 
@@ -1477,7 +1477,8 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
         ("user", "Hello"),
         (
             "assistant",
-            "Partial answer\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]",
+            "Partial answer\n\n(turn interrupted by the user before completion; "
+            "1 tool call(s) had completed: run_shell_command)",
         ),
     ]
 
@@ -1560,9 +1561,10 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
     persisted_run = cast("RunOutput", persisted_session.runs[0])
     assistant_text = cast("str", persisted_run.messages[1].content)
     assert "🔧 `run_shell_command` [1]" not in assistant_text
-    assert assistant_text.count("[tool:run_shell_command completed]") == 1
+    assert assistant_text.count("run_shell_command") == 1
     assert assistant_text == (
-        "Partial answer\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]"
+        "Partial answer\n\n(turn interrupted by the user before completion; "
+        "1 tool call(s) had completed: run_shell_command)"
     )
 
 
@@ -1790,7 +1792,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
     assert persisted_run.messages[0].role == "user"
     assert "Hello" in cast("str", persisted_run.messages[0].content)
     assert [(message.role, message.content) for message in persisted_run.messages[-1:]] == [
-        ("assistant", "[interrupted]"),
+        ("assistant", "(turn interrupted by the user before completion)"),
     ]
 
 
@@ -3370,7 +3372,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "Team hello\n\n[interrupted]"),
+        ("assistant", "Team hello\n\n(turn interrupted by the user before completion)"),
     ]
 
 
@@ -3454,13 +3456,11 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
     persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
     assistant_text = cast("str", persisted_run.messages[1].content)
     assert "🔧 `run_shell_command` [1]" not in assistant_text
-    assert assistant_text.count("[tool:run_shell_command completed]") == 1
+    assert assistant_text.count("run_shell_command") == 1
     assert assistant_text == (
         "🤝 **Team Response** (General):\n\nTeam hello\n\n"
-        "[tool:run_shell_command completed]\n"
-        "  args: cmd=pwd\n"
-        "  result: /app\n\n"
-        "[interrupted]"
+        "(turn interrupted by the user before completion; "
+        "1 tool call(s) had completed: run_shell_command)"
     )
 
 
@@ -3538,7 +3538,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
     assert persisted_run.messages[0].role == "user"
     assert "Hello" in cast("str", persisted_run.messages[0].content)
     assert [(message.role, message.content) for message in persisted_run.messages[-1:]] == [
-        ("assistant", "[interrupted]"),
+        ("assistant", "(turn interrupted by the user before completion)"),
     ]
 
 
@@ -3600,7 +3600,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "🤝 Team Response:\n\nTeam hello\n\n[interrupted]"),
+        ("assistant", "🤝 Team Response:\n\nTeam hello\n\n(turn interrupted by the user before completion)"),
     ]
 
 
@@ -3732,7 +3732,7 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "Team hello\n\n[interrupted]"),
+        ("assistant", "Team hello\n\n(turn interrupted by the user before completion)"),
     ]
 
 
@@ -3983,7 +3983,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "[interrupted]"),
+        ("assistant", "(turn interrupted by the user before completion)"),
     ]
 
 
@@ -5172,7 +5172,8 @@ class TestUserIdPassthrough:
             ("user", "test"),
             (
                 "assistant",
-                "Half done\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]",
+                "Half done\n\n(turn interrupted by the user before completion; "
+                "1 tool call(s) had completed: run_shell_command)",
             ),
         ]
 
@@ -5226,7 +5227,7 @@ class TestUserIdPassthrough:
         assert persisted_run.messages is not None
         assert [(message.role, message.content) for message in persisted_run.messages] == [
             ("user", "test"),
-            ("assistant", "Half done\n\n[interrupted]"),
+            ("assistant", "Half done\n\n(turn interrupted by the user before completion)"),
         ]
 
     @pytest.mark.asyncio
@@ -5282,10 +5283,8 @@ class TestUserIdPassthrough:
             ("user", "test"),
             (
                 "assistant",
-                "Half done\n\n[tool:run_shell_command interrupted]\n"
-                "  args: cmd=pwd\n"
-                "  result: <interrupted before completion>\n\n"
-                "[interrupted]",
+                "Half done\n\n(turn interrupted by the user before completion; "
+                "1 tool call(s) were still running: run_shell_command)",
             ),
         ]
 
@@ -7527,14 +7526,9 @@ class TestUserIdPassthrough:
             ("user", "test"),
             (
                 "assistant",
-                "Half done\n\n"
-                "[tool:run_shell_command completed]\n"
-                "  args: cmd=pwd\n"
-                "  result: /app\n"
-                "[tool:save_file interrupted]\n"
-                "  args: file_name=main.py\n"
-                "  result: <interrupted before completion>\n\n"
-                "[interrupted]",
+                "Half done\n\n(turn interrupted by the user before completion; "
+                "1 tool call(s) had completed: run_shell_command; "
+                "1 tool call(s) were still running: save_file)",
             ),
         ]
 
@@ -7612,14 +7606,9 @@ class TestUserIdPassthrough:
             ("user", "test"),
             (
                 "assistant",
-                "Half done\n\n"
-                "[tool:run_shell_command completed]\n"
-                "  args: cmd=pwd\n"
-                "  result: /app\n"
-                "[tool:run_shell_command interrupted]\n"
-                "  args: cmd=ls\n"
-                "  result: <interrupted before completion>\n\n"
-                "[interrupted]",
+                "Half done\n\n(turn interrupted by the user before completion; "
+                "1 tool call(s) had completed: run_shell_command; "
+                "1 tool call(s) were still running: run_shell_command)",
             ),
         ]
 
@@ -7678,7 +7667,7 @@ class TestUserIdPassthrough:
         assert persisted_run.messages is not None
         assert [(message.role, message.content) for message in persisted_run.messages] == [
             ("user", "test"),
-            ("assistant", "Half done\n\n[interrupted]"),
+            ("assistant", "Half done\n\n(turn interrupted by the user before completion)"),
         ]
 
     @pytest.mark.asyncio

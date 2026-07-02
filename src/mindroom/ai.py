@@ -366,6 +366,41 @@ def _advance_dynamic_continuation(
     return advanced_state, turn_state
 
 
+def _discard_empty_run_and_grant_retry(
+    *,
+    agent: Agent | None,
+    scope_context: ScopeSessionContext | None,
+    session_id: str,
+    run_id: str | None,
+    entity_name: str,
+    output_tokens: int | None,
+    empty_response_retried: bool,
+    continuation_count: int,
+) -> bool:
+    """Discard one empty completed run and decide whether one retry is granted.
+
+    Shared by the blocking and streaming loops so the empty-retry handoff stays
+    identical across both paths. The one-shot retry borrows a dynamic-continuation
+    slot so the outer loop's iteration budget stays authoritative; a granted retry
+    closes the spent agent's runtime state DBs exactly like the continuation handoff.
+    """
+    ai_runtime.discard_empty_completed_run(
+        scope_context=scope_context,
+        session_id=session_id,
+        run_id=run_id,
+        session_type=SessionType.AGENT,
+        entity_name=entity_name,
+        output_tokens=output_tokens,
+    )
+    if empty_response_retried or continuation_count >= DYNAMIC_TOOL_CONTINUATION_LIMIT:
+        return False
+    close_agent_runtime_state_dbs(
+        agent,
+        shared_scope_storage=scope_context.storage if scope_context is not None else None,
+    )
+    return True
+
+
 @timed("system_prompt_assembly.system_enrichment_render")
 def _render_system_enrichment_context(
     system_enrichment_items: Sequence[EnrichmentItem],
@@ -1525,6 +1560,7 @@ async def ai_response(  # noqa: C901, PLR0915
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
+    empty_response_retried = False
     turn_state = AITurnState()
     unseen_event_ids: list[str] = []
     metadata: dict[str, Any] | None = None
@@ -1536,9 +1572,9 @@ async def ai_response(  # noqa: C901, PLR0915
         except ValueError as e:
             return get_user_friendly_error_message(e, agent_name)
 
-        async def _run_blocking_attempt(continuation_count: int) -> str | None:  # noqa: C901, PLR0912
+        async def _run_blocking_attempt(continuation_count: int) -> str | None:  # noqa: C901, PLR0911, PLR0912, PLR0915
             """Run one agent attempt; return final text, or None to continue the turn."""
-            nonlocal agent, attempt, continuation_state, metadata, run_extra_content
+            nonlocal agent, attempt, continuation_state, empty_response_retried, metadata, run_extra_content
             nonlocal standalone_interrupted_replay_persisted, turn_state, unseen_event_ids
             try:
                 run_context = await _prepare_agent_run_context(
@@ -1655,6 +1691,28 @@ async def ai_response(  # noqa: C901, PLR0915
                     Exception(str(response.content or "Unknown agent error")),
                     agent_name,
                 )
+            if ai_runtime.is_empty_completed_run(response):
+                if _discard_empty_run_and_grant_retry(
+                    agent=agent,
+                    scope_context=scope_context,
+                    session_id=response.session_id or session_id,
+                    run_id=response.run_id,
+                    entity_name=agent_name,
+                    output_tokens=_usage_metric_int(response.metrics, "output_tokens"),
+                    empty_response_retried=empty_response_retried,
+                    continuation_count=continuation_count,
+                ):
+                    empty_response_retried = True
+                    agent = None
+                    return None
+                if turn_recorder is not None:
+                    turn_state.record_completed(
+                        turn_recorder,
+                        run_metadata=metadata,
+                        assistant_text="",
+                        completed_tools=[],
+                    )
+                return ai_runtime.EMPTY_RESPONSE_NOTICE
 
             continuation_decision = continuation_decision_from_tools(
                 response.tools,
@@ -2089,6 +2147,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
+    empty_response_retried = False
     turn_state = AITurnState()
     unseen_event_ids: list[str] = []
     metadata: dict[str, Any] | None = None
@@ -2107,8 +2166,9 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             continuation_count: int,
         ) -> AsyncGenerator[AIStreamChunk, None]:
             """Stream one agent attempt; set keep_going when the turn should continue."""
-            nonlocal agent, attempt, continuation_state, keep_going, metadata, run_extra_content
-            nonlocal standalone_interrupted_replay_persisted, state, turn_state, unseen_event_ids
+            nonlocal agent, attempt, continuation_state, empty_response_retried, keep_going, metadata
+            nonlocal run_extra_content, standalone_interrupted_replay_persisted, state, turn_state
+            nonlocal unseen_event_ids
             try:
                 run_context = await _prepare_agent_run_context(
                     agent_name=agent_name,
@@ -2280,6 +2340,27 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                         _raise_agent_run_cancelled(state.cancelled_run_event.reason)
 
                     break
+
+                if _stream_completed_without_visible_output(state) and not state.completed_tool_executions:
+                    completed_event = state.completed_run_event
+                    assert completed_event is not None
+                    if _discard_empty_run_and_grant_retry(
+                        agent=agent,
+                        scope_context=scope_context,
+                        session_id=completed_event.session_id or session_id,
+                        run_id=completed_event.run_id,
+                        entity_name=agent_name,
+                        output_tokens=state.request_metric_totals.get("output_tokens"),
+                        empty_response_retried=empty_response_retried,
+                        continuation_count=continuation_count,
+                    ):
+                        empty_response_retried = True
+                        agent = None
+                        keep_going = True
+                        return
+                    # The notice must fall through: the run-metadata recording and
+                    # recorder completion below still apply to this notice-only turn.
+                    yield RunContentEvent(content=ai_runtime.EMPTY_RESPONSE_NOTICE)
 
                 continuation_decision = continuation_decision_from_tools(
                     state.completed_tool_executions,

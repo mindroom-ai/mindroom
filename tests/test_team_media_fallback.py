@@ -1498,10 +1498,8 @@ async def test_team_response_records_interrupted_snapshot_for_cancelled_runs() -
     assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: Half done\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
-        "[tool:run_shell_command completed]\n"
-        "  args: cmd=pwd\n"
-        "  result: /app\n\n"
-        "[interrupted]"
+        "(turn interrupted by the user before completion; "
+        "1 tool call(s) had completed: run_shell_command)"
     )
 
 
@@ -1566,10 +1564,8 @@ async def test_team_response_records_incomplete_cancelled_tools_as_interrupted()
     assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: Half done\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
-        "[tool:run_shell_command interrupted]\n"
-        "  args: cmd=pwd\n"
-        "  result: <interrupted before completion>\n\n"
-        "[interrupted]"
+        "(turn interrupted by the user before completion; "
+        "1 tool call(s) were still running: run_shell_command)"
     )
 
 
@@ -1986,10 +1982,8 @@ async def test_team_response_stream_records_hidden_interrupted_tool_state() -> N
     assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: Half done\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
-        "[tool:run_shell_command completed]\n"
-        "  args: cmd=pwd\n"
-        "  result: /app\n\n"
-        "[interrupted]"
+        "(turn interrupted by the user before completion; "
+        "1 tool call(s) had completed: run_shell_command)"
     )
 
 
@@ -2213,7 +2207,8 @@ async def test_team_response_stream_records_interrupted_snapshot_after_external_
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
     assert _render_interrupted_replay_content(snapshot) == (
-        "**GeneralAgent**: Half done\n\n\n*No team consensus - showing individual responses only*\n\n[interrupted]"
+        "**GeneralAgent**: Half done\n\n\n*No team consensus - showing individual responses only*\n\n"
+        "(turn interrupted by the user before completion)"
     )
 
 
@@ -2311,12 +2306,12 @@ async def test_team_response_stream_preserves_pending_tool_scope_for_same_named_
 
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
-    content = _render_interrupted_replay_content(snapshot)
-    assert "[tool:run_shell_command completed]" in content
-    assert "args: cmd=pwd" in content
-    assert "[tool:run_shell_command interrupted]" in content
-    assert "args: cmd=ls" in content
-    assert "args: cmd=pwd\n  result: <interrupted before completion>" not in content
+    assert [(tool.tool_name, tool.args_preview) for tool in snapshot.completed_tools] == [
+        ("run_shell_command", "cmd=pwd"),
+    ]
+    assert [(tool.tool_name, tool.args_preview) for tool in snapshot.interrupted_tools] == [
+        ("run_shell_command", "cmd=ls"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -2398,13 +2393,9 @@ async def test_team_response_stream_preserves_pending_tool_identity_within_membe
     assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: General started\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
-        "[tool:run_shell_command completed]\n"
-        "  args: cmd=pwd\n"
-        "  result: /app\n"
-        "[tool:run_shell_command interrupted]\n"
-        "  args: cmd=ls\n"
-        "  result: <interrupted before completion>\n\n"
-        "[interrupted]"
+        "(turn interrupted by the user before completion; "
+        "1 tool call(s) had completed: run_shell_command; "
+        "1 tool call(s) were still running: run_shell_command)"
     )
 
 

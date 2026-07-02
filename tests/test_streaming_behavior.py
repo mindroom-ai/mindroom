@@ -36,7 +36,6 @@ from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, Fina
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
-    _INTERRUPTED_RESPONSE_MARKER,
     InterruptedReplaySnapshot,
     _render_interrupted_replay_content,
 )
@@ -90,6 +89,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
 IN_PROGRESS_MARKER = " ⋯"
+_INTERRUPTION_SUMMARY = "(turn interrupted by the user before completion)"
 
 
 async def _aiter(*events: object) -> AsyncIterator[object]:
@@ -717,19 +717,19 @@ class TestStreamingBehavior:
     def test_clean_partial_reply_text_normalises_user_stop_label_to_interrupted_marker(self) -> None:
         """User-stop labels should collapse to the canonical interrupted replay marker."""
         assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}") == (
-            f"Draft answer\n\n{_INTERRUPTED_RESPONSE_MARKER}"
+            f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
         )
 
     def test_clean_partial_reply_text_normalises_restart_label_to_interrupted_marker(self) -> None:
         """Restart labels should collapse to the canonical interrupted replay marker."""
         assert _render_cleaned_interrupted_replay(build_restart_interrupted_body("Draft answer")) == (
-            f"Draft answer\n\n{_INTERRUPTED_RESPONSE_MARKER}"
+            f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
         )
 
     def test_clean_partial_reply_text_normalises_new_interrupted_label_to_interrupted_marker(self) -> None:
         """Generic interruption labels should collapse to the canonical interrupted replay marker."""
         assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{_INTERRUPTED_RESPONSE_NOTE}") == (
-            f"Draft answer\n\n{_INTERRUPTED_RESPONSE_MARKER}"
+            f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
         )
 
     @pytest.mark.asyncio

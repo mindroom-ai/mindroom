@@ -80,7 +80,7 @@ def test_split_interrupted_tool_trace_keeps_missing_terminal_state_as_interrupte
     assert [entry.tool_name for entry in interrupted] == ["noop"]
 
 
-def test_build_interrupted_replay_run_creates_completed_agent_run_with_marker_and_tools() -> None:
+def test_build_interrupted_replay_run_creates_completed_agent_run_with_summary_and_tools() -> None:
     """Interrupted snapshots should replay through the normal completed history lane."""
     snapshot = InterruptedReplaySnapshot(
         user_message="Please continue",
@@ -122,15 +122,50 @@ def test_build_interrupted_replay_run_creates_completed_agent_run_with_marker_an
         (
             "assistant",
             "Half done\n\n"
-            "[tool:run_shell_command completed]\n"
-            "  args: cmd=pwd\n"
-            "  result: /app\n"
-            "[tool:save_file interrupted]\n"
-            "  args: file_name=main.py\n"
-            "  result: <interrupted before completion>\n\n"
-            "[interrupted]",
+            "(turn interrupted by the user before completion; "
+            "1 tool call(s) had completed: run_shell_command; "
+            "1 tool call(s) were still running: save_file)",
         ),
     ]
+
+
+def test_interrupted_replay_content_contains_no_raw_tool_trace() -> None:
+    """Replay assistant content must stay prose-safe: no raw tool logs or payload dumps."""
+    snapshot = InterruptedReplaySnapshot(
+        user_message="Please continue",
+        partial_text="Half done",
+        completed_tools=(
+            ToolTraceEntry(
+                type="tool_call_completed",
+                tool_name="get_attachment",
+                args_preview="attachment_id=abc, mindroom_output_path=scratch/voice.m4a",
+                result_preview='{"attachment": {"id": "abc"}}',
+            ),
+        ),
+        interrupted_tools=(),
+        seen_event_ids=(),
+        source_event_id=None,
+        source_event_ids=(),
+        source_event_prompts=(),
+        response_event_id=None,
+    )
+
+    run = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="run-123",
+        scope_id="test_agent",
+        session_id="session-1",
+        is_team=False,
+    )
+
+    content = _assistant_text(run)
+    assert "[tool:" not in content
+    assert "result:" not in content
+    assert "[interrupted]" not in content
+    assert '{"attachment"' not in content
+    assert content.startswith("Half done")
+    assert "turn interrupted by the user before completion" in content
+    assert "get_attachment" in content
 
 
 def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata() -> None:
@@ -365,6 +400,6 @@ def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_
         assert persisted is not None
         assert persisted.runs is not None
         assert len(persisted.runs) == 1
-        assert _assistant_text(persisted.runs[0]) == "[interrupted]"
+        assert _assistant_text(persisted.runs[0]) == "(turn interrupted by the user before completion)"
     finally:
         storage.close()
