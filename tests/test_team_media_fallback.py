@@ -149,17 +149,17 @@ def _team_turn_recorder(message: str) -> TurnRecorder:
     return TurnRecorder(user_message=message)
 
 
-def test_team_response_turn_recorder_is_optional() -> None:
-    """Recorder-less team helper calls fall back to standalone interrupted replay."""
+def test_team_response_requires_turn_recorder() -> None:
+    """Teams have no recorder-less production caller, so the recorder stays required."""
     turn_recorder = inspect.signature(team_response).parameters["turn_recorder"]
-    assert turn_recorder.default is None
+    assert turn_recorder.default is inspect.Parameter.empty
     assert turn_recorder.kind is inspect.Parameter.KEYWORD_ONLY
 
 
-def test_team_response_stream_turn_recorder_is_optional() -> None:
-    """Recorder-less team stream helper calls fall back to standalone interrupted replay."""
+def test_team_response_stream_requires_turn_recorder() -> None:
+    """Teams have no recorder-less production caller, so the recorder stays required."""
     turn_recorder = inspect.signature(team_response_stream).parameters["turn_recorder"]
-    assert turn_recorder.default is None
+    assert turn_recorder.default is inspect.Parameter.empty
     assert turn_recorder.kind is inspect.Parameter.KEYWORD_ONLY
 
 

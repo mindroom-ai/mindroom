@@ -2562,7 +2562,7 @@ class TestAgentBot:
             assert stream_kwargs["reply_to_event_id"] == "event123"
             assert stream_kwargs["show_tool_calls"] is True
             assert stream_kwargs["run_metadata_collector"] == {}
-            assert stream_kwargs["compaction_outcomes_collector"] == []
+            assert "compaction_outcomes_collector" not in stream_kwargs
             mock_ai_response.assert_not_called()
             # With streaming and stop button: initial message + reaction + edits
             # Note: The exact count may vary based on implementation
@@ -2589,7 +2589,7 @@ class TestAgentBot:
             assert ai_kwargs["collect_streamed_response"] is True
             assert ai_kwargs["tool_trace_collector"] == []
             assert ai_kwargs["run_metadata_collector"] == {}
-            assert ai_kwargs["compaction_outcomes_collector"] == []
+            assert "compaction_outcomes_collector" not in ai_kwargs
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final
             assert bot.client.room_send.call_count >= 2
