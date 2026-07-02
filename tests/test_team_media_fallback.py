@@ -2062,6 +2062,12 @@ async def test_team_response_stream_marks_tool_call_timing_for_agent_and_team_to
                     messages=(Message(role="user", content="Analyze this."),),
                     run_metadata={},
                     unseen_event_ids=[],
+                    prepared_history=PreparedHistoryState(
+                        replays_persisted_history=False,
+                        compaction_decision=CompactionDecision(mode="none", reason="unclassified"),
+                        compaction_reply_outcome="none",
+                    ),
+                    runtime_model_name="test-model",
                 ),
             ),
         ),
