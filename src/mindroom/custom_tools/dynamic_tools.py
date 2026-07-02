@@ -89,13 +89,13 @@ class DynamicToolsToolkit(Toolkit):
 
     def _deferred_tool_names(self) -> list[str]:
         return self._filter_visible_tool_names(
-            [entry.name for entry in self._config.get_agent_authored_deferred_tool_configs(self._agent_name)],
+            [entry.name for entry in self._config.resolve_entity(self._agent_name).authored_deferred_tool_configs],
         )
 
     def _initial_tools(self) -> set[str]:
         return {
             entry.name
-            for entry in self._config.get_agent_authored_deferred_tool_configs(self._agent_name)
+            for entry in self._config.resolve_entity(self._agent_name).authored_deferred_tool_configs
             if entry.initial and entry.name not in self._hidden_tool_names
         }
 
@@ -149,7 +149,7 @@ class DynamicToolsToolkit(Toolkit):
                 available_tools=self._filter_visible_tool_names(result.available_tools),
             )
         elif result.status == "scope_incompatible":
-            scope_label = self._config.get_agent_scope_label(self._agent_name)
+            scope_label = self._config.resolve_entity(self._agent_name).scope_label
             unsupported_tools = list(result.unsupported_tools)
             response = self._payload(
                 "scope_incompatible",

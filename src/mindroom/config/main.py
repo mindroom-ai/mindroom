@@ -23,7 +23,6 @@ from pydantic import (
 from mindroom.agent_policy import (
     build_agent_policy_seeds,
     get_agent_delegation_closure,
-    get_private_team_targets,
     get_unsupported_team_agents,
     resolve_agent_policy_from_data,
     resolve_private_knowledge_base_agent,
@@ -32,6 +31,7 @@ from mindroom.agent_policy import (
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import (
@@ -691,8 +691,8 @@ class Config(BaseModel):
         """Reject shared-only integrations on isolating scopes for static and dynamic tool assignments."""
         invalid_assignments: list[str] = []
         for agent_name in sorted(self.agents):
-            scope_label = self.get_agent_scope_label(agent_name)
-            execution_scope = self.get_agent_execution_scope(agent_name)
+            scope_label = self._agent_scope_label(agent_name)
+            execution_scope = self._agent_execution_scope(agent_name)
             unsupported_tools = unsupported_shared_only_integration_names(
                 self._get_agent_eager_tools(agent_name),
                 execution_scope,
@@ -700,7 +700,7 @@ class Config(BaseModel):
             invalid_assignments.extend(
                 f"{agent_name} -> {tool_name} ({scope_label})" for tool_name in unsupported_tools
             )
-            for authored_name, incompatible_tools in self.get_agent_scope_incompatible_deferred_tools(
+            for authored_name, incompatible_tools in self._agent_scope_incompatible_deferred_tools(
                 agent_name,
             ).items():
                 invalid_assignments.extend(
@@ -846,13 +846,12 @@ class Config(BaseModel):
                     "and outside scaffolded private workspace content"
                 )
                 raise ValueError(msg)
-            overlaps_private_file_memory = self.get_agent_memory_backend(
-                agent_name,
-            ) == "file" and _relative_paths_overlap(
+            uses_file_memory_backend = self._agent_memory_backend(agent_name) == "file"
+            overlaps_private_file_memory = uses_file_memory_backend and _relative_paths_overlap(
                 knowledge_path,
                 memory_notes_dir,
             )
-            if self.get_agent_memory_backend(agent_name) == "file" and _relative_paths_overlap(
+            if uses_file_memory_backend and _relative_paths_overlap(
                 knowledge_path,
                 memory_notes_entrypoint,
             ):
@@ -1027,7 +1026,7 @@ class Config(BaseModel):
         )
         return _strip_empty_root_sections(payload)
 
-    def get_agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
+    def _agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
         """Get the configured culture assignment for an agent, if any."""
         for culture_name, culture_config in self.cultures.items():
             if agent_name in culture_config.agents:
@@ -1053,15 +1052,7 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self.agents[agent_name]
 
-    def get_team(self, team_name: str) -> TeamConfig:
-        """Get a team configuration by name."""
-        if team_name not in self.teams:
-            available = ", ".join(sorted(self.teams.keys()))
-            msg = f"Unknown team: {team_name}. Available teams: {available}"
-            raise ValueError(msg)
-        return self.teams[team_name]
-
-    def get_default_history_settings(self) -> ResolvedHistorySettings:
+    def _default_history_settings(self) -> ResolvedHistorySettings:
         """Return defaults-only replay settings for ad hoc shared team scope."""
         return ResolvedHistorySettings(
             policy=_history_policy_from_limits(
@@ -1072,12 +1063,12 @@ class Config(BaseModel):
             system_message_role="system",
         )
 
-    def get_entity_history_settings(self, entity_name: str) -> ResolvedHistorySettings:
+    def _entity_history_settings(self, entity_name: str) -> ResolvedHistorySettings:
         """Return effective replay settings for one configured agent or team."""
         if entity_name in self.agents:
             entity = self.get_agent(entity_name)
         elif entity_name in self.teams:
-            entity = self.get_team(entity_name)
+            entity = self.teams[entity_name]
         else:
             msg = f"Unknown entity: {entity_name}"
             raise ValueError(msg)
@@ -1102,17 +1093,17 @@ class Config(BaseModel):
             system_message_role="system",
         )
 
-    def get_default_compaction_config(self) -> CompactionConfig:
+    def _default_compaction_config(self) -> CompactionConfig:
         """Return the effective destructive compaction config for defaults-only scope."""
         base = self.defaults.compaction
         merged = base.model_dump() if base is not None else {}
         return CompactionConfig.model_validate(merged)
 
-    def has_authored_default_compaction_config(self) -> bool:
+    def _has_authored_default_compaction_config(self) -> bool:
         """Return whether defaults-only scope has authored destructive compaction config."""
         return self.defaults.compaction is not None
 
-    def get_entity_compaction_config(self, entity_name: str) -> CompactionConfig:
+    def _entity_compaction_config(self, entity_name: str) -> CompactionConfig:
         """Return the effective destructive compaction config for one configured agent or team."""
         base = self.defaults.compaction
         defaults_enabled = base.enabled if base is not None else False
@@ -1120,7 +1111,7 @@ class Config(BaseModel):
         if entity_name in self.agents:
             override = self.get_agent(entity_name).compaction
         elif entity_name in self.teams:
-            override = self.get_team(entity_name).compaction
+            override = self.teams[entity_name].compaction
         else:
             msg = f"Unknown entity: {entity_name}"
             raise ValueError(msg)
@@ -1151,43 +1142,47 @@ class Config(BaseModel):
             )
         return CompactionConfig.model_validate(merged)
 
-    def has_authored_entity_compaction_config(self, entity_name: str) -> bool:
+    def _has_authored_entity_compaction_config(self, entity_name: str) -> bool:
         """Return whether destructive compaction was explicitly configured for one configured entity."""
         if entity_name in self.agents:
             override = self.get_agent(entity_name).compaction
         elif entity_name in self.teams:
-            override = self.get_team(entity_name).compaction
+            override = self.teams[entity_name].compaction
         else:
             msg = f"Unknown entity: {entity_name}"
             raise ValueError(msg)
         return self.defaults.compaction is not None or override is not None
+
+    def resolve_entity(self, entity_name: str | None) -> ResolvedEntityView:
+        """Return the resolved config view for one entity, or the defaults-only scope for None."""
+        return ResolvedEntityView(_config=self, name=entity_name)
 
     def get_model_context_window(self, model_name: str) -> int | None:
         """Return the configured context window for one model name, when known."""
         model_config = self.models.get(model_name)
         return model_config.context_window if model_config and model_config.context_window else None
 
-    def get_deferred_tool_scope_incompatible_tools(
+    def _deferred_tool_scope_incompatible_tools(
         self,
         agent_name: str,
         authored_tool_name: str,
     ) -> list[str]:
         """Return expanded deferred tools invalid for one agent's effective execution scope."""
-        authored_config = self.get_agent_authored_deferred_tool_config(agent_name, authored_tool_name)
+        authored_config = self._agent_authored_deferred_tool_config(agent_name, authored_tool_name)
         if authored_config is None:
             return []
-        execution_scope = self.get_agent_execution_scope(agent_name)
+        execution_scope = self._agent_execution_scope(agent_name)
         return unsupported_shared_only_integration_names(
             self.expand_tool_names([authored_tool_name]),
             execution_scope,
         )
 
-    def get_agent_scope_incompatible_deferred_tools(self, agent_name: str) -> dict[str, list[str]]:
+    def _agent_scope_incompatible_deferred_tools(self, agent_name: str) -> dict[str, list[str]]:
         """Return deferred authored tools whose expanded contents are invalid for one agent scope."""
         return {
             entry.name: incompatible_tools
-            for entry in self.get_agent_authored_deferred_tool_configs(agent_name)
-            if (incompatible_tools := self.get_deferred_tool_scope_incompatible_tools(agent_name, entry.name))
+            for entry in self._agent_authored_deferred_tool_configs(agent_name)
+            if (incompatible_tools := self._deferred_tool_scope_incompatible_tools(agent_name, entry.name))
         }
 
     def get_worker_grantable_credentials(self) -> frozenset[str]:
@@ -1197,7 +1192,7 @@ class Config(BaseModel):
             return DEFAULT_WORKER_GRANTABLE_CREDENTIALS
         return frozenset(configured)
 
-    def get_agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
+    def _agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
         """Return the internal derived execution scope for one agent.
 
         This is not the authored config field.
@@ -1212,10 +1207,10 @@ class Config(BaseModel):
         )
         return policy.effective_execution_scope
 
-    def get_agent_scope_label(self, agent_name: str) -> str:
+    def _agent_scope_label(self, agent_name: str) -> str:
         """Return the user-facing authored scope label for one agent.
 
-        Keep this separate from `get_agent_execution_scope()`: the internal runtime uses
+        Keep this separate from `_agent_execution_scope()`: the internal runtime uses
         one derived execution scope, but user-facing messages should still distinguish
         authored `worker_scope=...` from private `private.per=...`.
         """
@@ -1236,7 +1231,7 @@ class Config(BaseModel):
             tool_names.extend(self.expand_tool_names([entry.name]))
         return tool_names
 
-    def get_agent_private_knowledge_base_id(self, agent_name: str) -> str | None:
+    def _agent_private_knowledge_base_id(self, agent_name: str) -> str | None:
         """Return the synthetic knowledge base ID for one agent's private knowledge."""
         policy = resolve_agent_policy_from_data(
             agent_name,
@@ -1257,11 +1252,11 @@ class Config(BaseModel):
             private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
         )
 
-    def get_agent_knowledge_base_ids(self, agent_name: str) -> list[str]:
+    def _agent_knowledge_base_ids(self, agent_name: str) -> list[str]:
         """Return shared and private knowledge base IDs assigned to one agent."""
         agent_config = self.get_agent(agent_name)
         base_ids = list(agent_config.knowledge_bases)
-        private_base_id = self.get_agent_private_knowledge_base_id(agent_name)
+        private_base_id = self._agent_private_knowledge_base_id(agent_name)
         if private_base_id is not None:
             base_ids.append(private_base_id)
         return base_ids
@@ -1439,7 +1434,7 @@ class Config(BaseModel):
         """Return whether an authored tool survived tolerant plugin-load validation."""
         return tool_name not in self._unavailable_plugin_tool_names
 
-    def get_agent_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
+    def _agent_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
         """Return effective runtime tool config entries for each authored owner."""
         effective_entries = []
         for authored_entry in self._get_agent_authored_tool_configs(agent_name):
@@ -1463,7 +1458,7 @@ class Config(BaseModel):
             )
         return effective_entries
 
-    def get_agent_available_tools(self, agent_name: str) -> list[str]:
+    def _agent_available_tools(self, agent_name: str) -> list[str]:
         """Get all tools the agent may use after dynamic loading."""
         agent_config = self.get_agent(agent_name)
         explicit_names = [name for name in agent_config.tool_names if self._tool_name_is_available(name)]
@@ -1471,7 +1466,7 @@ class Config(BaseModel):
             explicit_names.extend(name for name in self.defaults.tool_names if self._tool_name_is_available(name))
         return self.expand_tool_names(explicit_names)
 
-    def get_agent_authored_deferred_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
+    def _agent_authored_deferred_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
         """Return one entry per authored deferred tool in effective order."""
         return [
             EffectiveToolConfig(
@@ -1486,32 +1481,20 @@ class Config(BaseModel):
             if entry.defer and self._tool_name_is_available(entry.name)
         ]
 
-    def get_agent_authored_deferred_tool_config(
+    def _agent_authored_deferred_tool_config(
         self,
         agent_name: str,
         authored_tool_name: str,
     ) -> EffectiveToolConfig | None:
         """Return one authored deferred tool config by authored name."""
-        for entry in self.get_agent_authored_deferred_tool_configs(agent_name):
+        for entry in self._agent_authored_deferred_tool_configs(agent_name):
             if entry.name == authored_tool_name:
                 return entry
         return None
 
-    def get_agent_tool_runtime_overrides(
-        self,
-        agent_name: str,
-        tool_name: str,
-        *,
-        runtime_paths: RuntimePaths | None = None,
-    ) -> dict[str, object] | None:
+    def _agent_tool_runtime_overrides(self, agent_name: str, tool_name: str) -> dict[str, object] | None:
         """Return runtime kwargs derived from one agent's authored tool overrides."""
-        from mindroom.tool_system.catalog import (  # noqa: PLC0415
-            authored_tool_overrides_to_runtime,
-            ensure_tool_registry_loaded,
-        )
-
-        if runtime_paths is not None:
-            ensure_tool_registry_loaded(runtime_paths, self)
+        from mindroom.tool_system.catalog import authored_tool_overrides_to_runtime  # noqa: PLC0415
 
         agent_config = self.get_agent(agent_name)
         overrides = agent_config.get_tool_overrides(tool_name)
@@ -1523,7 +1506,7 @@ class Config(BaseModel):
     def _agent_hard_dependency_tool_names(self, agent_name: str) -> set[str]:
         """Return tool names that are hard startup dependencies for one agent."""
         referenced_tool_names: set[str] = set()
-        for entry in self.get_agent_tool_configs(agent_name):
+        for entry in self._agent_tool_configs(agent_name):
             if not entry.defer or entry.initial:
                 referenced_tool_names.add(entry.name)
         return referenced_tool_names
@@ -1548,22 +1531,6 @@ class Config(BaseModel):
     ) -> frozenset[str]:
         """Return one agent plus all agents reachable through transitive delegation."""
         return get_agent_delegation_closure(
-            agent_name,
-            build_agent_policy_seeds(
-                self.agents,
-                default_worker_scope=self.defaults.worker_scope,
-            ),
-            closures=closures,
-        )
-
-    def get_private_team_targets(
-        self,
-        agent_name: str,
-        *,
-        closures: dict[str, frozenset[str]] | None = None,
-    ) -> tuple[str, ...]:
-        """Return private agents reachable from one team member, including itself."""
-        return get_private_team_targets(
             agent_name,
             build_agent_policy_seeds(
                 self.agents,
@@ -1662,7 +1629,7 @@ class Config(BaseModel):
             queue.extend(implied_tool for implied_tool in next_tools if implied_tool not in seen)
         return expanded
 
-    def get_agent_memory_backend(self, agent_name: str) -> MemoryBackend:
+    def _agent_memory_backend(self, agent_name: str) -> MemoryBackend:
         """Get effective memory backend for one agent."""
         agent_config = self.agents.get(agent_name)
         if agent_config is None:
@@ -1671,7 +1638,7 @@ class Config(BaseModel):
             return agent_config.memory_backend
         return self.memory.backend
 
-    def get_agent_memory_search(self, agent_name: str) -> MemorySearchConfig:
+    def _agent_memory_search(self, agent_name: str) -> MemorySearchConfig:
         """Get effective file-memory search settings for one agent."""
         agent_config = self.agents.get(agent_name)
         override = agent_config.memory_search if agent_config is not None else None
@@ -1684,7 +1651,7 @@ class Config(BaseModel):
         """Return whether any configured agent uses file-backed memory."""
         if not self.agents:
             return self.memory.backend == "file"
-        return any(self.get_agent_memory_backend(agent_name) == "file" for agent_name in self.agents)
+        return any(self._agent_memory_backend(agent_name) == "file" for agent_name in self.agents)
 
     def get_all_configured_rooms(self) -> set[str]:
         """Extract all configured room references.
@@ -1759,7 +1726,7 @@ class Config(BaseModel):
 
         return "thread"
 
-    def get_entity_model_name(self, entity_name: str) -> str:
+    def _entity_model_name(self, entity_name: str) -> str:
         """Get the model name for an agent, team, or router.
 
         Args:
@@ -1790,17 +1757,6 @@ class Config(BaseModel):
         available = sorted(set(self.agents.keys()) | set(self.teams.keys()) | {ROUTER_AGENT_NAME})
         msg = f"Unknown entity: {entity_name}. Available entities: {', '.join(available)}"
         raise ValueError(msg)
-
-    def get_effective_entity_model_name(
-        self,
-        entity_name: str,
-        room_id: str | None,
-        runtime_paths: RuntimePaths,
-    ) -> str:
-        """Return the effective model for one entity in one room context."""
-        from mindroom.entity_resolution import effective_entity_model_name  # noqa: PLC0415
-
-        return effective_entity_model_name(self, entity_name, room_id, runtime_paths)
 
     def resolve_runtime_model(
         self,
@@ -1837,9 +1793,11 @@ class Config(BaseModel):
                 if runtime_paths is None:
                     msg = "runtime_paths are required to resolve a room-specific runtime model"
                     raise ValueError(msg)
-                resolved_model_name = self.get_effective_entity_model_name(entity_name, room_id, runtime_paths)
+                from mindroom.entity_resolution import effective_entity_model_name  # noqa: PLC0415
+
+                resolved_model_name = effective_entity_model_name(self, entity_name, room_id, runtime_paths)
             else:
-                resolved_model_name = self.get_entity_model_name(entity_name)
+                resolved_model_name = self._entity_model_name(entity_name)
 
         resolved_context_window = active_context_window
         if resolved_context_window is None:

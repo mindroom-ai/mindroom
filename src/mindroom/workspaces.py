@@ -352,7 +352,7 @@ def _effective_workspace(
             else None
         ),
         context_files=tuple(private_config.context_files or ()),
-        file_memory_path="." if config.get_agent_memory_backend(agent_name) == "file" else None,
+        file_memory_path="." if config.resolve_entity(agent_name).memory_backend == "file" else None,
     )
 
 
@@ -379,7 +379,7 @@ def _resolve_workspace(
         return None
 
     if agent_config.private is None:
-        if config.get_agent_memory_backend(agent_name) != "file":
+        if config.resolve_entity(agent_name).memory_backend != "file":
             return None
         root = resolve_workspace_relative_path(
             state_storage_path,

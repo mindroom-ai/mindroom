@@ -219,7 +219,7 @@ async def test_prepare_history_for_run_warns_once_when_authored_compaction_is_un
     assert len(mock_warning.call_args_list) == 1
 
 
-def test_get_entity_compaction_config_merges_authored_overrides(tmp_path: Path) -> None:
+def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -256,7 +256,7 @@ def test_get_entity_compaction_config_merges_authored_overrides(tmp_path: Path) 
         runtime_paths,
     )
 
-    resolved = config.get_entity_compaction_config("test_agent")
+    resolved = config.resolve_entity("test_agent").compaction_config
 
     assert resolved.enabled is True
     assert resolved.threshold_tokens is None
@@ -291,8 +291,8 @@ def test_authored_empty_defaults_compaction_enables_destructive_compaction(tmp_p
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.get_entity_compaction_config("test_agent"),
-        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
         active_model_name="default",
         active_context_window=48_000,
         static_prompt_tokens=2_000,
@@ -326,8 +326,8 @@ def test_omitted_defaults_compaction_enables_destructive_compaction(tmp_path: Pa
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.get_entity_compaction_config("test_agent"),
-        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
         active_model_name="default",
         active_context_window=48_000,
         static_prompt_tokens=2_000,
@@ -365,8 +365,8 @@ def test_empty_agent_compaction_override_stays_disabled_with_disabled_defaults(t
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.get_entity_compaction_config("test_agent"),
-        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
         active_model_name="default",
         active_context_window=48_000,
         static_prompt_tokens=2_000,
@@ -498,7 +498,7 @@ def test_authored_model_dump_preserves_explicit_compaction_model_clear(tmp_path:
     }
 
 
-def test_get_entity_compaction_config_inherits_disabled_defaults_for_pure_model_clear(tmp_path: Path) -> None:
+def test_resolved_compaction_config_inherits_disabled_defaults_for_pure_model_clear(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -531,7 +531,7 @@ def test_get_entity_compaction_config_inherits_disabled_defaults_for_pure_model_
         runtime_paths,
     )
 
-    compaction_config = config.get_entity_compaction_config("test_agent")
+    compaction_config = config.resolve_entity("test_agent").compaction_config
 
     assert compaction_config.enabled is False
     assert compaction_config.model is None
@@ -568,8 +568,8 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.get_entity_compaction_config("test_agent"),
-        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
         active_model_name="default",
         active_context_window=None,
         static_prompt_tokens=2_000,
@@ -657,8 +657,8 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.get_entity_compaction_config("test_agent"),
-        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
         active_model_name="default",
         active_context_window=4_096,
         static_prompt_tokens=500,
@@ -702,8 +702,8 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.get_entity_compaction_config("test_agent"),
-        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
         active_model_name="default",
         active_context_window=1_000,
         static_prompt_tokens=10,

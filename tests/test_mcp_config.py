@@ -165,7 +165,7 @@ def test_config_accepts_top_level_mcp_servers(tmp_path: Path) -> None:
         runtime_paths,
     )
     assert "chrome_devtools" in config.mcp_servers
-    assert "mcp_chrome_devtools" in config.get_agent_available_tools("code")
+    assert "mcp_chrome_devtools" in config.resolve_entity("code").available_tools
 
 
 def test_config_allows_non_oauth_mcp_tools_on_private_per_user_agents(tmp_path: Path) -> None:
@@ -191,8 +191,8 @@ def test_config_allows_non_oauth_mcp_tools_on_private_per_user_agents(tmp_path: 
         runtime_paths,
     )
 
-    assert config.get_agent_execution_scope("code") == "user_agent"
-    assert "mcp_demo" in config.get_agent_available_tools("code")
+    assert config.resolve_entity("code").execution_scope == "user_agent"
+    assert "mcp_demo" in config.resolve_entity("code").available_tools
 
 
 def test_config_allows_non_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> None:
@@ -218,7 +218,7 @@ def test_config_allows_non_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path)
         runtime_paths,
     )
 
-    assert "mcp_demo" in config.get_agent_available_tools("code")
+    assert "mcp_demo" in config.resolve_entity("code").available_tools
 
 
 def test_config_allows_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> None:
@@ -250,7 +250,7 @@ def test_config_allows_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> 
         runtime_paths,
     )
 
-    assert "mcp_demo" in config.get_agent_available_tools("code")
+    assert "mcp_demo" in config.resolve_entity("code").available_tools
 
 
 def test_config_tracks_initial_deferred_mcp_dependencies_for_agents_and_teams(tmp_path: Path) -> None:
