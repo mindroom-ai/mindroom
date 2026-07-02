@@ -68,19 +68,19 @@ def test_delivery_progress_placeholder_fallback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_post_delivery_failure_finalizes_error_outcome(tmp_path: Path) -> None:
-    """A failure after delivery started finalizes a terminal error instead of asserting."""
+async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path) -> None:
+    """A failure after delivery started settles a terminal error instead of asserting.
+
+    The tracked event must not be touched: with an adopted thinking-message
+    stream it can already carry the full streamed reply, and the
+    placeholder-only cleanup in finalize would redact it.
+    """
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    finalize_requests: list[object] = []
+    effect_outcomes: list[object] = []
 
-    async def fake_finalize(finalize_request: object) -> object:
-        finalize_requests.append(finalize_request)
-        outcome = MagicMock()
-        outcome.terminal_status = "error"
-        outcome.final_visible_event_id = "$thinking"
-        outcome.mark_handled = True
-        return outcome
+    async def fake_post_effects(final_outcome: object, *_args: object) -> None:
+        effect_outcomes.append(final_outcome)
 
     async def failing_process(_request: object, **kwargs: object) -> _ResponseGenerationOutcome:
         on_delivery_started = cast("Callable[[str | None], None]", kwargs["on_delivery_started"])
@@ -90,22 +90,22 @@ async def test_agent_post_delivery_failure_finalizes_error_outcome(tmp_path: Pat
 
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$thinking")),
-        patch.object(DeliveryGateway, "finalize_streamed_response", new=AsyncMock(side_effect=fake_finalize)),
+        patch.object(DeliveryGateway, "finalize_streamed_response", new=AsyncMock()) as mock_finalize,
         patch.object(coordinator, "process_and_respond", new=AsyncMock(side_effect=failing_process)),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
-            apply_post_response_effects=AsyncMock(return_value=None),
+            apply_post_response_effects=AsyncMock(side_effect=fake_post_effects),
         ),
     ):
         result = await coordinator.generate_response(_plain_request(_target()))
 
     # Previously this path tripped `assert final_delivery_outcome is not None`.
-    assert result == "$thinking"
-    assert len(finalize_requests) == 1
-    transport_outcome = finalize_requests[0].stream_transport_outcome
-    assert transport_outcome.terminal_status == "error"
-    assert transport_outcome.failure_reason == "delivery pipe burst"
+    assert result is None
+    mock_finalize.assert_not_awaited()
+    assert len(effect_outcomes) == 1
+    assert effect_outcomes[0].terminal_status == "error"
+    assert effect_outcomes[0].failure_reason == "delivery pipe burst"
 
 
 @pytest.mark.asyncio

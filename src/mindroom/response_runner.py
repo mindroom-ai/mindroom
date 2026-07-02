@@ -2298,7 +2298,7 @@ class ResponseRunner:
             ),
         )
 
-    async def generate_response_locked(  # noqa: C901, PLR0915
+    async def generate_response_locked(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -2451,10 +2451,13 @@ class ResponseRunner:
             progress.deferred_error = error
         except Exception as error:
             if progress.stage_started:
-                # A failure after delivery started finalizes through the late
-                # fallback below instead of tripping the outcome assertion.
+                # A failure after delivery started settles through the late
+                # fallback below instead of tripping the outcome assertion. Only
+                # record the reason when no outcome exists yet, so a settled
+                # sync-restart cancellation still registers its retry.
                 self._log_delivery_failure(response_kind="ai", error=error)
-                progress.failure_reason = progress.failure_reason or str(error) or "late_delivery_failure"
+                if final_delivery_outcome is None:
+                    progress.failure_reason = progress.failure_reason or str(error) or "late_delivery_failure"
             else:
                 progress.failure_reason = str(error) or "delivery_failed_before_start"
                 final_delivery_outcome = await self._finalize_pre_delivery_terminal(
@@ -2470,15 +2473,14 @@ class ResponseRunner:
                 progress.deferred_error = error
         if final_delivery_outcome is None and (progress.cancelled or progress.failure_reason is not None):
             if progress.stage_started:
-                final_delivery_outcome = await self._finalize_late_delivery_failure(
-                    target=resolved_target,
-                    request=request,
-                    response_kind="ai",
-                    response_envelope=resolved_response_envelope,
-                    correlation_id=resolved_correlation_id,
-                    progress=progress,
-                    run_message_id=run_message_id,
-                    extra_content=None,
+                # Delivery began but never settled an outcome. Do not touch the
+                # tracked event: with an adopted thinking-message stream it can
+                # already hold the full streamed reply, and the placeholder-only
+                # cleanup in finalize_streamed_response would redact it.
+                final_delivery_outcome = FinalDeliveryOutcome(
+                    terminal_status="cancelled" if progress.cancelled else "error",
+                    event_id=None,
+                    failure_reason=progress.failure_reason or "interrupted",
                 )
             else:
                 final_delivery_outcome = await self._finalize_pre_delivery_terminal(
