@@ -131,6 +131,7 @@ from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
     _merge_response_extra_content,
+    _ResponseGenerationOutcome,
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
@@ -2622,7 +2623,7 @@ class TestAgentBot:
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            delivery = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -2638,7 +2639,7 @@ class TestAgentBot:
                 ),
             )
 
-        assert delivery.event_id == "$response"
+        assert generation.delivery.event_id == "$response"
         assert mock_ai.call_args.kwargs["prompt"] == "Please send an update"
         model_prompt = mock_ai.call_args.kwargs["model_prompt"]
         assert "[Matrix metadata for tool calls]" in model_prompt
@@ -2676,7 +2677,7 @@ class TestAgentBot:
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            delivery = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -2692,7 +2693,7 @@ class TestAgentBot:
                 ),
             )
 
-        assert delivery.event_id == "$response"
+        assert generation.delivery.event_id == "$response"
         assert mock_ai.call_args.kwargs["prompt"] == "Please send an update"
         model_prompt = mock_ai.call_args.kwargs["model_prompt"]
         assert "[Matrix metadata for tool calls]" in model_prompt
@@ -2739,7 +2740,7 @@ class TestAgentBot:
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                delivery = await bot._response_runner.process_and_respond_streaming(
+                generation = await bot._response_runner.process_and_respond_streaming(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please reply in thread",
@@ -2755,7 +2756,7 @@ class TestAgentBot:
                     ),
                 )
 
-        assert delivery.event_id == "$response"
+        assert generation.delivery.event_id == "$response"
         assert mock_stream_agent_response.call_args.kwargs["prompt"] == "Please reply in thread"
         model_prompt = mock_stream_agent_response.call_args.kwargs["model_prompt"]
         assert "[Matrix metadata for tool calls]" in model_prompt
@@ -2913,7 +2914,7 @@ class TestAgentBot:
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                delivery = await bot._response_runner.process_and_respond_streaming(
+                generation = await bot._response_runner.process_and_respond_streaming(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Hello",
@@ -2929,7 +2930,7 @@ class TestAgentBot:
                     ),
                 )
 
-        assert delivery.event_id == "$response"
+        assert generation.delivery.event_id == "$response"
         bot._knowledge_access_support.resolve_for_agent.assert_called_once()
         args, kwargs = bot._knowledge_access_support.resolve_for_agent.call_args
         assert args == ("calculator",)
@@ -3258,7 +3259,7 @@ class TestAgentBot:
                 stream_agent_response=mock_stream_agent_response,
             ),
         ):
-            delivery = await bot._response_runner.process_and_respond_streaming(
+            generation = await bot._response_runner.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please continue",
@@ -3274,10 +3275,10 @@ class TestAgentBot:
                 ),
             )
 
-        assert _visible_response_event_id(delivery) == "$terminal"
-        assert _handled_response_event_id(delivery) == "$terminal"
-        assert delivery.delivery_kind is None
-        assert "Response interrupted by an error" in delivery.response_text
+        assert _visible_response_event_id(generation.delivery) == "$terminal"
+        assert _handled_response_event_id(generation.delivery) == "$terminal"
+        assert generation.delivery.delivery_kind is None
+        assert "Response interrupted by an error" in generation.delivery.response_text
 
     @pytest.mark.asyncio
     async def test_process_and_respond_applies_before_and_after_hooks_non_streaming(
@@ -3319,7 +3320,7 @@ class TestAgentBot:
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            delivery = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -3331,7 +3332,7 @@ class TestAgentBot:
                 ),
             )
 
-        assert delivery.event_id == "$response"
+        assert generation.delivery.event_id == "$response"
         assert before_calls == 1
         assert bot.client.room_send.await_args.kwargs["content"]["body"] == "Handled [hooked]"
         assert after_results == []
@@ -3449,7 +3450,7 @@ class TestAgentBot:
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                delivery = await bot._response_runner.process_and_respond_streaming(
+                generation = await bot._response_runner.process_and_respond_streaming(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please reply in thread",
@@ -3461,7 +3462,7 @@ class TestAgentBot:
                     ),
                 )
 
-        assert delivery.event_id == "$response"
+        assert generation.delivery.event_id == "$response"
         assert before_calls == 0
         mock_edit_message.assert_not_awaited()
         assert after_results == []
@@ -4432,7 +4433,7 @@ class TestAgentBot:
                 rendered_body=None,
                 visible_body_state="none",
             )
-            delivery = await bot._response_runner.process_and_respond_streaming(
+            generation = await bot._response_runner.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please reply in thread",
@@ -4450,10 +4451,10 @@ class TestAgentBot:
                 ),
             )
 
-        assert delivery.terminal_status == "completed"
-        assert _visible_response_event_id(delivery) == "$existing"
-        assert _handled_response_event_id(delivery) == "$existing"
-        assert delivery.mark_handled is True
+        assert generation.delivery.terminal_status == "completed"
+        assert _visible_response_event_id(generation.delivery) == "$existing"
+        assert _handled_response_event_id(generation.delivery) == "$existing"
+        assert generation.delivery.mark_handled is True
 
     def test_response_outcome_prefers_terminal_status_over_delivery_kind(self) -> None:
         """Pipeline outcome summaries must not report cancelled or error states as plain send/edit success."""
@@ -5530,7 +5531,7 @@ class TestAgentBot:
             typing_indicator=noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            delivery = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Summarize README",
@@ -5546,7 +5547,7 @@ class TestAgentBot:
                 ),
             )
 
-        assert delivery.event_id == "$response"
+        assert generation.delivery.event_id == "$response"
         assert mock_ai.call_args.kwargs["show_tool_calls"] is False
         assert mock_ai.call_args.kwargs["collect_streamed_response"] is False
         assert "io.mindroom.tool_trace" not in bot.client.room_send.await_args.kwargs["content"]
@@ -5599,7 +5600,7 @@ class TestAgentBot:
             typing_indicator=noop_typing_indicator,
             ai_response=AsyncMock(side_effect=fake_ai_response),
         ):
-            delivery = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Check status",
@@ -5615,7 +5616,7 @@ class TestAgentBot:
                 ),
             )
 
-        assert delivery.event_id == "$response"
+        assert generation.delivery.event_id == "$response"
         content = bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "Final answer"
         assert content[TOOL_TRACE_CONTENT_KEY]["events"] == [
@@ -5685,11 +5686,14 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$response",
-                        is_visible_response=True,
-                        final_visible_body="ok",
+                    return_value=_ResponseGenerationOutcome(
+                        delivery=FinalDeliveryOutcome(
+                            terminal_status="completed",
+                            event_id="$response",
+                            is_visible_response=True,
+                            final_visible_body="ok",
+                        ),
+                        run_succeeded=True,
                     ),
                 ),
             ) as mock_process,
@@ -5803,11 +5807,14 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$response",
-                        is_visible_response=True,
-                        final_visible_body="ok",
+                    return_value=_ResponseGenerationOutcome(
+                        delivery=FinalDeliveryOutcome(
+                            terminal_status="completed",
+                            event_id="$response",
+                            is_visible_response=True,
+                            final_visible_body="ok",
+                        ),
+                        run_succeeded=True,
                     ),
                 ),
             ) as mock_process,
@@ -5899,12 +5906,15 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond_streaming",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$thinking",
-                        is_visible_response=True,
-                        final_visible_body="",
-                        delivery_kind="edited",
+                    return_value=_ResponseGenerationOutcome(
+                        delivery=FinalDeliveryOutcome(
+                            terminal_status="completed",
+                            event_id="$thinking",
+                            is_visible_response=True,
+                            final_visible_body="",
+                            delivery_kind="edited",
+                        ),
+                        run_succeeded=True,
                     ),
                 ),
             ) as mock_process,
@@ -6001,11 +6011,14 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$response",
-                        is_visible_response=True,
-                        final_visible_body="ok",
+                    return_value=_ResponseGenerationOutcome(
+                        delivery=FinalDeliveryOutcome(
+                            terminal_status="completed",
+                            event_id="$response",
+                            is_visible_response=True,
+                            final_visible_body="ok",
+                        ),
+                        run_succeeded=True,
                     ),
                 ),
             ) as mock_process,
@@ -6116,12 +6129,15 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$thinking",
-                        is_visible_response=True,
-                        final_visible_body="ok",
-                        delivery_kind="edited",
+                    return_value=_ResponseGenerationOutcome(
+                        delivery=FinalDeliveryOutcome(
+                            terminal_status="completed",
+                            event_id="$thinking",
+                            is_visible_response=True,
+                            final_visible_body="ok",
+                            delivery_kind="edited",
+                        ),
+                        run_succeeded=True,
                     ),
                 ),
             ),
@@ -6509,11 +6525,14 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$response",
-                        is_visible_response=True,
-                        final_visible_body="ok",
+                    return_value=_ResponseGenerationOutcome(
+                        delivery=FinalDeliveryOutcome(
+                            terminal_status="completed",
+                            event_id="$response",
+                            is_visible_response=True,
+                            final_visible_body="ok",
+                        ),
+                        run_succeeded=True,
                     ),
                 ),
             ),
@@ -11876,11 +11895,14 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$response",
-                        is_visible_response=True,
-                        final_visible_body="ok",
+                    return_value=_ResponseGenerationOutcome(
+                        delivery=FinalDeliveryOutcome(
+                            terminal_status="completed",
+                            event_id="$response",
+                            is_visible_response=True,
+                            final_visible_body="ok",
+                        ),
+                        run_succeeded=True,
                     ),
                 ),
             ) as mock_process,

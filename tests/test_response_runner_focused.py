@@ -38,7 +38,7 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutc
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest
+from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.stop import StopManager
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.turn_policy import PreparedDispatch
@@ -247,14 +247,14 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
         await response_function(None)  # type: ignore[operator]
         return "$response"
 
-    async def fake_process_and_respond(request: ResponseRequest, **_kwargs: object) -> FinalDeliveryOutcome:
+    async def fake_process_and_respond(request: ResponseRequest, **_kwargs: object) -> _ResponseGenerationOutcome:
         turn = _turn(request)
         events.append(f"respond_start:{turn}")
         if turn == 1:
             first_turn_started.set()
             await gate.wait()
         events.append(f"respond_end:{turn}")
-        return _completed_outcome()
+        return _ResponseGenerationOutcome(delivery=_completed_outcome(), run_succeeded=True)
 
     def _request_for(turn: int) -> ResponseRequest:
         target = _target(thread_id="$thread", reply_to_event_id=f"$event{turn}")
@@ -507,9 +507,9 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
             typing_indicator=_noop_typing,
         ),
     ):
-        delivery = await coordinator.process_and_respond(_plain_request(_target()))
+        generation = await coordinator.process_and_respond(_plain_request(_target()))
 
-    assert delivery.event_id == "$response"
+    assert generation.delivery.event_id == "$response"
     deliver_final.assert_awaited_once()
     final_request = deliver_final.await_args.args[0]
     assert final_request.response_text == "final text"
@@ -543,9 +543,9 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
             typing_indicator=_noop_typing,
         ),
     ):
-        delivery = await coordinator.process_and_respond_streaming(_plain_request(_target()))
+        generation = await coordinator.process_and_respond_streaming(_plain_request(_target()))
 
-    assert delivery.event_id == "$stream"
+    assert generation.delivery.event_id == "$stream"
     deliver_stream.assert_awaited_once()
     assert deliver_stream.await_args.args[0].existing_event_id is None
     finalize.assert_awaited_once()
@@ -600,10 +600,10 @@ async def test_streaming_midstream_failure_persists_partial_and_finalizes_error(
             typing_indicator=_noop_typing,
         ),
     ):
-        delivery = await coordinator.process_and_respond_streaming(_plain_request(_target()))
+        generation = await coordinator.process_and_respond_streaming(_plain_request(_target()))
 
     # The failure does not propagate: it is logged and becomes a finalized error outcome.
-    assert delivery is error_outcome
+    assert generation.delivery is error_outcome
     coordinator.deps.logger.exception.assert_called_once_with("Error in streaming response", error="boom")
     finalize.assert_awaited_once()
     assert finalize.await_args.args[0].stream_transport_outcome is error_transport
@@ -706,7 +706,7 @@ async def test_agent_streaming_sync_restart_cancelled_outcome_registers_retry(tm
         patch.object(
             coordinator,
             "process_and_respond_streaming",
-            new=AsyncMock(return_value=cancelled_outcome),
+            new=AsyncMock(return_value=_ResponseGenerationOutcome(delivery=cancelled_outcome, run_succeeded=False)),
         ),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=True),

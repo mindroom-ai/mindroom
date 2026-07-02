@@ -1331,12 +1331,12 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        delivery = await coordinator.process_and_respond_streaming(
+        generation = await coordinator.process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
         )
 
-    assert delivery.event_id == "$terminal"
-    assert delivery.response_text == "Hello!"
+    assert generation.delivery.event_id == "$terminal"
+    assert generation.delivery.response_text == "Hello!"
     assert sequence == [
         "stream",
         "deliver:Hello!",
@@ -1392,12 +1392,12 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        delivery = await coordinator.process_and_respond_streaming(
+        generation = await coordinator.process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
         )
 
-    assert delivery.event_id == "$terminal"
-    assert delivery.failure_reason == "boom"
+    assert generation.delivery.event_id == "$terminal"
+    assert generation.delivery.failure_reason == "boom"
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1459,12 +1459,12 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
 
-        delivery = await coordinator.process_and_respond_streaming(
+        generation = await coordinator.process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
             run_id="run-1",
         )
 
-    assert delivery.event_id == "$streamed"
+    assert generation.delivery.event_id == "$streamed"
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1550,11 +1550,11 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        delivery = await coordinator.process_and_respond_streaming(
+        generation = await coordinator.process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
         )
 
-    assert delivery.event_id == "$terminal"
+    assert generation.delivery.event_id == "$terminal"
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1627,15 +1627,15 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
 
         mock_ai.side_effect = fake_ai_response
 
-        delivery = await coordinator.process_and_respond(
+        generation = await coordinator.process_and_respond(
             replace(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 existing_event_id="$thinking",
             ),
         )
 
-    assert delivery.terminal_status == "cancelled"
-    assert _visible_response_event_id(delivery) == "$thinking"
+    assert generation.delivery.terminal_status == "cancelled"
+    assert _visible_response_event_id(generation.delivery) == "$thinking"
     assert sequence == [
         "ai",
         "started:!test:localhost:$thread-root:$thread-root",

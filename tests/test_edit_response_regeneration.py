@@ -43,7 +43,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest
+from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.thread_utils import create_session_id
 from tests.conftest import (
     bind_runtime_paths,
@@ -3073,7 +3073,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     conversation_target = MessageTarget.resolve("!test:example.com", None, "$primary:example.com")
     history_scope = _agent_history_scope("test_agent")
 
-    async def process_and_respond(*args: object, **kwargs: object) -> FinalDeliveryOutcome:
+    async def process_and_respond(*args: object, **kwargs: object) -> _ResponseGenerationOutcome:
         request = args[0]
         assert isinstance(request, ResponseRequest)
         storage.session = AgentSession(
@@ -3089,12 +3089,15 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
                 ),
             ],
         )
-        return _outcome(
-            "final_visible_delivery",
-            terminal_status="completed",
-            final_visible_event_id="$response:example.com",
-            final_visible_body="ok",
-            delivery_kind="sent",
+        return _ResponseGenerationOutcome(
+            delivery=_outcome(
+                "final_visible_delivery",
+                terminal_status="completed",
+                final_visible_event_id="$response:example.com",
+                final_visible_body="ok",
+                delivery_kind="sent",
+            ),
+            run_succeeded=True,
         )
 
     with (
@@ -3527,7 +3530,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         conversation_target=stored_target,
     )
 
-    async def process_and_respond(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+    async def process_and_respond(*_args: object, **kwargs: object) -> _ResponseGenerationOutcome:
         storage = bot._conversation_state_writer.create_storage(None)
         try:
             storage.upsert_session(
@@ -3556,12 +3559,15 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
             )
         finally:
             storage.close()
-        return _outcome(
-            "final_visible_delivery",
-            terminal_status="completed",
-            final_visible_event_id="$response-new:example.com",
-            final_visible_body="ok",
-            delivery_kind="sent",
+        return _ResponseGenerationOutcome(
+            delivery=_outcome(
+                "final_visible_delivery",
+                terminal_status="completed",
+                final_visible_event_id="$response-new:example.com",
+                final_visible_body="ok",
+                delivery_kind="sent",
+            ),
+            run_succeeded=True,
         )
 
     with (

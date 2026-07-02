@@ -573,7 +573,7 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
             ai_response=AsyncMock(side_effect=fake_ai_response),
         ),
     ):
-        delivery = await bot._response_runner.process_and_respond(
+        generation = await bot._response_runner.process_and_respond(
             ResponseRequest(
                 thread_history=[],
                 prompt="Please reply",
@@ -588,8 +588,8 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
             ),
         )
 
-    assert delivery.event_id == "$response"
-    assert delivery.response_text == "handled"
+    assert generation.delivery.event_id == "$response"
+    assert generation.delivery.response_text == "handled"
 
 
 @pytest.mark.asyncio
@@ -625,7 +625,7 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
             stream_agent_response=fake_stream_agent_response,
         ),
     ):
-        delivery = await bot._response_runner.process_and_respond_streaming(
+        generation = await bot._response_runner.process_and_respond_streaming(
             ResponseRequest(
                 thread_history=[],
                 prompt="Please reply",
@@ -640,5 +640,5 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
             ),
         )
 
-    assert delivery.event_id == "$response"
-    assert delivery.response_text == "stream chunk"
+    assert generation.delivery.event_id == "$response"
+    assert generation.delivery.response_text == "stream chunk"
