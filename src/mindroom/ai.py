@@ -457,6 +457,8 @@ class _AgentRunContext:
     """Prepared state shared by one top-level agent response lifecycle."""
 
     turn: ResponseTurnContext
+    # turn.session_id narrowed to non-None once at the entry boundary; read
+    # this field, not turn.session_id, wherever a str is required.
     session_id: str
     prompt: str
     model_prompt: str | None
