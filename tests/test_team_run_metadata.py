@@ -111,7 +111,7 @@ async def test_team_response_collects_run_metadata() -> None:
 
 def _member_output_with_metrics() -> RunOutput:
     member = RunOutput(agent_name="GeneralAgent", content="Member answer")
-    member.metrics = Metrics(input_tokens=300, output_tokens=50, total_tokens=350)
+    member.metrics = Metrics(input_tokens=300, output_tokens=50, total_tokens=350, duration=6.0)
     return member
 
 
@@ -141,6 +141,9 @@ async def test_team_response_usage_aggregates_member_metrics() -> None:
     payload = collector["io.mindroom.ai_run"]
     assert payload["usage"]["input_tokens"] == 1100
     assert payload["usage"]["output_tokens"] == 170
+    # Member runs execute inside the leader's window: duration must stay the
+    # leader's (1.75), not the sum with the member's 6.0.
+    assert payload["usage"]["duration"] == "1.75"
 
 
 @pytest.mark.asyncio
