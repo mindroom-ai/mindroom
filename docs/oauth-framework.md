@@ -29,6 +29,8 @@ This keeps FastAPI routing and state handling in core while still letting plugin
 
 OAuth token writes always go through `resolve_request_credentials_target()` and `save_scoped_credentials()`.
 For private agents, the target worker key is derived from the authenticated requester and the agent's saved `worker_scope`, so a user-owned OAuth token lands under the same scope normal tools will read at runtime.
+For shared-scope agents, OAuth tokens land in a per-agent primary-runtime store, so a connection made for one agent never becomes visible to other agents.
+Only agents without any worker scope share OAuth tokens through the global credential store.
 If MindRoom cannot resolve the authenticated dashboard user to the requester carried by a conversation-issued link, the link fails closed and no credential is saved.
 Credential placement and visibility policy is centralized in `src/mindroom/credential_policy.py`.
 That module owns service classification, OAuth token field filtering, local-only credential service names, and worker-grantable rejections.

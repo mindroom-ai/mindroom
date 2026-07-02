@@ -4207,7 +4207,7 @@ requires-dist = [
     { name = "google-auth-oauthlib", marker = "extra == 'google-drive'", specifier = ">=1.2.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-sheets'", specifier = ">=1.2.2" },
     { name = "google-cloud-bigquery", marker = "extra == 'google-bigquery'" },
-    { name = "google-genai", specifier = ">=2" },
+    { name = "google-genai", specifier = ">=2,<2.9" },
     { name = "google-genai", marker = "extra == 'gemini'" },
     { name = "google-maps-places", marker = "extra == 'google-maps'" },
     { name = "google-search-results", marker = "extra == 'serpapi'", specifier = ">=2.4.2" },

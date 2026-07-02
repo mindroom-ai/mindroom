@@ -1480,7 +1480,9 @@ def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path)
         ("google_calendar", "shared", frozenset({"google_calendar"})),
         ("google_sheets", "shared", frozenset({"google_sheets"})),
         ("gmail", "shared", frozenset({"gmail"})),
-        ("google_drive_oauth", "shared", frozenset({"google_drive_oauth"})),
+        # Agent-scoped OAuth token services no longer inject themselves into the
+        # shared allowlist; they fall through to the context allowlist unchanged.
+        ("google_drive_oauth", "shared", frozenset({"weather"})),
         ("weather", "shared", frozenset({"weather"})),
         ("google_drive", "user", frozenset({"weather"})),
         ("google_drive", "user_agent", frozenset({"weather"})),
@@ -1840,7 +1842,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     assert tool["name"] == "google_drive"
     assert tool["status"] == "requires_config"
 
-    manager.save_credentials(
+    manager.for_primary_runtime_agent_scope("general").save_credentials(
         "google_drive_oauth",
         {
             "token": "drive-token",

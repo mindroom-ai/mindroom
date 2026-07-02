@@ -218,6 +218,7 @@ def _service_uses_primary_runtime_store(service: str, target: RequestCredentials
     return (
         policy.uses_primary_runtime_global_credentials
         or policy.uses_primary_runtime_scoped_credentials
+        or policy.uses_primary_runtime_agent_scoped_credentials
         or policy.uses_local_shared_credentials
     )
 
@@ -270,6 +271,15 @@ def delete_credentials_for_target(service: str, target: RequestCredentialsTarget
 
 def primary_runtime_scoped_services_for_target(target: RequestCredentialsTarget) -> set[str]:
     """List services stored in the primary runtime scoped store for one target."""
+    if target.worker_scope == "shared":
+        if not target.agent_name:
+            return set()
+        agent_scoped_manager = target.base_manager.for_primary_runtime_agent_scope(target.agent_name)
+        return {
+            service
+            for service in agent_scoped_manager.list_services()
+            if credential_service_policy(service, target.worker_scope).uses_primary_runtime_agent_scoped_credentials
+        }
     if target.worker_scope not in {"user", "user_agent"}:
         return set()
     if target.execution_identity is None or target.execution_identity.requester_id is None:
