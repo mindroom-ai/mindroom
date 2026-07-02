@@ -322,14 +322,11 @@ class _DeliveryProgress:
 
 @dataclass(frozen=True)
 class _ResponseGenerationOutcome:
-    """Everything one locked response generation produced, returned instead of out-params."""
+    """What one locked response generation produced, returned instead of out-params."""
 
     delivery: FinalDeliveryOutcome
     run_succeeded: bool
     attempt_run_ids: tuple[str, ...] = ()
-    compaction_outcomes: tuple[CompactionOutcome, ...] = ()
-    tool_trace: tuple[Any, ...] = ()
-    run_metadata_content: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -2013,9 +2010,6 @@ class ResponseRunner:
                 delivery=delivery,
                 run_succeeded=turn_recorder.outcome == "completed",
                 attempt_run_ids=tuple(attempt_run_ids),
-                compaction_outcomes=tuple(compaction_outcomes),
-                tool_trace=tuple(tool_trace),
-                run_metadata_content=run_metadata_content,
             )
 
         try:
@@ -2160,9 +2154,6 @@ class ResponseRunner:
                 delivery=delivery,
                 run_succeeded=turn_recorder.outcome == "completed",
                 attempt_run_ids=tuple(attempt_run_ids),
-                compaction_outcomes=tuple(compaction_outcomes),
-                tool_trace=tuple(tool_trace),
-                run_metadata_content=run_metadata_content,
             )
 
         try:
