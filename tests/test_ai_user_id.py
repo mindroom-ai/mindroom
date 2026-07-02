@@ -47,7 +47,7 @@ from mindroom.ai import (
     build_matrix_run_metadata,
     stream_agent_response,
 )
-from mindroom.ai_run_metadata import _serialize_metrics
+from mindroom.ai_run_metadata import _serialize_metrics, build_ai_run_metadata_content
 from mindroom.bot import AgentBot
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
@@ -281,6 +281,107 @@ def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
         "input_tokens": 6,
         "cache_read_tokens": 46449,
     }
+
+
+def _metadata_config(provider: str, model_id: str) -> Config:
+    return Config(
+        agents={"general": AgentConfig(display_name="General")},
+        models={"default": ModelConfig(provider=provider, id=model_id, context_window=200_000)},
+    )
+
+
+def test_ai_run_metadata_prefers_provider_counters_over_estimate_for_cache_token_providers() -> None:
+    """Cache-token providers report context as raw input plus cache read/write, not the estimate."""
+    metadata = build_ai_run_metadata_content(
+        config=_metadata_config("vertexai_claude", "claude-sonnet-4-6"),
+        model_name="default",
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        model="claude-sonnet-4-6",
+        model_provider="google",
+        context_input_tokens=30_210,
+        context_raw_input_tokens=1_200,
+        context_cache_read_tokens=45_000,
+        context_cache_write_tokens=5_000,
+    )
+
+    context = metadata[AI_RUN_METADATA_KEY]["context"]
+    assert context["input_tokens"] == 51_200
+    assert context["cache_read_input_tokens"] == 45_000
+    assert context["cache_write_input_tokens"] == 5_000
+    assert context["uncached_input_tokens"] == 6_200
+    assert context["window_tokens"] == 200_000
+
+
+def test_ai_run_metadata_context_uses_raw_input_for_non_cache_token_providers() -> None:
+    """Providers whose input counter already includes cached tokens report raw input as the context."""
+    metadata = build_ai_run_metadata_content(
+        config=_metadata_config("openai", "test-model"),
+        model_name="default",
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        model="test-model",
+        model_provider="openai",
+        context_input_tokens=30_210,
+        context_raw_input_tokens=700,
+        context_cache_read_tokens=512,
+    )
+
+    context = metadata[AI_RUN_METADATA_KEY]["context"]
+    assert context["input_tokens"] == 700
+    assert context["cache_read_input_tokens"] == 512
+    assert context["uncached_input_tokens"] == 188
+    assert "cache_write_input_tokens" not in context
+
+
+def test_ai_run_metadata_context_falls_back_to_estimate_without_provider_counters() -> None:
+    """Without any provider usage counters, the pre-flight estimate still populates the context block."""
+    metadata = build_ai_run_metadata_content(
+        config=_metadata_config("anthropic", "claude-sonnet-4-6"),
+        model_name="default",
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        model="claude-sonnet-4-6",
+        model_provider="Anthropic",
+        context_input_tokens=30_210,
+        prepared_history=PreparedHistoryState(prepared_context_tokens=30_210),
+    )
+
+    context = metadata[AI_RUN_METADATA_KEY]["context"]
+    assert context["input_tokens"] == 30_210
+    assert context["window_tokens"] == 200_000
+    assert "cache_read_input_tokens" not in context
+    assert "cache_write_input_tokens" not in context
+    assert "uncached_input_tokens" not in context
+    assert metadata[AI_RUN_METADATA_KEY]["prepared_context"] == {"tokens": 30_210}
+
+
+def test_ai_run_metadata_context_regression_cached_prefix_sample() -> None:
+    """Regression: a 49,886-token cached prefix must not be reported as a 30,210-token context."""
+    metadata = build_ai_run_metadata_content(
+        config=_metadata_config("vertexai_claude", "claude-sonnet-4-6"),
+        model_name="default",
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        model="claude-sonnet-4-6",
+        model_provider="google",
+        metrics={"input_tokens": 3_277, "cache_read_tokens": 99_772, "cache_write_tokens": 49_886},
+        context_input_tokens=30_210,
+        context_raw_input_tokens=1_777,
+        context_cache_read_tokens=49_886,
+        context_cache_write_tokens=0,
+    )
+
+    context = metadata[AI_RUN_METADATA_KEY]["context"]
+    assert context["input_tokens"] == 51_663
+    assert context["cache_read_input_tokens"] == 49_886
+    assert context["uncached_input_tokens"] == 1_777
+    assert "cache_write_input_tokens" not in context
+    assert context["window_tokens"] == 200_000
 
 
 class _SessionStorage:
@@ -6997,9 +7098,13 @@ class TestUserIdPassthrough:
         assert payload["usage"]["cache_read_tokens"] == 640
         assert payload["usage"]["cache_write_tokens"] == 32
         assert payload["usage"]["reasoning_tokens"] == 24
-        assert payload["context"]["input_tokens"] == 1500
+        assert payload["context"]["input_tokens"] == 800
+        assert payload["context"]["cache_read_input_tokens"] == 640
+        assert payload["context"]["uncached_input_tokens"] == 160
+        assert payload["context"]["cache_write_input_tokens"] == 32
         assert payload["context"]["window_tokens"] == 2000
         assert "utilization_pct" not in payload["context"]
+        assert payload["prepared_context"] == {"tokens": 1500}
         assert payload["tools"]["count"] == 0
 
     @pytest.mark.asyncio
@@ -7838,11 +7943,11 @@ class TestUserIdPassthrough:
         assert payload["usage"]["total_tokens"] == 15
 
     @pytest.mark.asyncio
-    async def test_stream_agent_response_uses_prepared_context_estimate_for_context(
+    async def test_stream_agent_response_prefers_latest_request_counters_over_estimate(
         self,
         tmp_path: Path,
     ) -> None:
-        """Streaming context metadata should use the prepared full-context estimate when available."""
+        """Streaming context metadata should prefer real request counters over the prepared estimate."""
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "OpenAIChat"
@@ -7898,11 +8003,12 @@ class TestUserIdPassthrough:
         assert payload["usage"]["total_tokens"] == 890
         assert payload["usage"]["cache_read_tokens"] == 576
         assert payload["usage"]["reasoning_tokens"] == 48
-        assert payload["context"]["input_tokens"] == 900
+        assert payload["context"]["input_tokens"] == 120
         assert payload["context"]["cache_read_input_tokens"] == 64
-        assert payload["context"]["uncached_input_tokens"] == 836
+        assert payload["context"]["uncached_input_tokens"] == 56
         assert "cached_input_tokens" not in payload["context"]
         assert payload["context"]["window_tokens"] == 1000
+        assert payload["prepared_context"] == {"tokens": 900}
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_does_not_backfill_latest_context_cache_from_usage(
@@ -8027,7 +8133,8 @@ class TestUserIdPassthrough:
         assert payload["usage"]["input_tokens"] == 820
         assert payload["usage"]["output_tokens"] == 70
         assert payload["usage"]["total_tokens"] == 890
-        assert payload["context"]["input_tokens"] == 900
+        assert payload["context"]["input_tokens"] == 120
+        assert payload["prepared_context"] == {"tokens": 900}
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_context_counts_latest_anthropic_cache_tokens(self, tmp_path: Path) -> None:

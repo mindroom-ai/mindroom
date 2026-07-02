@@ -589,11 +589,11 @@ def _settle_blocking_attempt(
     continuation_count: int,
 ) -> str | DynamicContinuationRunState:
     """Settle one blocking attempt: return final text or the advanced continuation."""
-    # The blocking envelope publishes run metadata before dispatching on the
-    # attempt outcome, so cancelled and errored runs still reach the collector.
-    if sinks.run_metadata_collector is not None and resolution.metadata_content is not None:
-        sinks.run_metadata_collector.update(resolution.metadata_content)
+    # The blocking envelope publishes run metadata before recording, and only
+    # for attempts that end the turn: a discarded empty run's or a superseded
+    # continuation attempt's payload must not ride out on a later resolution.
     if isinstance(resolution, CancelledAttempt):
+        _publish_run_metadata(sinks, resolution.metadata_content)
         run.turn_state.record_interrupted(
             sinks.turn_recorder,
             run_metadata=run.run_metadata,
@@ -605,6 +605,7 @@ def _settle_blocking_attempt(
             _persist_attempt_cancelled_replay(ctx, adapter.persist_standalone_replay, run, resolution)
         raise build_cancelled_error(resolution.reason)
     if isinstance(resolution, ErroredAttempt):
+        _publish_run_metadata(sinks, resolution.metadata_content)
         return resolution.user_message_text
     settle = _settle_completed_attempt(
         ctx,
@@ -618,6 +619,7 @@ def _settle_blocking_attempt(
     )
     if settle.keep_going:
         return settle.continuation
+    _publish_run_metadata(sinks, resolution.metadata_content)
     run.turn_state.record_completed(
         sinks.turn_recorder,
         run_metadata=run.run_metadata,
@@ -627,17 +629,26 @@ def _settle_blocking_attempt(
     return settle.response_text
 
 
+def _publish_run_metadata(sinks: TurnSinks, metadata_content: dict[str, Any] | None) -> None:
+    """Publish one attempt's run metadata payload to the caller's collector."""
+    if sinks.run_metadata_collector is not None and metadata_content is not None:
+        sinks.run_metadata_collector.update(metadata_content)
+
+
 @dataclass(frozen=True)
 class _CompletionSettle:
     """Driver-internal plan for finishing one completed attempt."""
 
     keep_going: bool
     continuation: DynamicContinuationRunState
-    # The streaming driver emits these as chunks; the blocking driver returns
-    # response_text. Both cover the same notice/limit/final-text decisions.
-    deliver_texts: tuple[str, ...]
+    # What the recorder persists as the turn's replayable assistant text; it
+    # can differ from response_text (e.g. tool-rendered visible output).
     recorded_text: str
     recorded_tools: tuple[ToolTraceEntry, ...]
+    # The turn's deliverable final text (notice, limit message, or terminal
+    # document): the blocking driver returns it; the streaming driver emits it
+    # as a final chunk when non-empty (live-streamed attempts leave it empty
+    # because their chunks already delivered the document).
     response_text: str
 
 
@@ -666,7 +677,6 @@ def _settle_completed_attempt(
             return _CompletionSettle(
                 keep_going=True,
                 continuation=continuation,
-                deliver_texts=(),
                 recorded_text="",
                 recorded_tools=(),
                 response_text="",
@@ -676,7 +686,6 @@ def _settle_completed_attempt(
         return _CompletionSettle(
             keep_going=False,
             continuation=continuation,
-            deliver_texts=(ai_runtime.EMPTY_RESPONSE_NOTICE,),
             recorded_text="",
             recorded_tools=(),
             response_text=ai_runtime.EMPTY_RESPONSE_NOTICE,
@@ -697,12 +706,10 @@ def _settle_completed_attempt(
                 continuation,
                 next_prompt=decision.next_prompt,
             ),
-            deliver_texts=(),
             recorded_text="",
             recorded_tools=(),
             response_text="",
         )
-    deliver_texts: tuple[str, ...] = (resolution.response_text,) if resolution.response_text else ()
     recorded_text = resolution.replayable_text
     response_text = resolution.response_text
     if decision.limit_message is not None:
@@ -715,13 +722,11 @@ def _settle_completed_attempt(
                 status=decision.continuation.status,
             )
         if not resolution.has_visible_content:
-            deliver_texts = (decision.limit_message,)
             recorded_text = decision.limit_message
             response_text = decision.limit_message
     return _CompletionSettle(
         keep_going=False,
         continuation=continuation,
-        deliver_texts=deliver_texts,
         recorded_text=recorded_text,
         recorded_tools=resolution.completed_tools,
         response_text=response_text,
@@ -768,8 +773,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
                             completed_tools=list(resolution.completed_tools),
                             interrupted_tools=list(resolution.interrupted_tools),
                         )
-                        if sinks.run_metadata_collector is not None and resolution.metadata_content is not None:
-                            sinks.run_metadata_collector.update(resolution.metadata_content)
+                        _publish_run_metadata(sinks, resolution.metadata_content)
                         if sinks.turn_recorder is None and adapter.persist_standalone_replay is not None:
                             _persist_attempt_cancelled_replay(
                                 ctx,
@@ -790,11 +794,10 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
                     )
                     continuation = settle.continuation
                     keep_going = settle.keep_going
-                    for deliver_text in settle.deliver_texts:
-                        yield adapter.make_text_chunk(deliver_text)
+                    if settle.response_text:
+                        yield adapter.make_text_chunk(settle.response_text)
                     if not keep_going:
-                        if sinks.run_metadata_collector is not None and resolution.metadata_content is not None:
-                            sinks.run_metadata_collector.update(resolution.metadata_content)
+                        _publish_run_metadata(sinks, resolution.metadata_content)
                         run.turn_state.record_completed(
                             sinks.turn_recorder,
                             run_metadata=run.run_metadata,
