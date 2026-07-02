@@ -1995,7 +1995,7 @@ def test_user_scope_oauth_token_not_in_worker_path(tmp_path: Path) -> None:
     assert not manager.for_worker(user_worker_key).get_credentials_path(provider.credential_service).exists()
 
 
-def test_shared_scope_oauth_token_uses_shared_store_not_worker_path(tmp_path: Path) -> None:
+def test_shared_scope_oauth_token_uses_agent_store_not_shared_or_worker_path(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
         {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
@@ -2015,7 +2015,9 @@ def test_shared_scope_oauth_token_uses_shared_store_not_worker_path(tmp_path: Pa
             )
 
     assert callback_response.status_code == 307
-    shared_credentials = manager.shared_manager().load_credentials(provider.credential_service)
+    agent_credentials = manager.for_primary_runtime_agent_scope("general").load_credentials(
+        provider.credential_service,
+    )
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
@@ -2027,12 +2029,14 @@ def test_shared_scope_oauth_token_uses_shared_store_not_worker_path(tmp_path: Pa
     )
     worker_key = resolve_worker_key("shared", identity, agent_name="general")
     assert worker_key is not None
-    assert shared_credentials is not None
-    assert shared_credentials["token"] == "google_drive-access-token"
+    assert agent_credentials is not None
+    assert agent_credentials["token"] == "google_drive-access-token"
+    assert manager.shared_manager().load_credentials(provider.credential_service) is None
+    assert manager.for_primary_runtime_agent_scope("other").load_credentials(provider.credential_service) is None
     assert manager.for_worker(worker_key).load_credentials(provider.credential_service) is None
 
 
-def test_shared_scope_plugin_oauth_token_uses_shared_store_not_worker_path(tmp_path: Path) -> None:
+def test_shared_scope_plugin_oauth_token_uses_agent_store_not_shared_or_worker_path(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
         {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
@@ -2065,7 +2069,9 @@ def test_shared_scope_plugin_oauth_token_uses_shared_store_not_worker_path(tmp_p
             )
 
     assert callback_response.status_code == 307
-    shared_credentials = manager.shared_manager().load_credentials(provider.credential_service)
+    agent_credentials = manager.for_primary_runtime_agent_scope("general").load_credentials(
+        provider.credential_service,
+    )
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
@@ -2077,8 +2083,9 @@ def test_shared_scope_plugin_oauth_token_uses_shared_store_not_worker_path(tmp_p
     )
     worker_key = resolve_worker_key("shared", identity, agent_name="general")
     assert worker_key is not None
-    assert shared_credentials is not None
-    assert shared_credentials["token"] == "acme-access-token"
+    assert agent_credentials is not None
+    assert agent_credentials["token"] == "acme-access-token"
+    assert manager.shared_manager().load_credentials(provider.credential_service) is None
     assert manager.for_worker(worker_key).load_credentials(provider.credential_service) is None
 
 
@@ -2385,7 +2392,7 @@ def test_agent_oauth_management_allows_authorized_requester(tmp_path: Path) -> N
     _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     manager = get_runtime_credentials_manager(runtime_paths)
-    manager.shared_manager().save_credentials(
+    manager.for_primary_runtime_agent_scope("general").save_credentials(
         provider.credential_service,
         {
             "token": "stored-token",
@@ -2412,7 +2419,7 @@ def test_agent_oauth_management_allows_authorized_requester(tmp_path: Path) -> N
     assert status_response.status_code == 200
     assert status_response.json()["connected"] is True
     assert disconnect_response.status_code == 200
-    assert manager.shared_manager().load_credentials(provider.credential_service) is None
+    assert manager.for_primary_runtime_agent_scope("general").load_credentials(provider.credential_service) is None
 
 
 def test_agent_oauth_management_rejects_requester_not_allowed_for_agent(tmp_path: Path) -> None:

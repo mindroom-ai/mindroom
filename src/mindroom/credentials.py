@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 _SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
 _WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
 _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
+# Sanitized scope directory parts never start with "_", so this literal cannot
+# collide with a requester directory inside the primary-runtime scoped store.
+_PRIMARY_RUNTIME_AGENT_SCOPED_DIRNAME = "_agents"
 _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES = frozenset({"env", "ui", None})
 _ENCRYPTED_CREDENTIALS_MAGIC = b"MINDROOM-CREDENTIALS-V1\n"
 _AES_GCM_NONCE_SIZE = 12
@@ -252,6 +255,21 @@ class CredentialsManager:
         requester_dir = _scoped_credentials_dir_part(requester_id)
         agent_dir = _scoped_credentials_dir_part(agent_name or "_shared")
         scoped_path = self.storage_root / _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME / requester_dir / agent_dir
+        return CredentialsManager(
+            base_path=scoped_path,
+            shared_base_path=scoped_path,
+            encryption_key=self._encryption_key_config,
+        )
+
+    def for_primary_runtime_agent_scope(self, agent_name: str) -> CredentialsManager:
+        """Return a primary-runtime-only agent-scoped credentials manager."""
+        agent_dir = _scoped_credentials_dir_part(agent_name)
+        scoped_path = (
+            self.storage_root
+            / _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME
+            / _PRIMARY_RUNTIME_AGENT_SCOPED_DIRNAME
+            / agent_dir
+        )
         return CredentialsManager(
             base_path=scoped_path,
             shared_base_path=scoped_path,
@@ -663,6 +681,12 @@ def _primary_runtime_scoped_credentials_manager(
     worker_target: ResolvedWorkerTarget,
 ) -> CredentialsManager | None:
     policy = credential_service_policy(service, worker_target.worker_scope)
+    if policy.uses_primary_runtime_agent_scoped_credentials:
+        agent_name = worker_target.routing_agent_name
+        if not agent_name:
+            msg = f"Agent-scoped credentials for {service} require an agent name"
+            raise ValueError(msg)
+        return manager.for_primary_runtime_agent_scope(agent_name)
     if not policy.uses_primary_runtime_scoped_credentials:
         return None
     identity = worker_target.execution_identity

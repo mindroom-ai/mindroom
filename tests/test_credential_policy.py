@@ -36,8 +36,8 @@ def test_primary_runtime_scoped_service_policy(service: str, worker_scope: str, 
     ("service", "worker_scope", "expected"),
     [
         ("google_drive", "shared", True),
-        ("google_drive_oauth", "shared", True),
-        ("acme_oauth", "shared", True),
+        ("google_drive_oauth", "shared", False),
+        ("acme_oauth", "shared", False),
         ("gmail", "shared", True),
         ("openai", "shared", False),
         ("google_drive", "user", False),
@@ -46,6 +46,25 @@ def test_primary_runtime_scoped_service_policy(service: str, worker_scope: str, 
 def test_local_shared_service_policy(service: str, worker_scope: str, expected: bool) -> None:
     """Shared worker scope should read local-only service credentials from the primary runtime."""
     assert credential_service_policy(service, worker_scope).uses_local_shared_credentials is expected
+
+
+@pytest.mark.parametrize(
+    ("service", "worker_scope", "expected"),
+    [
+        ("google_drive_oauth", "shared", True),
+        ("acme_oauth", "shared", True),
+        ("mcp_demo_oauth", "shared", True),
+        ("google_drive_oauth", "user", False),
+        ("google_drive_oauth", "user_agent", False),
+        ("google_drive_oauth", None, False),
+        ("google_drive", "shared", False),
+        ("google_drive_oauth_client", "shared", False),
+        ("openai", "shared", False),
+    ],
+)
+def test_agent_scoped_service_policy(service: str, worker_scope: str | None, expected: bool) -> None:
+    """Shared worker scope should keep OAuth tokens in per-agent primary-runtime storage."""
+    assert credential_service_policy(service, worker_scope).uses_primary_runtime_agent_scoped_credentials is expected
 
 
 @pytest.mark.parametrize(
@@ -84,11 +103,13 @@ def test_credential_service_policy_classifies_plugin_oauth_token_service() -> No
     shared_policy = credential_service_policy("acme_oauth", "shared")
     user_agent_policy = credential_service_policy("acme_oauth", "user_agent")
 
-    assert shared_policy.uses_local_shared_credentials is True
+    assert shared_policy.uses_local_shared_credentials is False
     assert shared_policy.uses_primary_runtime_scoped_credentials is False
+    assert shared_policy.uses_primary_runtime_agent_scoped_credentials is True
     assert shared_policy.worker_grantable_supported is False
     assert user_agent_policy.uses_local_shared_credentials is False
     assert user_agent_policy.uses_primary_runtime_scoped_credentials is True
+    assert user_agent_policy.uses_primary_runtime_agent_scoped_credentials is False
     assert user_agent_policy.worker_grantable_supported is False
 
 
