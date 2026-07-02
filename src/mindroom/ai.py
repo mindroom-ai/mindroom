@@ -1665,6 +1665,8 @@ async def ai_response(  # noqa: C901, PLR0915
                     entity_name=agent_name,
                     output_tokens=_usage_metric_int(response.metrics, "output_tokens"),
                 )
+                # The one-shot retry borrows a dynamic-continuation slot so the
+                # outer loop's iteration budget stays authoritative.
                 if not empty_response_retried and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
                     empty_response_retried = True
                     return None
@@ -2315,10 +2317,14 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                         entity_name=agent_name,
                         output_tokens=state.request_metric_totals.get("output_tokens"),
                     )
+                    # The one-shot retry borrows a dynamic-continuation slot so the
+                    # outer loop's iteration budget stays authoritative.
                     if not empty_response_retried and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
                         empty_response_retried = True
                         keep_going = True
                         return
+                    # The notice must fall through: the run-metadata recording and
+                    # recorder completion below still apply to this notice-only turn.
                     yield RunContentEvent(content=ai_runtime.EMPTY_RESPONSE_NOTICE)
 
                 continuation_decision = continuation_decision_from_tools(
