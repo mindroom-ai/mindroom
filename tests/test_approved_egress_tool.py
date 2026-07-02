@@ -425,15 +425,17 @@ def test_request_network_access_reports_per_host_expiry_when_grants_differ(
     assert "cdn.other.test expires at Unix time 124." in result
 
 
+@pytest.mark.parametrize("failure", [RuntimeError, OSError])
 def test_request_network_access_reports_partial_grants_on_failure(
     monkeypatch: pytest.MonkeyPatch,
+    failure: type[Exception],
 ) -> None:
-    """A mid-batch policy failure must report which hostnames already received grants."""
+    """A mid-batch policy or socket failure must report which hostnames already received grants."""
 
     def post_grant(payload: dict[str, object]) -> dict[str, object]:
         if payload["hostname"] == "cdn.other.test":
             msg = "policy service is down"
-            raise RuntimeError(msg)
+            raise failure(msg)
         return {"expires_at": 123}
 
     monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)

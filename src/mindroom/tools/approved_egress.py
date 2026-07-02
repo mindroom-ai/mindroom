@@ -324,7 +324,7 @@ class _ApprovedEgressTools(Toolkit):
             }
             try:
                 grant = await asyncio.to_thread(_post_grant, payload)
-            except RuntimeError as exc:
+            except (RuntimeError, OSError) as exc:
                 if granted:
                     msg = f"created grants for {', '.join(granted)} but failed to grant {host}: {exc}"
                     raise RuntimeError(msg) from exc
