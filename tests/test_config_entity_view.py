@@ -196,6 +196,8 @@ def test_culture_and_knowledge_resolution() -> None:
     assert config.resolve_entity("inheriting_agent").culture is None
     # Culture assignment is a membership scan, so non-agent names resolve to None instead of raising.
     assert config.resolve_entity("overriding_team").culture is None
+    with pytest.raises(ValueError, match="defaults-only scope has no per-agent config"):
+        _ = config.resolve_entity(None).culture
 
     assert config.resolve_entity("overriding_agent").knowledge_base_ids == ["engineering_docs"]
     assert config.resolve_entity("inheriting_agent").knowledge_base_ids == []

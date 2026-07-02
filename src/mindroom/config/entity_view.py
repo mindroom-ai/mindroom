@@ -116,8 +116,9 @@ class ResolvedEntityView:
     def culture(self) -> tuple[str, CultureConfig] | None:
         """Configured culture assignment for this agent, if any.
 
-        Unlike the other agent-only fields, non-agent names do not raise: culture assignment
-        is a membership scan, so unknown or team names resolve to None.
+        Unknown or team names resolve to None (culture assignment is a membership scan)
+        instead of raising like the other agent-only fields; the defaults-only scope
+        still raises like every agent-only field.
         """
         return self._config._agent_culture(self._agent_name())
 

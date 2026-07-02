@@ -846,13 +846,12 @@ class Config(BaseModel):
                     "and outside scaffolded private workspace content"
                 )
                 raise ValueError(msg)
-            overlaps_private_file_memory = self._agent_memory_backend(
-                agent_name,
-            ) == "file" and _relative_paths_overlap(
+            uses_file_memory_backend = self._agent_memory_backend(agent_name) == "file"
+            overlaps_private_file_memory = uses_file_memory_backend and _relative_paths_overlap(
                 knowledge_path,
                 memory_notes_dir,
             )
-            if self._agent_memory_backend(agent_name) == "file" and _relative_paths_overlap(
+            if uses_file_memory_backend and _relative_paths_overlap(
                 knowledge_path,
                 memory_notes_entrypoint,
             ):

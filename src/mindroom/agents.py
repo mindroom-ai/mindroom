@@ -1517,7 +1517,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         enable_agentic_culture = culture_settings.enable_agentic_culture
 
     # Shared history-policy source of truth with the team replay path.
-    history_settings = config.resolve_entity(agent_name).history_settings
+    history_settings = entity_view.history_settings
     history_policy = history_settings.policy
 
     compress_tool_results = (
