@@ -341,6 +341,7 @@ def test_ai_run_metadata_context_falls_back_to_estimate_without_provider_counter
         model="claude-sonnet-4-6",
         model_provider="Anthropic",
         context_input_tokens=30_210,
+        prepared_history=PreparedHistoryState(prepared_context_tokens=30_210),
     )
 
     context = metadata[AI_RUN_METADATA_KEY]["context"]
@@ -349,6 +350,7 @@ def test_ai_run_metadata_context_falls_back_to_estimate_without_provider_counter
     assert "cache_read_input_tokens" not in context
     assert "cache_write_input_tokens" not in context
     assert "uncached_input_tokens" not in context
+    assert metadata[AI_RUN_METADATA_KEY]["prepared_context"] == {"tokens": 30_210}
 
 
 def test_ai_run_metadata_context_regression_cached_prefix_sample() -> None:
