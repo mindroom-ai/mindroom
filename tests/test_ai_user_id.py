@@ -3305,6 +3305,75 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
 
 
 @pytest.mark.asyncio
+async def test_generate_team_response_helper_streaming_delivery_carries_live_metadata_collector(
+    tmp_path: Path,
+) -> None:
+    """The team streaming delivery request carries the live metadata collector.
+
+    The turn driver fills the collector at terminal settle, before the
+    stream's final edit snapshots extra_content; without the live dict the
+    ai_run payload never reaches Matrix in streaming mode (the finalize
+    happy path sends no extra edit).
+    """
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "ultimate"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = _knowledge_access_support()
+
+    captured_extra_content: list[object] = []
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        async def consume_delivery(request: object) -> StreamTransportOutcome:
+            async for _chunk in request.response_stream:
+                pass
+            # Snapshot after stream exhaustion, like the real final edit.
+            captured_extra_content.append(request.extra_content)
+            return _stream_outcome("$team-final", "Team hello")
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
+
+        def fake_team_response_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                collector = kwargs["run_metadata_collector"]
+                assert isinstance(collector, dict)
+                collector["io.mindroom.ai_run"] = {"usage": {"output_tokens": 5}}
+                yield "Team hello"
+
+            return fake_stream()
+
+        mock_team_stream.side_effect = fake_team_response_stream
+
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert captured_extra_content == [{"io.mindroom.ai_run": {"usage": {"output_tokens": 5}}}]
+
+
+@pytest.mark.asyncio
 async def test_generate_team_response_helper_persists_interrupted_history_when_stream_delivery_fails(
     tmp_path: Path,
 ) -> None:
