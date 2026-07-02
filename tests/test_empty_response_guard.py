@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.db.base import SessionType
+from agno.db.base import BaseDb, SessionType
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
@@ -182,6 +182,31 @@ async def test_ai_response_retries_once_after_empty_completed_run(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_ai_response_closes_spent_agent_state_dbs_before_empty_retry(tmp_path: Path) -> None:
+    """The empty-retry handoff must close the discarded attempt's runtime DB handles."""
+    empty_agent = _mock_agent(_completed_run("run-empty", None))
+    empty_agent.db = MagicMock(spec=BaseDb)
+    recovered_agent = _mock_agent(_completed_run("run-good", "Recovered"))
+
+    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+        mock_prepare.side_effect = [
+            _prepared_prompt_result(empty_agent),
+            _prepared_prompt_result(recovered_agent),
+        ]
+
+        result = await ai_response(
+            agent_name="general",
+            prompt="test",
+            session_id="session-1",
+            runtime_paths=_runtime_paths(tmp_path),
+            config=_config(),
+        )
+
+    assert result == "Recovered"
+    empty_agent.db.close.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(tmp_path: Path) -> None:
     """Two consecutive empty responses should surface a visible notice, never a blank reply."""
     first_agent = _mock_agent(_completed_run("run-empty-1", None))
@@ -268,6 +293,43 @@ async def test_stream_agent_response_retries_once_after_empty_completed_stream(t
     assert contents == ["Recovered"]
     empty_agent.arun.assert_called_once()
     recovered_agent.arun.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_response_closes_spent_agent_state_dbs_before_empty_retry(tmp_path: Path) -> None:
+    """The streamed empty-retry handoff must close the discarded attempt's runtime DB handles too."""
+
+    async def empty_stream() -> AsyncIterator[object]:
+        yield RunCompletedEvent(content=None)
+
+    async def recovered_stream() -> AsyncIterator[object]:
+        yield RunContentEvent(content="Recovered")
+        yield RunCompletedEvent(content="Recovered")
+
+    empty_agent = _mock_streaming_agent(empty_stream())
+    empty_agent.db = MagicMock(spec=BaseDb)
+    recovered_agent = _mock_streaming_agent(recovered_stream())
+
+    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+        mock_prepare.side_effect = [
+            _prepared_prompt_result(empty_agent),
+            _prepared_prompt_result(recovered_agent),
+        ]
+
+        chunks = [
+            chunk
+            async for chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session-1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+            )
+        ]
+
+    contents = [cast("str", chunk.content) for chunk in chunks if isinstance(chunk, RunContentEvent)]
+    assert contents == ["Recovered"]
+    empty_agent.db.close.assert_called_once()
 
 
 @pytest.mark.asyncio

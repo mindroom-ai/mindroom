@@ -366,6 +366,41 @@ def _advance_dynamic_continuation(
     return advanced_state, turn_state
 
 
+def _discard_empty_run_and_grant_retry(
+    *,
+    agent: Agent | None,
+    scope_context: ScopeSessionContext | None,
+    session_id: str,
+    run_id: str | None,
+    entity_name: str,
+    output_tokens: int | None,
+    empty_response_retried: bool,
+    continuation_count: int,
+) -> bool:
+    """Discard one empty completed run and decide whether one retry is granted.
+
+    Shared by the blocking and streaming loops so the empty-retry handoff stays
+    identical across both paths. The one-shot retry borrows a dynamic-continuation
+    slot so the outer loop's iteration budget stays authoritative; a granted retry
+    closes the spent agent's runtime state DBs exactly like the continuation handoff.
+    """
+    ai_runtime.discard_empty_completed_run(
+        scope_context=scope_context,
+        session_id=session_id,
+        run_id=run_id,
+        session_type=SessionType.AGENT,
+        entity_name=entity_name,
+        output_tokens=output_tokens,
+    )
+    if empty_response_retried or continuation_count >= DYNAMIC_TOOL_CONTINUATION_LIMIT:
+        return False
+    close_agent_runtime_state_dbs(
+        agent,
+        shared_scope_storage=scope_context.storage if scope_context is not None else None,
+    )
+    return True
+
+
 @timed("system_prompt_assembly.system_enrichment_render")
 def _render_system_enrichment_context(
     system_enrichment_items: Sequence[EnrichmentItem],
@@ -1657,18 +1692,18 @@ async def ai_response(  # noqa: C901, PLR0915
                     agent_name,
                 )
             if ai_runtime.is_empty_completed_run(response):
-                ai_runtime.discard_empty_completed_run(
+                if _discard_empty_run_and_grant_retry(
+                    agent=agent,
                     scope_context=scope_context,
                     session_id=response.session_id or session_id,
                     run_id=response.run_id,
-                    session_type=SessionType.AGENT,
                     entity_name=agent_name,
                     output_tokens=_usage_metric_int(response.metrics, "output_tokens"),
-                )
-                # The one-shot retry borrows a dynamic-continuation slot so the
-                # outer loop's iteration budget stays authoritative.
-                if not empty_response_retried and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
+                    empty_response_retried=empty_response_retried,
+                    continuation_count=continuation_count,
+                ):
                     empty_response_retried = True
+                    agent = None
                     return None
                 if turn_recorder is not None:
                     turn_state.record_completed(
@@ -2309,18 +2344,18 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 if _stream_completed_without_visible_output(state) and not state.completed_tool_executions:
                     completed_event = state.completed_run_event
                     assert completed_event is not None
-                    ai_runtime.discard_empty_completed_run(
+                    if _discard_empty_run_and_grant_retry(
+                        agent=agent,
                         scope_context=scope_context,
                         session_id=completed_event.session_id or session_id,
                         run_id=completed_event.run_id,
-                        session_type=SessionType.AGENT,
                         entity_name=agent_name,
                         output_tokens=state.request_metric_totals.get("output_tokens"),
-                    )
-                    # The one-shot retry borrows a dynamic-continuation slot so the
-                    # outer loop's iteration budget stays authoritative.
-                    if not empty_response_retried and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
+                        empty_response_retried=empty_response_retried,
+                        continuation_count=continuation_count,
+                    ):
                         empty_response_retried = True
+                        agent = None
                         keep_going = True
                         return
                     # The notice must fall through: the run-metadata recording and
