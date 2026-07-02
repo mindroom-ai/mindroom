@@ -96,7 +96,7 @@ async def test_team_response_continues_after_member_dynamic_tool_load() -> None:
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(run_id="run-1"),
+            ctx=make_turn_context(run_id="run-1", session_id=None),
             run_id_callback=run_ids.append,
         )
 
@@ -135,7 +135,7 @@ async def test_team_response_returns_limit_message_after_dynamic_tool_limit() ->
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
         )
 
     assert mock_team.arun.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
@@ -170,7 +170,7 @@ async def test_team_response_stream_continues_after_terminal_dynamic_tool_output
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
             )
         ]
 
@@ -219,7 +219,7 @@ async def test_team_response_stream_continues_after_streamed_member_dynamic_tool
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
             )
         ]
 
@@ -264,7 +264,7 @@ async def test_team_response_stream_continues_from_hidden_member_dynamic_tool() 
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
                 show_tool_calls=False,
             )
         ]
