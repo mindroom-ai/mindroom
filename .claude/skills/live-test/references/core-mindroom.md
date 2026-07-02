@@ -73,8 +73,11 @@ Use this when the machine already has local MindRoom instances, existing Matrix 
 
 ```bash
 tmp="$(mktemp -d /tmp/mindroom-live-test.XXXXXX)"
-uv run mindroom config init --minimal --provider openai --force --path "$tmp/config.yaml"
+uv run mindroom config init --provider openai --force --path "$tmp/config.yaml"
 ```
+
+`config init` has no `--minimal` flag; write the config YAML directly when you need a precise minimal shape (models, agents, teams, authorization, `mindroom_user`).
+If no local model server is running on 9292 and no provider key is available, a ~60-line FastAPI stub serving `/v1/models` and `/v1/chat/completions` (JSON + SSE stream) is enough for deterministic end-to-end turns; run it with `uvicorn` from the venv.
 
 Patch the generated config so it can run locally without private credentials and without restrictive room auth.
 When you are targeting the local OpenAI-compatible server on `http://localhost:9292/v1`, start with `gpt-oss-low:20b`.
@@ -206,6 +209,7 @@ Use the actual alias created by the active config.
 ## Read and Send Messages with Matty
 
 Matty accepts per-command credentials with `-u` and `-p`.
+Matty may be absent from a fresh worktree venv; if `matty` is not found after `uv sync --all-extras`, fall back to the raw Matrix client API with `curl` (register, `/join/{roomId}`, `PUT /rooms/{roomId}/send/m.room.message/{txn}`, and `GET /rooms/{roomId}/messages?dir=b` filtering `m.relates_to.rel_type == "m.thread"`), which is fully sufficient for send/read smoke tests.
 
 List rooms:
 
