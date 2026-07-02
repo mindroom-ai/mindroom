@@ -64,7 +64,7 @@ def build_agent_status_message(
     status_parts = []
 
     # Get model name using the config method
-    model_name = config.get_entity_model_name(agent_name)
+    model_name = config.resolve_entity(agent_name).model_name
 
     # Format model info
     if model_name in config.models:

@@ -7,7 +7,9 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
+from mindroom.config.memory import AgentMemorySearchConfig, MemoryConfig
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
+from mindroom.constants import ROUTER_AGENT_NAME
 
 
 def _representative_config() -> Config:
@@ -15,9 +17,12 @@ def _representative_config() -> Config:
         agents={
             "overriding_agent": AgentConfig(
                 display_name="Overriding Agent",
+                model="summary-model",
                 num_history_runs=7,
                 max_tool_calls_from_history=3,
                 compaction=CompactionOverrideConfig(threshold_percent=0.6),
+                memory_backend="file",
+                memory_search=AgentMemorySearchConfig(mode="semantic"),
             ),
             "inheriting_agent": AgentConfig(display_name="Inheriting Agent"),
         },
@@ -50,6 +55,7 @@ def _representative_config() -> Config:
             "default": ModelConfig(provider="openai", id="test-model", context_window=48_000),
             "summary-model": ModelConfig(provider="openai", id="summary-model-id", context_window=32_000),
         },
+        memory=MemoryConfig(backend="mem0"),
     )
 
 
@@ -65,6 +71,9 @@ def test_view_fields_match_entity_accessors(entity_name: str) -> None:
     assert view.history_settings == config.get_entity_history_settings(entity_name)
     assert view.compaction_config == config.get_entity_compaction_config(entity_name)
     assert view.has_authored_compaction_config == config.has_authored_entity_compaction_config(entity_name)
+    assert view.memory_backend == config.get_agent_memory_backend(entity_name)
+    assert view.memory_search == config.get_agent_memory_search(entity_name)
+    assert view.model_name == config.get_entity_model_name(entity_name)
 
 
 def test_defaults_scope_view_matches_default_accessors() -> None:
@@ -75,6 +84,18 @@ def test_defaults_scope_view_matches_default_accessors() -> None:
     assert view.history_settings == config.get_default_history_settings()
     assert view.compaction_config == config.get_default_compaction_config()
     assert view.has_authored_compaction_config == config.has_authored_default_compaction_config()
+    assert view.memory_backend == config.memory.backend
+    assert view.memory_search == config.memory.search
+    with pytest.raises(ValueError, match="defaults-only scope has no authored model"):
+        _ = view.model_name
+
+
+def test_router_view_resolves_router_model() -> None:
+    config = _representative_config()
+    view = config.resolve_entity(ROUTER_AGENT_NAME)
+
+    assert view.model_name == config.get_entity_model_name(ROUTER_AGENT_NAME)
+    assert view.memory_backend == config.get_agent_memory_backend(ROUTER_AGENT_NAME)
 
 
 def test_unauthored_compaction_reports_not_authored() -> None:
