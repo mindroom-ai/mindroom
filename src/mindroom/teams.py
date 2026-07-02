@@ -32,7 +32,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import get_team_session
 from mindroom.agents import create_agent, enable_all_history_replay
 from mindroom.ai import resolve_run_correlation_id
-from mindroom.ai_run_metadata import build_prepared_history_metadata_content
+from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.authorization import get_available_responders_in_room
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
@@ -111,7 +111,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history import CompactionLifecycle, CompactionOutcome
+    from mindroom.history import CompactionLifecycle, CompactionOutcome, PreparedHistoryState
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -190,6 +190,11 @@ class _PreparedMaterializedTeamExecution:
     messages: tuple[Message, ...]
     run_metadata: dict[str, Any] | None
     unseen_event_ids: list[str]
+    prepared_history: PreparedHistoryState
+    # Configured model name resolved at preparation time. Run metadata must use
+    # this snapshot instead of re-resolving, because the per-thread override
+    # store can change mid-run (for example via the thread_model tool).
+    runtime_model_name: str
 
     @property
     def prepared_prompt(self) -> str:
@@ -1224,6 +1229,30 @@ def _collect_team_tool_executions(response: TeamRunOutput | RunOutput) -> list[T
     return tools
 
 
+def _build_team_run_metadata_content(
+    *,
+    config: Config,
+    prepared_execution: _PreparedMaterializedTeamExecution,
+    response: TeamRunOutput | RunOutput,
+    session_id: str | None,
+    tool_count: int,
+) -> dict[str, Any]:
+    """Build the versioned run/model/token metadata payload for one team run."""
+    return build_ai_run_metadata_content(
+        config=config,
+        model_name=prepared_execution.runtime_model_name,
+        run_id=response.run_id,
+        session_id=response.session_id or session_id,
+        status=response.status,
+        model=response.model,
+        model_provider=response.model_provider,
+        metrics=response.metrics,
+        context_input_tokens=prepared_execution.prepared_history.prepared_context_tokens,
+        tool_count=tool_count,
+        prepared_history=prepared_execution.prepared_history,
+    )
+
+
 def _is_cancellation_boilerplate(content: str) -> bool:
     """Return whether one string is just Agno cancellation boilerplate."""
     normalized = content.strip().lower()
@@ -1572,6 +1601,10 @@ async def prepare_materialized_team_execution(
         _append_additional_context(team, rendered_system_context)
         for agent in agents:
             _append_additional_context(agent, rendered_system_context)
+    runtime_model = config.resolve_runtime_model(
+        entity_name=configured_team_name,
+        active_model_name=active_model_name,
+    )
     prepared_execution = await prepare_bound_team_run_context(
         scope_context=scope_context,
         agents=agents,
@@ -1582,10 +1615,7 @@ async def prepare_materialized_team_execution(
         config=config,
         entity_name=configured_team_name,
         active_model_name=active_model_name,
-        active_context_window=config.resolve_runtime_model(
-            entity_name=configured_team_name,
-            active_model_name=active_model_name,
-        ).context_window,
+        active_context_window=runtime_model.context_window,
         room_id=room_id,
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
@@ -1618,6 +1648,8 @@ async def prepare_materialized_team_execution(
         messages=prepared_execution.messages,
         run_metadata=run_metadata,
         unseen_event_ids=prepared_execution.unseen_event_ids,
+        prepared_history=prepared_history,
+        runtime_model_name=runtime_model.model_name,
     )
 
 
@@ -1642,6 +1674,7 @@ async def team_response(  # noqa: C901, PLR0915
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
+    run_metadata_collector: dict[str, Any] | None = None,
     configured_team_name: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
@@ -1880,6 +1913,18 @@ async def team_response(  # noqa: C901, PLR0915
             break
 
         assert response is not None
+        run_tool_executions = (
+            _collect_team_tool_executions(response) if isinstance(response, (TeamRunOutput, RunOutput)) else []
+        )
+        metadata_content: dict[str, Any] | None = None
+        if run_metadata_collector is not None and isinstance(response, (TeamRunOutput, RunOutput)):
+            metadata_content = _build_team_run_metadata_content(
+                config=config,
+                prepared_execution=prepared_execution,
+                response=response,
+                session_id=session_id,
+                tool_count=len(run_tool_executions),
+            )
         if isinstance(response, (TeamRunOutput, RunOutput)) and is_cancelled_run_output(response):
             partial_text = _extract_interrupted_team_partial_text(response)
             completed_tools, interrupted_tools = _extract_cancelled_team_tool_trace(response)
@@ -1888,6 +1933,7 @@ async def team_response(  # noqa: C901, PLR0915
                 partial_text=partial_text,
                 completed_tools=tuple(completed_tools),
                 interrupted_tools=tuple(interrupted_tools),
+                metadata_content=metadata_content,
             )
         if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
             return ErroredAttempt(
@@ -1895,6 +1941,7 @@ async def team_response(  # noqa: C901, PLR0915
                     Exception(str(response.content or "Unknown team error")),
                     team_name,
                 ),
+                metadata_content=metadata_content,
             )
         if reply_to_event_id:
             _persist_bound_seen_event_ids(
@@ -1944,14 +1991,13 @@ async def team_response(  # noqa: C901, PLR0915
             replayable_text=response_text,
             has_visible_content=has_visible_output,
             attempt_run_id=attempt_run_id,
-            tool_executions=tuple(
-                _collect_team_tool_executions(response) if isinstance(response, (TeamRunOutput, RunOutput)) else [],
-            ),
+            tool_executions=tuple(run_tool_executions),
             completed_tools=tuple(
                 _extract_completed_team_tool_trace(response)
                 if isinstance(response, (TeamRunOutput, RunOutput))
                 else [],
             ),
+            metadata_content=metadata_content,
         )
 
     def _finalize_team_attempt(scope_context: ScopeSessionContext | None) -> None:
@@ -1999,7 +2045,7 @@ async def team_response(  # noqa: C901, PLR0915
             matrix_run_metadata=matrix_run_metadata,
         ),
         adapter,
-        TurnSinks(turn_recorder=turn_recorder),
+        TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
         continuation=DynamicContinuationRunState.initial(
             prompt=message,
             model_prompt=None,
@@ -2094,6 +2140,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
+    run_metadata_collector: dict[str, Any] | None = None,
     configured_team_name: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
@@ -2453,6 +2500,16 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         session_id=session_id,
                         entity_name=configured_team_name or team_label,
                     )
+                    event_tool_executions = _collect_team_tool_executions(event)
+                    event_metadata_content: dict[str, Any] | None = None
+                    if run_metadata_collector is not None:
+                        event_metadata_content = _build_team_run_metadata_content(
+                            config=config,
+                            prepared_execution=prepared_execution,
+                            response=event,
+                            session_id=session_id,
+                            tool_count=len(event_tool_executions),
+                        )
 
                     if is_cancelled_run_output(event):
                         partial_text = _extract_interrupted_team_partial_text(event)
@@ -2463,6 +2520,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                                 partial_text=partial_text,
                                 completed_tools=tuple(completed_tool_trace),
                                 interrupted_tools=tuple(interrupted_tool_trace),
+                                metadata_content=event_metadata_content,
                             ),
                         )
                         return
@@ -2518,8 +2576,9 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             replayable_text=response_text,
                             has_visible_content=_has_visible_team_output(event),
                             attempt_run_id=attempt_run_id,
-                            tool_executions=tuple(_collect_team_tool_executions(event)),
+                            tool_executions=tuple(event_tool_executions),
                             completed_tools=tuple(_extract_completed_team_tool_trace(event)),
+                            metadata_content=event_metadata_content,
                         ),
                     )
                     return
@@ -2728,7 +2787,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             matrix_run_metadata=matrix_run_metadata,
         ),
         adapter,
-        TurnSinks(turn_recorder=turn_recorder),
+        TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
         continuation=DynamicContinuationRunState.initial(
             prompt=message,
             model_prompt=None,
