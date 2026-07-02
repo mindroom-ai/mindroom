@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import ResolvedHistorySettings
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ResolvedEntityView:
     """Resolved config values for one agent or team, or the defaults-only scope when `name` is None.
 
@@ -21,9 +21,10 @@ class ResolvedEntityView:
     raises for unknown entities.
     Views are cheap per-call snapshots over one loaded ``Config``; config hot-reload replaces the
     ``Config`` object, so never store a view beyond the current operation.
+    Views compare by identity (``eq=False``): each `resolve_entity` call returns a fresh view.
     """
 
-    _config: Config
+    _config: Config = field(repr=False)
     name: str | None
 
     @cached_property

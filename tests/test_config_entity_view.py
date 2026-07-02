@@ -77,6 +77,23 @@ def test_defaults_scope_view_matches_default_accessors() -> None:
     assert view.has_authored_compaction_config == config.has_authored_default_compaction_config()
 
 
+def test_unauthored_compaction_reports_not_authored() -> None:
+    config = Config(
+        agents={"plain_agent": AgentConfig(display_name="Plain Agent")},
+        defaults=DefaultsConfig(tools=[]),
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+
+    assert config.resolve_entity("plain_agent").has_authored_compaction_config is False
+    assert config.resolve_entity(None).has_authored_compaction_config is False
+
+
+def test_resolve_entity_returns_a_fresh_view_per_call() -> None:
+    config = _representative_config()
+
+    assert config.resolve_entity("overriding_agent") is not config.resolve_entity("overriding_agent")
+
+
 def test_unknown_entity_raises_on_field_access() -> None:
     view = _representative_config().resolve_entity("missing")
 
