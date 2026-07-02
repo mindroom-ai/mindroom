@@ -9,9 +9,11 @@ a recorder. This module owns that lifecycle exactly once; ``mindroom.ai`` and
 ``mindroom.teams`` supply thin adapters carrying the entity-specific attempt
 bodies as injected callables.
 
-Every ``ResponseTurnContext`` field is consumed by the drivers themselves;
-state that only the attempt bodies need stays captured inside the adapter
-closures and never crosses this seam.
+``ResponseTurnContext`` is the per-turn identity carrier built once by the
+caller that owns the turn: the drivers consume its Matrix-identity fields,
+while ``active_event_ids`` and ``system_enrichment_items`` ride along for the
+entity prepare chains. Mutable per-turn state (collectors, recorders,
+callbacks) stays out of it and crosses via ``TurnSinks`` or the adapters.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ if TYPE_CHECKING:
 
     from mindroom.history import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.hooks import EnrichmentItem
     from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
@@ -184,7 +187,13 @@ class DynamicContinuationRunState:
 
 @dataclass(frozen=True)
 class ResponseTurnContext:
-    """Per-turn Matrix identity constants consumed by the turn drivers."""
+    """Per-turn Matrix identity constants for one response turn.
+
+    Built once by the caller that owns the turn, then passed unchanged through
+    the entity envelope, its prepare chain, and the turn drivers. For agent
+    turns ``entity_label`` is the configured agent name; team turns refine it
+    to the materialized team label via ``dataclasses.replace``.
+    """
 
     entity_label: str
     session_id: str | None
@@ -195,6 +204,8 @@ class ResponseTurnContext:
     thread_id: str | None
     requester_id: str | None
     matrix_run_metadata: dict[str, Any] | None
+    active_event_ids: frozenset[str] = frozenset()
+    system_enrichment_items: tuple[EnrichmentItem, ...] = ()
 
 
 @dataclass(frozen=True)

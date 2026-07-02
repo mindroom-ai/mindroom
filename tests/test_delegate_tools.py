@@ -189,16 +189,17 @@ class TestDelegateTools:
 
             assert mock_ai_response.await_count == 1
             call_kwargs = mock_ai_response.await_args.kwargs
-            assert call_kwargs["agent_name"] == "code"
+            call_ctx = mock_ai_response.await_args.args[0]
+            assert call_ctx.entity_label == "code"
             assert call_kwargs["prompt"] == "Write a hello world program"
             assert call_kwargs["runtime_paths"] == tools._runtime_paths
             assert call_kwargs["config"] == tools._config
             assert call_kwargs["knowledge"] is None
-            assert call_kwargs["user_id"] is None
+            assert call_ctx.requester_id is None
             assert call_kwargs["include_interactive_questions"] is False
             assert call_kwargs["execution_identity"] is None
             assert call_kwargs["delegation_depth"] == 1
-            assert call_kwargs["session_id"].startswith("delegate:leader:code:")
+            assert call_ctx.session_id.startswith("delegate:leader:code:")
             assert result == "Here is the generated code: print('hello')"
 
     @pytest.mark.asyncio
@@ -325,7 +326,8 @@ class TestDelegateKnowledge:
             assert args == ("researcher", config, runtime_paths)
             assert kwargs["execution_identity"] is None
             ai_kwargs = mock_ai_response.await_args.kwargs
-            assert ai_kwargs["agent_name"] == "researcher"
+            ai_ctx = mock_ai_response.await_args.args[0]
+            assert ai_ctx.entity_label == "researcher"
             assert ai_kwargs["config"] == config
             assert ai_kwargs["runtime_paths"] == runtime_paths
             assert ai_kwargs["knowledge"] is mock_knowledge
@@ -440,7 +442,7 @@ class TestDelegateKnowledge:
             return_value="done",
         ) as mock_ai_response:
             await tools.delegate_task("worker", "do work")
-            assert mock_ai_response.await_args.kwargs["agent_name"] == "worker"
+            assert mock_ai_response.await_args.args[0].entity_label == "worker"
             assert mock_ai_response.await_args.kwargs["knowledge"] is None
 
     @pytest.mark.asyncio
@@ -487,7 +489,8 @@ class TestDelegateKnowledge:
             await tools.delegate_task("worker", "do work")
 
         call_kwargs = mock_ai_response.await_args.kwargs
-        assert call_kwargs["agent_name"] == "worker"
+        call_ctx = mock_ai_response.await_args.args[0]
+        assert call_ctx.entity_label == "worker"
         assert call_kwargs["config"] == config
         assert call_kwargs["runtime_paths"] == runtime_paths
         delegated_identity = call_kwargs["execution_identity"]
@@ -497,10 +500,10 @@ class TestDelegateKnowledge:
         assert delegated_identity.requester_id == "@alice:example.org"
         assert delegated_identity.room_id == "!room:example.org"
         assert delegated_identity.thread_id == "$thread"
-        assert delegated_identity.session_id == call_kwargs["session_id"]
+        assert delegated_identity.session_id == call_ctx.session_id
         assert delegated_identity.session_id.startswith("delegate:leader:worker:")
-        assert call_kwargs["room_id"] == "!room:example.org"
-        assert call_kwargs["user_id"] == "@alice:example.org"
+        assert call_ctx.room_id == "!room:example.org"
+        assert call_ctx.requester_id == "@alice:example.org"
         assert call_kwargs["delegation_depth"] == 1
 
     @pytest.mark.asyncio
@@ -553,15 +556,15 @@ class TestDelegateKnowledge:
             correlation_id="corr-parent",
         )
 
-        async def fake_ai_response(**kwargs: object) -> str:
+        async def fake_ai_response(ctx: object, **_kwargs: object) -> str:
             context = get_tool_runtime_context()
             assert context is not None
             assert context.agent_name == "worker"
-            assert context.session_id == kwargs["session_id"]
+            assert context.session_id == ctx.session_id
             assert context.room_id == "!room:example.org"
-            assert kwargs["room_id"] == "!room:example.org"
+            assert ctx.room_id == "!room:example.org"
             assert context.correlation_id == "corr-parent"
-            assert kwargs["correlation_id"] == "corr-parent"
+            assert ctx.correlation_id == "corr-parent"
             assert context.active_model_name == "default"
             return "done"
 
@@ -636,13 +639,13 @@ class TestDelegateKnowledge:
             session_id="session-1",
         )
 
-        async def fake_ai_response(**kwargs: object) -> str:
+        async def fake_ai_response(ctx: object, **_kwargs: object) -> str:
             context = get_tool_runtime_context()
             assert context is not None
             assert context.agent_name == "worker"
             assert context.room_id == "!room:example.org"
             assert context.active_model_name == "large"
-            assert kwargs["room_id"] == "!room:example.org"
+            assert ctx.room_id == "!room:example.org"
             return "done"
 
         with (

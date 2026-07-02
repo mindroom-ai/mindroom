@@ -30,6 +30,7 @@ from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
+from tests.conftest import make_turn_context
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -228,9 +229,8 @@ async def test_ai_response_retries_once_after_empty_completed_run(tmp_path: Path
         ]
 
         result = await ai_response(
-            agent_name="general",
+            make_turn_context("general", session_id="session-1"),
             prompt="test",
-            session_id="session-1",
             runtime_paths=_runtime_paths(tmp_path),
             config=_config(),
         )
@@ -254,9 +254,8 @@ async def test_ai_response_closes_spent_agent_state_dbs_before_empty_retry(tmp_p
         ]
 
         result = await ai_response(
-            agent_name="general",
+            make_turn_context("general", session_id="session-1"),
             prompt="test",
-            session_id="session-1",
             runtime_paths=_runtime_paths(tmp_path),
             config=_config(),
         )
@@ -278,9 +277,8 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(tmp_
         ]
 
         result = await ai_response(
-            agent_name="general",
+            make_turn_context("general", session_id="session-1"),
             prompt="test",
-            session_id="session-1",
             runtime_paths=_runtime_paths(tmp_path),
             config=_config(),
         )
@@ -304,9 +302,8 @@ async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(tmp_pa
         ]
 
         result = await ai_response(
-            agent_name="general",
+            make_turn_context("general", session_id="session-1"),
             prompt="test",
-            session_id="session-1",
             runtime_paths=_runtime_paths(tmp_path),
             config=_config(),
             turn_recorder=recorder,
@@ -340,9 +337,8 @@ async def test_stream_agent_response_retries_once_after_empty_completed_stream(t
         chunks = [
             chunk
             async for chunk in stream_agent_response(
-                agent_name="general",
+                make_turn_context("general", session_id="session-1"),
                 prompt="test",
-                session_id="session-1",
                 runtime_paths=_runtime_paths(tmp_path),
                 config=_config(),
             )
@@ -378,9 +374,8 @@ async def test_stream_agent_response_closes_spent_agent_state_dbs_before_empty_r
         chunks = [
             chunk
             async for chunk in stream_agent_response(
-                agent_name="general",
+                make_turn_context("general", session_id="session-1"),
                 prompt="test",
-                session_id="session-1",
                 runtime_paths=_runtime_paths(tmp_path),
                 config=_config(),
             )
@@ -410,9 +405,8 @@ async def test_stream_agent_response_yields_fallback_notice_when_retry_is_also_e
         chunks = [
             chunk
             async for chunk in stream_agent_response(
-                agent_name="general",
+                make_turn_context("general", session_id="session-1"),
                 prompt="test",
-                session_id="session-1",
                 runtime_paths=_runtime_paths(tmp_path),
                 config=_config(),
             )
@@ -444,9 +438,8 @@ async def test_stream_agent_response_fallback_notice_stays_out_of_the_turn_recor
         chunks = [
             chunk
             async for chunk in stream_agent_response(
-                agent_name="general",
+                make_turn_context("general", session_id="session-1"),
                 prompt="test",
-                session_id="session-1",
                 runtime_paths=_runtime_paths(tmp_path),
                 config=_config(),
                 turn_recorder=recorder,

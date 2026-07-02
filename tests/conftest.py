@@ -23,7 +23,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from itertools import count
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -36,6 +36,7 @@ from aioresponses import aioresponses
 
 import mindroom.bot  # noqa: F401
 from mindroom.agent_storage import get_agent_session, get_team_session
+from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
@@ -56,7 +57,7 @@ from mindroom.history import (
 )
 from mindroom.history.runtime import _resolve_history_scope, open_scope_session_context
 from mindroom.history.types import ResolvedHistoryExecutionPlan
-from mindroom.hooks import MessageEnvelope
+from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
@@ -953,6 +954,36 @@ def create_mock_room(
     else:
         room.users = {}
     return room
+
+
+def make_turn_context(
+    entity_label: str = "test_agent",
+    *,
+    session_id: str | None = "test_session",
+    run_id: str | None = None,
+    correlation_id: str = "corr-test",
+    reply_to_event_id: str | None = None,
+    room_id: str | None = None,
+    thread_id: str | None = None,
+    requester_id: str | None = None,
+    matrix_run_metadata: dict[str, Any] | None = None,
+    active_event_ids: frozenset[str] = frozenset(),
+    system_enrichment_items: tuple[EnrichmentItem, ...] = (),
+) -> ResponseTurnContext:
+    """Build one response-turn context with test defaults."""
+    return ResponseTurnContext(
+        entity_label=entity_label,
+        session_id=session_id,
+        run_id=run_id,
+        correlation_id=correlation_id,
+        reply_to_event_id=reply_to_event_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        requester_id=requester_id,
+        matrix_run_metadata=matrix_run_metadata,
+        active_event_ids=active_event_ids,
+        system_enrichment_items=system_enrichment_items,
+    )
 
 
 def make_visible_message(

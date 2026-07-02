@@ -90,7 +90,7 @@ from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, ti
 from mindroom.tool_system.events import StreamingToolTracker, complete_pending_tool_block, format_tool_combined
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
     from contextlib import AbstractContextManager
 
     from agno.agent import Agent
@@ -113,6 +113,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "AIStreamChunk",
+    "ResponseTurnContext",
     "ai_response",
     "build_matrix_run_metadata",
     "resolve_run_correlation_id",
@@ -277,13 +278,6 @@ class _MediaAttempt:
         )
         self.attempt_media_inputs = retry_media_inputs
         self.attempt_run_id = ai_runtime.next_retry_run_id(run_id)
-
-
-def _prompt_current_sender_id(user_id: str | None, *, include_openai_compat_guidance: bool) -> str | None:
-    """Return the Matrix current sender ID when prompt formatting should include it."""
-    if include_openai_compat_guidance:
-        return None
-    return user_id
 
 
 def _build_timing_scope(
@@ -463,19 +457,21 @@ def _streaming_partial_snapshot(holder: _AgentTurnHolder) -> TurnPartialSnapshot
 class _AgentRunContext:
     """Prepared state shared by one top-level agent response lifecycle."""
 
-    agent_name: str
-    prompt: str
+    turn: ResponseTurnContext
+    # turn.session_id narrowed to non-None once at the entry boundary; read
+    # this field, not turn.session_id, wherever a str is required.
     session_id: str
+    prompt: str
     model_prompt: str | None
-    room_id: str | None
-    thread_id: str | None
-    reply_to_event_id: str | None
-    requester_id: str | None
-    correlation_id: str
     prepared_run: _PreparedAgentRun
     run_input: list[Message]
     metadata: dict[str, Any] | None
     inline_media_fallback_prompt: str
+
+    @property
+    def agent_name(self) -> str:
+        """Return the agent name; agent turns label the context with it."""
+        return self.turn.entity_label
 
 
 @dataclass(frozen=True)
@@ -897,14 +893,9 @@ def _select_streaming_usage_metrics(
 
 
 def _attempt_request_log_context(
+    ctx: ResponseTurnContext,
     *,
-    agent_id: str,
     session_id: str,
-    room_id: str | None,
-    thread_id: str | None,
-    reply_to_event_id: str | None,
-    requester_id: str | None,
-    correlation_id: str,
     prompt: str,
     model_prompt: str | None,
     attempt_prompt: ai_runtime.ModelRunInput,
@@ -912,13 +903,13 @@ def _attempt_request_log_context(
 ) -> dict[str, object]:
     """Build request-log context for the exact prompt used by one provider attempt."""
     return build_llm_request_log_context(
-        agent_id=agent_id,
+        agent_id=ctx.entity_label,
         session_id=session_id,
-        room_id=room_id,
-        thread_id=thread_id,
-        reply_to_event_id=reply_to_event_id,
-        requester_id=requester_id,
-        correlation_id=correlation_id,
+        room_id=ctx.room_id,
+        thread_id=ctx.thread_id,
+        reply_to_event_id=ctx.reply_to_event_id,
+        requester_id=ctx.requester_id,
+        correlation_id=ctx.correlation_id,
         prompt=prompt,
         model_prompt=model_prompt,
         full_prompt=render_prepared_messages_text(ai_runtime.copy_run_input(attempt_prompt)),
@@ -955,7 +946,6 @@ async def _run_non_streaming_agent_attempts(
     *,
     run_context: _AgentRunContext,
     attempt: _MediaAttempt,
-    user_id: str | None,
     run_id: str | None,
     run_id_callback: Callable[[str], None] | None,
     scope_context: ScopeSessionContext | None,
@@ -972,13 +962,8 @@ async def _run_non_streaming_agent_attempts(
                     pipeline_timing.mark("model_request_sent", overwrite=True)
                 with bind_llm_request_log_context(
                     **_attempt_request_log_context(
-                        agent_id=run_context.agent_name,
+                        run_context.turn,
                         session_id=run_context.session_id,
-                        room_id=run_context.room_id,
-                        thread_id=run_context.thread_id,
-                        reply_to_event_id=run_context.reply_to_event_id,
-                        requester_id=run_context.requester_id,
-                        correlation_id=run_context.correlation_id,
                         prompt=run_context.prompt,
                         model_prompt=run_context.model_prompt,
                         attempt_prompt=attempt.attempt_prompt,
@@ -989,7 +974,7 @@ async def _run_non_streaming_agent_attempts(
                         agent,
                         attempt.attempt_prompt,
                         run_context.session_id,
-                        user_id=user_id,
+                        user_id=run_context.turn.requester_id,
                         run_id=attempt.attempt_run_id,
                         run_id_callback=run_id_callback,
                         media=attempt.attempt_media_inputs,
@@ -1076,20 +1061,12 @@ def _assert_agent_target(agent_name: str, config: Config) -> None:
         raise ValueError(msg)
 
 
-def _current_sender_id_kwargs(
-    user_id: str | None,
-    *,
-    include_openai_compat_guidance: bool,
-) -> dict[str, str | None]:
-    """Return prompt-preparation kwargs without Matrix sender metadata for OpenAI-compatible calls."""
-    if include_openai_compat_guidance:
-        return {"current_sender_id": None}
-    return {
-        "current_sender_id": _prompt_current_sender_id(
-            user_id,
-            include_openai_compat_guidance=include_openai_compat_guidance,
-        ),
-    }
+def _require_turn_session_id(ctx: ResponseTurnContext) -> str:
+    """Return the turn's session id; agent response turns always run with one."""
+    if not ctx.session_id:
+        msg = "agent response turns require ResponseTurnContext.session_id"
+        raise ValueError(msg)
+    return ctx.session_id
 
 
 def _mark_pipeline_timing(pipeline_timing: DispatchPipelineTiming | None, label: str) -> None:
@@ -1100,36 +1077,31 @@ def _mark_pipeline_timing(pipeline_timing: DispatchPipelineTiming | None, label:
 
 @timed("system_prompt_assembly")
 async def _prepare_agent_and_prompt(
-    agent_name: str,
+    ctx: ResponseTurnContext,
+    *,
     prompt: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    session_id: str | None = None,
     scope_context: ScopeSessionContext | None = None,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    room_id: str | None = None,
-    thread_id: str | None = None,
     knowledge: Knowledge | None = None,
     include_interactive_questions: bool = True,
-    reply_to_event_id: str | None = None,
-    active_event_ids: Collection[str] = frozenset(),
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    system_enrichment_items: Sequence[EnrichmentItem] = (),
     include_openai_compat_guidance: bool = False,
     model_prompt: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    current_sender_id: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedAgentRun:
     """Prepare agent and full prompt for AI processing.
 
     Returns the prepared run input plus history bookkeeping for one agent turn.
     """
+    agent_name = ctx.entity_label
     _assert_agent_target(agent_name, config)
     storage_path = runtime_paths.storage_root
     _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
@@ -1148,10 +1120,6 @@ async def _prepare_agent_and_prompt(
     )
     _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
 
-    resolved_session_id = session_id
-    if resolved_session_id is None and scope_context is not None and scope_context.session is not None:
-        resolved_session_id = scope_context.session.session_id
-
     _mark_pipeline_timing(pipeline_timing, "agent_build_start")
 
     def _resolve_model_and_build_agent() -> tuple[ResolvedRuntimeModel, Agent]:
@@ -1162,15 +1130,15 @@ async def _prepare_agent_and_prompt(
         """
         runtime_model = config.resolve_runtime_model(
             entity_name=agent_name,
-            room_id=room_id,
-            thread_id=thread_id,
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
             runtime_paths=runtime_paths,
         )
         agent = create_agent(
             agent_name,
             config,
             runtime_paths,
-            session_id=resolved_session_id,
+            session_id=ctx.session_id,
             history_storage=scope_context.storage if scope_context is not None else None,
             active_model_name=runtime_model.model_name,
             knowledge=knowledge,
@@ -1185,10 +1153,10 @@ async def _prepare_agent_and_prompt(
 
     runtime_model, agent = await asyncio.to_thread(_resolve_model_and_build_agent)
     _append_additional_context(agent, prompt_parts.session_preamble)
-    if system_enrichment_items:
+    if ctx.system_enrichment_items:
         _append_additional_context(
             agent,
-            _render_system_enrichment_context(system_enrichment_items),
+            _render_system_enrichment_context(ctx.system_enrichment_items),
         )
     _mark_pipeline_timing(pipeline_timing, "agent_build_ready")
 
@@ -1200,13 +1168,13 @@ async def _prepare_agent_and_prompt(
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
-        room_id=room_id,
-        thread_id=thread_id,
-        reply_to_event_id=reply_to_event_id,
-        active_event_ids=active_event_ids,
+        room_id=ctx.room_id,
+        thread_id=ctx.thread_id,
+        reply_to_event_id=ctx.reply_to_event_id,
+        active_event_ids=ctx.active_event_ids,
         compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
-        current_sender_id=current_sender_id,
+        current_sender_id=None if include_openai_compat_guidance else ctx.requester_id,
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
         include_openai_compat_guidance=include_openai_compat_guidance,
@@ -1240,34 +1208,25 @@ async def _prepare_agent_and_prompt(
 
 
 async def _prepare_agent_run_context(
+    ctx: ResponseTurnContext,
     *,
-    agent_name: str,
     prompt: str,
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
     scope_context: ScopeSessionContext | None,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    room_id: str | None,
-    thread_id: str | None,
     knowledge: Knowledge | None,
     include_interactive_questions: bool,
     include_openai_compat_guidance: bool,
-    reply_to_event_id: str | None,
-    active_event_ids: Collection[str],
     execution_identity: ToolExecutionIdentity | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None,
     compaction_lifecycle: CompactionLifecycle | None,
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    system_enrichment_items: Sequence[EnrichmentItem],
     model_prompt: str | None,
     current_timestamp_ms: float | None,
     current_prompt_is_structured: bool,
-    user_id: str | None,
-    requester_id: str | None,
-    correlation_id: str,
-    matrix_run_metadata: dict[str, Any] | None,
     turn_recorder: TurnRecorder | None,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> _AgentRunContext:
@@ -1275,33 +1234,23 @@ async def _prepare_agent_run_context(
     if pipeline_timing is not None:
         pipeline_timing.mark("ai_prepare_start", overwrite=True)
     prepared_run = await _prepare_agent_and_prompt(
-        agent_name,
-        prompt,
-        runtime_paths,
-        config,
-        session_id,
-        scope_context,
-        thread_history,
-        room_id,
-        thread_id,
-        knowledge,
+        ctx,
+        prompt=prompt,
+        runtime_paths=runtime_paths,
+        config=config,
+        scope_context=scope_context,
+        thread_history=thread_history,
+        knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
-        reply_to_event_id=reply_to_event_id,
-        active_event_ids=active_event_ids,
         execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
-        system_enrichment_items=system_enrichment_items,
         include_openai_compat_guidance=include_openai_compat_guidance,
         model_prompt=model_prompt,
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
-        **_current_sender_id_kwargs(
-            user_id,
-            include_openai_compat_guidance=include_openai_compat_guidance,
-        ),
         pipeline_timing=pipeline_timing,
     )
     if pipeline_timing is not None:
@@ -1317,29 +1266,24 @@ async def _prepare_agent_run_context(
 
     run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
     metadata = build_matrix_run_metadata(
-        reply_to_event_id,
+        ctx.reply_to_event_id,
         prepared_run.unseen_event_ids,
-        room_id=room_id,
-        thread_id=thread_id,
-        requester_id=requester_id,
-        correlation_id=correlation_id,
+        room_id=ctx.room_id,
+        thread_id=ctx.thread_id,
+        requester_id=ctx.requester_id,
+        correlation_id=ctx.correlation_id,
         tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
         model_params=model_params_payload(agent.model) if agent.model is not None else {},
-        extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
+        extra_metadata=deep_merge_metadata(ctx.matrix_run_metadata, run_extra_content),
     )
     if turn_recorder is not None:
         turn_recorder.set_run_metadata(metadata)
 
     return _AgentRunContext(
-        agent_name=agent_name,
-        prompt=prompt,
+        turn=ctx,
         session_id=session_id,
+        prompt=prompt,
         model_prompt=model_prompt,
-        room_id=room_id,
-        thread_id=thread_id,
-        reply_to_event_id=reply_to_event_id,
-        requester_id=requester_id,
-        correlation_id=correlation_id,
         prepared_run=prepared_run,
         run_input=prepared_run.run_input,
         metadata=metadata,
@@ -1348,27 +1292,19 @@ async def _prepare_agent_run_context(
 
 
 async def ai_response(
-    agent_name: str,
+    ctx: ResponseTurnContext,
     prompt: str,
-    session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_prompt: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    thread_id: str | None = None,
-    room_id: str | None = None,
     knowledge: Knowledge | None = None,
-    user_id: str | None = None,
-    run_id: str | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
     media: MediaInputs | None = None,
-    reply_to_event_id: str | None = None,
-    correlation_id: str | None = None,
-    active_event_ids: Collection[str] = frozenset(),
     show_tool_calls: bool = True,
     collect_streamed_response: bool = False,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
@@ -1378,28 +1314,23 @@ async def ai_response(
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    matrix_run_metadata: dict[str, Any] | None = None,
-    system_enrichment_items: Sequence[EnrichmentItem] = (),
     turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
     Args:
-        agent_name: Name of the agent to use
+        ctx: Per-turn identity constants for this response turn. ``entity_label``
+            names the agent, ``session_id`` is required, and ``requester_id`` is
+            the Matrix sender used for Agno learning and prompt attribution.
         prompt: User prompt
-        session_id: Session ID for conversation tracking
         runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
         thread_history: Optional thread history
         model_prompt: Optional model-facing current-turn prompt additions.
         current_timestamp_ms: Optional source Matrix event timestamp in milliseconds.
         current_prompt_is_structured: Whether the current prompt already carries trusted message tags.
-        thread_id: Optional resolved Matrix thread ID for request-log correlation and run metadata.
-        room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
-        user_id: Matrix user ID of the sender, used by Agno's LearningMachine
-        run_id: Explicit Agno run identifier used for graceful stop/cancel handling.
         run_id_callback: Optional callback that receives the active Agno run_id
             before each real run attempt starts.
         include_interactive_questions: Whether to include the interactive
@@ -1408,11 +1339,6 @@ async def ai_response(
         include_openai_compat_guidance: Whether to omit Matrix-style sender
             attribution for OpenAI-compatible prompt formatting.
         media: Optional multimodal inputs (audio/images/files/videos)
-        reply_to_event_id: Matrix event ID of the triggering message, stored
-            in run metadata for unseen message tracking and edit cleanup.
-        correlation_id: Stable cross-sink trace ID for this response lifecycle.
-        active_event_ids: Live self-authored Matrix event IDs still tracked as
-            actively streaming for this bot in the current room.
         show_tool_calls: Whether to include tool call details inline in the response text.
         collect_streamed_response: Whether to use stream-shaped execution internally
             and collect chunks into one final response body.
@@ -1430,10 +1356,6 @@ async def ai_response(
         delegation_depth: Current nested delegation depth for delegated-agent runs.
         refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
             passed through to delegated child agents.
-        matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
-            for unseen-message tracking, coalesced edit regeneration, and cleanup.
-        system_enrichment_items: Optional system-prompt enrichment items for this run.
-        model_prompt: Optional model-facing current-turn prompt additions.
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
 
@@ -1441,31 +1363,24 @@ async def ai_response(
         Agent response string
 
     """
-    logger.info("AI request", agent=agent_name, room_id=room_id)
+    agent_name = ctx.entity_label
+    logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     if collect_streamed_response:
         return await _collect_streamed_response_content(
             stream_agent_response(
-                agent_name=agent_name,
+                ctx,
                 prompt=prompt,
-                session_id=session_id,
                 runtime_paths=runtime_paths,
                 config=config,
                 thread_history=thread_history,
                 model_prompt=model_prompt,
                 current_timestamp_ms=current_timestamp_ms,
                 current_prompt_is_structured=current_prompt_is_structured,
-                thread_id=thread_id,
-                room_id=room_id,
                 knowledge=knowledge,
-                user_id=user_id,
-                run_id=run_id,
                 run_id_callback=run_id_callback,
                 include_interactive_questions=include_interactive_questions,
                 include_openai_compat_guidance=include_openai_compat_guidance,
                 media=media,
-                reply_to_event_id=reply_to_event_id,
-                correlation_id=correlation_id,
-                active_event_ids=active_event_ids,
                 show_tool_calls=show_tool_calls,
                 run_metadata_collector=run_metadata_collector,
                 execution_identity=execution_identity,
@@ -1473,8 +1388,6 @@ async def ai_response(
                 compaction_lifecycle=compaction_lifecycle,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
-                matrix_run_metadata=matrix_run_metadata,
-                system_enrichment_items=system_enrichment_items,
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
             ),
@@ -1482,22 +1395,18 @@ async def ai_response(
             tool_trace_collector=tool_trace_collector,
         )
 
+    session_id = _require_turn_session_id(ctx)
     # Bind the timing scope for this turn; asyncio task contexts isolate it and
     # the next turn in a reused task overwrites it.
     timing_scope.set(
         _build_timing_scope(
-            reply_to_event_id=reply_to_event_id,
-            run_id=run_id,
+            reply_to_event_id=ctx.reply_to_event_id,
+            run_id=ctx.run_id,
             session_id=session_id,
             agent_name=agent_name,
         ),
     )
     media_inputs = media or MediaInputs()
-    resolved_correlation_id = resolve_run_correlation_id(
-        correlation_id,
-        reply_to_event_id=reply_to_event_id,
-        matrix_run_metadata=matrix_run_metadata,
-    )
     try:
         _assert_agent_target(agent_name, config)
     except ValueError as e:
@@ -1521,33 +1430,24 @@ async def ai_response(
         """Run one agent attempt, including its media-fallback retries."""
         try:
             run_context = await _prepare_agent_run_context(
-                agent_name=agent_name,
+                ctx,
                 prompt=continuation_state.active_prompt,
                 session_id=session_id,
                 runtime_paths=runtime_paths,
                 config=config,
                 scope_context=run.scope_context,
                 thread_history=thread_history,
-                room_id=room_id,
-                thread_id=thread_id,
                 knowledge=knowledge,
                 include_interactive_questions=include_interactive_questions,
                 include_openai_compat_guidance=include_openai_compat_guidance,
-                reply_to_event_id=reply_to_event_id,
-                active_event_ids=active_event_ids,
                 execution_identity=execution_identity,
                 compaction_outcomes_collector=compaction_outcomes_collector,
                 compaction_lifecycle=compaction_lifecycle,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
-                system_enrichment_items=system_enrichment_items,
                 model_prompt=continuation_state.active_model_prompt,
                 current_timestamp_ms=continuation_state.active_current_timestamp_ms,
                 current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
-                user_id=user_id,
-                requester_id=user_id,
-                correlation_id=resolved_correlation_id,
-                matrix_run_metadata=matrix_run_metadata,
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
             )
@@ -1570,7 +1470,6 @@ async def ai_response(
         attempt_result = await _run_non_streaming_agent_attempts(
             run_context=run_context,
             attempt=attempt,
-            user_id=user_id,
             run_id=continuation_state.active_run_id,
             run_id_callback=run_id_callback,
             scope_context=run.scope_context,
@@ -1649,17 +1548,7 @@ async def ai_response(
         persist_standalone_replay=callbacks.persist_standalone_replay,
     )
     return await run_blocking_response_turn(
-        ResponseTurnContext(
-            entity_label=agent_name,
-            session_id=session_id,
-            run_id=run_id,
-            correlation_id=resolved_correlation_id,
-            reply_to_event_id=reply_to_event_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            requester_id=user_id,
-            matrix_run_metadata=matrix_run_metadata,
-        ),
+        ctx,
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
         continuation=_initial_agent_continuation(
@@ -1667,7 +1556,7 @@ async def ai_response(
             model_prompt=model_prompt,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
-            run_id=run_id,
+            run_id=ctx.run_id,
         ),
     )
 
@@ -1803,7 +1692,6 @@ async def _stream_agent_attempt_chunks(
     attempt: _MediaAttempt,
     state: _StreamingAttemptState,
     show_tool_calls: bool,
-    user_id: str | None,
     run_id_callback: Callable[[str], None] | None,
     retried_after_media_fallback: bool,
     state_updated: Callable[[], None] | None,
@@ -1816,13 +1704,8 @@ async def _stream_agent_attempt_chunks(
             pipeline_timing.mark("model_request_sent", overwrite=True)
         ai_runtime.note_attempt_run_id(run_id_callback, attempt.attempt_run_id)
         request_context = _attempt_request_log_context(
-            agent_id=run_context.agent_name,
+            run_context.turn,
             session_id=run_context.session_id,
-            room_id=run_context.room_id,
-            thread_id=run_context.thread_id,
-            reply_to_event_id=run_context.reply_to_event_id,
-            requester_id=run_context.requester_id,
-            correlation_id=run_context.correlation_id,
             prompt=run_context.prompt,
             model_prompt=run_context.model_prompt,
             attempt_prompt=attempt.attempt_prompt,
@@ -1836,7 +1719,7 @@ async def _stream_agent_attempt_chunks(
             stream_generator = agent.arun(
                 prepared_input,
                 session_id=run_context.session_id,
-                user_id=user_id,
+                user_id=run_context.turn.requester_id,
                 run_id=attempt.attempt_run_id,
                 stream=True,
                 stream_events=True,
@@ -1876,27 +1759,19 @@ async def _stream_agent_attempt_chunks(
 
 
 async def stream_agent_response(  # noqa: C901, PLR0915
-    agent_name: str,
+    ctx: ResponseTurnContext,
     prompt: str,
-    session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_prompt: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    thread_id: str | None = None,
-    room_id: str | None = None,
     knowledge: Knowledge | None = None,
-    user_id: str | None = None,
-    run_id: str | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
     media: MediaInputs | None = None,
-    reply_to_event_id: str | None = None,
-    correlation_id: str | None = None,
-    active_event_ids: Collection[str] = frozenset(),
     show_tool_calls: bool = True,
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -1904,28 +1779,23 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    matrix_run_metadata: dict[str, Any] | None = None,
-    system_enrichment_items: Sequence[EnrichmentItem] = (),
     turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
     Args:
-        agent_name: Name of the agent to use
+        ctx: Per-turn identity constants for this response turn. ``entity_label``
+            names the agent, ``session_id`` is required, and ``requester_id`` is
+            the Matrix sender used for Agno learning and prompt attribution.
         prompt: User prompt
-        session_id: Session ID for conversation tracking
         runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
         thread_history: Optional thread history
         model_prompt: Optional model-facing current-turn prompt additions.
         current_timestamp_ms: Optional source Matrix event timestamp in milliseconds.
         current_prompt_is_structured: Whether the current prompt already carries trusted message tags.
-        thread_id: Optional resolved Matrix thread ID for request-log correlation and run metadata.
-        room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
-        user_id: Matrix user ID of the sender, used by Agno's LearningMachine
-        run_id: Explicit Agno run identifier used for graceful stop/cancel handling.
         run_id_callback: Optional callback that receives the active Agno run_id
             before each real streaming attempt starts.
         include_interactive_questions: Whether to include the interactive
@@ -1934,11 +1804,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         include_openai_compat_guidance: Whether to omit Matrix-style sender
             attribution for OpenAI-compatible prompt formatting.
         media: Optional multimodal inputs (audio/images/files/videos)
-        reply_to_event_id: Matrix event ID of the triggering message, stored
-            in run metadata for unseen message tracking and edit cleanup.
-        correlation_id: Stable cross-sink trace ID for this response lifecycle.
-        active_event_ids: Live self-authored Matrix event IDs still tracked as
-            actively streaming for this bot in the current room.
         show_tool_calls: Whether to include tool call details inline in the streamed response.
         run_metadata_collector: Optional mapping that receives versioned
             run/model/token metadata for Matrix message content.
@@ -1952,10 +1817,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         delegation_depth: Current nested delegation depth for delegated-agent runs.
         refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
             passed through to delegated child agents.
-        matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
-            for unseen-message tracking, coalesced edit regeneration, and cleanup.
-        system_enrichment_items: Optional system-prompt enrichment items for this run.
-        model_prompt: Optional model-facing current-turn prompt additions.
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
 
@@ -1963,23 +1824,20 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         Streaming chunks/events as they become available
 
     """
-    logger.info("AI streaming request", agent=agent_name, room_id=room_id)
+    agent_name = ctx.entity_label
+    logger.info("AI streaming request", agent=agent_name, room_id=ctx.room_id)
+    session_id = _require_turn_session_id(ctx)
     # Bind the timing scope for this turn; asyncio task contexts isolate it and
     # the next turn in a reused task overwrites it.
     timing_scope.set(
         _build_timing_scope(
-            reply_to_event_id=reply_to_event_id,
-            run_id=run_id,
+            reply_to_event_id=ctx.reply_to_event_id,
+            run_id=ctx.run_id,
             session_id=session_id,
             agent_name=agent_name,
         ),
     )
     media_inputs = media or MediaInputs()
-    resolved_correlation_id = resolve_run_correlation_id(
-        correlation_id,
-        reply_to_event_id=reply_to_event_id,
-        matrix_run_metadata=matrix_run_metadata,
-    )
     try:
         _assert_agent_target(agent_name, config)
     except ValueError as e:
@@ -2016,33 +1874,24 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
         try:
             run_context = await _prepare_agent_run_context(
-                agent_name=agent_name,
+                ctx,
                 prompt=continuation_state.active_prompt,
                 session_id=session_id,
                 runtime_paths=runtime_paths,
                 config=config,
                 scope_context=run.scope_context,
                 thread_history=thread_history,
-                room_id=room_id,
-                thread_id=thread_id,
                 knowledge=knowledge,
                 include_interactive_questions=include_interactive_questions,
                 include_openai_compat_guidance=include_openai_compat_guidance,
-                reply_to_event_id=reply_to_event_id,
-                active_event_ids=active_event_ids,
                 execution_identity=execution_identity,
                 compaction_outcomes_collector=compaction_outcomes_collector,
                 compaction_lifecycle=compaction_lifecycle,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
-                system_enrichment_items=system_enrichment_items,
                 model_prompt=continuation_state.active_model_prompt,
                 current_timestamp_ms=continuation_state.active_current_timestamp_ms,
                 current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
-                user_id=user_id,
-                requester_id=user_id,
-                correlation_id=resolved_correlation_id,
-                matrix_run_metadata=matrix_run_metadata,
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
             )
@@ -2092,7 +1941,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 attempt=attempt,
                 state=state,
                 show_tool_calls=show_tool_calls,
-                user_id=user_id,
                 run_id_callback=run_id_callback,
                 retried_after_media_fallback=retried_after_media_fallback,
                 state_updated=_sync_live_turn_recorder,
@@ -2243,17 +2091,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         persist_standalone_replay=callbacks.persist_standalone_replay,
     )
     response_stream = stream_response_turn(
-        ResponseTurnContext(
-            entity_label=agent_name,
-            session_id=session_id,
-            run_id=run_id,
-            correlation_id=resolved_correlation_id,
-            reply_to_event_id=reply_to_event_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            requester_id=user_id,
-            matrix_run_metadata=matrix_run_metadata,
-        ),
+        ctx,
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
         continuation=_initial_agent_continuation(
@@ -2261,7 +2099,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             model_prompt=model_prompt,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
-            run_id=run_id,
+            run_id=ctx.run_id,
         ),
     )
     # Close the driver generator deterministically when this wrapper unwinds so

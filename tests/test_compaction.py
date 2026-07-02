@@ -36,7 +36,7 @@ from mindroom.history.types import (
 )
 from mindroom.memory import MemoryPromptParts
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -308,10 +308,10 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
         ),
     ):
         prepared_run = await _prepare_agent_and_prompt(
-            "test_agent",
-            "Current prompt",
-            runtime_paths,
-            config,
+            make_turn_context("test_agent"),
+            prompt="Current prompt",
+            runtime_paths=runtime_paths,
+            config=config,
             compaction_outcomes_collector=None,
         )
 

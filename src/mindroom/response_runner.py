@@ -13,7 +13,7 @@ from agno.session.team import TeamSession
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
-from mindroom.ai import ai_response, build_matrix_run_metadata, stream_agent_response
+from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
@@ -844,6 +844,30 @@ class ResponseRunner:
     def _correlation_id_for_request(self, request: ResponseRequest) -> str:
         """Resolve the correlation id for one request."""
         return request.correlation_id or request.reply_to_event_id or request.response_envelope.source_event_id
+
+    def _agent_turn_context(
+        self,
+        request: ResponseRequest,
+        *,
+        runtime: _PreparedResponseRuntime,
+        run_id: str | None,
+        active_event_ids: set[str],
+        system_enrichment_items: Sequence[EnrichmentItem],
+    ) -> ResponseTurnContext:
+        """Build the per-turn identity context for one agent response."""
+        return ResponseTurnContext(
+            entity_label=self.deps.agent_name,
+            session_id=runtime.session_id,
+            run_id=run_id,
+            correlation_id=self._correlation_id_for_request(request),
+            reply_to_event_id=request.reply_to_event_id,
+            room_id=request.room_id,
+            thread_id=runtime.resolved_target.resolved_thread_id,
+            requester_id=request.user_id,
+            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            active_event_ids=frozenset(active_event_ids),
+            system_enrichment_items=tuple(system_enrichment_items),
+        )
 
     def _notify_sync_restart_cancelled(
         self,
@@ -1778,27 +1802,24 @@ class ResponseRunner:
                 request.system_enrichment_items,
                 knowledge_resolution.unavailable,
             )
-            matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
             return await ai_response(
-                agent_name=self.deps.agent_name,
+                self._agent_turn_context(
+                    request,
+                    runtime=runtime,
+                    run_id=run_id,
+                    active_event_ids=active_event_ids,
+                    system_enrichment_items=system_enrichment_items,
+                ),
                 prompt=request.prompt,
-                session_id=runtime.session_id,
                 runtime_paths=self.deps.runtime_paths,
                 config=self.deps.runtime.config,
                 thread_history=request.thread_history,
                 model_prompt=runtime.model_prompt,
                 current_timestamp_ms=request.current_timestamp_ms,
                 current_prompt_is_structured=request.current_prompt_is_structured,
-                thread_id=runtime.resolved_target.resolved_thread_id,
-                room_id=request.room_id,
                 knowledge=knowledge_resolution.knowledge,
-                user_id=request.user_id,
-                run_id=run_id,
                 run_id_callback=note_attempt_run_id,
                 media=runtime.media_inputs,
-                reply_to_event_id=request.reply_to_event_id,
-                correlation_id=self._correlation_id_for_request(request),
-                active_event_ids=active_event_ids,
                 show_tool_calls=show_tool_calls,
                 collect_streamed_response=show_tool_calls,
                 tool_trace_collector=tool_trace,
@@ -1810,8 +1831,6 @@ class ResponseRunner:
                     if self.deps.runtime.orchestrator is not None
                     else None
                 ),
-                matrix_run_metadata=matrix_run_metadata,
-                system_enrichment_items=system_enrichment_items,
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
             )
@@ -1870,27 +1889,24 @@ class ResponseRunner:
             request.system_enrichment_items,
             knowledge_resolution.unavailable,
         )
-        matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         response_stream = stream_agent_response(
-            agent_name=self.deps.agent_name,
+            self._agent_turn_context(
+                request,
+                runtime=runtime,
+                run_id=run_id,
+                active_event_ids=active_event_ids,
+                system_enrichment_items=system_enrichment_items,
+            ),
             prompt=request.prompt,
-            session_id=runtime.session_id,
             runtime_paths=self.deps.runtime_paths,
             config=self.deps.runtime.config,
             thread_history=request.thread_history,
             model_prompt=runtime.model_prompt,
             current_timestamp_ms=request.current_timestamp_ms,
             current_prompt_is_structured=request.current_prompt_is_structured,
-            thread_id=runtime.resolved_target.resolved_thread_id,
-            room_id=request.room_id,
             knowledge=knowledge_resolution.knowledge,
-            user_id=request.user_id,
-            run_id=run_id,
             run_id_callback=note_attempt_run_id,
             media=runtime.media_inputs,
-            reply_to_event_id=request.reply_to_event_id,
-            correlation_id=self._correlation_id_for_request(request),
-            active_event_ids=active_event_ids,
             show_tool_calls=self._show_tool_calls(),
             run_metadata_collector=run_metadata_content,
             execution_identity=runtime.tool_dispatch.execution_identity,
@@ -1900,8 +1916,6 @@ class ResponseRunner:
                 if self.deps.runtime.orchestrator is not None
                 else None
             ),
-            matrix_run_metadata=matrix_run_metadata,
-            system_enrichment_items=system_enrichment_items,
             turn_recorder=turn_recorder,
             pipeline_timing=pipeline_timing,
         )

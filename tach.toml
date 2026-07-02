@@ -2848,6 +2848,7 @@ from = ["mindroom.runtime_resolution"]
 [[interfaces]]
 expose = [
     "AIStreamChunk",
+    "ResponseTurnContext",
     "build_matrix_run_metadata",
     "ai_response",
     "resolve_run_correlation_id",

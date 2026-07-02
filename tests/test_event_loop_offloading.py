@@ -18,7 +18,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.history import PreparedHistoryState
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory._file_backend import FileMemoryBackend
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,7 +69,12 @@ async def test_prepare_agent_and_prompt_builds_agent_off_event_loop(
     config = Config.model_validate({"agents": {"general": {"display_name": "General", "role": "test"}}})
     runtime_paths = test_runtime_paths(tmp_path)
     prepare_task = asyncio.get_running_loop().create_task(
-        ai_module._prepare_agent_and_prompt("general", "hello", runtime_paths, config),
+        ai_module._prepare_agent_and_prompt(
+            make_turn_context("general"),
+            prompt="hello",
+            runtime_paths=runtime_paths,
+            config=config,
+        ),
     )
     await asyncio.to_thread(build_started.wait, 5.0)
 

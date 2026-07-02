@@ -51,6 +51,7 @@ from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_m
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    make_turn_context,
     message_origin,
     patch_response_runner_module,
     request_envelope,
@@ -347,11 +348,10 @@ async def test_prepare_agent_and_prompt_applies_system_enrichment_to_agent_addit
         ),
     ):
         prepared_run = await _prepare_agent_and_prompt(
-            agent_name="code",
+            make_turn_context("code", system_enrichment_items=system_items),
             prompt="prompt",
             runtime_paths=runtime_paths_for(config),
             config=config,
-            system_enrichment_items=system_items,
         )
 
     agent = prepared_run.agent
@@ -551,8 +551,8 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
         EnrichmentItem(key="omega", text="volatile", cache_policy="volatile"),
     )
 
-    async def fake_ai_response(*_args: object, **kwargs: object) -> str:
-        assert kwargs["system_enrichment_items"] == system_items
+    async def fake_ai_response(*args: object, **_kwargs: object) -> str:
+        assert args[0].system_enrichment_items == system_items
         return "handled"
 
     with (
@@ -601,8 +601,8 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
         EnrichmentItem(key="omega", text="volatile", cache_policy="volatile"),
     )
 
-    async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncIterator[str]:
-        assert kwargs["system_enrichment_items"] == system_items
+    async def fake_stream_agent_response(*args: object, **_kwargs: object) -> AsyncIterator[str]:
+        assert args[0].system_enrichment_items == system_items
         yield "stream chunk"
 
     async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
