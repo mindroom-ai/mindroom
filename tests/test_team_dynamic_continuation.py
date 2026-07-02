@@ -16,7 +16,13 @@ from agno.run.team import TeamRunOutput
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.teams import TeamMode, _materialize_team_members, team_response, team_response_stream
+from mindroom.teams import (
+    TeamMode,
+    _materialize_team_members,
+    materialize_exact_team_members,
+    team_response,
+    team_response_stream,
+)
 from tests.conftest import runtime_paths_for
 from tests.identity_helpers import entity_ids
 from tests.test_team_media_fallback import _build_test_config, _make_test_agent, _make_test_team
@@ -79,7 +85,7 @@ async def test_team_response_continues_after_member_dynamic_tool_load() -> None:
     run_ids: list[str] = []
 
     patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
+    with patches[0] as mock_create, patches[1], patches[2]:
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -93,6 +99,8 @@ async def test_team_response_continues_after_member_dynamic_tool_load() -> None:
 
     assert "Used the loaded tool." in response
     assert mock_team.arun.await_count == 2
+    # The continuation rebuilds member agents so the loaded tool's schema is baked in.
+    assert mock_create.call_count == 2
     second_prompt = mock_team.arun.await_args_list[1].args[0]
     assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt
     assert "Continue the same task" in second_prompt
@@ -208,6 +216,61 @@ async def test_team_response_stream_continues_after_streamed_member_dynamic_tool
     assert recorder.outcome == "completed"
     assert "Used the loaded tool." in recorder.assistant_text
     assert any(entry.tool_name == "load_tool" for entry in recorder.completed_tools)
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_continues_from_hidden_member_dynamic_tool() -> None:
+    """A tools-only attempt with hidden tool calls still continues the turn."""
+    orchestrator, config = _make_orchestrator()
+
+    async def first_stream() -> AsyncIterator[object]:
+        yield AgentToolCallCompletedEvent(agent_name="GeneralAgent", tool=_load_tool_execution())
+
+    async def second_stream() -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Used the loaded tool.")
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
+    recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Load the sleep tool and use it.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                show_tool_calls=False,
+            )
+        ]
+
+    assert mock_team.arun.call_count == 2
+    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+    assert "Used the loaded tool." in rendered
+    assert recorder.outcome == "completed"
+
+
+def test_materialize_exact_team_members_defaults_to_no_continuation() -> None:
+    """Callers without a continuation-capable driver keep load/unload non-truncating."""
+    config = _build_test_config()
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent) as mock_create,
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+    ):
+        materialize_exact_team_members(
+            ["general"],
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
+            session_id="session-1",
+        )
+
+    assert mock_create.call_args.kwargs["dynamic_tool_continuation"] is False
 
 
 def test_team_members_are_built_with_dynamic_tool_continuation() -> None:
