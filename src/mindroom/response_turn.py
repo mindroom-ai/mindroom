@@ -17,6 +17,7 @@ closures and never crosses this seam.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 from uuid import uuid4
@@ -32,7 +33,6 @@ from mindroom.constants import (
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
-from mindroom.metadata_merge import deep_merge_metadata
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
@@ -209,12 +209,16 @@ class TurnSinks:
 
 @dataclass
 class TurnRunState:
-    """Driver-owned mutable state shared with the adapter attempt bodies."""
+    """Driver-owned mutable state shared with the adapter attempt bodies.
+
+    Attempt bodies must set ``run_metadata`` and ``unseen_event_ids`` once
+    prepare finishes; interruption recording falls back to rebuilt metadata
+    while they are still unset.
+    """
 
     turn_state: AITurnState = field(default_factory=AITurnState)
     scope_context: ScopeSessionContext | None = None
     run_metadata: dict[str, Any] | None = None
-    run_extra_content: dict[str, Any] | None = None
     unseen_event_ids: list[str] = field(default_factory=list)
     standalone_replay_persisted: bool = False
     empty_response_retried: bool = False
@@ -234,6 +238,8 @@ class TurnPartialSnapshot:
 class CompletedAttempt:
     """One attempt that ran to a terminal provider response."""
 
+    # Only blocking attempts set this; the streaming driver delivers via
+    # chunks and records replayable_text.
     response_text: str = ""
     replayable_text: str = ""
     has_visible_content: bool = False
@@ -286,9 +292,13 @@ class AttemptResolved:
 
 @dataclass(frozen=True)
 class ContinuationCapability:
-    """Enable dynamic-tool continuations with one iteration budget."""
+    """Enable dynamic-tool continuations for the turn.
 
-    limit: int = DYNAMIC_TOOL_CONTINUATION_LIMIT
+    The iteration budget is always ``DYNAMIC_TOOL_CONTINUATION_LIMIT``:
+    ``continuation_decision_from_tools`` hardcodes that constant for its
+    continue/stop decision, so a per-adapter limit would silently desync
+    from the loop budget.
+    """
 
 
 @dataclass(frozen=True)
@@ -368,6 +378,13 @@ def _raise_continuation_budget_exhausted() -> NoReturn:
     raise AssertionError(msg)
 
 
+def _raise_missing_stream_resolution(entity_label: str) -> NoReturn:
+    # A streaming attempt that returns without its sentinel would otherwise end
+    # the turn silently: nothing recorded, no metadata published, no log.
+    msg = f"streaming attempt for {entity_label!r} ended without yielding its AttemptResolved sentinel"
+    raise RuntimeError(msg)
+
+
 def _effective_continuation_limit(
     continuation: ContinuationCapability | None,
     empty_run: EmptyRunCapability | None,
@@ -378,7 +395,7 @@ def _effective_continuation_limit(
     are enabled; without them it still needs one slot of its own.
     """
     if continuation is not None:
-        return continuation.limit
+        return DYNAMIC_TOOL_CONTINUATION_LIMIT
     return 1 if empty_run is not None else 0
 
 
@@ -408,7 +425,7 @@ def _fallback_matrix_run_metadata(ctx: ResponseTurnContext, run: TurnRunState) -
         thread_id=ctx.thread_id,
         requester_id=ctx.requester_id,
         correlation_id=ctx.correlation_id,
-        extra_metadata=deep_merge_metadata(ctx.matrix_run_metadata, run.run_extra_content),
+        extra_metadata=deepcopy(ctx.matrix_run_metadata),
     )
 
 
@@ -788,7 +805,7 @@ def _settle_completed_stream_attempt(
     )
 
 
-async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
+async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     ctx: ResponseTurnContext,
     adapter: StreamingTurnAdapter[ChunkT],
     sinks: TurnSinks,
@@ -815,7 +832,9 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
                             resolution = item.resolution
                             continue
                         yield item
-                    if resolution is None or isinstance(resolution, HandledAttempt):
+                    if resolution is None:
+                        _raise_missing_stream_resolution(ctx.entity_label)
+                    if isinstance(resolution, HandledAttempt):
                         return
                     if isinstance(resolution, CancelledAttempt):
                         # The streaming envelope records the interruption before

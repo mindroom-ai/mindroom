@@ -93,7 +93,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.dynamic_tool_continuation",
     "mindroom.logging_config",
-    "mindroom.metadata_merge",
 ]
 visibility = [
     "mindroom.ai",

@@ -555,6 +555,37 @@ def test_blocking_empty_run_without_continuation_still_retries_once() -> None:
     assert attempts == 2
 
 
+def test_blocking_empty_retry_borrows_continuation_slot_within_shared_budget() -> None:
+    """One empty retry plus dynamic-tool continuations share the iteration budget."""
+    log = _AdapterLog()
+    attempts = 0
+
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return CompletedAttempt(is_empty=True, run_id="run-empty")
+        return CompletedAttempt(
+            attempt_run_id=f"run-{attempts}",
+            tool_executions=(_dynamic_tool_execution(),),
+        )
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt, empty_run=_empty_run_capability(log)),
+            TurnSinks(),
+            continuation=_continuation(),
+        ),
+    )
+
+    # Attempt 1 spends the empty retry; attempts 2-4 continue; attempt 5 sits
+    # at the decision limit and settles with the limit message.
+    assert attempts == 5
+    assert "did not produce a final answer" in result
+    assert [discard.run_id for discard in log.discards] == ["run-empty"]
+
+
 def test_blocking_unexpected_error_reraises_without_shaper() -> None:
     """Unexpected exceptions propagate when no error shaper is configured."""
     log = _AdapterLog()
@@ -695,6 +726,40 @@ def test_streaming_cancelled_attempt_records_updates_collector_and_raises() -> N
     assert len(log.persisted) == 1
     assert log.finalized == 1
     assert log.closed == 1
+
+
+def test_streaming_cancelled_attempt_with_recorder_records_twice() -> None:
+    """An in-attempt stream cancel records inline, then again from the live snapshot."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    log.snapshot = TurnPartialSnapshot(assistant_text="snapshot partial")
+
+    async def _attempt(
+        run: TurnRunState,
+        _c: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        run.run_metadata = {"room_id": "!room"}
+        yield "partial"
+        yield AttemptResolved(CancelledAttempt(reason="stop", partial_text="attempt partial"))
+
+    async def _run() -> None:
+        async for _chunk in stream_response_turn(
+            _ctx(),
+            _streaming_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        ):
+            pass
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(_run())
+
+    assert len(recorder.interrupted_calls) == 2
+    assert recorder.interrupted_calls[0]["assistant_text"] == "attempt partial"
+    # Unlike blocking, the streaming outer handler re-records from the live
+    # snapshot rather than the recorder's canonical state.
+    assert recorder.interrupted_calls[1]["assistant_text"] == "snapshot partial"
+    assert log.persisted == []
 
 
 def test_streaming_external_cancel_records_snapshot_partials() -> None:
@@ -914,6 +979,64 @@ def test_streaming_unexpected_error_yields_shaped_text() -> None:
     )
 
     assert chunks == ["chunk", "shaped: boom"]
+
+
+def test_streaming_attempt_without_sentinel_raises() -> None:
+    """A streaming attempt that never yields its sentinel fails loudly."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+
+    async def _attempt(
+        _run: TurnRunState,
+        _c: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield "chunk"
+
+    async def _run() -> None:
+        async for _chunk in stream_response_turn(
+            _ctx(),
+            _streaming_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        ):
+            pass
+
+    with pytest.raises(RuntimeError, match="AttemptResolved sentinel"):
+        asyncio.run(_run())
+    assert recorder.completed_calls == []
+    assert log.finalized == 1
+    assert log.closed == 1
+
+
+def test_streaming_aclose_runs_cleanup_without_recording() -> None:
+    """Closing the driver generator mid-stream cleans up and records nothing."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+
+    async def _attempt(
+        _run: TurnRunState,
+        _c: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield "first"
+        yield "second"
+        yield AttemptResolved(CompletedAttempt(replayable_text="full", has_visible_content=True))
+
+    async def _run() -> None:
+        stream = stream_response_turn(
+            _ctx(),
+            _streaming_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        )
+        assert await anext(stream) == "first"
+        await stream.aclose()
+
+    asyncio.run(_run())
+
+    assert log.closed == 1
+    assert log.finalized == 1
+    assert recorder.completed_calls == []
+    assert recorder.interrupted_calls == []
 
 
 def test_stream_resolution_union_covers_handled() -> None:
