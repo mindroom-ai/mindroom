@@ -288,7 +288,7 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
             media=MediaInputs(audio=[audio_input]),
         )
 
@@ -336,7 +336,7 @@ async def test_team_response_retries_errored_plain_run_output_with_fresh_run_id(
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(run_id="run-123"),
+            ctx=make_turn_context(run_id="run-123", session_id=None),
             media=MediaInputs(audio=[MagicMock(name="audio_input")]),
             run_id_callback=callback_run_ids.append,
         )
@@ -852,7 +852,7 @@ async def test_prepare_materialized_team_execution_scrubs_queued_notices_when_ca
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ):
             await prepare_materialized_team_execution(
-                make_turn_context(),
+                make_turn_context(session_id=None),
                 scope_context=scope_context,
                 agents=[fake_agent],
                 team=mock_team,
@@ -891,7 +891,7 @@ async def test_prepare_materialized_team_execution_forwards_explicit_thread_hist
         new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
     ):
         await prepare_materialized_team_execution(
-            make_turn_context(),
+            make_turn_context(session_id=None),
             scope_context=None,
             agents=[fake_agent],
             team=mock_team,
@@ -934,6 +934,7 @@ async def test_prepare_materialized_team_execution_appends_system_enrichment_con
         await prepare_materialized_team_execution(
             make_turn_context(
                 system_enrichment_items=(EnrichmentItem(key="weather", text="72F and sunny"),),
+                session_id=None,
             ),
             scope_context=None,
             agents=[fake_agent],
@@ -988,7 +989,7 @@ async def test_prepare_materialized_team_execution_carries_compaction_metadata_a
         new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
     ):
         prepared = await prepare_materialized_team_execution(
-            make_turn_context(reply_to_event_id="$event", room_id="!room:localhost"),
+            make_turn_context(reply_to_event_id="$event", room_id="!room:localhost", session_id=None),
             scope_context=None,
             agents=[fake_agent],
             team=mock_team,
@@ -1401,7 +1402,7 @@ async def test_team_response_passes_run_id_to_team_arun() -> None:
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(run_id="run-123"),
+            ctx=make_turn_context(run_id="run-123", session_id=None),
         )
 
     assert "Recovered team response" in response
@@ -1440,7 +1441,7 @@ async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(run_id="run-123"),
+            ctx=make_turn_context(run_id="run-123", session_id=None),
         )
 
 
@@ -1612,7 +1613,7 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
         )
 
     assert response == "friendly-team-error"
@@ -1775,7 +1776,7 @@ async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> N
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(run_id="run-123"),
+            ctx=make_turn_context(run_id="run-123", session_id=None),
             media=MediaInputs(audio=[MagicMock(name="audio_input")]),
             run_id_callback=lambda current_run_id: (
                 callback_run_ids.append(current_run_id),
@@ -1907,7 +1908,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
                     turn_recorder=recorder,
                     orchestrator=orchestrator,
                     execution_identity=None,
-                    ctx=make_turn_context(run_id="run-456"),
+                    ctx=make_turn_context(run_id="run-456", session_id=None),
                     mode=TeamMode.COORDINATE,
                 )
             ]
@@ -2614,7 +2615,7 @@ async def test_team_response_stream_emits_team_run_output_fallback() -> None:
                 turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(run_id="run-789"),
+                ctx=make_turn_context(run_id="run-789", session_id=None),
                 mode=TeamMode.COORDINATE,
             )
         ]
@@ -2745,7 +2746,7 @@ async def test_team_response_stream_emits_plain_run_output_fallback_with_team_fo
                 turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
                 mode=TeamMode.COORDINATE,
             )
         ]
@@ -2803,7 +2804,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_output_f
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(run_id="run-789"),
+            ctx=make_turn_context(run_id="run-789", session_id=None),
             mode=TeamMode.COORDINATE,
         ):
             pass
@@ -2857,7 +2858,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
                 turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
                 mode=TeamMode.COORDINATE,
             )
         ]
@@ -2913,7 +2914,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_plain_run
                 turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
                 mode=TeamMode.COORDINATE,
             )
         ]
@@ -2975,7 +2976,7 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
                 turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(run_id="run-789"),
+                ctx=make_turn_context(run_id="run-789", session_id=None),
                 mode=TeamMode.COORDINATE,
                 media=MediaInputs(audio=[MagicMock(name="audio_input")]),
                 run_id_callback=callback_run_ids.append,
@@ -3245,7 +3246,7 @@ async def test_team_response_rejects_missing_materialized_members() -> None:
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
         )
 
     assert response == "Team request includes agent 'research' that could not be materialized for this request."
@@ -3519,7 +3520,7 @@ async def test_team_response_rejects_non_running_materialized_members() -> None:
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
         )
 
     assert response == "Team request includes agent 'research' that could not be materialized for this request."
@@ -3561,7 +3562,7 @@ async def test_team_response_rejects_request_time_materialization_failure() -> N
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
             reason_prefix="Team 'summary'",
         )
 
@@ -3602,7 +3603,7 @@ async def test_team_stream_rejects_missing_materialized_members() -> None:
                 turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
             )
         ]
 
@@ -3650,7 +3651,7 @@ async def test_team_stream_rejects_request_time_materialization_failure() -> Non
                 turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
                 reason_prefix="Team 'summary'",
             )
         ]
@@ -3693,7 +3694,7 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
                 turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
                 media=MediaInputs(audio=[audio_input]),
             )
         ]
@@ -3749,7 +3750,7 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
                 turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
                 media=MediaInputs(audio=[audio_input]),
             )
         ]
@@ -3992,7 +3993,7 @@ async def test_team_response_materializes_private_agent_with_execution_identity(
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=identity,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
         )
 
     assert "Team response" in response
@@ -4025,7 +4026,7 @@ async def test_team_response_rejects_private_agent_with_non_matrix_execution_ide
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=identity,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
         )
 
 
@@ -4054,7 +4055,7 @@ async def test_team_response_rejects_private_agent_with_empty_requester_identity
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=identity,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
         )
 
 
@@ -4074,7 +4075,7 @@ async def test_team_response_rejects_private_agents_even_when_private_member_is_
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
         )
 
 
@@ -4099,7 +4100,7 @@ async def test_team_response_stream_rejects_private_agents_even_when_private_mem
                 turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
             )
         ]
 
@@ -4142,7 +4143,7 @@ async def test_team_response_stream_materializes_private_agent_with_execution_id
                 turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=identity,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
             )
         ]
 
@@ -4191,7 +4192,7 @@ async def test_team_response_rejects_members_that_delegate_to_private_agents() -
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
         )
 
 
@@ -4225,7 +4226,7 @@ async def test_team_response_ignores_router_in_direct_team_member_list() -> None
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
         )
 
     assert "General response" in response
@@ -4265,7 +4266,7 @@ async def test_team_response_stream_ignores_router_in_direct_team_member_list() 
                 turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(),
+                ctx=make_turn_context(session_id=None),
             )
         ]
 
@@ -4355,7 +4356,7 @@ async def test_team_response_materializes_members_with_request_execution_identit
             turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=identity,
-            ctx=make_turn_context(),
+            ctx=make_turn_context(session_id=None),
         )
 
     assert "General response" in response
