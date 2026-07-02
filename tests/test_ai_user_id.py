@@ -108,6 +108,7 @@ from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
     ResponseRunnerDeps,
+    _NonStreamingGeneration,
     prepare_memory_and_model_context,
 )
 from mindroom.streaming import StreamingDeliveryError, strip_visible_tool_markers
@@ -2194,7 +2195,7 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
         async def fake_generate_non_streaming(
             *_args: object,
             **kwargs: object,
-        ) -> str:
+        ) -> _NonStreamingGeneration:
             turn_recorder = cast("TurnRecorder", kwargs["turn_recorder"])
             turn_recorder.set_run_id("run-delivery-cancel")
             turn_recorder.record_completed(
@@ -2202,7 +2203,11 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
                 assistant_text="Hello!",
                 completed_tools=[],
             )
-            return "Hello!"
+            return _NonStreamingGeneration(
+                response_text="Hello!",
+                tool_trace=[],
+                run_metadata_content={},
+            )
 
         _set_gateway_method(
             coordinator.deps.delivery_gateway,

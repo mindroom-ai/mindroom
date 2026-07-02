@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 
     from mindroom.attachments import AttachmentRecord
     from mindroom.config.main import Config
-    from mindroom.history import CompactionLifecycle, CompactionOutcome
+    from mindroom.history import CompactionLifecycle
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.timing import DispatchPipelineTiming
@@ -774,7 +774,6 @@ async def prepare_agent_execution_context(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
     config: Config,
-    compaction_outcomes_collector: list[CompactionOutcome] | None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
@@ -814,7 +813,6 @@ async def prepare_agent_execution_context(
             resolved_inputs=resolved_inputs,
             runtime_paths=runtime_paths,
             config=config,
-            compaction_outcomes_collector=compaction_outcomes_collector,
             scope_context=scope_context,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
@@ -868,7 +866,6 @@ async def _prepare_bound_team_execution_context(
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
@@ -885,7 +882,6 @@ async def _prepare_bound_team_execution_context(
             full_prompt=prepared_prompt,
             runtime_paths=runtime_paths,
             config=config,
-            compaction_outcomes_collector=compaction_outcomes_collector,
             scope_context=scope_context,
             team_name=team_name,
             active_model_name=active_model_name,
@@ -958,7 +954,6 @@ async def prepare_bound_team_run_context(
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
@@ -985,7 +980,6 @@ async def prepare_bound_team_run_context(
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
-        compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
         thread_history_render_limits=thread_history_render_limits,
         pipeline_timing=pipeline_timing,

@@ -2922,7 +2922,6 @@ class TestTeamCompletion:
         assert preparation_ctx.thread_id is None
         assert preparation_ctx.requester_id is None
         assert re.fullmatch(r"[0-9a-f]{32}", preparation_ctx.correlation_id)
-        assert preparation_kwargs["compaction_outcomes_collector"] is None
         assert preparation_kwargs["configured_team_name"] == "super_team"
         assert preparation_ctx.matrix_run_metadata is None
         assert preparation_kwargs["active_model_name"] == "default"

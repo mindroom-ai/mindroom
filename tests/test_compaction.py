@@ -312,7 +312,6 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
             prompt="Current prompt",
             runtime_paths=runtime_paths,
             config=config,
-            compaction_outcomes_collector=None,
         )
 
     prepared = prepared_run.prepared_history

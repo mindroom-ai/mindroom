@@ -597,100 +597,7 @@ def _make_test_compaction_outcome() -> CompactionOutcome:
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_syncs_enriched_compaction_outcomes_back_to_collector(
-    tmp_path: Path,
-) -> None:
-    config, runtime_paths = _make_config(tmp_path)
-
-    def search_docs(query: str) -> str:
-        return query
-
-    live_agent = _agent()
-    live_agent.role = "Engineer"
-    live_agent.instructions = ["Keep the response concise."]
-    live_agent.tools = [Function.from_callable(search_docs)]
-
-    original_outcome = _make_test_compaction_outcome()
-    collector = [original_outcome]
-    prepared_execution = _PreparedExecutionContext(
-        messages=(Message(role="user", content="Current prompt"),),
-        unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(compaction_outcomes=[original_outcome]),
-    )
-
-    with (
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch(
-            "mindroom.ai.prepare_agent_execution_context",
-            new=AsyncMock(return_value=prepared_execution),
-        ),
-    ):
-        prepared_run = await _prepare_agent_and_prompt(
-            make_turn_context("test_agent"),
-            prompt="Current prompt",
-            runtime_paths=runtime_paths,
-            config=config,
-            compaction_outcomes_collector=collector,
-        )
-
-    prepared = prepared_run.prepared_history
-    assert collector[0] is prepared.compaction_outcomes[0]
-    assert collector[0] is not original_outcome
-    assert collector[0].role_instructions_tokens is not None
-    assert collector[0].tool_definition_tokens is not None
-    assert collector[0].current_prompt_tokens is not None
-
-
-@pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_populates_empty_collector_with_enriched_compaction_outcomes(
-    tmp_path: Path,
-) -> None:
-    config, runtime_paths = _make_config(tmp_path)
-
-    def search_docs(query: str) -> str:
-        return query
-
-    live_agent = _agent()
-    live_agent.role = "Engineer"
-    live_agent.instructions = ["Keep the response concise."]
-    live_agent.tools = [Function.from_callable(search_docs)]
-
-    original_outcome = _make_test_compaction_outcome()
-    collector: list[CompactionOutcome] = []
-    prepared_execution = _PreparedExecutionContext(
-        messages=(Message(role="user", content="Current prompt"),),
-        unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(compaction_outcomes=[original_outcome]),
-    )
-
-    with (
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch(
-            "mindroom.ai.prepare_agent_execution_context",
-            new=AsyncMock(return_value=prepared_execution),
-        ),
-    ):
-        prepared_run = await _prepare_agent_and_prompt(
-            make_turn_context("test_agent"),
-            prompt="Current prompt",
-            runtime_paths=runtime_paths,
-            config=config,
-            compaction_outcomes_collector=collector,
-        )
-
-    prepared = prepared_run.prepared_history
-    assert len(collector) == 1
-    assert collector[0] is prepared.compaction_outcomes[0]
-    assert collector[0] is not original_outcome
-    assert collector[0].role_instructions_tokens is not None
-    assert collector[0].tool_definition_tokens is not None
-    assert collector[0].current_prompt_tokens is not None
-
-
-@pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_enriches_compaction_outcomes_without_collector(
+async def test_prepare_agent_and_prompt_enriches_compaction_outcomes(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
@@ -723,7 +630,6 @@ async def test_prepare_agent_and_prompt_enriches_compaction_outcomes_without_col
             prompt="Current prompt",
             runtime_paths=runtime_paths,
             config=config,
-            compaction_outcomes_collector=None,
         )
 
     prepared = prepared_run.prepared_history
@@ -764,7 +670,6 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
             prompt="Current prompt",
             runtime_paths=runtime_paths,
             config=config,
-            compaction_outcomes_collector=None,
         )
 
     prepared = prepared_run.prepared_history
@@ -779,12 +684,11 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_keeps_empty_collector_when_no_compaction_outcomes(
+async def test_prepare_agent_and_prompt_keeps_outcomes_empty_when_no_compaction_occurred(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
     live_agent = _agent()
-    collector: list[CompactionOutcome] = []
     prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
         unseen_event_ids=[],
@@ -804,11 +708,9 @@ async def test_prepare_agent_and_prompt_keeps_empty_collector_when_no_compaction
             prompt="Current prompt",
             runtime_paths=runtime_paths,
             config=config,
-            compaction_outcomes_collector=collector,
         )
 
     prepared = prepared_run.prepared_history
-    assert collector == []
     assert prepared.compaction_outcomes == []
 
 

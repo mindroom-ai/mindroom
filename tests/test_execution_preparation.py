@@ -237,7 +237,6 @@ async def test_prepare_agent_execution_context_reuses_function_schema_processing
         ],
         runtime_paths=runtime_paths,
         config=config,
-        compaction_outcomes_collector=None,
         current_sender_id="@alice:localhost",
     )
 
@@ -308,7 +307,6 @@ async def test_prepare_agent_execution_context_reuses_function_schema_processing
             ],
             runtime_paths=runtime_paths,
             config=config,
-            compaction_outcomes_collector=None,
             current_sender_id="@alice:localhost",
         )
 
