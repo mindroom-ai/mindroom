@@ -16,9 +16,12 @@ from agno.run.team import TeamRunOutput
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import (
     TeamMode,
+    _build_team_runtime_db_callbacks,
     _materialize_team_members,
+    _TeamTurnHolder,
     materialize_exact_team_members,
     team_response,
     team_response_stream,
@@ -156,7 +159,7 @@ async def test_team_response_stream_continues_after_terminal_dynamic_tool_output
     recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
 
     patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
+    with patches[0] as mock_create, patches[1], patches[2]:
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -170,6 +173,8 @@ async def test_team_response_stream_continues_after_terminal_dynamic_tool_output
         ]
 
     assert mock_team.arun.call_count == 2
+    # The streamed continuation rebuilds member agents like the blocking path.
+    assert mock_create.call_count == 2
     second_prompt = mock_team.arun.call_args_list[1].args[0]
     assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
@@ -193,9 +198,14 @@ async def test_team_response_stream_continues_after_streamed_member_dynamic_tool
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
     recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
+    first_agent = _make_test_agent("GeneralAgent")
+    second_agent = _make_test_agent("GeneralAgent")
 
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
+    with (
+        patch("mindroom.teams.create_agent", side_effect=[first_agent, second_agent]) as mock_create,
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team) as mock_instance,
+    ):
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -209,6 +219,11 @@ async def test_team_response_stream_continues_after_streamed_member_dynamic_tool
         ]
 
     assert mock_team.arun.call_count == 2
+    # The second attempt's Team instance is built from the rebuilt members,
+    # not the spent first-attempt agents.
+    assert mock_create.call_count == 2
+    assert mock_instance.call_args_list[0].kwargs["agents"] == [first_agent]
+    assert mock_instance.call_args_list[1].kwargs["agents"] == [second_agent]
     second_prompt = mock_team.arun.call_args_list[1].args[0]
     assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
@@ -234,7 +249,7 @@ async def test_team_response_stream_continues_from_hidden_member_dynamic_tool() 
     recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
 
     patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
+    with patches[0] as mock_create, patches[1], patches[2]:
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -249,9 +264,40 @@ async def test_team_response_stream_continues_from_hidden_member_dynamic_tool() 
         ]
 
     assert mock_team.arun.call_count == 2
+    assert mock_create.call_count == 2
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Used the loaded tool." in rendered
     assert recorder.outcome == "completed"
+
+
+def test_release_attempt_members_resets_snapshot_state() -> None:
+    """Releasing spent members clears the partial-snapshot sources on the holder.
+
+    A cancel landing between the release and the next attempt must snapshot
+    empty partials instead of the spent attempt's text and tools (which would
+    be double-counted via the turn state's prior completed tools).
+    """
+    holder = _TeamTurnHolder(
+        team=None,
+        team_members=ResolvedExactTeamMembers(
+            requested_agent_names=["general"],
+            agents=[],
+            display_names=["GeneralAgent"],
+            materialized_agent_names={"general"},
+            failed_agent_names=[],
+        ),
+        last_response=TeamRunOutput(content="stale"),
+        render_partial=lambda: "stale partial",
+    )
+    stale_tracker = holder.tool_tracker
+    release, _close = _build_team_runtime_db_callbacks(holder)
+
+    release(None)
+
+    assert holder.team_members is None
+    assert holder.last_response is None
+    assert holder.render_partial() == ""
+    assert holder.tool_tracker is not stale_tracker
 
 
 def test_materialize_exact_team_members_defaults_to_no_continuation() -> None:
