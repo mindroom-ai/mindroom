@@ -125,7 +125,7 @@ SKILLS_TOOL_USAGE_PROMPT = """When using skills, access them via the skill tools
 Do not open an existing skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.
 """
 
-WORKSPACE_SKILL_AUTHORING_PROMPT = """You can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.
+WORKSPACE_SKILL_AUTHORING_PROMPT = """If you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.
 A skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.
 `SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:
 
