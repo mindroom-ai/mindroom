@@ -272,7 +272,7 @@ def delete_credentials_for_target(service: str, target: RequestCredentialsTarget
 def primary_runtime_scoped_services_for_target(target: RequestCredentialsTarget) -> set[str]:
     """List services stored in the primary runtime scoped store for one target."""
     if target.worker_scope == "shared":
-        if target.agent_name is None:
+        if not target.agent_name:
             return set()
         agent_scoped_manager = target.base_manager.for_primary_runtime_agent_scope(target.agent_name)
         return {

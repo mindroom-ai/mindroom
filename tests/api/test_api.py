@@ -1480,6 +1480,8 @@ def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path)
         ("google_calendar", "shared", frozenset({"google_calendar"})),
         ("google_sheets", "shared", frozenset({"google_sheets"})),
         ("gmail", "shared", frozenset({"gmail"})),
+        # Agent-scoped OAuth token services no longer inject themselves into the
+        # shared allowlist; they fall through to the context allowlist unchanged.
         ("google_drive_oauth", "shared", frozenset({"weather"})),
         ("weather", "shared", frozenset({"weather"})),
         ("google_drive", "user", frozenset({"weather"})),
