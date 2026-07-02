@@ -95,11 +95,11 @@ def _ordered_deferred_tools(
 
 
 def _deferred_tool_names(config: Config, agent_name: str) -> list[str]:
-    return [entry.name for entry in config.get_agent_authored_deferred_tool_configs(agent_name)]
+    return [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs]
 
 
 def _initial_loaded_tools(config: Config, agent_name: str) -> list[str]:
-    return [entry.name for entry in config.get_agent_authored_deferred_tool_configs(agent_name) if entry.initial]
+    return [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs if entry.initial]
 
 
 def _default_loaded_tools(config: Config, agent_name: str) -> list[str]:
@@ -119,7 +119,7 @@ def _sanitize_loaded_tools(
         if tool_name not in deferred_tool_name_set:
             invalid_tools.append(tool_name)
             continue
-        if config.get_deferred_tool_scope_incompatible_tools(agent_name, tool_name):
+        if config.resolve_entity(agent_name).deferred_tool_scope_incompatible_tools(tool_name):
             invalid_tools.append(tool_name)
             continue
         valid.append(tool_name)
@@ -147,7 +147,7 @@ def _normalize_effective_tool_config_overrides(
 
 def has_deferred_tools(config: Config, agent_name: str) -> bool:
     """Return whether one agent has at least one authored deferred tool."""
-    return bool(config.get_agent_authored_deferred_tool_configs(agent_name))
+    return bool(config.resolve_entity(agent_name).authored_deferred_tool_configs)
 
 
 def _special_tool_names(
@@ -221,7 +221,7 @@ def _visible_authored_tool_configs(
                 hidden_deferred_by_name[tool_name] = expanded
 
     resolved: list[EffectiveToolConfig] = []
-    for tool_name in config.get_agent_available_tools(agent_name):
+    for tool_name in config.resolve_entity(agent_name).available_tools:
         visible = visible_by_name.get(tool_name)
         if visible is None:
             continue
@@ -253,7 +253,7 @@ def _append_injected_special_tool_configs(
     ):
         if tool_name in tool_names:
             continue
-        if config.get_agent_authored_deferred_tool_config(agent_name, tool_name) is not None:
+        if config.resolve_entity(agent_name).authored_deferred_tool_config(tool_name) is not None:
             continue
         resolved_tool_configs.append(
             EffectiveToolConfig(
@@ -408,7 +408,7 @@ def load_tool_for_session(
                 loaded_tools=tuple(loaded_tools),
                 available_tools=tuple(deferred_tool_names),
             )
-        elif incompatible_tools := config.get_deferred_tool_scope_incompatible_tools(agent_name, tool_name):
+        elif incompatible_tools := config.resolve_entity(agent_name).deferred_tool_scope_incompatible_tools(tool_name):
             result = LoadToolResult(
                 status="scope_incompatible",
                 loaded_tools=tuple(loaded_tools),
@@ -512,7 +512,7 @@ def deferred_tool_catalog_entries(
     """Return model-visible catalog metadata for one agent's authored deferred tools."""
     loaded = set(loaded_tools)
     entries: list[DeferredToolCatalogEntry] = []
-    for entry in config.get_agent_authored_deferred_tool_configs(agent_name):
+    for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs:
         metadata = TOOL_METADATA.get(entry.name)
         entries.append(
             DeferredToolCatalogEntry(

@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryBackend, MemorySearchConfig
-    from mindroom.config.models import CompactionConfig
+    from mindroom.config.models import CompactionConfig, EffectiveToolConfig
     from mindroom.history.types import ResolvedHistorySettings
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 
 @dataclass(frozen=True, eq=False)
@@ -70,3 +71,46 @@ class ResolvedEntityView:
             msg = "The defaults-only scope has no authored model"
             raise ValueError(msg)
         return self._config.get_entity_model_name(self.name)
+
+    def _agent_name(self) -> str:
+        if self.name is None:
+            msg = "The defaults-only scope has no per-agent config"
+            raise ValueError(msg)
+        return self.name
+
+    @cached_property
+    def available_tools(self) -> list[str]:
+        """All tools this agent may use after dynamic loading."""
+        return self._config.get_agent_available_tools(self._agent_name())
+
+    @cached_property
+    def tool_configs(self) -> list[EffectiveToolConfig]:
+        """Effective runtime tool config entries for each authored owner."""
+        return self._config.get_agent_tool_configs(self._agent_name())
+
+    @cached_property
+    def authored_deferred_tool_configs(self) -> list[EffectiveToolConfig]:
+        """One entry per authored deferred tool in effective order."""
+        return self._config.get_agent_authored_deferred_tool_configs(self._agent_name())
+
+    def authored_deferred_tool_config(self, authored_tool_name: str) -> EffectiveToolConfig | None:
+        """Return one authored deferred tool config by authored name."""
+        return self._config.get_agent_authored_deferred_tool_config(self._agent_name(), authored_tool_name)
+
+    def tool_runtime_overrides(self, tool_name: str) -> dict[str, object] | None:
+        """Return runtime kwargs derived from this agent's authored overrides for one tool."""
+        return self._config.get_agent_tool_runtime_overrides(self._agent_name(), tool_name)
+
+    def deferred_tool_scope_incompatible_tools(self, authored_tool_name: str) -> list[str]:
+        """Return expanded deferred tools invalid for this agent's effective execution scope."""
+        return self._config.get_deferred_tool_scope_incompatible_tools(self._agent_name(), authored_tool_name)
+
+    @cached_property
+    def execution_scope(self) -> WorkerScope | None:
+        """Internal derived execution scope for this agent."""
+        return self._config.get_agent_execution_scope(self._agent_name())
+
+    @cached_property
+    def scope_label(self) -> str:
+        """User-facing authored scope label for this agent."""
+        return self._config.get_agent_scope_label(self._agent_name())

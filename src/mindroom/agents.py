@@ -794,7 +794,7 @@ def _visible_deferred_tool_names(
 ) -> list[str]:
     return [
         entry.name
-        for entry in config.get_agent_authored_deferred_tool_configs(agent_name)
+        for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs
         if entry.name not in hidden_tool_names
     ]
 
@@ -867,7 +867,7 @@ def _build_dynamic_tooling_state_suffix(
 
     initial_tools = [
         entry.name
-        for entry in config.get_agent_authored_deferred_tool_configs(agent_name)
+        for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs
         if entry.initial and entry.name not in hidden_tool_names
     ]
     visible_loaded_tools = tuple(tool_name for tool_name in loaded_tools if tool_name not in hidden_tool_names)
@@ -1314,7 +1314,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     tools: list[Toolkit] = []
     for tool_name in resolved_tool_configs:
         try:
-            runtime_overrides = config.get_agent_tool_runtime_overrides(agent_name, tool_name)
+            runtime_overrides = config.resolve_entity(agent_name).tool_runtime_overrides(tool_name)
             with agent_create_timing("toolkit_build.one", tool_name=tool_name):
                 toolkit = build_agent_toolkit(
                     tool_name,
