@@ -26,7 +26,7 @@ from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest
+from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.turn_policy import PreparedDispatch
 from tests.conftest import (
     TEST_PASSWORD,
@@ -320,13 +320,16 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
         await response_function(None)
         return "$response"
 
-    async def fake_process_and_respond(_request: ResponseRequest, **_kwargs: object) -> FinalDeliveryOutcome:
-        return FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$response",
-            is_visible_response=True,
-            final_visible_body="ok",
-            delivery_kind="sent",
+    async def fake_process_and_respond(_request: ResponseRequest, **_kwargs: object) -> _ResponseGenerationOutcome:
+        return _ResponseGenerationOutcome(
+            delivery=FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$response",
+                is_visible_response=True,
+                final_visible_body="ok",
+                delivery_kind="sent",
+            ),
+            run_succeeded=True,
         )
 
     with (

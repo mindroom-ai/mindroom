@@ -70,7 +70,12 @@ from mindroom.post_response_effects import (
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_lifecycle import _QueuedMessageState
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
+from mindroom.response_runner import (
+    PostLockRequestPreparationError,
+    ResponseRequest,
+    ResponseRunner,
+    _ResponseGenerationOutcome,
+)
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
@@ -1122,12 +1127,15 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$response",
-                        is_visible_response=True,
-                        final_visible_body="ok",
-                        delivery_kind="sent",
+                    return_value=_ResponseGenerationOutcome(
+                        delivery=FinalDeliveryOutcome(
+                            terminal_status="completed",
+                            event_id="$response",
+                            is_visible_response=True,
+                            final_visible_body="ok",
+                            delivery_kind="sent",
+                        ),
+                        run_succeeded=True,
                     ),
                 ),
             ),
@@ -1260,14 +1268,17 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
     async def fake_process_and_respond(
         request: ResponseRequest,
         **_kwargs: object,
-    ) -> FinalDeliveryOutcome:
+    ) -> _ResponseGenerationOutcome:
         observed_delivery_targets.append(request.response_envelope.target)
-        return FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$response",
-            is_visible_response=True,
-            final_visible_body="ok",
-            delivery_kind="sent",
+        return _ResponseGenerationOutcome(
+            delivery=FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$response",
+                is_visible_response=True,
+                final_visible_body="ok",
+                delivery_kind="sent",
+            ),
+            run_succeeded=True,
         )
 
     with (
@@ -1333,14 +1344,17 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
     async def fake_process_and_respond(
         request: ResponseRequest,
         **_kwargs: object,
-    ) -> FinalDeliveryOutcome:
+    ) -> _ResponseGenerationOutcome:
         observed_delivery_targets.append(request.response_envelope.target)
-        return FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$response",
-            is_visible_response=True,
-            final_visible_body="ok",
-            delivery_kind="sent",
+        return _ResponseGenerationOutcome(
+            delivery=FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$response",
+                is_visible_response=True,
+                final_visible_body="ok",
+                delivery_kind="sent",
+            ),
+            run_succeeded=True,
         )
 
     def fake_build_lifecycle(**kwargs: object) -> _NoopResponseLifecycle:

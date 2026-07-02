@@ -1331,12 +1331,12 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        delivery = await coordinator.process_and_respond_streaming(
+        generation = await coordinator.process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
         )
 
-    assert delivery.event_id == "$terminal"
-    assert delivery.response_text == "Hello!"
+    assert generation.delivery.event_id == "$terminal"
+    assert generation.delivery.response_text == "Hello!"
     assert sequence == [
         "stream",
         "deliver:Hello!",
@@ -1392,12 +1392,12 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        delivery = await coordinator.process_and_respond_streaming(
+        generation = await coordinator.process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
         )
 
-    assert delivery.event_id == "$terminal"
-    assert delivery.failure_reason == "boom"
+    assert generation.delivery.event_id == "$terminal"
+    assert generation.delivery.failure_reason == "boom"
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1459,12 +1459,12 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
 
-        delivery = await coordinator.process_and_respond_streaming(
+        generation = await coordinator.process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
             run_id="run-1",
         )
 
-    assert delivery.event_id == "$streamed"
+    assert generation.delivery.event_id == "$streamed"
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1550,11 +1550,11 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        delivery = await coordinator.process_and_respond_streaming(
+        generation = await coordinator.process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
         )
 
-    assert delivery.event_id == "$terminal"
+    assert generation.delivery.event_id == "$terminal"
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1627,15 +1627,15 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
 
         mock_ai.side_effect = fake_ai_response
 
-        delivery = await coordinator.process_and_respond(
+        generation = await coordinator.process_and_respond(
             replace(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 existing_event_id="$thinking",
             ),
         )
 
-    assert delivery.terminal_status == "cancelled"
-    assert _visible_response_event_id(delivery) == "$thinking"
+    assert generation.delivery.terminal_status == "cancelled"
+    assert _visible_response_event_id(generation.delivery) == "$thinking"
     assert sequence == [
         "ai",
         "started:!test:localhost:$thread-root:$thread-root",
@@ -3302,6 +3302,75 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         "deliver:Team hello",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
     ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_streaming_delivery_carries_live_metadata_collector(
+    tmp_path: Path,
+) -> None:
+    """The team streaming delivery request carries the live metadata collector.
+
+    The turn driver fills the collector at terminal settle, before the
+    stream's final edit snapshots extra_content; without the live dict the
+    ai_run payload never reaches Matrix in streaming mode (the finalize
+    happy path sends no extra edit).
+    """
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "ultimate"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = _knowledge_access_support()
+
+    captured_extra_content: list[object] = []
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        async def consume_delivery(request: object) -> StreamTransportOutcome:
+            async for _chunk in request.response_stream:
+                pass
+            # Snapshot after stream exhaustion, like the real final edit.
+            captured_extra_content.append(request.extra_content)
+            return _stream_outcome("$team-final", "Team hello")
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
+
+        def fake_team_response_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                collector = kwargs["run_metadata_collector"]
+                assert isinstance(collector, dict)
+                collector["io.mindroom.ai_run"] = {"usage": {"output_tokens": 5}}
+                yield "Team hello"
+
+            return fake_stream()
+
+        mock_team_stream.side_effect = fake_team_response_stream
+
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert captured_extra_content == [{"io.mindroom.ai_run": {"usage": {"output_tokens": 5}}}]
 
 
 @pytest.mark.asyncio

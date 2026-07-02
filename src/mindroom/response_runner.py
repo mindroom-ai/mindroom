@@ -92,7 +92,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
-    from mindroom.history import CompactionOutcome, HistoryScope
+    from mindroom.history import HistoryScope
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -283,6 +283,25 @@ class ResponseRequest:
 
 class PostLockRequestPreparationError(RuntimeError):
     """Raised when post-lock request preparation fails before generation starts."""
+
+
+@dataclass(frozen=True)
+class _ResponseGenerationOutcome:
+    """What one locked response generation produced, returned instead of out-params."""
+
+    delivery: FinalDeliveryOutcome
+    run_succeeded: bool
+
+
+def _generation_outcome(
+    delivery: FinalDeliveryOutcome,
+    turn_recorder: TurnRecorder,
+) -> _ResponseGenerationOutcome:
+    """Assemble one generation outcome from the turn's recorder."""
+    return _ResponseGenerationOutcome(
+        delivery=delivery,
+        run_succeeded=turn_recorder.outcome == "completed",
+    )
 
 
 @dataclass(frozen=True)
@@ -1036,7 +1055,7 @@ class ResponseRunner:
             raise RuntimeError(msg)
         response_run_id = str(uuid4())
         final_delivery_outcome: FinalDeliveryOutcome | None = None
-        compaction_outcomes: list[CompactionOutcome] = []
+        team_run_metadata_content: dict[str, Any] = {}
         tracked_event_id: str | None = request.existing_event_id
         delivery_stage_started = False
         delivery_failure_reason: str | None = None
@@ -1102,7 +1121,7 @@ class ResponseRunner:
                             correlation_id=resolved_correlation_id,
                             active_event_ids=active_event_ids,
                             response_sender_id=self.deps.matrix_full_id,
-                            compaction_outcomes_collector=compaction_outcomes,
+                            run_metadata_collector=team_run_metadata_content,
                             compaction_lifecycle=compaction_lifecycle,
                             configured_team_name=self.deps.agent_name
                             if self.deps.agent_name in self.deps.runtime.config.teams
@@ -1130,6 +1149,15 @@ class ResponseRunner:
                                 and delivery_request.existing_event_is_placeholder,
                                 header=None,
                                 show_tool_calls=show_tool_calls,
+                                # The live collector dict: the turn driver fills it
+                                # at terminal settle, before the stream's final
+                                # edit snapshots extra_content, so the ai_run
+                                # metadata lands on the wire (mirrors the agent
+                                # streaming path).
+                                extra_content=_merge_response_extra_content(
+                                    team_run_metadata_content,
+                                    request.attachment_ids,
+                                ),
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
                                 visible_event_id_callback=_note_visible_response_event_id,
@@ -1163,7 +1191,8 @@ class ResponseRunner:
                     correlation_id=resolved_correlation_id,
                     tool_trace=None,
                     extra_content=_merge_response_extra_content(
-                        ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                        team_run_metadata_content
+                        or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
                         request.attachment_ids,
                     ),
                     existing_event_id=request.existing_event_id,
@@ -1200,7 +1229,7 @@ class ResponseRunner:
                                     correlation_id=resolved_correlation_id,
                                     active_event_ids=active_event_ids,
                                     response_sender_id=self.deps.matrix_full_id,
-                                    compaction_outcomes_collector=compaction_outcomes,
+                                    run_metadata_collector=team_run_metadata_content,
                                     compaction_lifecycle=compaction_lifecycle,
                                     configured_team_name=self.deps.agent_name
                                     if self.deps.agent_name in self.deps.runtime.config.teams
@@ -1274,7 +1303,8 @@ class ResponseRunner:
                             correlation_id=resolved_correlation_id,
                             tool_trace=None,
                             extra_content=_merge_response_extra_content(
-                                ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                                team_run_metadata_content
+                                or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
                                 request.attachment_ids,
                             ),
                         ),
@@ -1363,7 +1393,8 @@ class ResponseRunner:
                     correlation_id=resolved_correlation_id,
                     tool_trace=error.tool_trace if show_tool_calls else None,
                     extra_content=_merge_response_extra_content(
-                        ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                        team_run_metadata_content
+                        or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
                         request.attachment_ids,
                     ),
                     existing_event_id=request.existing_event_id,
@@ -1397,7 +1428,8 @@ class ResponseRunner:
                     correlation_id=resolved_correlation_id,
                     tool_trace=None,
                     extra_content=_merge_response_extra_content(
-                        ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                        team_run_metadata_content
+                        or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
                         request.attachment_ids,
                     ),
                     existing_event_id=request.existing_event_id,
@@ -1412,6 +1444,7 @@ class ResponseRunner:
                 session_id=session_id,
                 session_type=SessionType.TEAM,
                 execution_identity=tool_dispatch.execution_identity,
+                run_succeeded=team_turn_recorder.outcome == "completed",
                 interactive_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
@@ -1570,7 +1603,6 @@ class ResponseRunner:
         turn_recorder: TurnRecorder,
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
-        compaction_outcomes: list[CompactionOutcome],
         attempt_run_id_collector: list[str],
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> str:
@@ -1622,7 +1654,6 @@ class ResponseRunner:
                 tool_trace_collector=tool_trace,
                 run_metadata_collector=run_metadata_content,
                 execution_identity=runtime.tool_dispatch.execution_identity,
-                compaction_outcomes_collector=compaction_outcomes,
                 compaction_lifecycle=compaction_lifecycle,
                 refresh_scheduler=(
                     self.deps.runtime.orchestrator.knowledge_refresh_scheduler
@@ -1664,7 +1695,6 @@ class ResponseRunner:
         turn_recorder: TurnRecorder,
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
-        compaction_outcomes: list[CompactionOutcome],
         attempt_run_id_collector: list[str],
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> StreamTransportOutcome:
@@ -1714,7 +1744,6 @@ class ResponseRunner:
             show_tool_calls=self._show_tool_calls(),
             run_metadata_collector=run_metadata_content,
             execution_identity=runtime.tool_dispatch.execution_identity,
-            compaction_outcomes_collector=compaction_outcomes,
             compaction_lifecycle=compaction_lifecycle,
             refresh_scheduler=(
                 self.deps.runtime.orchestrator.knowledge_refresh_scheduler
@@ -1783,11 +1812,9 @@ class ResponseRunner:
         *,
         run_id: str | None = None,
         response_kind: str = "ai",
-        compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-        run_success_collector: list[bool] | None = None,
-        attempt_run_id_collector: list[str] | None = None,
         on_delivery_started: Callable[[str | None], None] | None = None,
-    ) -> FinalDeliveryOutcome:
+        attempt_run_id_collector: list[str] | None = None,
+    ) -> _ResponseGenerationOutcome:
         """Process a message and send a response without streaming."""
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
@@ -1818,14 +1845,19 @@ class ResponseRunner:
             create_storage=history_storage_factory,
         )
         tool_trace: list[Any] = []
-        compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
+        # The caller's list survives raising exit paths (cancellation, stream
+        # re-raises), unlike the returned outcome.
+        attempt_run_ids = attempt_run_id_collector if attempt_run_id_collector is not None else []
         active_event_ids = self._active_response_event_ids(request.room_id)
         turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
         )
+
+        def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
+            return _generation_outcome(delivery, turn_recorder)
 
         try:
             try:
@@ -1837,8 +1869,7 @@ class ResponseRunner:
                     turn_recorder=turn_recorder,
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
-                    compaction_outcomes=compaction_outcomes,
-                    attempt_run_id_collector=attempt_run_id_collector if attempt_run_id_collector is not None else [],
+                    attempt_run_id_collector=attempt_run_ids,
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
@@ -1854,22 +1885,26 @@ class ResponseRunner:
                 interrupted_message="Non-streaming response interrupted — traceback for diagnosis",
             )
             if request.existing_event_id:
-                return await self.deps.delivery_gateway.deliver_cancelled_visible_note(
-                    CancelledVisibleNoteRequest(
-                        target=runtime.resolved_target,
-                        event_id=request.existing_event_id,
-                        existing_event_is_placeholder=request.existing_event_is_placeholder,
-                        cancel_source=cancel_source,
-                        response_kind=response_kind,
-                        response_envelope=response_envelope,
-                        correlation_id=correlation_id,
+                return build_outcome(
+                    await self.deps.delivery_gateway.deliver_cancelled_visible_note(
+                        CancelledVisibleNoteRequest(
+                            target=runtime.resolved_target,
+                            event_id=request.existing_event_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                            cancel_source=cancel_source,
+                            response_kind=response_kind,
+                            response_envelope=response_envelope,
+                            correlation_id=correlation_id,
+                        ),
                     ),
                 )
             failure_reason = cancel_failure_reason(cancel_source)
-            return FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                event_id=None,
-                failure_reason=failure_reason,
+            return build_outcome(
+                FinalDeliveryOutcome(
+                    terminal_status="cancelled",
+                    event_id=None,
+                    failure_reason=failure_reason,
+                ),
             )
         except Exception as error:
             self.deps.logger.exception("Error in non-streaming response", error=str(error))
@@ -1909,25 +1944,17 @@ class ResponseRunner:
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
-        if run_success_collector is not None:
-            run_success_collector.append(turn_recorder.outcome == "completed")
-        if compaction_outcomes_collector is not None:
-            compaction_outcomes_collector.extend(compaction_outcomes)
-        return delivery
+        return build_outcome(delivery)
 
-    async def process_and_respond_streaming(  # noqa: C901, PLR0912, PLR0915
+    async def process_and_respond_streaming(  # noqa: C901, PLR0915
         self,
         request: ResponseRequest,
         *,
         run_id: str | None = None,
         response_kind: str = "ai",
-        compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-        run_success_collector: list[bool] | None = None,
-        attempt_run_id_collector: list[str] | None = None,
         on_delivery_started: Callable[[str | None], None] | None = None,
-        tool_trace_collector: list[Any] | None = None,
-        run_metadata_content_collector: dict[str, Any] | None = None,
-    ) -> FinalDeliveryOutcome:
+        attempt_run_id_collector: list[str] | None = None,
+    ) -> _ResponseGenerationOutcome:
         """Process a message and send a streamed response."""
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
@@ -1957,16 +1984,21 @@ class ResponseRunner:
             thread_id=runtime.resolved_target.resolved_thread_id,
             create_storage=history_storage_factory,
         )
-        compaction_outcomes: list[CompactionOutcome] = []
-        run_metadata_content = run_metadata_content_collector if run_metadata_content_collector is not None else {}
+        run_metadata_content: dict[str, Any] = {}
+        # The caller's list survives raising exit paths (cancellation, stream
+        # re-raises), unlike the returned outcome.
+        attempt_run_ids = attempt_run_id_collector if attempt_run_id_collector is not None else []
         active_event_ids = self._active_response_event_ids(request.room_id)
-        tool_trace = tool_trace_collector if tool_trace_collector is not None else []
+        tool_trace: list[Any] = []
         transport_outcome: StreamTransportOutcome | None = None
         turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
         )
+
+        def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
+            return _generation_outcome(delivery, turn_recorder)
 
         try:
             try:
@@ -1978,8 +2010,7 @@ class ResponseRunner:
                     turn_recorder=turn_recorder,
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
-                    compaction_outcomes=compaction_outcomes,
-                    attempt_run_id_collector=attempt_run_id_collector if attempt_run_id_collector is not None else [],
+                    attempt_run_id_collector=attempt_run_ids,
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
@@ -2013,26 +2044,24 @@ class ResponseRunner:
                     is_team=False,
                     response_event_id=error.event_id,
                 )
-            if run_success_collector is not None:
-                run_success_collector.append(turn_recorder.outcome == "completed")
-            if compaction_outcomes_collector is not None:
-                compaction_outcomes_collector.extend(compaction_outcomes)
             response_extra_content = _merge_response_extra_content(
                 run_metadata_content,
                 request.attachment_ids,
             )
-            return await self.deps.delivery_gateway.finalize_streamed_response(
-                FinalizeStreamedResponseRequest(
-                    target=runtime.resolved_target,
-                    stream_transport_outcome=stream_transport_outcome,
-                    initial_delivery_kind="edited" if request.existing_event_id else "sent",
-                    response_kind=response_kind,
-                    response_envelope=response_envelope,
-                    correlation_id=correlation_id,
-                    tool_trace=error.tool_trace if self._show_tool_calls() else None,
-                    extra_content=response_extra_content,
-                    existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+            return build_outcome(
+                await self.deps.delivery_gateway.finalize_streamed_response(
+                    FinalizeStreamedResponseRequest(
+                        target=runtime.resolved_target,
+                        stream_transport_outcome=stream_transport_outcome,
+                        initial_delivery_kind="edited" if request.existing_event_id else "sent",
+                        response_kind=response_kind,
+                        response_envelope=response_envelope,
+                        correlation_id=correlation_id,
+                        tool_trace=error.tool_trace if self._show_tool_calls() else None,
+                        extra_content=response_extra_content,
+                        existing_event_id=request.existing_event_id,
+                        existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    ),
                 ),
             )
         except asyncio.CancelledError as exc:
@@ -2047,31 +2076,33 @@ class ResponseRunner:
             raise
         except Exception as error:
             self.deps.logger.exception("Error in streaming response", error=str(error))
-            return await self.deps.delivery_gateway.finalize_streamed_response(
-                FinalizeStreamedResponseRequest(
-                    target=runtime.resolved_target,
-                    stream_transport_outcome=build_terminal_stream_transport_outcome(
-                        PendingVisibleResponse(
-                            tracked_event_id=request.existing_event_id,
-                            run_message_id=None,
-                            existing_event_id=request.existing_event_id,
-                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+            return build_outcome(
+                await self.deps.delivery_gateway.finalize_streamed_response(
+                    FinalizeStreamedResponseRequest(
+                        target=runtime.resolved_target,
+                        stream_transport_outcome=build_terminal_stream_transport_outcome(
+                            PendingVisibleResponse(
+                                tracked_event_id=request.existing_event_id,
+                                run_message_id=None,
+                                existing_event_id=request.existing_event_id,
+                                existing_event_is_placeholder=request.existing_event_is_placeholder,
+                            ),
+                            terminal_status="error",
+                            failure_reason=str(error),
+                            placeholder_body=PROGRESS_PLACEHOLDER,
                         ),
-                        terminal_status="error",
-                        failure_reason=str(error),
-                        placeholder_body=PROGRESS_PLACEHOLDER,
+                        initial_delivery_kind="edited" if request.existing_event_id else "sent",
+                        response_kind=response_kind,
+                        response_envelope=response_envelope,
+                        correlation_id=correlation_id,
+                        tool_trace=list(tool_trace) if self._show_tool_calls() else None,
+                        extra_content=_merge_response_extra_content(
+                            run_metadata_content,
+                            request.attachment_ids,
+                        ),
+                        existing_event_id=request.existing_event_id,
+                        existing_event_is_placeholder=request.existing_event_is_placeholder,
                     ),
-                    initial_delivery_kind="edited" if request.existing_event_id else "sent",
-                    response_kind=response_kind,
-                    response_envelope=response_envelope,
-                    correlation_id=correlation_id,
-                    tool_trace=list(tool_trace) if self._show_tool_calls() else None,
-                    extra_content=_merge_response_extra_content(
-                        run_metadata_content,
-                        request.attachment_ids,
-                    ),
-                    existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
 
@@ -2098,12 +2129,7 @@ class ResponseRunner:
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
-
-        if run_success_collector is not None:
-            run_success_collector.append(turn_recorder.outcome == "completed")
-        if compaction_outcomes_collector is not None:
-            compaction_outcomes_collector.extend(compaction_outcomes)
-        return delivery
+        return build_outcome(delivery)
 
     async def generate_response(self, request: ResponseRequest) -> str | None:
         """Generate and send/edit an agent response with lifecycle locking."""
@@ -2173,17 +2199,14 @@ class ResponseRunner:
         )
         self._note_pipeline_metadata(request, response_kind="agent", used_streaming=use_streaming)
         final_delivery_outcome: FinalDeliveryOutcome | None = None
-        compaction_outcomes: list[CompactionOutcome] = []
-        run_successes: list[bool] = []
+        generation: _ResponseGenerationOutcome | None = None
+        attempt_run_ids: list[str] = []
         response_run_id = str(uuid4())
         tracked_event_id: str | None = request.existing_event_id
         delivery_stage_started = False
         delivery_failure_reason: str | None = None
         delivery_cancelled = False
         early_delivery_error: BaseException | None = None
-        tool_trace: list[Any] = []
-        run_metadata_content: dict[str, Any] = {}
-        attempt_run_ids: list[str] = []
         request = self._request_with_locked_target(request, resolved_target)
         resolved_correlation_id = self._correlation_id_for_request(request)
         resolved_response_envelope = request.response_envelope
@@ -2263,30 +2286,25 @@ class ResponseRunner:
             )
 
         async def generate(message_id: str | None) -> None:
-            nonlocal final_delivery_outcome, tracked_event_id
+            nonlocal final_delivery_outcome, generation, tracked_event_id
             if message_id is not None:
                 tracked_event_id = message_id
             delivery_request = self._request_for_delivery(normalized_request, message_id=message_id)
             if use_streaming:
-                final_delivery_outcome = await self.process_and_respond_streaming(
+                generation = await self.process_and_respond_streaming(
                     delivery_request,
                     run_id=response_run_id,
-                    compaction_outcomes_collector=compaction_outcomes,
-                    run_success_collector=run_successes,
-                    attempt_run_id_collector=attempt_run_ids,
                     on_delivery_started=note_delivery_started,
-                    tool_trace_collector=tool_trace,
-                    run_metadata_content_collector=run_metadata_content,
+                    attempt_run_id_collector=attempt_run_ids,
                 )
             else:
-                final_delivery_outcome = await self.process_and_respond(
+                generation = await self.process_and_respond(
                     delivery_request,
                     run_id=response_run_id,
-                    compaction_outcomes_collector=compaction_outcomes,
-                    run_success_collector=run_successes,
-                    attempt_run_id_collector=attempt_run_ids,
                     on_delivery_started=note_delivery_started,
+                    attempt_run_id_collector=attempt_run_ids,
                 )
+            final_delivery_outcome = generation.delivery
 
         thinking_msg = None
         if not request.existing_event_id and not self._has_queued_forced_compaction(
@@ -2380,11 +2398,17 @@ class ResponseRunner:
                 )
         assert final_delivery_outcome is not None
         post_response_outcome = ResponseOutcome(
+            # The live collector list also covers raising exit paths, where the
+            # returned generation outcome never materialized.
             response_run_id=attempt_run_ids[-1] if attempt_run_ids else response_run_id,
             session_id=session_id,
             session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
             execution_identity=execution_identity,
-            run_succeeded=run_successes[-1] if run_successes else final_delivery_outcome.terminal_status == "completed",
+            run_succeeded=(
+                generation.run_succeeded
+                if generation is not None
+                else final_delivery_outcome.terminal_status == "completed"
+            ),
             interactive_target=resolved_target,
             thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
             thread_summary_thread_id=resolved_target.resolved_thread_id,

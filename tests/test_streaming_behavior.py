@@ -2042,7 +2042,7 @@ class TestStreamingBehavior:
                 typing_indicator=noop_typing,
             ),
         ):
-            delivery = await bot._response_runner.process_and_respond_streaming(
+            generation = await bot._response_runner.process_and_respond_streaming(
                 ResponseRequest(
                     thread_history=[],
                     prompt="Continue",
@@ -2052,7 +2052,7 @@ class TestStreamingBehavior:
                 ),
             )
 
-        assert delivery.event_id == "$stream_1"
+        assert generation.delivery.event_id == "$stream_1"
         assert sent_contents
         first_content = sent_contents[0]
         assert first_content["m.relates_to"]["rel_type"] == "m.thread"
@@ -2218,7 +2218,7 @@ class TestStreamingBehavior:
                 typing_indicator=_noop_typing_indicator,
             ),
         ):
-            delivery = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner.process_and_respond(
                 ResponseRequest(
                     thread_history=[],
                     prompt="Please check the docs",
@@ -2232,7 +2232,7 @@ class TestStreamingBehavior:
                 ),
             )
 
-        assert delivery.event_id == "$response"
+        assert generation.delivery.event_id == "$response"
         assert sync_git_source.await_count == 0
         assert reindex_all.await_count == 0
 
