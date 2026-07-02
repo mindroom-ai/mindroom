@@ -3806,10 +3806,15 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_helper_routes_placeholder_only_late_failure_through_cleanup_boundary(
+async def test_generate_team_response_helper_settles_late_failure_without_finalize(
     tmp_path: Path,
 ) -> None:
-    """Raw late team failures after sending only Thinking... should use the placeholder cleanup path."""
+    """Raw late team failures settle a bare terminal error without finalize.
+
+    Mirrors the agent arm: the tracked event must not be routed through the
+    placeholder-only cleanup, because an adopted thinking-message stream can
+    already hold the full streamed reply under the same event id.
+    """
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
@@ -3852,7 +3857,7 @@ async def test_generate_team_response_helper_routes_placeholder_only_late_failur
         )
 
     assert resolution is None
-    coordinator.deps.delivery_gateway.finalize_streamed_response.assert_awaited_once()
+    coordinator.deps.delivery_gateway.finalize_streamed_response.assert_not_awaited()
     coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
 
 

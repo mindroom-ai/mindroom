@@ -43,7 +43,6 @@ from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseO
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_terminal import (
     PendingVisibleResponse,
-    build_placeholder_terminal_stream_transport_outcome,
     build_terminal_stream_transport_outcome,
 )
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
@@ -310,14 +309,6 @@ class _DeliveryProgress:
         """Remember the latest Matrix event a terminal note could edit."""
         if event_id:
             self.tracked_event_id = event_id
-
-    def terminal_event_id(self, request: ResponseRequest, run_message_id: str | None) -> str | None:
-        """Return the best event to edit a terminal note into pre-delivery."""
-        if self.tracked_event_id is None:
-            self.track_event(run_message_id)
-        if self.tracked_event_id is not None:
-            return self.tracked_event_id
-        return request.existing_event_id if request.existing_event_is_placeholder else None
 
 
 @dataclass(frozen=True)
@@ -906,12 +897,24 @@ class ResponseRunner:
         response_kind: str,
         response_envelope: MessageEnvelope,
         correlation_id: str,
-        event_id: str | None,
+        progress: _DeliveryProgress,
+        run_message_id: str | None,
         terminal_status: Literal["cancelled", "error"],
         failure_reason: str,
     ) -> FinalDeliveryOutcome:
-        """Finalize one turn that terminated before visible delivery started."""
-        if event_id is None:
+        """Finalize one turn that terminated before a delivery outcome settled.
+
+        The real pending-visible shape decides what the gateway may touch: a
+        non-placeholder existing event (for example a prior answer being
+        regenerated) must never be treated as a redactable placeholder.
+        """
+        pending = PendingVisibleResponse(
+            tracked_event_id=progress.tracked_event_id,
+            run_message_id=run_message_id if request.existing_event_id is None else None,
+            existing_event_id=request.existing_event_id,
+            existing_event_is_placeholder=request.existing_event_is_placeholder,
+        )
+        if pending.terminal_event_id is None:
             return FinalDeliveryOutcome(
                 terminal_status=terminal_status,
                 event_id=None,
@@ -920,8 +923,8 @@ class ResponseRunner:
         return await self.deps.delivery_gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
                 target=target,
-                stream_transport_outcome=build_placeholder_terminal_stream_transport_outcome(
-                    event_id,
+                stream_transport_outcome=build_terminal_stream_transport_outcome(
+                    pending,
                     terminal_status=terminal_status,
                     failure_reason=failure_reason,
                     placeholder_body=PROGRESS_PLACEHOLDER,
@@ -932,44 +935,6 @@ class ResponseRunner:
                 correlation_id=correlation_id,
                 tool_trace=None,
                 extra_content=None,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-            ),
-        )
-
-    async def _finalize_late_delivery_failure(
-        self,
-        *,
-        target: MessageTarget,
-        request: ResponseRequest,
-        response_kind: str,
-        response_envelope: MessageEnvelope,
-        correlation_id: str,
-        progress: _DeliveryProgress,
-        run_message_id: str | None,
-        extra_content: dict[str, Any] | None,
-    ) -> FinalDeliveryOutcome:
-        """Finalize one turn whose delivery began but never produced an outcome."""
-        return await self.deps.delivery_gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=target,
-                stream_transport_outcome=build_terminal_stream_transport_outcome(
-                    PendingVisibleResponse(
-                        tracked_event_id=progress.tracked_event_id,
-                        run_message_id=run_message_id if request.existing_event_id is None else None,
-                        existing_event_id=request.existing_event_id,
-                        existing_event_is_placeholder=request.existing_event_is_placeholder,
-                    ),
-                    terminal_status="cancelled" if progress.cancelled else "error",
-                    failure_reason=progress.failure_reason or "late_stream_delivery_failure",
-                    placeholder_body=PROGRESS_PLACEHOLDER,
-                ),
-                initial_delivery_kind="edited" if request.existing_event_id else "sent",
-                response_kind=response_kind,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                tool_trace=None,
-                extra_content=extra_content,
                 existing_event_id=request.existing_event_id,
                 existing_event_is_placeholder=request.existing_event_is_placeholder,
             ),
@@ -1551,17 +1516,21 @@ class ResponseRunner:
                 response_kind="team",
                 response_envelope=resolved_response_envelope,
                 correlation_id=resolved_correlation_id,
-                event_id=progress.terminal_event_id(request, run_message_id),
+                progress=progress,
+                run_message_id=run_message_id,
                 terminal_status="cancelled",
                 failure_reason=progress.failure_reason or "interrupted",
             )
             progress.deferred_error = error
         except Exception as error:
             if progress.stage_started:
-                if progress.tracked_event_id is None:
-                    progress.track_event(run_message_id)
-                progress.failure_reason = str(error)
+                # A failure after delivery started settles through the late
+                # fallback below instead of tripping the outcome assertion. Only
+                # record the reason when no outcome exists yet, so a settled
+                # sync-restart cancellation still registers its retry.
                 self._log_delivery_failure(response_kind="team", error=error)
+                if final_delivery_outcome is None:
+                    progress.failure_reason = progress.failure_reason or str(error) or "late_delivery_failure"
             else:
                 progress.failure_reason = str(error) or "delivery_failed_before_start"
                 final_delivery_outcome = await self._finalize_pre_delivery_terminal(
@@ -1570,25 +1539,35 @@ class ResponseRunner:
                     response_kind="team",
                     response_envelope=resolved_response_envelope,
                     correlation_id=resolved_correlation_id,
-                    event_id=progress.terminal_event_id(request, run_message_id),
+                    progress=progress,
+                    run_message_id=run_message_id,
                     terminal_status="error",
                     failure_reason=progress.failure_reason,
                 )
                 progress.deferred_error = error
         if final_delivery_outcome is None and (progress.cancelled or progress.failure_reason is not None):
-            final_delivery_outcome = await self._finalize_late_delivery_failure(
-                target=delivery_target,
-                request=request,
-                response_kind="team",
-                response_envelope=resolved_response_envelope,
-                correlation_id=resolved_correlation_id,
-                progress=progress,
-                run_message_id=run_message_id,
-                extra_content=_merge_response_extra_content(
-                    team_run_metadata_content or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
-                    request.attachment_ids,
-                ),
-            )
+            if progress.stage_started:
+                # Delivery began but never settled an outcome. Do not touch the
+                # tracked event: with an adopted thinking-message stream it can
+                # already hold the full streamed reply, and the placeholder-only
+                # cleanup in finalize_streamed_response would redact it.
+                final_delivery_outcome = FinalDeliveryOutcome(
+                    terminal_status="cancelled" if progress.cancelled else "error",
+                    event_id=None,
+                    failure_reason=progress.failure_reason or "interrupted",
+                )
+            else:
+                final_delivery_outcome = await self._finalize_pre_delivery_terminal(
+                    target=delivery_target,
+                    request=request,
+                    response_kind="team",
+                    response_envelope=resolved_response_envelope,
+                    correlation_id=resolved_correlation_id,
+                    progress=progress,
+                    run_message_id=run_message_id,
+                    terminal_status="cancelled" if progress.cancelled else "error",
+                    failure_reason=progress.failure_reason or "interrupted",
+                )
         assert final_delivery_outcome is not None
         team_post_response_outcome = ResponseOutcome(
             response_run_id=team_turn_recorder.run_id or response_run_id,
@@ -2348,7 +2327,6 @@ class ResponseRunner:
         generation: _ResponseGenerationOutcome | None = None
         response_run_id = str(uuid4())
         progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
-        request = self._request_with_locked_target(request, resolved_target)
         resolved_correlation_id = self._correlation_id_for_request(request)
         resolved_response_envelope = request.response_envelope
         lifecycle = self._build_lifecycle(
@@ -2438,7 +2416,8 @@ class ResponseRunner:
                 response_kind="ai",
                 response_envelope=resolved_response_envelope,
                 correlation_id=resolved_correlation_id,
-                event_id=progress.terminal_event_id(request, run_message_id),
+                progress=progress,
+                run_message_id=run_message_id,
                 terminal_status="cancelled",
                 failure_reason=progress.failure_reason or "interrupted",
             )
@@ -2460,7 +2439,8 @@ class ResponseRunner:
                     response_kind="ai",
                     response_envelope=resolved_response_envelope,
                     correlation_id=resolved_correlation_id,
-                    event_id=progress.terminal_event_id(request, run_message_id),
+                    progress=progress,
+                    run_message_id=run_message_id,
                     terminal_status="error",
                     failure_reason=progress.failure_reason,
                 )
@@ -2483,7 +2463,8 @@ class ResponseRunner:
                     response_kind="ai",
                     response_envelope=resolved_response_envelope,
                     correlation_id=resolved_correlation_id,
-                    event_id=progress.terminal_event_id(request, run_message_id),
+                    progress=progress,
+                    run_message_id=run_message_id,
                     terminal_status="cancelled" if progress.cancelled else "error",
                     failure_reason=progress.failure_reason or "interrupted",
                 )

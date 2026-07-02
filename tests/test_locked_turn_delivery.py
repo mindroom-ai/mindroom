@@ -34,7 +34,6 @@ if TYPE_CHECKING:
 def test_delivery_progress_transitions() -> None:
     """The delivery-progress state machine tracks events and terminal reasons."""
     progress = _DeliveryProgress(tracked_event_id=None)
-    assert progress.terminal_event_id(_plain_request(_target()), None) is None
 
     progress.track_event(None)
     assert progress.tracked_event_id is None
@@ -49,22 +48,6 @@ def test_delivery_progress_transitions() -> None:
     progress.note_task_cancelled("cancelled_by_user")
     assert progress.cancelled is True
     assert progress.failure_reason == "cancelled_by_user"
-
-    # terminal_event_id falls back to the run message only when nothing is tracked.
-    fresh = _DeliveryProgress(tracked_event_id=None)
-    assert fresh.terminal_event_id(_plain_request(_target()), "$thinking") == "$thinking"
-    kept = _DeliveryProgress(tracked_event_id="$existing")
-    assert kept.terminal_event_id(_plain_request(_target()), "$thinking") == "$existing"
-
-
-def test_delivery_progress_placeholder_fallback() -> None:
-    """With nothing tracked, a placeholder existing event is the terminal target."""
-    request = _plain_request(_target())
-    placeholder_request: ResponseRequest = request.__class__(
-        **{**request.__dict__, "existing_event_id": "$placeholder", "existing_event_is_placeholder": True},
-    )
-    progress = _DeliveryProgress(tracked_event_id=None)
-    assert progress.terminal_event_id(placeholder_request, None) == "$placeholder"
 
 
 @pytest.mark.asyncio
@@ -106,6 +89,126 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
     assert len(effect_outcomes) == 1
     assert effect_outcomes[0].terminal_status == "error"
     assert effect_outcomes[0].failure_reason == "delivery pipe burst"
+
+
+@pytest.mark.asyncio
+async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intact(tmp_path: Path) -> None:
+    """A pre-delivery failure while regenerating must not redact the prior answer.
+
+    The existing event is a real prior response, not a placeholder. Routing it
+    through a forced-placeholder terminal outcome would let the gateway's
+    placeholder-only cleanup redact it; the real pending-visible shape makes
+    the gateway return a bookkeeping outcome without touching Matrix.
+    """
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    effect_outcomes: list[object] = []
+
+    async def fake_post_effects(final_outcome: object, *_args: object) -> None:
+        effect_outcomes.append(final_outcome)
+
+    async def failing_process(_request: object, **_kwargs: object) -> _ResponseGenerationOutcome:
+        msg = "regen prep exploded"
+        raise RuntimeError(msg)
+
+    request = _plain_request(_target())
+    regen_request: ResponseRequest = request.__class__(
+        **{**request.__dict__, "existing_event_id": "$prior_answer", "existing_event_is_placeholder": False},
+    )
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$thinking")),
+        patch.object(coordinator, "process_and_respond", new=AsyncMock(side_effect=failing_process)),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+            apply_post_response_effects=AsyncMock(side_effect=fake_post_effects),
+        ),
+        pytest.raises(RuntimeError, match="regen prep exploded"),
+    ):
+        await coordinator.generate_response(regen_request)
+
+    # The prior answer event survives as the visible outcome target; a
+    # placeholder-only cleanup would have redacted it instead.
+    assert len(effect_outcomes) == 1
+    assert effect_outcomes[0].terminal_status == "error"
+    assert effect_outcomes[0].event_id == "$prior_answer"
+    assert effect_outcomes[0].is_visible_response is True
+
+
+@pytest.mark.asyncio
+async def test_team_post_delivery_failure_settles_error_outcome_without_finalize(tmp_path: Path) -> None:
+    """A team failure after delivery started settles a bare terminal error.
+
+    Mirrors the agent arm: the tracked event must not be routed through
+    finalize, because with an adopted thinking-message stream it can already
+    hold the full streamed reply and the placeholder-only cleanup would
+    redact it.
+    """
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "ultimate"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = _knowledge_access_support()
+
+    finalize_requests: list[object] = []
+    effect_outcomes: list[object] = []
+
+    async def fake_post_effects(final_outcome: object, *_args: object) -> None:
+        effect_outcomes.append(final_outcome)
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch(
+            "mindroom.response_lifecycle.apply_post_response_effects",
+            new=AsyncMock(side_effect=fake_post_effects),
+        ),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")),
+        patch("mindroom.response_runner.typing_indicator", _noop_typing),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "deliver_final",
+            AsyncMock(side_effect=RuntimeError("delivery pipe burst")),
+        )
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "finalize_streamed_response",
+            AsyncMock(side_effect=lambda req: finalize_requests.append(req)),
+        )
+        _set_gateway_method(coordinator.deps.delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
+        with patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=_run_response_function_directly),
+        ):
+            await coordinator.generate_team_response_helper(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+                team_mode="coordinate",
+            )
+
+    # Post-start failures settle bare: no finalize call, terminal error effects.
+    assert finalize_requests == []
+    assert len(effect_outcomes) == 1
+    assert effect_outcomes[0].terminal_status == "error"
+    assert "delivery pipe burst" in str(effect_outcomes[0].failure_reason)
 
 
 @pytest.mark.asyncio
