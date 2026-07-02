@@ -179,6 +179,8 @@ async def test_team_response_stream_continues_after_terminal_dynamic_tool_output
     assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Used the loaded tool." in rendered
+    # The superseded first attempt's fallback document must not leak.
+    assert "No team response generated." not in rendered
     assert recorder.outcome == "completed"
     assert "Used the loaded tool." in recorder.assistant_text
 
