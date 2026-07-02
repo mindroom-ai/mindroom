@@ -720,6 +720,89 @@ class TestCredentialsManager:
 
         assert loaded_credentials == {"api_key": "worker-key", "_source": "ui"}
 
+    def test_shared_scope_oauth_tokens_stay_isolated_per_agent(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """OAuth tokens saved for one shared-scope agent should stay invisible to other agents."""
+        manager = CredentialsManager(temp_credentials_dir)
+        connecting_target = _worker_target("shared", "alpha", None, tenant_id="tenant-123", account_id="account-456")
+        other_agent_target = _worker_target("shared", "beta", None, tenant_id="tenant-123", account_id="account-456")
+
+        save_scoped_credentials(
+            "google_drive_oauth",
+            {"token": "alpha-token", "refresh_token": "alpha-refresh", "_source": "oauth"},
+            credentials_manager=manager,
+            worker_target=connecting_target,
+        )
+
+        connecting_agent_credentials = load_scoped_credentials(
+            "google_drive_oauth",
+            credentials_manager=manager,
+            worker_target=connecting_target,
+        )
+        assert connecting_agent_credentials is not None
+        assert connecting_agent_credentials["token"] == "alpha-token"  # noqa: S105
+        assert (
+            load_scoped_credentials(
+                "google_drive_oauth",
+                credentials_manager=manager,
+                worker_target=other_agent_target,
+            )
+            is None
+        )
+        assert manager.load_credentials("google_drive_oauth") is None
+        assert (
+            load_scoped_credentials(
+                "google_drive_oauth",
+                credentials_manager=manager,
+                worker_target=None,
+            )
+            is None
+        )
+
+    def test_shared_scope_oauth_tokens_ignore_global_store(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Shared-scope agents should not inherit OAuth tokens from the global credentials store."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials(
+            "google_drive_oauth",
+            {"token": "global-token", "refresh_token": "global-refresh", "_source": "oauth"},
+        )
+
+        loaded_credentials = load_scoped_credentials(
+            "google_drive_oauth",
+            credentials_manager=manager,
+            worker_target=_worker_target("shared", "alpha", None, tenant_id="tenant-123", account_id="account-456"),
+        )
+
+        assert loaded_credentials is None
+
+    def test_shared_scope_oauth_save_requires_agent_name(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Agent-scoped OAuth saves should fail loudly instead of widening to the global store."""
+        manager = CredentialsManager(temp_credentials_dir)
+        worker_target = ResolvedWorkerTarget(
+            worker_scope="shared",
+            routing_agent_name=None,
+            execution_identity=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+            worker_key=None,
+        )
+
+        with pytest.raises(ValueError, match="require an agent name"):
+            save_scoped_credentials(
+                "google_drive_oauth",
+                {"token": "orphan-token", "_source": "oauth"},
+                credentials_manager=manager,
+                worker_target=worker_target,
+            )
+
     def test_load_scoped_credentials_uses_shared_mirror_for_unscoped_worker_manager(
         self,
         temp_credentials_dir: Path,
