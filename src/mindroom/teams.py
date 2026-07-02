@@ -2091,7 +2091,7 @@ async def team_response(  # noqa: C901, PLR0915
             response_session_id = response.session_id
             response_run_id = response.run_id
             response_output_tokens = response.metrics.output_tokens if response.metrics is not None else None
-            is_empty_run = response.status is RunStatus.completed and not run_tool_executions and not has_visible_output
+            is_empty_run = response.status == RunStatus.completed and not run_tool_executions and not has_visible_output
         else:
             logger.warning(
                 "team_response_unexpected_type",
@@ -2733,7 +2733,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             replayable_text=response_text,
                             has_visible_content=event_has_visible,
                             is_empty=(
-                                event.status is RunStatus.completed
+                                event.status == RunStatus.completed
                                 and not event_tool_executions
                                 and not event_has_visible
                             ),
