@@ -35,7 +35,6 @@ from mindroom.ai_run_metadata import (
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history import (
-    CompactionOutcome,
     HistoryScope,
     PreparedHistoryState,
     ScopeSessionContext,
@@ -562,8 +561,7 @@ async def _collect_streamed_response_content(
     response_stream: AsyncIterator[AIStreamChunk],
     *,
     show_tool_calls: bool,
-    tool_trace_collector: list[ToolTraceEntry] | None = None,
-) -> str:
+) -> tuple[str, list[ToolTraceEntry]]:
     """Collect a streaming response into one final body without Matrix edits."""
     state = _CollectedStreamResponseState()
 
@@ -575,9 +573,23 @@ async def _collect_streamed_response_content(
         elif isinstance(chunk, ToolCallCompletedEvent):
             _collect_stream_tool_completed(state, chunk, show_tool_calls=show_tool_calls)
 
+    return state.full_response or state.canonical_final_body_candidate or "", state.tool_trace
+
+
+async def _collect_response_body_with_trace(
+    response_stream: AsyncIterator[AIStreamChunk],
+    *,
+    show_tool_calls: bool,
+    tool_trace_collector: list[ToolTraceEntry] | None,
+) -> str:
+    """Collect a stream to one body, bridging the trace to an optional collector."""
+    body, tool_trace = await _collect_streamed_response_content(
+        response_stream,
+        show_tool_calls=show_tool_calls,
+    )
     if tool_trace_collector is not None:
-        tool_trace_collector.extend(state.tool_trace)
-    return state.full_response or state.canonical_final_body_candidate or ""
+        tool_trace_collector.extend(tool_trace)
+    return body
 
 
 def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = True) -> str:
@@ -1067,7 +1079,6 @@ async def _prepare_agent_and_prompt(
     knowledge: Knowledge | None = None,
     include_interactive_questions: bool = True,
     execution_identity: ToolExecutionIdentity | None = None,
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -1148,7 +1159,6 @@ async def _prepare_agent_and_prompt(
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
-        compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
         current_sender_id=None if include_openai_compat_guidance else ctx.requester_id,
         current_timestamp_ms=current_timestamp_ms,
@@ -1166,9 +1176,6 @@ async def _prepare_agent_and_prompt(
         breakdown = _compute_compaction_token_breakdown(agent, render_prepared_messages_text(run_messages))
         enriched_outcomes = [replace(o, **breakdown) for o in prepared_history.compaction_outcomes]
         prepared_history = replace(prepared_history, compaction_outcomes=enriched_outcomes)
-        if compaction_outcomes_collector is not None:
-            compaction_outcomes_collector.clear()
-            compaction_outcomes_collector.extend(enriched_outcomes)
     logger.info(
         "Preparing agent and prompt",
         agent=agent_name,
@@ -1196,7 +1203,6 @@ async def _prepare_agent_run_context(
     include_interactive_questions: bool,
     include_openai_compat_guidance: bool,
     execution_identity: ToolExecutionIdentity | None,
-    compaction_outcomes_collector: list[CompactionOutcome] | None,
     compaction_lifecycle: CompactionLifecycle | None,
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
@@ -1219,7 +1225,6 @@ async def _prepare_agent_run_context(
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
         execution_identity=execution_identity,
-        compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
@@ -1286,7 +1291,6 @@ async def ai_response(
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -1324,9 +1328,6 @@ async def ai_response(
             run/model/token metadata for Matrix message content.
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
-        compaction_outcomes_collector: Optional list that receives completed
-            compaction outcomes from required compaction and manual `compact_context`
-            tool calls during this run.
         compaction_lifecycle: Optional lifecycle sink for ordered foreground
             compaction notices.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
@@ -1342,7 +1343,7 @@ async def ai_response(
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     if collect_streamed_response:
-        return await _collect_streamed_response_content(
+        return await _collect_response_body_with_trace(
             stream_agent_response(
                 ctx,
                 prompt=prompt,
@@ -1360,7 +1361,6 @@ async def ai_response(
                 show_tool_calls=show_tool_calls,
                 run_metadata_collector=run_metadata_collector,
                 execution_identity=execution_identity,
-                compaction_outcomes_collector=compaction_outcomes_collector,
                 compaction_lifecycle=compaction_lifecycle,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
@@ -1417,7 +1417,6 @@ async def ai_response(
                 include_interactive_questions=include_interactive_questions,
                 include_openai_compat_guidance=include_openai_compat_guidance,
                 execution_identity=execution_identity,
-                compaction_outcomes_collector=compaction_outcomes_collector,
                 compaction_lifecycle=compaction_lifecycle,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
@@ -1751,7 +1750,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     show_tool_calls: bool = True,
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -1785,9 +1783,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             run/model/token metadata for Matrix message content.
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
-        compaction_outcomes_collector: Optional list that receives completed
-            compaction outcomes from required compaction and manual `compact_context`
-            tool calls during this run.
         compaction_lifecycle: Optional lifecycle sink for ordered foreground
             compaction notices.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
@@ -1861,7 +1856,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 include_interactive_questions=include_interactive_questions,
                 include_openai_compat_guidance=include_openai_compat_guidance,
                 execution_identity=execution_identity,
-                compaction_outcomes_collector=compaction_outcomes_collector,
                 compaction_lifecycle=compaction_lifecycle,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,

@@ -319,6 +319,20 @@ class _ResponseGenerationOutcome:
     run_succeeded: bool
 
 
+@dataclass(frozen=True)
+class _NonStreamingGeneration:
+    """One non-streaming AI generation's artifacts, returned instead of out-params.
+
+    The streaming path keeps caller-owned collectors instead: its run-metadata
+    dict must be live while the delivery gateway snapshots extra_content, and
+    its artifacts must survive the raising StreamingDeliveryError exit.
+    """
+
+    response_text: str
+    tool_trace: list[Any]
+    run_metadata_content: dict[str, Any]
+
+
 def _generation_outcome(
     delivery: FinalDeliveryOutcome,
     turn_recorder: TurnRecorder,
@@ -1778,16 +1792,16 @@ class ResponseRunner:
         runtime: _PreparedResponseRuntime,
         active_event_ids: set[str],
         turn_recorder: TurnRecorder,
-        tool_trace: list[Any],
-        run_metadata_content: dict[str, Any],
         attempt_run_id_collector: list[str],
         pipeline_timing: DispatchPipelineTiming | None = None,
-    ) -> str:
-        """Run one non-streaming AI request."""
+    ) -> _NonStreamingGeneration:
+        """Run one non-streaming AI request and return its artifacts by value."""
         compaction_lifecycle = self._build_compaction_lifecycle(
             target=runtime.resolved_target,
             request=request,
         )
+        tool_trace: list[Any] = []
+        run_metadata_content: dict[str, Any] = {}
 
         def note_attempt_run_id(current_run_id: str) -> None:
             self.deps.stop_manager.update_run_id(request.existing_event_id, current_run_id)
@@ -1840,9 +1854,14 @@ class ResponseRunner:
 
         try:
             async with typing_indicator(self._client(), request.room_id):
-                return await self._run_in_tool_context(
+                response_text = await self._run_in_tool_context(
                     tool_dispatch=runtime.tool_dispatch,
                     operation=build_response_text,
+                )
+                return _NonStreamingGeneration(
+                    response_text=response_text,
+                    tool_trace=tool_trace,
+                    run_metadata_content=run_metadata_content,
                 )
         except asyncio.CancelledError:
             await self._persist_interrupted_recorder_off_loop(
@@ -2011,8 +2030,6 @@ class ResponseRunner:
             thread_id=runtime.resolved_target.resolved_thread_id,
             create_storage=history_storage_factory,
         )
-        tool_trace: list[Any] = []
-        run_metadata_content: dict[str, Any] = {}
         # The caller's list survives raising exit paths (cancellation, stream
         # re-raises), unlike the returned outcome.
         attempt_run_ids = attempt_run_id_collector if attempt_run_id_collector is not None else []
@@ -2028,14 +2045,12 @@ class ResponseRunner:
 
         try:
             try:
-                response_text = await self.generate_non_streaming_ai_response(
+                generation = await self.generate_non_streaming_ai_response(
                     request,
                     run_id=run_id,
                     runtime=runtime,
                     active_event_ids=active_event_ids,
                     turn_recorder=turn_recorder,
-                    tool_trace=tool_trace,
-                    run_metadata_content=run_metadata_content,
                     attempt_run_id_collector=attempt_run_ids,
                     pipeline_timing=request.pipeline_timing,
                 )
@@ -2078,7 +2093,7 @@ class ResponseRunner:
             raise
 
         response_extra_content = _merge_response_extra_content(
-            run_metadata_content,
+            generation.run_metadata_content,
             request.attachment_ids,
         )
         if on_delivery_started is not None:
@@ -2089,11 +2104,11 @@ class ResponseRunner:
                     target=runtime.resolved_target,
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
-                    response_text=response_text,
+                    response_text=generation.response_text,
                     response_kind=response_kind,
                     response_envelope=response_envelope,
                     correlation_id=correlation_id,
-                    tool_trace=tool_trace if self._show_tool_calls() else None,
+                    tool_trace=generation.tool_trace if self._show_tool_calls() else None,
                     extra_content=response_extra_content or None,
                 ),
             )
@@ -2151,6 +2166,10 @@ class ResponseRunner:
             thread_id=runtime.resolved_target.resolved_thread_id,
             create_storage=history_storage_factory,
         )
+        # The streaming path keeps these caller-owned (unlike the non-streaming
+        # path's returned _NonStreamingGeneration): the metadata dict must stay
+        # live while the delivery gateway snapshots extra_content, and both
+        # must survive the raising StreamingDeliveryError exit below.
         run_metadata_content: dict[str, Any] = {}
         # The caller's list survives raising exit paths (cancellation, stream
         # re-raises), unlike the returned outcome.

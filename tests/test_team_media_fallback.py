@@ -541,7 +541,6 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
     fake_agent = _make_test_agent("GeneralAgent")
-    collector: list[object] = []
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -558,7 +557,6 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
             orchestrator=orchestrator,
             execution_identity=None,
             ctx=make_turn_context(session_id="session-123"),
-            compaction_outcomes_collector=collector,
         )
 
     assert "Recovered team response" in response
@@ -569,7 +567,6 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     scope_context = mock_prepare.await_args.kwargs["scope_context"]
     assert scope_context is not None
     assert scope_context.scope.kind == "team"
-    assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
 
 
 @pytest.mark.asyncio
@@ -866,7 +863,6 @@ async def test_prepare_materialized_team_execution_scrubs_queued_notices_when_ca
                 active_model_name=None,
                 response_sender_id=None,
                 current_sender_id=None,
-                compaction_outcomes_collector=None,
                 configured_team_name=None,
             )
 
@@ -906,7 +902,6 @@ async def test_prepare_materialized_team_execution_forwards_explicit_thread_hist
             active_model_name=None,
             response_sender_id=None,
             current_sender_id=None,
-            compaction_outcomes_collector=None,
             configured_team_name=None,
             thread_history_render_limits=ThreadHistoryRenderLimits(
                 max_messages=30,
@@ -950,7 +945,6 @@ async def test_prepare_materialized_team_execution_appends_system_enrichment_con
             active_model_name=None,
             response_sender_id=None,
             current_sender_id=None,
-            compaction_outcomes_collector=None,
             configured_team_name=None,
         )
 
@@ -1005,7 +999,6 @@ async def test_prepare_materialized_team_execution_carries_compaction_metadata_a
             active_model_name=None,
             response_sender_id=None,
             current_sender_id=None,
-            compaction_outcomes_collector=None,
             configured_team_name=None,
             pipeline_timing=timing,
         )
@@ -3269,7 +3262,6 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock(running=True)}
     fake_agent = _make_test_agent("GeneralAgent")
-    collector: list[object] = []
     mock_team = _make_test_team(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:
@@ -3296,7 +3288,6 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
                 orchestrator=orchestrator,
                 execution_identity=None,
                 ctx=make_turn_context(session_id="session-123"),
-                compaction_outcomes_collector=collector,
             )
         ]
 
@@ -3309,7 +3300,6 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     scope_context = mock_prepare.await_args.kwargs["scope_context"]
     assert scope_context is not None
     assert scope_context.scope.kind == "team"
-    assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
     assert mock_raw.await_count == 1
     assert mock_raw.await_args.kwargs["team"] is mock_team
 

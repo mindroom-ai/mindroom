@@ -855,7 +855,6 @@ async def _prepare_openai_team_prompt(
         active_model_name=config.resolve_runtime_model(entity_name=team_name).model_name,
         response_sender_id=None,
         current_sender_id=None,
-        compaction_outcomes_collector=None,
         configured_team_name=team_name,
     )
     return _PreparedOpenAITeamPrompt(

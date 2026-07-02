@@ -457,7 +457,6 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
             active_model_name=None,
             response_sender_id="@mindroom_code:localhost",
             current_sender_id=None,
-            compaction_outcomes_collector=[],
             configured_team_name=None,
         )
 
@@ -546,7 +545,6 @@ async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_pa
             active_model_name=None,
             response_sender_id="@mindroom_code:localhost",
             current_sender_id=None,
-            compaction_outcomes_collector=[],
             configured_team_name=None,
         )
 

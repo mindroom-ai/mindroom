@@ -120,7 +120,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history import CompactionLifecycle, CompactionOutcome, PreparedHistoryState
+    from mindroom.history import CompactionLifecycle, PreparedHistoryState
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -1837,7 +1837,6 @@ async def prepare_materialized_team_execution(
     active_model_name: str | None,
     response_sender_id: str | None,
     current_sender_id: str | None,
-    compaction_outcomes_collector: list[CompactionOutcome] | None,
     configured_team_name: str | None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
@@ -1874,7 +1873,6 @@ async def prepare_materialized_team_execution(
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
-        compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
         thread_history_render_limits=thread_history_render_limits,
         pipeline_timing=pipeline_timing,
@@ -1919,7 +1917,6 @@ async def team_response(  # noqa: C901, PLR0915
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
     response_sender_id: str | None = None,
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
     configured_team_name: str | None = None,
@@ -2026,7 +2023,6 @@ async def team_response(  # noqa: C901, PLR0915
             active_model_name=attempt_model_name,
             response_sender_id=response_sender_id,
             current_sender_id=user_id,
-            compaction_outcomes_collector=compaction_outcomes_collector,
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
             compaction_lifecycle=compaction_lifecycle,
@@ -2387,7 +2383,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
     response_sender_id: str | None = None,
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
     configured_team_name: str | None = None,
@@ -2499,7 +2494,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
             active_model_name=attempt_model_name,
             response_sender_id=response_sender_id,
             current_sender_id=user_id,
-            compaction_outcomes_collector=compaction_outcomes_collector,
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
             compaction_lifecycle=compaction_lifecycle,

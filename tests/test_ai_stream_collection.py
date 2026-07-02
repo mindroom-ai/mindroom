@@ -37,11 +37,9 @@ async def test_collect_streamed_response_preserves_tool_marker_order() -> None:
             ),
         )
 
-    trace: list[ToolTraceEntry] = []
-    body = await _collect_streamed_response_content(
+    body, trace = await _collect_streamed_response_content(
         stream(),
         show_tool_calls=True,
-        tool_trace_collector=trace,
     )
 
     assert body.index("Before tool.") < body.index("run_shell_command") < body.index("After tool.")
@@ -67,11 +65,9 @@ async def test_collect_streamed_response_can_hide_tool_markers() -> None:
         )
         yield RunContentEvent(content=" After.")
 
-    trace: list[ToolTraceEntry] = []
-    body = await _collect_streamed_response_content(
+    body, trace = await _collect_streamed_response_content(
         stream(),
         show_tool_calls=False,
-        tool_trace_collector=trace,
     )
 
     assert body == "Before. After."
