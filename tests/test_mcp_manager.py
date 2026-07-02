@@ -72,12 +72,6 @@ class _ConfigStub:
         self.agents: dict[str, object] = {}
         self.defaults = type("_DefaultsStub", (), {"allow_self_config": False})()
 
-    def get_agent_tools(self, _agent_name: str) -> list[str]:
-        return []
-
-    def get_agent_available_tools(self, _agent_name: str) -> list[str]:
-        return []
-
     def get_entities_referencing_tools(self, _tool_names: set[str]) -> set[str]:
         return set()
 

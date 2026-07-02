@@ -145,7 +145,7 @@ def test_model_name_resolution() -> None:
     assert config.resolve_entity("overriding_agent").model_name == "summary-model"
     assert config.resolve_entity("inheriting_agent").model_name == "default"
     assert config.resolve_entity("overriding_team").model_name == "default"
-    assert config.resolve_entity(ROUTER_AGENT_NAME).model_name == config.router.model
+    assert config.resolve_entity(ROUTER_AGENT_NAME).model_name == "default"
     with pytest.raises(ValueError, match="defaults-only scope has no authored model"):
         _ = config.resolve_entity(None).model_name
 

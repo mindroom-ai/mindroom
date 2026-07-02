@@ -1181,7 +1181,7 @@ class TestConsolidatedConfigManager:
 
 
 class TestAgentWorkerScope:
-    """Tests for Config.get_agent_execution_scope."""
+    """Tests for the resolved per-agent execution scope."""
 
     def test_worker_scope_prefers_agent_override(self) -> None:
         """Agent-level worker_scope should override defaults."""

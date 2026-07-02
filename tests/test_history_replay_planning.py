@@ -219,7 +219,7 @@ async def test_prepare_history_for_run_warns_once_when_authored_compaction_is_un
     assert len(mock_warning.call_args_list) == 1
 
 
-def test_get_entity_compaction_config_merges_authored_overrides(tmp_path: Path) -> None:
+def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -498,7 +498,7 @@ def test_authored_model_dump_preserves_explicit_compaction_model_clear(tmp_path:
     }
 
 
-def test_get_entity_compaction_config_inherits_disabled_defaults_for_pure_model_clear(tmp_path: Path) -> None:
+def test_resolved_compaction_config_inherits_disabled_defaults_for_pure_model_clear(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
