@@ -19,7 +19,7 @@ from agno.run.team import TeamRunOutput
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.teams import TeamMode, team_response, team_response_stream
-from tests.conftest import runtime_paths_for
+from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
 from tests.test_team_media_fallback import _build_test_config, _make_test_agent, _make_test_team
 
@@ -93,7 +93,7 @@ async def test_team_response_collects_run_metadata() -> None:
             turn_recorder=TurnRecorder(user_message="Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            session_id="session-1",
+            ctx=make_turn_context(session_id="session-1"),
             run_metadata_collector=collector,
         )
 
@@ -135,7 +135,7 @@ async def test_team_response_usage_aggregates_member_metrics() -> None:
             turn_recorder=TurnRecorder(user_message="Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            session_id="session-1",
+            ctx=make_turn_context(session_id="session-1"),
             run_metadata_collector=collector,
         )
 
@@ -164,7 +164,7 @@ async def test_team_response_collects_cancelled_run_metadata() -> None:
             turn_recorder=TurnRecorder(user_message="Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
-            session_id="session-1",
+            ctx=make_turn_context(session_id="session-1"),
             run_metadata_collector=collector,
         )
 
@@ -206,7 +206,7 @@ async def test_team_response_stream_collects_run_metadata_from_completed_event()
                 turn_recorder=TurnRecorder(user_message="Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                session_id="session-1",
+                ctx=make_turn_context(session_id="session-1"),
                 run_metadata_collector=collector,
             )
         ]
@@ -251,7 +251,7 @@ async def test_team_response_stream_falls_back_to_model_request_totals() -> None
                 turn_recorder=TurnRecorder(user_message="Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                session_id="session-1",
+                ctx=make_turn_context(session_id="session-1"),
                 run_metadata_collector=collector,
             )
         ]
@@ -297,7 +297,7 @@ async def test_team_response_stream_publishes_usage_when_stream_errors() -> None
                 turn_recorder=TurnRecorder(user_message="Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                session_id="session-1",
+                ctx=make_turn_context(session_id="session-1"),
                 run_metadata_collector=collector,
             )
         ]
@@ -333,7 +333,7 @@ async def test_team_response_stream_collects_run_metadata_from_terminal_output()
                 turn_recorder=TurnRecorder(user_message="Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                session_id="session-1",
+                ctx=make_turn_context(session_id="session-1"),
                 run_metadata_collector=collector,
             )
         ]

@@ -128,9 +128,9 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
 
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         assert get_tool_runtime_context() is not None
-        assert _kwargs["session_id"] == "!team:localhost:$thread_root"
+        assert _kwargs["ctx"].session_id == "!team:localhost:$thread_root"
         assert _kwargs["user_id"] == "@user:localhost"
-        assert _kwargs["run_id"] == response_run_id
+        assert _kwargs["ctx"].run_id == response_run_id
         return "team non-streaming response"
 
     with (
@@ -283,9 +283,9 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
 
     async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         assert get_tool_runtime_context() is not None
-        assert _kwargs["session_id"] == "!team:localhost:$thread_root"
+        assert _kwargs["ctx"].session_id == "!team:localhost:$thread_root"
         assert _kwargs["user_id"] == "@user:localhost"
-        assert _kwargs["run_id"] == response_run_id
+        assert _kwargs["ctx"].run_id == response_run_id
         yield "stream chunk"
 
     with (

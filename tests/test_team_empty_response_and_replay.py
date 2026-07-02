@@ -15,7 +15,7 @@ from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.teams import TeamMode, team_response, team_response_stream
-from tests.conftest import runtime_paths_for
+from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
 from tests.test_team_dynamic_continuation import _dynamic_tool_team_output
 from tests.test_team_media_fallback import _build_test_config, _make_test_agent, _make_test_team
@@ -74,7 +74,7 @@ async def test_team_response_retries_once_after_empty_completed_run() -> None:
             turn_recorder=TurnRecorder(user_message="Say something."),
             orchestrator=orchestrator,
             execution_identity=None,
-            session_id="session-1",
+            ctx=make_turn_context(session_id="session-1"),
         )
 
     assert "Recovered answer" in response
@@ -98,7 +98,7 @@ async def test_team_response_returns_fallback_notice_when_retry_is_also_empty() 
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
-            session_id="session-1",
+            ctx=make_turn_context(session_id="session-1"),
         )
 
     assert response == ai_runtime.EMPTY_RESPONSE_NOTICE
@@ -130,7 +130,7 @@ async def test_team_response_stream_yields_fallback_notice_when_retry_is_also_em
                 turn_recorder=TurnRecorder(user_message="Say something."),
                 orchestrator=orchestrator,
                 execution_identity=None,
-                session_id="session-1",
+                ctx=make_turn_context(session_id="session-1"),
             )
         ]
 
@@ -169,7 +169,7 @@ async def test_team_response_stream_empty_event_stream_retries_then_notices() ->
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
-                session_id="session-1",
+                ctx=make_turn_context(session_id="session-1"),
             )
         ]
 
@@ -199,7 +199,7 @@ async def test_team_response_discards_whitespace_only_completed_run() -> None:
             turn_recorder=TurnRecorder(user_message="Say something."),
             orchestrator=orchestrator,
             execution_identity=None,
-            session_id="session-1",
+            ctx=make_turn_context(session_id="session-1"),
         )
 
     assert "Recovered answer" in response
@@ -235,7 +235,7 @@ async def test_team_response_ignores_history_messages_for_empty_detection() -> N
             turn_recorder=TurnRecorder(user_message="Say something."),
             orchestrator=orchestrator,
             execution_identity=None,
-            session_id="session-1",
+            ctx=make_turn_context(session_id="session-1"),
         )
 
     assert "Recovered answer" in response
@@ -264,7 +264,7 @@ async def test_team_empty_retry_shares_budget_with_dynamic_continuations() -> No
             turn_recorder=TurnRecorder(user_message="Keep loading tools."),
             orchestrator=orchestrator,
             execution_identity=None,
-            session_id="session-1",
+            ctx=make_turn_context(session_id="session-1"),
         )
 
     # The empty retry borrows one continuation slot: 1 discarded empty run

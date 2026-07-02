@@ -2890,21 +2890,22 @@ class TestTeamCompletion:
         assert prepared.run_metadata is run_metadata
         assert mock_prepare.await_count == 1
         preparation_kwargs = mock_prepare.await_args.kwargs
+        preparation_ctx = mock_prepare.await_args.args[0]
         assert preparation_kwargs["agents"] == mock_agents
         assert preparation_kwargs["team"] is mock_team
         assert preparation_kwargs["message"] == "Build it"
         assert preparation_kwargs["thread_history"] == []
-        assert preparation_kwargs["reply_to_event_id"] is None
-        assert preparation_kwargs["active_event_ids"] == frozenset()
+        assert preparation_ctx.reply_to_event_id is None
+        assert preparation_ctx.active_event_ids == frozenset()
         assert preparation_kwargs["response_sender_id"] is None
         assert preparation_kwargs["current_sender_id"] is None
-        assert preparation_kwargs["room_id"] is None
-        assert preparation_kwargs["thread_id"] is None
-        assert preparation_kwargs["requester_id"] is None
-        assert re.fullmatch(r"[0-9a-f]{32}", preparation_kwargs["correlation_id"])
+        assert preparation_ctx.room_id is None
+        assert preparation_ctx.thread_id is None
+        assert preparation_ctx.requester_id is None
+        assert re.fullmatch(r"[0-9a-f]{32}", preparation_ctx.correlation_id)
         assert preparation_kwargs["compaction_outcomes_collector"] is None
         assert preparation_kwargs["configured_team_name"] == "super_team"
-        assert preparation_kwargs["matrix_run_metadata"] is None
+        assert preparation_ctx.matrix_run_metadata is None
         assert preparation_kwargs["active_model_name"] == "default"
 
     def test_team_listed_in_models(self, team_app_client: TestClient) -> None:
@@ -3065,10 +3066,10 @@ class TestTeamCompletion:
         prepared_correlation_ids: list[str] = []
         request_log_contexts: list[dict[str, object]] = []
 
-        async def mock_prepare_team_execution(**kwargs: object) -> SimpleNamespace:
-            correlation_id = kwargs["correlation_id"]
+        async def mock_prepare_team_execution(ctx: object, **_kwargs: object) -> SimpleNamespace:
+            correlation_id = ctx.correlation_id
             assert isinstance(correlation_id, str)
-            assert kwargs["requester_id"] is None
+            assert ctx.requester_id is None
             prepared_correlation_ids.append(correlation_id)
             return _prepared_team_execution_context(
                 final_prompt="Build it",
@@ -3327,10 +3328,10 @@ class TestTeamCompletion:
         prepared_correlation_ids: list[str] = []
         request_log_contexts: list[dict[str, object]] = []
 
-        async def mock_prepare_team_execution(**kwargs: object) -> SimpleNamespace:
-            correlation_id = kwargs["correlation_id"]
+        async def mock_prepare_team_execution(ctx: object, **_kwargs: object) -> SimpleNamespace:
+            correlation_id = ctx.correlation_id
             assert isinstance(correlation_id, str)
-            assert kwargs["requester_id"] is None
+            assert ctx.requester_id is None
             prepared_correlation_ids.append(correlation_id)
             return _prepared_team_execution_context(
                 final_prompt="Build it",

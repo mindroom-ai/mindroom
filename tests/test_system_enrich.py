@@ -432,6 +432,15 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
             execution_identity=None,
         )
         await prepare_materialized_team_execution(
+            make_turn_context(
+                room_id="!room:localhost",
+                thread_id="$thread",
+                requester_id="@user:localhost",
+                correlation_id="$event",
+                reply_to_event_id="$event",
+                active_event_ids=frozenset(),
+                system_enrichment_items=system_items,
+            ),
             scope_context=scope_context,
             agents=team_members.agents,
             team=team,
@@ -440,17 +449,10 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
             config=config,
             runtime_paths=runtime_paths,
             active_model_name=None,
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            correlation_id="$event",
-            reply_to_event_id="$event",
-            active_event_ids=frozenset(),
             response_sender_id="@mindroom_code:localhost",
             current_sender_id=None,
             compaction_outcomes_collector=[],
             configured_team_name=None,
-            system_enrichment_items=system_items,
         )
 
     assert team is prepared_team
@@ -518,6 +520,13 @@ async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_pa
             execution_identity=None,
         )
         prepared_execution = await prepare_materialized_team_execution(
+            make_turn_context(
+                room_id=None,
+                thread_id=None,
+                requester_id=None,
+                reply_to_event_id="$event",
+                active_event_ids=frozenset(),
+            ),
             scope_context=scope_context,
             agents=team_members.agents,
             team=team,
@@ -526,12 +535,6 @@ async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_pa
             config=config,
             runtime_paths=runtime_paths,
             active_model_name=None,
-            room_id=None,
-            thread_id=None,
-            requester_id=None,
-            correlation_id=None,
-            reply_to_event_id="$event",
-            active_event_ids=frozenset(),
             response_sender_id="@mindroom_code:localhost",
             current_sender_id=None,
             compaction_outcomes_collector=[],

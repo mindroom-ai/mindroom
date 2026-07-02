@@ -26,7 +26,7 @@ from mindroom.teams import (
     team_response,
     team_response_stream,
 )
-from tests.conftest import runtime_paths_for
+from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
 from tests.test_team_media_fallback import _build_test_config, _make_test_agent, _make_test_team
 
@@ -96,7 +96,7 @@ async def test_team_response_continues_after_member_dynamic_tool_load() -> None:
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
-            run_id="run-1",
+            ctx=make_turn_context(run_id="run-1"),
             run_id_callback=run_ids.append,
         )
 
@@ -135,6 +135,7 @@ async def test_team_response_returns_limit_message_after_dynamic_tool_limit() ->
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
+            ctx=make_turn_context(),
         )
 
     assert mock_team.arun.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
@@ -169,6 +170,7 @@ async def test_team_response_stream_continues_after_terminal_dynamic_tool_output
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
+                ctx=make_turn_context(),
             )
         ]
 
@@ -217,6 +219,7 @@ async def test_team_response_stream_continues_after_streamed_member_dynamic_tool
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
+                ctx=make_turn_context(),
             )
         ]
 
@@ -261,6 +264,7 @@ async def test_team_response_stream_continues_from_hidden_member_dynamic_tool() 
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
+                ctx=make_turn_context(),
                 show_tool_calls=False,
             )
         ]

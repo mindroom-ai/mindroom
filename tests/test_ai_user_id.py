@@ -2998,8 +2998,9 @@ async def test_generate_team_response_passes_resolved_correlation_id_to_team_res
             team_mode="coordinate",
         )
 
-    assert seen_kwargs["reply_to_event_id"] == "$original"
-    assert seen_kwargs["correlation_id"] == "$edit"
+    ctx = seen_kwargs["ctx"]
+    assert ctx.reply_to_event_id == "$original"
+    assert ctx.correlation_id == "$edit"
 
 
 @pytest.mark.asyncio
@@ -3079,7 +3080,7 @@ async def test_generate_team_response_preserves_retry_model_prompt(tmp_path: Pat
 
     async def fake_team_response(*_args: object, **kwargs: object) -> str:
         model_message = cast("str", kwargs["message"])
-        run_id = cast("str | None", kwargs.get("run_id"))
+        run_id = cast("str | None", kwargs["ctx"].run_id)
         seen_run_ids.append(run_id)
         run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
         if run_id is not None:
@@ -3278,7 +3279,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
 
         def fake_team_response_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
             async def fake_stream() -> AsyncIterator[str]:
-                session_id = kwargs["session_id"]
+                session_id = kwargs["ctx"].session_id
                 assert isinstance(session_id, str)
                 storage.session = TeamSession(
                     session_id=session_id,
@@ -4130,7 +4131,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
 
         async def fake_team_response(*_args: object, **kwargs: object) -> str:
             cancel_message = "cancel"
-            session_id = kwargs["session_id"]
+            session_id = kwargs["ctx"].session_id
             assert isinstance(session_id, str)
             storage.session = TeamSession(
                 session_id=session_id,
@@ -4225,7 +4226,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         def fake_team_response_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
             async def fake_stream() -> AsyncIterator[str]:
                 cancel_message = "cancel"
-                session_id = kwargs["session_id"]
+                session_id = kwargs["ctx"].session_id
                 assert isinstance(session_id, str)
                 storage.session = TeamSession(
                     session_id=session_id,
@@ -4291,7 +4292,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
         )
 
         async def fake_team_response(*_args: object, **kwargs: object) -> str:
-            session_id = kwargs["session_id"]
+            session_id = kwargs["ctx"].session_id
             assert isinstance(session_id, str)
             storage.session = TeamSession(
                 session_id=session_id,
