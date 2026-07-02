@@ -834,6 +834,17 @@ async def _prepare_openai_team_prompt(
 ) -> _PreparedOpenAITeamPrompt:
     """Prepare the final prompt for one OpenAI-compatible team run."""
     prepared_execution = await prepare_materialized_team_execution(
+        ResponseTurnContext(
+            entity_label=team_name,
+            session_id=None,
+            run_id=None,
+            correlation_id=uuid4().hex,
+            reply_to_event_id=None,
+            room_id=None,
+            thread_id=None,
+            requester_id=execution_identity.requester_id if execution_identity is not None else None,
+            matrix_run_metadata=None,
+        ),
         scope_context=scope_context,
         agents=agents,
         team=team,
@@ -842,17 +853,10 @@ async def _prepare_openai_team_prompt(
         config=config,
         runtime_paths=runtime_paths,
         active_model_name=config.resolve_runtime_model(entity_name=team_name).model_name,
-        reply_to_event_id=None,
-        active_event_ids=frozenset(),
         response_sender_id=None,
         current_sender_id=None,
-        room_id=None,
-        thread_id=None,
-        requester_id=execution_identity.requester_id if execution_identity is not None else None,
-        correlation_id=uuid4().hex,
         compaction_outcomes_collector=None,
         configured_team_name=team_name,
-        matrix_run_metadata=None,
     )
     return _PreparedOpenAITeamPrompt(
         prompt=render_prepared_team_messages_text(prepared_execution.messages),

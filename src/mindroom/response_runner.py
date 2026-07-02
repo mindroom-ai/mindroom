@@ -1211,6 +1211,21 @@ class ResponseRunner:
         progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         active_event_ids = self._active_response_event_ids(request.room_id)
+        # Team entries refine entity_label to the materialized team label and
+        # append the knowledge-availability enrichment before the turn runs.
+        team_turn_ctx = ResponseTurnContext(
+            entity_label=self.deps.agent_name,
+            session_id=session_id,
+            run_id=response_run_id,
+            correlation_id=resolved_correlation_id,
+            reply_to_event_id=request.reply_to_event_id,
+            room_id=request.room_id,
+            thread_id=resolved_target.resolved_thread_id,
+            requester_id=requester_user_id or execution_identity.requester_id,
+            matrix_run_metadata=matrix_run_metadata,
+            active_event_ids=frozenset(active_event_ids),
+            system_enrichment_items=tuple(request.system_enrichment_items),
+        )
         team_turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
@@ -1254,29 +1269,23 @@ class ResponseRunner:
                             message=model_message,
                             orchestrator=orchestrator,
                             execution_identity=tool_dispatch.execution_identity,
+                            ctx=team_turn_ctx,
                             mode=mode,
                             thread_history=model_thread_history,
                             model_name=model_name,
                             media=resolved_request.media,
                             show_tool_calls=show_tool_calls,
-                            session_id=session_id,
-                            run_id=response_run_id,
                             run_id_callback=_note_attempt_run_id,
                             user_id=requester_user_id,
-                            reply_to_event_id=request.reply_to_event_id,
                             current_timestamp_ms=request.current_timestamp_ms,
                             current_prompt_is_structured=request.current_prompt_is_structured,
-                            correlation_id=resolved_correlation_id,
-                            active_event_ids=active_event_ids,
                             response_sender_id=self.deps.matrix_full_id,
                             run_metadata_collector=team_run_metadata_content,
                             compaction_lifecycle=compaction_lifecycle,
                             configured_team_name=self.deps.agent_name
                             if self.deps.agent_name in self.deps.runtime.config.teams
                             else None,
-                            system_enrichment_items=request.system_enrichment_items,
                             reason_prefix=team_request.reason_prefix,
-                            matrix_run_metadata=matrix_run_metadata,
                             pipeline_timing=request.pipeline_timing,
                             turn_recorder=team_turn_recorder,
                         )
@@ -1363,27 +1372,21 @@ class ResponseRunner:
                                     message=model_message,
                                     orchestrator=orchestrator,
                                     execution_identity=tool_dispatch.execution_identity,
+                                    ctx=team_turn_ctx,
                                     thread_history=model_thread_history,
                                     model_name=model_name,
                                     media=resolved_request.media,
-                                    session_id=session_id,
-                                    run_id=response_run_id,
                                     run_id_callback=_note_attempt_run_id,
                                     user_id=requester_user_id,
-                                    reply_to_event_id=request.reply_to_event_id,
                                     current_timestamp_ms=request.current_timestamp_ms,
                                     current_prompt_is_structured=request.current_prompt_is_structured,
-                                    correlation_id=resolved_correlation_id,
-                                    active_event_ids=active_event_ids,
                                     response_sender_id=self.deps.matrix_full_id,
                                     run_metadata_collector=team_run_metadata_content,
                                     compaction_lifecycle=compaction_lifecycle,
                                     configured_team_name=self.deps.agent_name
                                     if self.deps.agent_name in self.deps.runtime.config.teams
                                     else None,
-                                    system_enrichment_items=request.system_enrichment_items,
                                     reason_prefix=team_request.reason_prefix,
-                                    matrix_run_metadata=matrix_run_metadata,
                                     pipeline_timing=request.pipeline_timing,
                                     turn_recorder=team_turn_recorder,
                                 )

@@ -33,7 +33,6 @@ from mindroom import ai_runtime, model_loading
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import get_team_session
 from mindroom.agents import create_agent, enable_all_history_replay
-from mindroom.ai import resolve_run_correlation_id
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
@@ -62,7 +61,7 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
-from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
+from mindroom.hooks import render_system_enrichment_block
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
@@ -112,7 +111,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 
     import nio
     from agno.db.base import BaseDb
@@ -142,26 +141,21 @@ def _team_run_input_text(run_input: str | list[Message]) -> str:
 
 
 def _team_request_log_context(
+    ctx: ResponseTurnContext,
     *,
     team_name: str,
-    session_id: str | None,
-    room_id: str | None,
-    thread_id: str | None,
-    reply_to_event_id: str | None,
-    requester_id: str | None,
-    correlation_id: str,
     prompt: str,
     run_input: str | list[Message],
     metadata: dict[str, object] | None,
 ) -> dict[str, object]:
     return build_llm_request_log_context(
         agent_id=team_name,
-        session_id=session_id or "",
-        room_id=room_id,
-        thread_id=thread_id,
-        reply_to_event_id=reply_to_event_id,
-        requester_id=requester_id,
-        correlation_id=correlation_id,
+        session_id=ctx.session_id or "",
+        room_id=ctx.room_id,
+        thread_id=ctx.thread_id,
+        reply_to_event_id=ctx.reply_to_event_id,
+        requester_id=ctx.requester_id,
+        correlation_id=ctx.correlation_id,
         prompt=prompt,
         model_prompt=None,
         full_prompt=_team_run_input_text(run_input),
@@ -1831,6 +1825,7 @@ def build_materialized_team_instance(
 
 
 async def prepare_materialized_team_execution(
+    ctx: ResponseTurnContext,
     *,
     scope_context: ScopeSessionContext | None,
     agents: list[Agent],
@@ -1840,35 +1835,27 @@ async def prepare_materialized_team_execution(
     config: Config,
     runtime_paths: RuntimePaths,
     active_model_name: str | None,
-    reply_to_event_id: str | None,
-    active_event_ids: Collection[str],
     response_sender_id: str | None,
     current_sender_id: str | None,
-    room_id: str | None,
-    thread_id: str | None,
-    requester_id: str | None,
-    correlation_id: str | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None,
     configured_team_name: str | None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
-    matrix_run_metadata: dict[str, Any] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-    system_enrichment_items: Sequence[EnrichmentItem] = (),
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
-    if system_enrichment_items:
-        rendered_system_context = render_system_enrichment_block(system_enrichment_items)
+    if ctx.system_enrichment_items:
+        rendered_system_context = render_system_enrichment_block(ctx.system_enrichment_items)
         _append_additional_context(team, rendered_system_context)
         for agent in agents:
             _append_additional_context(agent, rendered_system_context)
     runtime_model = config.resolve_runtime_model(
         entity_name=configured_team_name,
         active_model_name=active_model_name,
-        room_id=room_id,
-        thread_id=thread_id,
+        room_id=ctx.room_id,
+        thread_id=ctx.thread_id,
         runtime_paths=runtime_paths,
     )
     prepared_execution = await prepare_bound_team_run_context(
@@ -1882,9 +1869,9 @@ async def prepare_materialized_team_execution(
         entity_name=configured_team_name,
         active_model_name=active_model_name,
         active_context_window=runtime_model.context_window,
-        room_id=room_id,
-        reply_to_event_id=reply_to_event_id,
-        active_event_ids=active_event_ids,
+        room_id=ctx.room_id,
+        reply_to_event_id=ctx.reply_to_event_id,
+        active_event_ids=ctx.active_event_ids,
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
@@ -1900,15 +1887,15 @@ async def prepare_materialized_team_execution(
         note_prepared_history_timing(pipeline_timing, prepared_history)
     run_extra_content = build_prepared_history_metadata_content(prepared_history)
     run_metadata = build_matrix_run_metadata(
-        reply_to_event_id,
+        ctx.reply_to_event_id,
         prepared_execution.unseen_event_ids,
-        room_id=room_id,
-        thread_id=thread_id,
-        requester_id=requester_id,
-        correlation_id=correlation_id,
+        room_id=ctx.room_id,
+        thread_id=ctx.thread_id,
+        requester_id=ctx.requester_id,
+        correlation_id=ctx.correlation_id,
         tools_schema=team_tool_definition_payloads_for_logging(team),
         model_params=model_params_payload(team.model) if team.model is not None else {},
-        extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
+        extra_metadata=deep_merge_metadata(ctx.matrix_run_metadata, run_extra_content),
     )
     return _PreparedMaterializedTeamExecution(
         messages=prepared_execution.messages,
@@ -1925,31 +1912,30 @@ async def team_response(  # noqa: C901, PLR0915
     message: str,
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
+    ctx: ResponseTurnContext,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_name: str | None = None,
     media: MediaInputs | None = None,
-    session_id: str | None = None,
-    run_id: str | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
-    reply_to_event_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    correlation_id: str | None = None,
-    active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
     configured_team_name: str | None = None,
-    matrix_run_metadata: dict[str, Any] | None = None,
-    system_enrichment_items: Sequence[EnrichmentItem] = (),
     pipeline_timing: DispatchPipelineTiming | None = None,
     *,
     turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
 ) -> str:
-    """Create a team and execute response."""
+    """Create a team and execute response.
+
+    ``ctx`` carries the per-turn Matrix identity; this entry refines its
+    ``entity_label`` to the materialized team label and appends the
+    knowledge-availability enrichment before the turn runs.
+    """
     assert orchestrator.config is not None
     requested_agent_names = _requested_team_agent_names(agent_names)
     allow_direct_private_agents = _allow_direct_private_team_agents(
@@ -1961,18 +1947,6 @@ async def team_response(  # noqa: C901, PLR0915
         allow_direct_private_agents=allow_direct_private_agents,
     )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
-    room_id = execution_identity.room_id if execution_identity is not None else None
-    thread_id = (
-        execution_identity.resolved_thread_id or execution_identity.thread_id
-        if execution_identity is not None
-        else None
-    )
-    requester_id = user_id or (execution_identity.requester_id if execution_identity is not None else None)
-    correlation_id = resolve_run_correlation_id(
-        correlation_id,
-        reply_to_event_id=reply_to_event_id,
-        matrix_run_metadata=matrix_run_metadata,
-    )
     try:
         # Member agent builds walk the filesystem (workspace scaffolding,
         # context files, session storage); keep them off the event loop (#1260).
@@ -1981,24 +1955,27 @@ async def team_response(  # noqa: C901, PLR0915
             agent_names,
             orchestrator,
             execution_identity,
-            session_id=session_id,
+            session_id=ctx.session_id,
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
         )
     except ValueError as exc:
         return str(exc)
-    system_enrichment_items = append_knowledge_availability_enrichment(
-        system_enrichment_items,
-        unavailable_bases,
-    )
     agents = team_members.agents
 
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
+    ctx = replace(
+        ctx,
+        entity_label=team_name,
+        system_enrichment_items=append_knowledge_availability_enrichment(
+            ctx.system_enrichment_items,
+            unavailable_bases,
+        ),
+    )
     base_media_inputs = media or MediaInputs()
     config = orchestrator.config
-    enrichment_items = system_enrichment_items
     holder = _TeamTurnHolder(team_members=team_members)
 
     async def _run_team_attempt(  # noqa: C901, PLR0912, PLR0915
@@ -2011,7 +1988,7 @@ async def team_response(  # noqa: C901, PLR0915
             agent_names,
             orchestrator,
             execution_identity,
-            session_id=session_id,
+            session_id=ctx.session_id,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
         )
@@ -2023,8 +2000,8 @@ async def team_response(  # noqa: C901, PLR0915
         attempt_model_name = config.resolve_runtime_model(
             entity_name=configured_team_name,
             active_model_name=model_name,
-            room_id=room_id,
-            thread_id=thread_id,
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
             runtime_paths=orchestrator.runtime_paths,
         ).model_name
         team = build_materialized_team_instance(
@@ -2040,6 +2017,7 @@ async def team_response(  # noqa: C901, PLR0915
         )
         holder.team = team
         prepared_execution = await prepare_materialized_team_execution(
+            ctx,
             scope_context=run.scope_context,
             agents=attempt_agents,
             team=team,
@@ -2048,23 +2026,15 @@ async def team_response(  # noqa: C901, PLR0915
             config=config,
             runtime_paths=orchestrator.runtime_paths,
             active_model_name=attempt_model_name,
-            reply_to_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
             current_sender_id=user_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            requester_id=requester_id,
-            correlation_id=correlation_id,
             compaction_outcomes_collector=compaction_outcomes_collector,
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
             compaction_lifecycle=compaction_lifecycle,
             configured_team_name=configured_team_name,
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
-            matrix_run_metadata=matrix_run_metadata,
             pipeline_timing=pipeline_timing,
-            system_enrichment_items=enrichment_items,
         )
         prompt = prepared_execution.prepared_prompt
         run.unseen_event_ids = prepared_execution.unseen_event_ids
@@ -2091,13 +2061,8 @@ async def team_response(  # noqa: C901, PLR0915
             )
             with bind_llm_request_log_context(
                 **_team_request_log_context(
+                    ctx,
                     team_name=configured_team_name or team_name,
-                    session_id=session_id,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    reply_to_event_id=reply_to_event_id,
-                    requester_id=requester_id,
-                    correlation_id=correlation_id,
                     prompt=message,
                     run_input=prepared_input,
                     metadata=run_metadata,
@@ -2105,7 +2070,7 @@ async def team_response(  # noqa: C901, PLR0915
             ):
                 return await team.arun(
                     prepared_input,
-                    session_id=session_id,
+                    session_id=ctx.session_id,
                     run_id=current_run_id,
                     user_id=user_id,
                     metadata=run_metadata,
@@ -2180,7 +2145,7 @@ async def team_response(  # noqa: C901, PLR0915
                     _cleanup_team_notice_state(
                         run_output=response,
                         scope_context=run.scope_context,
-                        session_id=session_id,
+                        session_id=ctx.session_id,
                         entity_name=configured_team_name or team_name,
                     )
                     _scrub_team_retry_notice_state(
@@ -2209,7 +2174,7 @@ async def team_response(  # noqa: C901, PLR0915
                 config=config,
                 prepared_execution=prepared_execution,
                 response=response,
-                session_id=session_id,
+                session_id=ctx.session_id,
                 tool_count=len(run_tool_executions),
             )
         if isinstance(response, (TeamRunOutput, RunOutput)) and is_cancelled_run_output(response):
@@ -2232,10 +2197,10 @@ async def team_response(  # noqa: C901, PLR0915
                 ),
                 metadata_content=metadata_content,
             )
-        if reply_to_event_id:
+        if ctx.reply_to_event_id:
             _persist_bound_seen_event_ids(
                 scope_context=run.scope_context,
-                session_id=session_id,
+                session_id=ctx.session_id,
                 event_ids=_run_metadata_seen_event_ids(run_metadata),
             )
 
@@ -2308,19 +2273,19 @@ async def team_response(  # noqa: C901, PLR0915
         _cleanup_team_notice_state(
             run_output=holder.last_response,
             scope_context=scope_context,
-            session_id=session_id,
+            session_id=ctx.session_id,
             entity_name=configured_team_name or team_name,
         )
 
     discard_team_empty_run = _build_team_empty_run_discard(
-        session_id=session_id,
+        session_id=ctx.session_id,
         entity_name=configured_team_name or team_name,
     )
     _release_team_attempt_members, _close_team_attempt_dbs = _build_team_runtime_db_callbacks(holder)
     adapter = BlockingTurnAdapter(
         open_scope=lambda: open_bound_scope_session_context(
             agents=agents,
-            session_id=session_id,
+            session_id=ctx.session_id,
             runtime_paths=orchestrator.runtime_paths,
             config=config,
             execution_identity=execution_identity,
@@ -2335,24 +2300,14 @@ async def team_response(  # noqa: C901, PLR0915
         discard_empty_run=discard_team_empty_run,
     )
     return await run_blocking_response_turn(
-        ResponseTurnContext(
-            entity_label=team_name,
-            session_id=session_id,
-            run_id=run_id,
-            correlation_id=correlation_id,
-            reply_to_event_id=reply_to_event_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            requester_id=requester_id,
-            matrix_run_metadata=matrix_run_metadata,
-        ),
+        ctx,
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
         continuation=_initial_team_continuation(
             message=message,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
-            run_id=run_id,
+            run_id=ctx.run_id,
         ),
     )
 
@@ -2423,27 +2378,21 @@ async def team_response_stream(  # noqa: C901, PLR0915
     message: str,
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
+    ctx: ResponseTurnContext,
     mode: TeamMode = TeamMode.COORDINATE,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_name: str | None = None,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
-    session_id: str | None = None,
-    run_id: str | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
-    reply_to_event_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    correlation_id: str | None = None,
-    active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
     configured_team_name: str | None = None,
-    matrix_run_metadata: dict[str, Any] | None = None,
-    system_enrichment_items: Sequence[EnrichmentItem] = (),
     pipeline_timing: DispatchPipelineTiming | None = None,
     *,
     turn_recorder: TurnRecorder,
@@ -2453,7 +2402,10 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
     Renders a header and per-member sections, optionally adding a team
     consensus if present. Rebuilds the entire document as new events
-    arrive so the final shape matches the non-stream style.
+    arrive so the final shape matches the non-stream style. ``ctx`` carries
+    the per-turn Matrix identity; this entry refines its ``entity_label``
+    to the materialized team label and appends the knowledge-availability
+    enrichment before the turn runs.
     """
     assert orchestrator.config is not None
     requested_agent_names = _requested_team_agent_names(
@@ -2468,18 +2420,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
         allow_direct_private_agents=allow_direct_private_agents,
     )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
-    room_id = execution_identity.room_id if execution_identity is not None else None
-    thread_id = (
-        execution_identity.resolved_thread_id or execution_identity.thread_id
-        if execution_identity is not None
-        else None
-    )
-    requester_id = user_id or (execution_identity.requester_id if execution_identity is not None else None)
-    correlation_id = resolve_run_correlation_id(
-        correlation_id,
-        reply_to_event_id=reply_to_event_id,
-        matrix_run_metadata=matrix_run_metadata,
-    )
     try:
         # Member agent builds walk the filesystem (workspace scaffolding,
         # context files, session storage); keep them off the event loop (#1260).
@@ -2488,7 +2428,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             requested_agent_names,
             orchestrator,
             execution_identity,
-            session_id=session_id,
+            session_id=ctx.session_id,
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
@@ -2496,16 +2436,19 @@ async def team_response_stream(  # noqa: C901, PLR0915
     except ValueError as exc:
         yield str(exc)
         return
-    system_enrichment_items = append_knowledge_availability_enrichment(
-        system_enrichment_items,
-        unavailable_bases,
-    )
     agent_names = team_members.display_names
     display_names = team_members.display_names
     team_label = f"Team ({', '.join(agent_names)})"
+    ctx = replace(
+        ctx,
+        entity_label=team_label,
+        system_enrichment_items=append_knowledge_availability_enrichment(
+            ctx.system_enrichment_items,
+            unavailable_bases,
+        ),
+    )
     base_media_inputs = media or MediaInputs()
     config = orchestrator.config
-    enrichment_items = system_enrichment_items
     holder = _TeamTurnHolder(team_members=team_members)
 
     async def _run_team_stream_attempt(  # noqa: C901, PLR0912, PLR0915
@@ -2518,7 +2461,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             requested_agent_names,
             orchestrator,
             execution_identity,
-            session_id=session_id,
+            session_id=ctx.session_id,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
         )
@@ -2530,8 +2473,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
         attempt_model_name = config.resolve_runtime_model(
             entity_name=configured_team_name,
             active_model_name=model_name,
-            room_id=room_id,
-            thread_id=thread_id,
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
             runtime_paths=orchestrator.runtime_paths,
         ).model_name
         team = build_materialized_team_instance(
@@ -2547,6 +2490,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
         )
         holder.team = team
         prepared_execution = await prepare_materialized_team_execution(
+            ctx,
             scope_context=run.scope_context,
             agents=attempt_agents,
             team=team,
@@ -2555,23 +2499,15 @@ async def team_response_stream(  # noqa: C901, PLR0915
             config=config,
             runtime_paths=orchestrator.runtime_paths,
             active_model_name=attempt_model_name,
-            reply_to_event_id=reply_to_event_id,
-            active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
             current_sender_id=user_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            requester_id=requester_id,
-            correlation_id=correlation_id,
             compaction_outcomes_collector=compaction_outcomes_collector,
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
             compaction_lifecycle=compaction_lifecycle,
             configured_team_name=configured_team_name,
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
-            matrix_run_metadata=matrix_run_metadata,
             pipeline_timing=pipeline_timing,
-            system_enrichment_items=enrichment_items,
         )
         prepared_prompt = prepared_execution.prepared_prompt
         run.unseen_event_ids = prepared_execution.unseen_event_ids
@@ -2792,7 +2728,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 prompt=attempt_prompt,
                 metadata=run_metadata,
                 media=attempt_media_inputs,
-                session_id=session_id,
+                session_id=ctx.session_id,
                 run_id=attempt_run_id,
                 user_id=user_id,
             )
@@ -2804,13 +2740,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
             raw_stream = stream_with_llm_request_log_context(
                 cast("AsyncGenerator[Any, None]", raw_stream),
                 request_context=_team_request_log_context(
+                    ctx,
                     team_name=configured_team_name or team_label,
-                    session_id=session_id,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    reply_to_event_id=reply_to_event_id,
-                    requester_id=requester_id,
-                    correlation_id=correlation_id,
                     prompt=message,
                     run_input=stream_run_input,
                     metadata=run_metadata,
@@ -2821,7 +2752,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     _cleanup_team_notice_state(
                         run_output=event,
                         scope_context=run.scope_context,
-                        session_id=session_id,
+                        session_id=ctx.session_id,
                         entity_name=configured_team_name or team_label,
                     )
                     event_tool_executions = _collect_team_tool_executions(event)
@@ -2831,7 +2762,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             config=config,
                             prepared_execution=prepared_execution,
                             response=event,
-                            session_id=session_id,
+                            session_id=ctx.session_id,
                             tool_count=len(event_tool_executions),
                         )
 
@@ -2890,11 +2821,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         yield AttemptResolved(HandledAttempt())
                         return
 
-                    if reply_to_event_id:
+                    if ctx.reply_to_event_id:
                         _persist_bound_seen_event_ids(
                             scope_context=run.scope_context,
-                            session_id=session_id,
-                            event_ids=[reply_to_event_id, *unseen_event_ids],
+                            session_id=ctx.session_id,
+                            event_ids=[ctx.reply_to_event_id, *unseen_event_ids],
                         )
                     response_text = _format_terminal_team_response(
                         event,
@@ -2968,7 +2899,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                                 completed_run_event=None,
                                 usage=usage,
                                 run_id=event.run_id or attempt_run_id,
-                                session_id=event.session_id or session_id,
+                                session_id=event.session_id or ctx.session_id,
                                 status=RunStatus.error,
                                 tool_count=len(completed_tool_executions),
                             ),
@@ -2986,7 +2917,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             completed_run_event=None,
                             usage=usage,
                             run_id=event.run_id or attempt_run_id,
-                            session_id=event.session_id or session_id,
+                            session_id=event.session_id or ctx.session_id,
                             status=RunStatus.cancelled,
                             tool_count=len(completed_tool_executions),
                         )
@@ -3094,11 +3025,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
             if media_fallback_retry_requested:
                 continue
-            if emitted_output and reply_to_event_id:
+            if emitted_output and ctx.reply_to_event_id:
                 _persist_bound_seen_event_ids(
                     scope_context=run.scope_context,
-                    session_id=session_id,
-                    event_ids=[reply_to_event_id, *unseen_event_ids],
+                    session_id=ctx.session_id,
+                    event_ids=[ctx.reply_to_event_id, *unseen_event_ids],
                 )
             # Real Agno team streams end without a terminal run output, so this
             # is the resolution point where the empty-run guard must fire.
@@ -3111,7 +3042,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     usage=usage,
                     run_id=(completed_run_event.run_id if completed_run_event is not None else None) or attempt_run_id,
                     session_id=(completed_run_event.session_id if completed_run_event is not None else None)
-                    or session_id,
+                    or ctx.session_id,
                     status=RunStatus.completed,
                     tool_count=len(completed_tool_executions),
                 )
@@ -3140,12 +3071,12 @@ async def team_response_stream(  # noqa: C901, PLR0915
         _cleanup_team_notice_state(
             run_output=None,
             scope_context=scope_context,
-            session_id=session_id,
+            session_id=ctx.session_id,
             entity_name=configured_team_name or team_label,
         )
 
     discard_team_empty_run = _build_team_empty_run_discard(
-        session_id=session_id,
+        session_id=ctx.session_id,
         entity_name=configured_team_name or team_label,
     )
 
@@ -3161,7 +3092,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
     adapter = StreamingTurnAdapter[_TeamStreamChunk](
         open_scope=lambda: open_bound_scope_session_context(
             agents=team_members.agents,
-            session_id=session_id,
+            session_id=ctx.session_id,
             runtime_paths=orchestrator.runtime_paths,
             config=config,
             execution_identity=execution_identity,
@@ -3177,24 +3108,14 @@ async def team_response_stream(  # noqa: C901, PLR0915
         discard_empty_run=discard_team_empty_run,
     )
     response_stream = stream_response_turn(
-        ResponseTurnContext(
-            entity_label=team_label,
-            session_id=session_id,
-            run_id=run_id,
-            correlation_id=correlation_id,
-            reply_to_event_id=reply_to_event_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            requester_id=requester_id,
-            matrix_run_metadata=matrix_run_metadata,
-        ),
+        ctx,
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
         continuation=_initial_team_continuation(
             message=message,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
-            run_id=run_id,
+            run_id=ctx.run_id,
         ),
     )
     # Close the driver generator deterministically when this wrapper unwinds so

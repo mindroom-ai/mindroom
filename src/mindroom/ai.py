@@ -116,7 +116,6 @@ __all__ = [
     "ResponseTurnContext",
     "ai_response",
     "build_matrix_run_metadata",
-    "resolve_run_correlation_id",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
@@ -701,23 +700,6 @@ def _extract_interrupted_partial_text(
     if _is_run_cancelled_boilerplate(stripped):
         return ""
     return stripped
-
-
-def resolve_run_correlation_id(
-    correlation_id: str | None,
-    *,
-    reply_to_event_id: str | None,
-    matrix_run_metadata: dict[str, Any] | None,
-) -> str:
-    """Return the authoritative correlation ID for one persisted model run."""
-    if correlation_id:
-        return correlation_id
-    metadata_correlation_id = matrix_run_metadata.get("correlation_id") if matrix_run_metadata is not None else None
-    if isinstance(metadata_correlation_id, str) and metadata_correlation_id:
-        return metadata_correlation_id
-    if reply_to_event_id:
-        return reply_to_event_id
-    return uuid4().hex
 
 
 def _request_stream_retry(
