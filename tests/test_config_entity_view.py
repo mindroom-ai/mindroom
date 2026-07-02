@@ -80,7 +80,7 @@ def test_defaults_scope_view_matches_default_accessors() -> None:
 def test_unauthored_compaction_reports_not_authored() -> None:
     config = Config(
         agents={"plain_agent": AgentConfig(display_name="Plain Agent")},
-        defaults=DefaultsConfig(tools=[]),
+        defaults=DefaultsConfig(tools=[], compaction=None),
         models={"default": ModelConfig(provider="openai", id="test-model")},
     )
 
