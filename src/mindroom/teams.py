@@ -2676,6 +2676,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
                                 partial_text=partial_text,
                                 completed_tools=tuple(completed_tool_trace),
                                 interrupted_tools=tuple(interrupted_tool_trace),
+                                session_id=event.session_id,
+                                run_id=event.run_id or attempt_run_id,
                                 metadata_content=event_metadata_content,
                             ),
                         )
@@ -2730,7 +2732,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     yield response_text
                     yield AttemptResolved(
                         CompletedAttempt(
-                            replayable_text=response_text,
+                            replayable_text=response_text if event_has_visible else "",
                             has_visible_content=event_has_visible,
                             is_empty=(
                                 event.status == RunStatus.completed
@@ -2790,6 +2792,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             partial_text=_current_canonical_partial_text(),
                             completed_tools=tuple(completed_tools),
                             interrupted_tools=tuple(pending.trace_entry for pending in pending_tools),
+                            session_id=event.session_id,
+                            run_id=event.run_id or attempt_run_id,
                         ),
                     )
                     return
@@ -2883,19 +2887,22 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     session_id=session_id,
                     event_ids=[reply_to_event_id, *unseen_event_ids],
                 )
-            if emitted_output or completed_tool_executions:
-                canonical_text = _current_canonical_partial_text()
-                yield AttemptResolved(
-                    CompletedAttempt(
-                        replayable_text=(
-                            _format_team_header(team_members.display_names) + canonical_text if canonical_text else ""
-                        ),
-                        has_visible_content=bool(canonical_text),
-                        attempt_run_id=attempt_run_id,
-                        tool_executions=tuple(completed_tool_executions),
-                        completed_tools=tuple(completed_tools),
+            # Real Agno team streams end without a terminal run output, so this
+            # is the resolution point where the empty-run guard must fire.
+            canonical_text = _current_canonical_partial_text()
+            yield AttemptResolved(
+                CompletedAttempt(
+                    replayable_text=(
+                        _format_team_header(team_members.display_names) + canonical_text if canonical_text else ""
                     ),
-                )
+                    has_visible_content=bool(canonical_text),
+                    is_empty=not emitted_output and not completed_tool_executions,
+                    run_id=attempt_run_id,
+                    attempt_run_id=attempt_run_id,
+                    tool_executions=tuple(completed_tool_executions),
+                    completed_tools=tuple(completed_tools),
+                ),
+            )
             return
 
     def _finalize_team_stream_attempt(scope_context: ScopeSessionContext | None) -> None:

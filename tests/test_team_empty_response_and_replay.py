@@ -150,6 +150,46 @@ async def test_team_response_stream_yields_fallback_notice_when_retry_is_also_em
 
 
 @pytest.mark.asyncio
+async def test_team_response_stream_empty_event_stream_retries_then_notices() -> None:
+    """A stream that ends with no events at all still triggers the empty-run guard.
+
+    Real Agno team streams never emit a terminal run output object, so the
+    guard must fire from the plain end-of-stream resolution.
+    """
+    orchestrator, config = _make_orchestrator()
+
+    async def silent_stream() -> AsyncIterator[object]:
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(side_effect=[silent_stream(), silent_stream()])
+    recorder = TurnRecorder(user_message="Say something.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Say something.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                session_id="session-1",
+            )
+        ]
+
+    assert mock_team.arun.call_count == 2
+    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+    assert ai_runtime.EMPTY_RESPONSE_NOTICE in rendered
+    # The notice-only turn records an empty completion, not the placeholder document.
+    assert recorder.outcome == "completed"
+    assert recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
 async def test_team_response_without_recorder_persists_interrupted_replay() -> None:
     """A recorder-less cancelled team run persists a standalone interrupted replay."""
     orchestrator, _config = _make_orchestrator()
