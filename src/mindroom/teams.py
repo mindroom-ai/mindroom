@@ -1706,6 +1706,9 @@ async def prepare_materialized_team_execution(
     runtime_model = config.resolve_runtime_model(
         entity_name=configured_team_name,
         active_model_name=active_model_name,
+        room_id=room_id,
+        thread_id=thread_id,
+        runtime_paths=runtime_paths,
     )
     prepared_execution = await prepare_bound_team_run_context(
         scope_context=scope_context,
