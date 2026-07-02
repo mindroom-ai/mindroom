@@ -1192,6 +1192,15 @@ class Config(BaseModel):
             return DEFAULT_WORKER_GRANTABLE_CREDENTIALS
         return frozenset(configured)
 
+    def agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
+        """Return the derived execution scope for one agent.
+
+        Public accessor for tool-composition call sites (e.g. plugins that
+        build other registered tools at dispatch time and need the same
+        worker scoping as agent toolkit construction).
+        """
+        return self._agent_execution_scope(agent_name)
+
     def _agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
         """Return the internal derived execution scope for one agent.
 
