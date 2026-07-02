@@ -490,7 +490,7 @@ def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[i
     backends = (
         {config.memory.backend}
         if not config.agents
-        else {config.get_agent_memory_backend(agent_name) for agent_name in config.agents}
+        else {config.resolve_entity(agent_name).memory_backend for agent_name in config.agents}
     )
     if "mem0" not in backends:
         if backends == {"none"}:

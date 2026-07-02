@@ -63,8 +63,8 @@ def build_agent_status_message(
     """
     status_parts = []
 
-    # Get model name using the config method
-    model_name = config.get_entity_model_name(agent_name)
+    entity_view = config.resolve_entity(agent_name)
+    model_name = entity_view.model_name
 
     # Format model info
     if model_name in config.models:
@@ -88,7 +88,7 @@ def build_agent_status_message(
         if agent_config.role:
             status_parts.append(f"💼 {agent_config.role[:100]}")  # Limit length
         # Add tool count
-        effective_tools = config.get_agent_available_tools(agent_name)
+        effective_tools = entity_view.available_tools
         if effective_tools:
             status_parts.append(f"🔧 {len(effective_tools)} tools available")
 

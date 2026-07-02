@@ -241,7 +241,7 @@ def test_effective_tool_configs_keep_defer_initial_and_authored_order(tmp_path: 
 
     config = _validated_config(tmp_path, raw)
 
-    entries = config.get_agent_tool_configs("code")
+    entries = config.resolve_entity("code").tool_configs
     assert [(entry.name, entry.defer, entry.initial, entry.authored_order) for entry in entries] == [
         ("shell", True, True, 0),
         ("sleep", False, False, 1),

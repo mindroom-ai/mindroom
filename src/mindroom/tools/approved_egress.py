@@ -161,7 +161,7 @@ def _effective_ttl_seconds(requested_ttl_seconds: int) -> int:
 
 def _grant_subject(context: ToolRuntimeContext) -> EgressGrantSubject:
     agent_name = context.agent_name
-    scope = context.config.get_agent_execution_scope(agent_name)
+    scope = context.config.resolve_entity(agent_name).execution_scope
     execution_identity = build_execution_identity_from_runtime_context(context) if scope == "user_agent" else None
     return resolve_grant_subject(
         agent_name=agent_name,

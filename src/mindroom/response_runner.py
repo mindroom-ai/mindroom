@@ -2201,7 +2201,7 @@ class ResponseRunner:
                 session_id=session_id,
                 execution_identity=execution_identity,
             )
-            if self.deps.runtime.config.get_agent_memory_backend(self.deps.agent_name) == "mem0":
+            if self.deps.runtime.config.resolve_entity(self.deps.agent_name).memory_backend == "mem0":
                 create_background_task(
                     store_conversation_memory(
                         memory_prompt,
