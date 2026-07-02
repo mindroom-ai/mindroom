@@ -75,6 +75,7 @@ from mindroom.response_turn import (
     BlockingTurnAdapter,
     CancelledAttempt,
     CompletedAttempt,
+    ContinuationCapability,
     DynamicContinuationRunState,
     ErroredAttempt,
     HandledAttempt,
@@ -303,6 +304,15 @@ def _team_response_text(response: TeamRunOutput | RunOutput) -> str:
     """Render one final team response body without the shared team header."""
     parts = format_team_response(response)
     return "\n\n".join(parts) if parts else (_get_response_content(response) or "No team response generated.")
+
+
+def _has_visible_team_output(response: TeamRunOutput | RunOutput) -> bool:
+    """Return whether one terminal team output carries real member or consensus text.
+
+    The "No team response generated." placeholder does not count, so the
+    dynamic-tool continuation limit message can replace it.
+    """
+    return bool(format_team_response(response)) or bool(_get_response_content(response))
 
 
 def _format_terminal_team_response(
@@ -1204,6 +1214,16 @@ def _extract_cancelled_team_tool_trace(
     return completed_trace, interrupted_trace
 
 
+def _collect_team_tool_executions(response: TeamRunOutput | RunOutput) -> list[ToolExecution]:
+    """Collect raw tool executions from a possibly nested team response."""
+    tools: list[ToolExecution] = list(response.tools or [])
+    if isinstance(response, TeamRunOutput):
+        for member_response in response.member_responses:
+            if isinstance(member_response, TeamRunOutput | RunOutput):
+                tools.extend(_collect_team_tool_executions(member_response))
+    return tools
+
+
 def _is_cancellation_boilerplate(content: str) -> bool:
     """Return whether one string is just Agno cancellation boilerplate."""
     normalized = content.strip().lower()
@@ -1267,6 +1287,7 @@ def materialize_exact_team_members(
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,
             refresh_scheduler=refresh_scheduler,
+            dynamic_tool_continuation=True,
         )
 
     team_members = materialize_exact_requested_team_members(
@@ -1893,6 +1914,7 @@ async def team_response(  # noqa: C901, PLR0915
                     content_preview=response.content[:200] if response.content else None,
                 )
             team_response_text = _team_response_text(response)
+            has_visible_output = _has_visible_team_output(response)
         else:
             logger.warning(
                 "team_response_unexpected_type",
@@ -1900,6 +1922,7 @@ async def team_response(  # noqa: C901, PLR0915
                 response=response,
             )
             team_response_text = str(response)
+            has_visible_output = bool(team_response_text)
 
         logger.info(
             "team_response_preview",
@@ -1920,8 +1943,11 @@ async def team_response(  # noqa: C901, PLR0915
         return CompletedAttempt(
             response_text=response_text,
             replayable_text=response_text,
-            has_visible_content=bool(response_text),
+            has_visible_content=has_visible_output,
             attempt_run_id=attempt_run_id,
+            tool_executions=tuple(
+                _collect_team_tool_executions(response) if isinstance(response, (TeamRunOutput, RunOutput)) else [],
+            ),
             completed_tools=tuple(
                 _extract_completed_team_tool_trace(response)
                 if isinstance(response, (TeamRunOutput, RunOutput))
@@ -1959,6 +1985,7 @@ async def team_response(  # noqa: C901, PLR0915
         ),
         finalize_attempt=_finalize_team_attempt,
         unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_name),
+        continuation=ContinuationCapability(),
     )
     return await run_blocking_response_turn(
         ResponseTurnContext(
@@ -2383,6 +2410,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             next_tool_index = 1
             pending_tools = tool_tracker.pending_tools
             holder.tool_tracker = tool_tracker
+            completed_tool_executions: list[ToolExecution] = []
             emitted_output = False
             media_fallback_retry_requested = False
 
@@ -2485,13 +2513,16 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         event,
                         team_display_names=team_members.display_names,
                     )
-                    turn_recorder.record_completed(
-                        run_metadata=run_metadata,
-                        assistant_text=response_text,
-                        completed_tools=_extract_completed_team_tool_trace(event),
-                    )
                     yield response_text
-                    yield AttemptResolved(HandledAttempt())
+                    yield AttemptResolved(
+                        CompletedAttempt(
+                            replayable_text=response_text,
+                            has_visible_content=_has_visible_team_output(event),
+                            attempt_run_id=attempt_run_id,
+                            tool_executions=tuple(_collect_team_tool_executions(event)),
+                            completed_tools=tuple(_extract_completed_team_tool_trace(event)),
+                        ),
+                    )
                     return
 
                 if isinstance(event, TeamRunErrorEvent):
@@ -2568,6 +2599,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             agent_name=member_name,
                             tool=event.tool,
                         )
+                        if event.tool is not None:
+                            completed_tool_executions.append(event.tool)
                         _complete_tool_for_member(member_name, event.tool)
                 elif isinstance(event, TeamRunContentEvent):
                     if event.content:
@@ -2595,6 +2628,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         agent_name=None,
                         tool=event.tool,
                     )
+                    if event.tool is not None:
+                        completed_tool_executions.append(event.tool)
                     _complete_tool(
                         scope_key="team",
                         get_visible_text=_get_visible_consensus,
@@ -2627,14 +2662,17 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 )
             if emitted_output:
                 canonical_text = _current_canonical_partial_text()
-                turn_recorder.record_completed(
-                    run_metadata=run_metadata,
-                    assistant_text=(
-                        _format_team_header(team_members.display_names) + canonical_text if canonical_text else ""
+                yield AttemptResolved(
+                    CompletedAttempt(
+                        replayable_text=(
+                            _format_team_header(team_members.display_names) + canonical_text if canonical_text else ""
+                        ),
+                        has_visible_content=bool(canonical_text),
+                        attempt_run_id=attempt_run_id,
+                        tool_executions=tuple(completed_tool_executions),
+                        completed_tools=tuple(completed_tools),
                     ),
-                    completed_tools=completed_tools,
                 )
-            yield AttemptResolved(HandledAttempt())
             return
 
     def _finalize_team_stream_attempt(scope_context: ScopeSessionContext | None) -> None:
@@ -2674,7 +2712,9 @@ async def team_response_stream(  # noqa: C901, PLR0915
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         ),
         finalize_attempt=_finalize_team_stream_attempt,
+        make_notice_chunk=lambda text: text,
         unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_label),
+        continuation=ContinuationCapability(),
     )
     response_stream = stream_response_turn(
         ResponseTurnContext(

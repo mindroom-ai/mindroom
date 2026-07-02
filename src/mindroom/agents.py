@@ -1206,11 +1206,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             infinite recursion when agents delegate to each other.
         refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
             passed through to delegated child agents.
-        dynamic_tool_continuation: Whether this agent runs under the standalone
-            ai.py turn loop that resumes after a dynamic load/unload. Only that
-            loop stops the dynamic tools manager mid-turn; team members and other
-            embedded agents leave it False so a load/unload takes effect on the
-            next request instead of truncating the run.
+        dynamic_tool_continuation: Whether this agent runs under a response-turn
+            loop that resumes after a dynamic load/unload (the standalone agent
+            envelope and materialized team members both do). Embedded agents
+            without such a loop leave it False so a load/unload takes effect on
+            the next request instead of truncating the run.
 
     Returns:
         Configured Agent instance

@@ -51,9 +51,10 @@ class DynamicToolsToolkit(Toolkit):
             instructions=config.get_prompt("DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS"),
             tools=[self.list_tools, self.load_tool, self.unload_tool, self.tool_search],
         )
-        # Same-turn continuation is only driven by the standalone agent run loop
-        # in ai.py. Team members and other embedded agents run without it, so
-        # only stop the provider loop when the caller will resume the turn.
+        # Same-turn continuation is driven by the shared response-turn drivers
+        # (standalone agents and materialized team members). Embedded agents
+        # without such a loop run with it off, so only stop the provider loop
+        # when the caller will resume the turn.
         for tool_name in ("load_tool", "unload_tool"):
             self.functions[tool_name].stop_after_tool_call = stop_after_tool_call
 
