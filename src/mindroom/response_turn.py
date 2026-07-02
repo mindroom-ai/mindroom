@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
     from mindroom.history import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.hooks import EnrichmentItem
     from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
@@ -184,7 +185,13 @@ class DynamicContinuationRunState:
 
 @dataclass(frozen=True)
 class ResponseTurnContext:
-    """Per-turn Matrix identity constants consumed by the turn drivers."""
+    """Per-turn Matrix identity constants for one response turn.
+
+    Built once by the caller that owns the turn, then passed unchanged through
+    the entity envelope, its prepare chain, and the turn drivers. For agent
+    turns ``entity_label`` is the configured agent name; team turns refine it
+    to the materialized team label via ``dataclasses.replace``.
+    """
 
     entity_label: str
     session_id: str | None
@@ -195,6 +202,8 @@ class ResponseTurnContext:
     thread_id: str | None
     requester_id: str | None
     matrix_run_metadata: dict[str, Any] | None
+    active_event_ids: frozenset[str] = frozenset()
+    system_enrichment_items: tuple[EnrichmentItem, ...] = ()
 
 
 @dataclass(frozen=True)

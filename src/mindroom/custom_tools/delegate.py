@@ -15,7 +15,7 @@ from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.ai import ai_response
+from mindroom.ai import ResponseTurnContext, ai_response
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
@@ -142,23 +142,31 @@ class DelegateTools(Toolkit):
                 room_id=room_id,
                 runtime_context=runtime_context,
             )
+            delegated_correlation_id = (
+                delegated_runtime_context.correlation_id if delegated_runtime_context is not None else None
+            )
+            turn_ctx = ResponseTurnContext(
+                entity_label=agent_name,
+                session_id=session_id,
+                run_id=None,
+                correlation_id=delegated_correlation_id or uuid4().hex,
+                reply_to_event_id=None,
+                room_id=room_id,
+                thread_id=None,
+                requester_id=execution_identity.requester_id if execution_identity is not None else None,
+                matrix_run_metadata=None,
+                system_enrichment_items=tuple(system_enrichment_items),
+            )
             with tool_runtime_context(delegated_runtime_context):
                 response = await ai_response(
-                    agent_name=agent_name,
+                    turn_ctx,
                     prompt=task,
-                    session_id=session_id,
                     runtime_paths=self._runtime_paths,
                     config=self._config,
                     knowledge=knowledge_resolution.knowledge,
-                    user_id=execution_identity.requester_id if execution_identity is not None else None,
-                    room_id=room_id,
-                    correlation_id=(
-                        delegated_runtime_context.correlation_id if delegated_runtime_context is not None else None
-                    ),
                     include_interactive_questions=False,
                     execution_identity=execution_identity,
                     delegation_depth=self._delegation_depth + 1,
-                    system_enrichment_items=system_enrichment_items,
                     refresh_scheduler=self._refresh_scheduler,
                 )
         except Exception as e:
