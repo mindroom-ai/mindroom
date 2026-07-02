@@ -19,7 +19,6 @@ from mindroom.tool_system.events import (
     extract_tool_completed_info,
     format_tool_combined,
     format_tool_completed_event,
-    render_tool_trace_for_context,
 )
 
 TEST_CURSOR = "cursor_1234567890"
@@ -148,16 +147,12 @@ def test_format_tool_combined_redacts_sensitive_args_and_results() -> None:
     )
 
     payload = build_tool_trace_content([trace])
-    rendered = render_tool_trace_for_context([trace])
 
     assert payload is not None
     trace_event = payload[_TOOL_TRACE_KEY]["events"][0]
     assert "auth-secret" not in trace_event["args_preview"]
     assert "plain-secret-one" not in trace_event["args_preview"]
     assert "result-secret" not in trace_event["result_preview"]
-    assert "auth-secret" not in rendered
-    assert "plain-secret-one" not in rendered
-    assert "result-secret" not in rendered
     assert "***redacted***" in trace_event["args_preview"]
     assert "***redacted***" in trace_event["result_preview"]
 
@@ -472,64 +467,6 @@ def test_build_tool_trace_content_redacts_raw_trace_entries() -> None:
     event = payload[_TOOL_TRACE_KEY]["events"][0]
     assert event["args_preview"] == "api_key=***redacted***"
     assert event["result_preview"] == "token=***redacted***"
-
-
-def test_render_tool_trace_for_context_pins_started_and_completed_format() -> None:
-    """Renderer should emit the planned context marker format."""
-    rendered = render_tool_trace_for_context(
-        [
-            ToolTraceEntry(
-                type="tool_call_completed",
-                tool_name="run_shell_command",
-                args_preview="cmd=pwd",
-                result_preview="/app",
-            ),
-            ToolTraceEntry(
-                type="tool_call_started",
-                tool_name="save_file",
-                args_preview="file_name=a.py",
-                truncated=True,
-            ),
-        ],
-    )
-
-    assert rendered == (
-        "[tool:run_shell_command completed]\n"
-        "  args: cmd=pwd\n"
-        "  result: /app\n"
-        "[tool:save_file started]\n"
-        "  args: file_name=a.py\n"
-        "  result: <not yet returned>\n"
-        "  (truncated)"
-    )
-
-
-def test_render_tool_trace_for_context_omits_missing_optional_fields() -> None:
-    """Renderer should avoid empty args/result lines for completed events without previews."""
-    rendered = render_tool_trace_for_context(
-        [ToolTraceEntry(type="tool_call_completed", tool_name="save_file")],
-    )
-
-    assert rendered == "[tool:save_file completed]"
-
-
-def test_render_tool_trace_for_context_redacts_raw_trace_entries() -> None:
-    """Context renderer should redact entries even when caller supplied raw previews."""
-    rendered = render_tool_trace_for_context(
-        [
-            ToolTraceEntry(
-                type="tool_call_completed",
-                tool_name="call_api",
-                args_preview="api_key=plain-arg-secret",
-                result_preview="token=plain-result-secret",
-            ),
-        ],
-    )
-
-    assert "plain-arg-secret" not in rendered
-    assert "plain-result-secret" not in rendered
-    assert "api_key=***redacted***" in rendered
-    assert "token=***redacted***" in rendered
 
 
 def test_format_tool_started_with_empty_args() -> None:

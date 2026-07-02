@@ -31,7 +31,6 @@ from mindroom.execution_preparation import (
     _sanitize_thread_history_for_replay,
 )
 from mindroom.history.interrupted_replay import (
-    _INTERRUPTED_RESPONSE_MARKER,
     InterruptedReplaySnapshot,
     _render_interrupted_replay_content,
 )
@@ -338,7 +337,7 @@ class TestCleanPartialReplyBody:
         ]
 
         assert rendered[0] == rendered[1] == rendered[2]
-        assert rendered[0] == f"Partial answer\n\n{_INTERRUPTED_RESPONSE_MARKER}".encode()
+        assert rendered[0] == b"Partial answer\n\n(turn interrupted by the user before completion)"
 
 
 class TestUnseenMessagesPartialReplies:
