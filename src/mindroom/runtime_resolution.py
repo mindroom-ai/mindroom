@@ -228,7 +228,7 @@ def resolve_agent_runtime(
             ).is_relative_to(workspace_knowledge_root)
         }
         knowledge_paths: dict[str, Path] = {}
-        for base_id in config.get_agent_knowledge_base_ids(agent_name):
+        for base_id in config.resolve_entity(agent_name).knowledge_base_ids:
             base_config = config.get_knowledge_base_config(base_id)
             if config.get_private_knowledge_base_agent(base_id) is None:
                 knowledge_paths[base_id] = resolve_config_relative_path(base_config.path, runtime_paths).resolve()

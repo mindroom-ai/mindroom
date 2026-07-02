@@ -401,7 +401,7 @@ def _file_mode_knowledge_instruction_block(
         "Available file-only sources:",
     ]
     source_lines: list[str] = []
-    for base_id in config.get_agent_knowledge_base_ids(agent_name):
+    for base_id in config.resolve_entity(agent_name).knowledge_base_ids:
         base_config = config.get_knowledge_base_config(base_id)
         if base_config.mode != "files":
             continue
@@ -965,7 +965,7 @@ def _resolve_agent_culture(
     cache_private: bool = False,
 ) -> tuple[CultureManager | None, _CultureAgentSettings | None]:
     """Resolve shared culture manager and feature flags for an agent."""
-    culture_assignment = config.get_agent_culture(agent_name)
+    culture_assignment = config.resolve_entity(agent_name).culture
     if culture_assignment is None:
         return None, None
 
@@ -1470,7 +1470,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     knowledge_enabled = (
         not disable_runtime_capabilities
-        and bool(config.get_agent_knowledge_base_ids(agent_name))
+        and bool(config.resolve_entity(agent_name).knowledge_base_ids)
         and knowledge is not None
     )
     knowledge_sources = (

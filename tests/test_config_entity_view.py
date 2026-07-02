@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.memory import AgentMemorySearchConfig, MemoryConfig
+from mindroom.config.memory import AgentMemorySearchConfig, MemoryConfig, MemorySearchConfig
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 
@@ -56,7 +56,14 @@ def _representative_config() -> Config:
             "default": ModelConfig(provider="openai", id="test-model", context_window=48_000),
             "summary-model": ModelConfig(provider="openai", id="summary-model-id", context_window=32_000),
         },
-        memory=MemoryConfig(backend="mem0"),
+        # Non-default global memory settings so inheritance assertions are non-degenerate.
+        memory=MemoryConfig(backend="none", search=MemorySearchConfig(include=["notes/**/*.md"])),
+        cultures={
+            "engineering": CultureConfig(
+                description="Write tests first",
+                agents=["overriding_agent"],
+            ),
+        },
     )
 
 
@@ -96,6 +103,8 @@ def test_view_agent_fields_match_agent_accessors(agent_name: str) -> None:
     )
     assert view.execution_scope == config.get_agent_execution_scope(agent_name)
     assert view.scope_label == config.get_agent_scope_label(agent_name)
+    assert view.culture == config.get_agent_culture(agent_name)
+    assert view.knowledge_base_ids == config.get_agent_knowledge_base_ids(agent_name)
 
 
 def test_agent_only_fields_raise_for_defaults_scope() -> None:
