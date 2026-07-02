@@ -564,9 +564,10 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     Returns ``None`` when the configured tool should be skipped, such as an
     explicit ``delegate`` entry without valid delegation targets.
 
-    ``dynamic_tool_continuation`` is only set by the standalone agent run loop
-    in ai.py, which resumes the turn after a load/unload. It stops the dynamic
-    tools manager's provider loop so the rebuilt agent sees the new schema.
+    ``dynamic_tool_continuation`` is only set by callers that resume the turn
+    after a load/unload (the standalone agent envelope and materialized team
+    members). It stops the dynamic tools manager's provider loop so the rebuilt
+    agent sees the new schema.
     """
     agent_config = config.get_agent(agent_name)
     if agent_runtime is None:
