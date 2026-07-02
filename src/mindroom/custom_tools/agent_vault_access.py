@@ -238,10 +238,12 @@ class AgentVaultAccessTools(Toolkit):
             await self._set_admin_role(vault, email, token)
             return False
         if response.status_code == 404:
+            register_url = urljoin(self._ui_base_url.rstrip("/") + "/", "login")
             msg = (
                 missing_account_message
                 or f"{email} does not have an Agent Vault account yet. "
-                "Register and verify at the vault UI first, then ask again."
+                f"Send the user this exact link to register and verify their email, "
+                f"then ask again: {register_url}"
             )
             raise _AgentVaultAccessError(msg)
         return self._raise_api_error("granting vault admin access", response)

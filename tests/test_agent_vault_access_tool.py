@@ -276,7 +276,7 @@ async def test_request_vault_access_reports_owner_account_setup_error(
     assert payload["status"] == "error"
     assert "configured worker token-mint owner account" in payload["error"]
     assert "operator" in payload["error"]
-    assert "Register and verify at the vault UI first, then ask again" not in payload["error"]
+    assert "register and verify their email" not in payload["error"]
     grant_calls = [body for path, body in api.calls if path.endswith("/users")]
     assert grant_calls == [{"email": "owner@example.test", "role": "admin"}]
 
@@ -313,6 +313,7 @@ async def test_request_vault_access_reports_unregistered_account(
 
     assert payload["status"] == "error"
     assert "does not have an Agent Vault account" in payload["error"]
+    assert "https://example.test/agent-vault/login" in payload["error"]
 
 
 @pytest.mark.asyncio
