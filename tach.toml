@@ -1245,7 +1245,6 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.authorization",
-    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.execution_preparation",
@@ -1259,6 +1258,7 @@ depends_on = [
     "mindroom.media_inputs",
     "mindroom.metadata_merge",
     "mindroom.model_loading",
+    "mindroom.response_turn",
     "mindroom.team_exact_members",
     "mindroom.tool_system.events",
 ]
