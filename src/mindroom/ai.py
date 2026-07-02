@@ -2239,7 +2239,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         discard_empty_run=callbacks.discard_empty_run,
         on_scope_opened=callbacks.on_scope_opened,
         finalize_attempt=_finalize_streaming_attempt,
-        make_notice_chunk=lambda text: RunContentEvent(content=text),
+        make_text_chunk=lambda text: RunContentEvent(content=text),
         persist_standalone_replay=callbacks.persist_standalone_replay,
     )
     response_stream = stream_response_turn(

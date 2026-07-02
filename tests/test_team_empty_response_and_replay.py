@@ -137,6 +137,8 @@ async def test_team_response_stream_yields_fallback_notice_when_retry_is_also_em
     assert mock_team.arun.call_count == 2
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert ai_runtime.EMPTY_RESPONSE_NOTICE in rendered
+    # The discarded attempts' fallback documents must not leak ahead of the notice.
+    assert "No team response generated." not in rendered
 
 
 @pytest.mark.asyncio

@@ -210,7 +210,7 @@ def _streaming_adapter(
         release_attempt_entity=lambda _scope: _bump(log, "released"),
         close_runtime_dbs=lambda _scope: _bump(log, "closed"),
         discard_empty_run=lambda _scope, discard: log.discards.append(discard),
-        make_notice_chunk=lambda text: f"notice:{text}",
+        make_text_chunk=lambda text: f"notice:{text}",
         finalize_attempt=lambda _scope: _bump(log, "finalized"),
         unexpected_error_text=unexpected_error_text,
         persist_standalone_replay=_persist if with_standalone_replay else None,
@@ -940,6 +940,111 @@ def test_streaming_unexpected_error_yields_shaped_notice_chunk() -> None:
     )
 
     assert chunks == ["chunk", "notice:shaped: boom"]
+
+
+def test_streaming_completed_response_text_is_emitted_after_settle() -> None:
+    """A resolution-carried final document is emitted once the attempt settles."""
+    log = _AdapterLog()
+
+    async def _attempt(
+        _run: TurnRunState,
+        _c: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(
+            CompletedAttempt(response_text="final doc", replayable_text="final doc", has_visible_content=True),
+        )
+
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(log, _attempt),
+                TurnSinks(),
+                continuation=_continuation(),
+            ),
+        ),
+    )
+
+    assert chunks == ["notice:final doc"]
+
+
+def test_streaming_empty_terminal_text_is_not_leaked_before_retry() -> None:
+    """An empty attempt's fallback document is superseded by the retry, not emitted.
+
+    Pre-fix, the team terminal branch yielded its formatted text before the
+    driver settled, so an empty run leaked "No team response generated."
+    ahead of the retry (or the empty notice).
+    """
+    log = _AdapterLog()
+    attempts = 0
+
+    async def _attempt(
+        _run: TurnRunState,
+        _c: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            yield AttemptResolved(
+                CompletedAttempt(response_text="No team response generated.", is_empty=True, run_id="run-1"),
+            )
+            return
+        yield AttemptResolved(
+            CompletedAttempt(response_text="Recovered", replayable_text="Recovered", has_visible_content=True),
+        )
+
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(log, _attempt),
+                TurnSinks(),
+                continuation=_continuation(),
+            ),
+        ),
+    )
+
+    assert attempts == 2
+    assert chunks == ["notice:Recovered"]
+
+
+def test_streaming_continuation_does_not_emit_first_attempt_terminal_text() -> None:
+    """A dynamic-tool attempt's terminal text is superseded by the rerun's."""
+    log = _AdapterLog()
+    attempts = 0
+
+    async def _attempt(
+        _run: TurnRunState,
+        _c: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            yield AttemptResolved(
+                CompletedAttempt(
+                    response_text="stale first-attempt text",
+                    attempt_run_id="run-1",
+                    tool_executions=(_dynamic_tool_execution(),),
+                ),
+            )
+            return
+        yield AttemptResolved(
+            CompletedAttempt(response_text="final", replayable_text="final", has_visible_content=True),
+        )
+
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(log, _attempt),
+                TurnSinks(),
+                continuation=_continuation(),
+            ),
+        ),
+    )
+
+    assert attempts == 2
+    assert chunks == ["notice:final"]
 
 
 def test_streaming_attempt_without_sentinel_raises() -> None:

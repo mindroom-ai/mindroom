@@ -2889,9 +2889,13 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         team_display_names=team_members.display_names,
                     )
                     event_has_visible = _has_visible_team_output(event)
-                    yield response_text
+                    # The driver emits response_text only after settling the
+                    # attempt: a pre-settle yield would leak the fallback
+                    # placeholder before an empty-run retry, or stale
+                    # first-attempt text before a dynamic-tool continuation.
                     yield AttemptResolved(
                         CompletedAttempt(
+                            response_text=response_text,
                             replayable_text=response_text if event_has_visible else "",
                             has_visible_content=event_has_visible,
                             is_empty=(
@@ -3139,7 +3143,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
         release_attempt_entity=_release_team_attempt_members,
         close_runtime_dbs=_close_team_attempt_dbs,
         finalize_attempt=_finalize_team_stream_attempt,
-        make_notice_chunk=lambda text: text,
+        make_text_chunk=lambda text: text,
         unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_label),
         discard_empty_run=discard_team_empty_run,
     )

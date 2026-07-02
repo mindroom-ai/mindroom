@@ -236,8 +236,10 @@ class TurnPartialSnapshot:
 class CompletedAttempt:
     """One attempt that ran to a terminal provider response."""
 
-    # Only blocking attempts set this; the streaming driver delivers via
-    # chunks and records replayable_text.
+    # The attempt's deliverable final text. Streaming attempts whose chunks
+    # already delivered the document leave it empty; otherwise the driver
+    # emits it only after the attempt settles (an in-attempt yield would leak
+    # text that an empty-run retry or continuation is about to supersede).
     response_text: str = ""
     replayable_text: str = ""
     has_visible_content: bool = False
@@ -341,7 +343,7 @@ class StreamingTurnAdapter[ChunkT]:
     release_attempt_entity: Callable[[ScopeSessionContext | None], None]
     close_runtime_dbs: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
-    make_notice_chunk: Callable[[str], ChunkT]
+    make_text_chunk: Callable[[str], ChunkT]
     on_scope_opened: Callable[[ScopeSessionContext | None], None] | None = None
     finalize_attempt: Callable[[ScopeSessionContext | None], None] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
@@ -620,7 +622,9 @@ class _CompletionSettle:
 
     keep_going: bool
     continuation: DynamicContinuationRunState
-    notice_texts: tuple[str, ...]
+    # The streaming driver emits these as chunks; the blocking driver returns
+    # response_text. Both cover the same notice/limit/final-text decisions.
+    deliver_texts: tuple[str, ...]
     recorded_text: str
     recorded_tools: tuple[ToolTraceEntry, ...]
     response_text: str
@@ -651,7 +655,7 @@ def _settle_completed_attempt(
             return _CompletionSettle(
                 keep_going=True,
                 continuation=continuation,
-                notice_texts=(),
+                deliver_texts=(),
                 recorded_text="",
                 recorded_tools=(),
                 response_text="",
@@ -661,7 +665,7 @@ def _settle_completed_attempt(
         return _CompletionSettle(
             keep_going=False,
             continuation=continuation,
-            notice_texts=(ai_runtime.EMPTY_RESPONSE_NOTICE,),
+            deliver_texts=(ai_runtime.EMPTY_RESPONSE_NOTICE,),
             recorded_text="",
             recorded_tools=(),
             response_text=ai_runtime.EMPTY_RESPONSE_NOTICE,
@@ -682,12 +686,12 @@ def _settle_completed_attempt(
                 continuation,
                 next_prompt=decision.next_prompt,
             ),
-            notice_texts=(),
+            deliver_texts=(),
             recorded_text="",
             recorded_tools=(),
             response_text="",
         )
-    notice_texts: tuple[str, ...] = ()
+    deliver_texts: tuple[str, ...] = (resolution.response_text,) if resolution.response_text else ()
     recorded_text = resolution.replayable_text
     response_text = resolution.response_text
     if decision.limit_message is not None:
@@ -700,13 +704,13 @@ def _settle_completed_attempt(
                 status=decision.continuation.status,
             )
         if not resolution.has_visible_content:
-            notice_texts = (decision.limit_message,)
+            deliver_texts = (decision.limit_message,)
             recorded_text = decision.limit_message
             response_text = decision.limit_message
     return _CompletionSettle(
         keep_going=False,
         continuation=continuation,
-        notice_texts=notice_texts,
+        deliver_texts=deliver_texts,
         recorded_text=recorded_text,
         recorded_tools=resolution.completed_tools,
         response_text=response_text,
@@ -775,8 +779,8 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
                     )
                     continuation = settle.continuation
                     keep_going = settle.keep_going
-                    for notice_text in settle.notice_texts:
-                        yield adapter.make_notice_chunk(notice_text)
+                    for deliver_text in settle.deliver_texts:
+                        yield adapter.make_text_chunk(deliver_text)
                     if not keep_going:
                         if sinks.run_metadata_collector is not None and resolution.metadata_content is not None:
                             sinks.run_metadata_collector.update(resolution.metadata_content)
@@ -806,7 +810,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
         if adapter.unexpected_error_text is None:
             raise
         logger.exception("Response turn failed", entity=ctx.entity_label)
-        yield adapter.make_notice_chunk(adapter.unexpected_error_text(e))
+        yield adapter.make_text_chunk(adapter.unexpected_error_text(e))
         return
     finally:
         adapter.close_runtime_dbs(run.scope_context)
