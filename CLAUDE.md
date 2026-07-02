@@ -64,7 +64,8 @@ Matrix sync callback
        -> ingress_lanes.py                                       (per-(room, sender) receipt-order FIFO; STT readiness waits here)
        -> coalescing.py                                          (text dispatches immediately; media-tailed batches debounce)
        -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
-       -> response_runner.py -> ai.py                            (lifecycle lock, Agno agent/team run)
+       -> response_runner.py -> ai.py / teams.py                 (lifecycle lock, entity envelopes)
+            -> response_turn.py                                  (shared blocking/streaming turn drivers)
        -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
        -> turn_store.py / handled_turns.py                       (durable dedup so restarts don't double-reply)
 ```
@@ -94,6 +95,8 @@ Matrix sync callback
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `sync_restart_retry.py` | One-shot re-dispatch of responses cancelled by sync-restart recovery |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
+| `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, dynamic-tool continuation, empty-run retry, interrupt recording) |
+| `response_terminal.py` | Pending-visible classification and terminal stream outcomes for failed or cancelled turns |
 | `response_attempt.py` | Runs one visible response attempt with placeholder and stop tracking |
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
