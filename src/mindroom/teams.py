@@ -1216,7 +1216,16 @@ def _extract_cancelled_team_tool_trace(
 
 
 def _collect_team_tool_executions(response: TeamRunOutput | RunOutput) -> list[ToolExecution]:
-    """Collect raw tool executions from a possibly nested team response."""
+    """Collect raw tool executions from a possibly nested team response.
+
+    Any member's completed load/unload call surfaces here and drives a
+    whole-fan continuation, even when the team already produced visible
+    output. That mirrors the agent path deliberately: gating on visible
+    output would disable continuation in coordinate mode, where the leader
+    almost always synthesizes text around a member's truncated tool call.
+    The rerun is bounded by the continuation budget and prior attempts stay
+    in session history for the rerun to reuse.
+    """
     tools: list[ToolExecution] = list(response.tools or [])
     if isinstance(response, TeamRunOutput):
         for member_response in response.member_responses:
@@ -1269,6 +1278,12 @@ def _build_team_runtime_db_callbacks(
         )
         holder.team_members = None
         holder.team = None
+        # Cancel snapshots taken between this release and the next attempt must
+        # not see the spent attempt's partials; its completed tools already
+        # carried over via the turn state.
+        holder.last_response = None
+        holder.render_partial = _empty_partial_text
+        holder.tool_tracker = StreamingToolTracker()
 
     def _close_runtime_dbs(scope_context: ScopeSessionContext | None) -> None:
         members = holder.team_members
