@@ -1,6 +1,7 @@
 """Tests for the credentials API endpoints."""
 
 from collections.abc import Generator
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1348,6 +1349,74 @@ class TestCredentialsAPI:
         assert scoped_manager.load_credentials("google_drive_oauth") is not None
         assert deleted_list_response.status_code == 200
         assert deleted_list_response.json() == []
+
+    def test_list_services_discovers_shared_agent_oauth_store(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Shared-scope listings should discover agent-store tokens and ignore stale global ones."""
+        _use_owner_runtime(client.app)
+        config = _config_with_worker_scope("shared")
+        _publish_committed_runtime_config(client.app, config)
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        agent_store = manager.for_primary_runtime_agent_scope("general")
+        agent_store.save_credentials(
+            "google_drive_oauth",
+            {
+                "token": "agent-drive-access-value",
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+            },
+        )
+        agent_store.save_credentials(
+            "acme_oauth",
+            {
+                "token": "agent-acme-access-value",
+                "_oauth_provider": "acme",
+                "_source": "oauth",
+            },
+        )
+        manager.save_credentials(
+            "legacy_oauth",
+            {
+                "token": "stale-global-access-value",
+                "_source": "oauth",
+            },
+        )
+
+        response = client.get("/api/credentials/list?agent_name=general")
+
+        assert response.status_code == 200
+        # The orphaned agent-store token service is discoverable, the registered
+        # provider token stays hidden, and the stale global token never surfaces.
+        assert response.json() == ["acme_oauth"]
+
+    def test_primary_runtime_scoped_services_for_shared_agent_target(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Shared-scope targets should list only agent-store OAuth token services."""
+        runtime_paths = constants.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        )
+        manager = get_runtime_credentials_manager(runtime_paths)
+        agent_store = manager.for_primary_runtime_agent_scope("general")
+        agent_store.save_credentials("acme_oauth", {"token": "agent-token", "_source": "oauth"})
+        agent_store.save_credentials("weather", {"api_key": "not-a-token", "_source": "ui"})
+        target = credentials_target.RequestCredentialsTarget(
+            runtime_paths=runtime_paths,
+            base_manager=manager,
+            target_manager=manager,
+            worker_scope="shared",
+            agent_name="general",
+            execution_identity=None,
+        )
+
+        assert credentials_target.primary_runtime_scoped_services_for_target(target) == {"acme_oauth"}
+        assert credentials_target.primary_runtime_scoped_services_for_target(replace(target, agent_name=None)) == set()
 
     def test_non_oauth_tool_settings_still_reject_private_scopes(
         self,
