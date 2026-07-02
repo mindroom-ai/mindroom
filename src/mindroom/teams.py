@@ -1260,7 +1260,7 @@ def _aggregate_team_usage_metrics(
     session level). The summed usage reports the whole turn's cost while the
     payload's model field stays the leader's.
     """
-    total = metrics
+    member_total: RunMetrics | None = None
     for member in member_responses:
         member_metrics = _aggregate_team_usage_metrics(
             member.metrics,
@@ -1268,8 +1268,17 @@ def _aggregate_team_usage_metrics(
         )
         if member_metrics is None:
             continue
-        total = member_metrics if total is None else total + member_metrics
-    return total
+        member_total = member_metrics if member_total is None else member_total + member_metrics
+    if member_total is None:
+        return metrics
+    if metrics is None:
+        return member_total
+    combined = metrics + member_total
+    # Member runs execute inside the leader's window (agno times the leader
+    # metrics around the whole team run), so summing durations would
+    # double-count wall clock; token and cost sums are disjoint.
+    combined.duration = metrics.duration
+    return combined
 
 
 def _build_team_run_metadata_content(
@@ -1966,8 +1975,10 @@ async def team_response(  # noqa: C901, PLR0915
             )
             holder.team_members = attempt_members
         attempt_agents = attempt_members.agents
-        # Resolve the runtime model once so the Team instance and the run
-        # metadata cannot disagree (thread overrides can change mid-turn).
+        # Resolve the runtime model here and pass it down so the Team instance
+        # and the run metadata cannot disagree: prepare re-resolves with the
+        # same inputs synchronously (no await in between) and short-circuits
+        # on this name.
         attempt_model_name = config.resolve_runtime_model(
             entity_name=configured_team_name,
             active_model_name=model_name,
@@ -2479,8 +2490,10 @@ async def team_response_stream(  # noqa: C901, PLR0915
             )
             holder.team_members = attempt_members
         attempt_agents = attempt_members.agents
-        # Resolve the runtime model once so the Team instance and the run
-        # metadata cannot disagree (thread overrides can change mid-turn).
+        # Resolve the runtime model here and pass it down so the Team instance
+        # and the run metadata cannot disagree: prepare re-resolves with the
+        # same inputs synchronously (no await in between) and short-circuits
+        # on this name.
         attempt_model_name = config.resolve_runtime_model(
             entity_name=configured_team_name,
             active_model_name=model_name,
@@ -3055,6 +3068,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     is_empty=not emitted_output and not completed_tool_executions,
                     run_id=attempt_run_id,
                     attempt_run_id=attempt_run_id,
+                    output_tokens=usage.request_metric_totals.get("output_tokens"),
                     tool_executions=tuple(completed_tool_executions),
                     completed_tools=tuple(completed_tools),
                     metadata_content=end_metadata_content,
