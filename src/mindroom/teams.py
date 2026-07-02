@@ -1406,10 +1406,9 @@ def _create_team_instance(
         model,
         notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
     )
-    if configured_team_name is not None and configured_team_name in config.teams:
-        history_settings = config.get_entity_history_settings(configured_team_name)
-    else:
-        history_settings = config.get_default_history_settings()
+    history_settings = config.resolve_entity(
+        configured_team_name if configured_team_name is not None and configured_team_name in config.teams else None,
+    ).history_settings
     team_id = _resolve_team_instance_id(
         agents=agents,
         config=config,

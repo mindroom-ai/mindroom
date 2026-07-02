@@ -230,7 +230,7 @@ def get_agent_delegation_closure(
     return result
 
 
-def get_private_team_targets(
+def _get_private_team_targets(
     agent_name: str,
     seeds: Mapping[str, AgentPolicySeed],
     *,
@@ -265,7 +265,7 @@ def get_unsupported_team_agents(
         if agent_name not in seeds:
             unsupported_agents[agent_name] = None
             continue
-        private_targets = get_private_team_targets(agent_name, seeds, closures=closure_cache)
+        private_targets = _get_private_team_targets(agent_name, seeds, closures=closure_cache)
         if allow_direct_private_agents and agent_name in private_targets:
             private_targets = tuple(target for target in private_targets if target != agent_name)
         if private_targets:
@@ -327,7 +327,7 @@ def resolve_agent_policy_index(
     """Resolve canonical policies for all agents from one shared seed set."""
     closure_cache: dict[str, frozenset[str]] = {}
     private_targets_by_agent = {
-        agent_name: get_private_team_targets(
+        agent_name: _get_private_team_targets(
             agent_name,
             seeds,
             closures=closure_cache,
@@ -381,7 +381,6 @@ __all__ = [
     "build_agent_policy_seeds",
     "dashboard_credentials_supported_for_scope",
     "get_agent_delegation_closure",
-    "get_private_team_targets",
     "get_unsupported_team_agents",
     "resolve_agent_policy_from_data",
     "resolve_agent_policy_index",

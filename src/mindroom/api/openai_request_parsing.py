@@ -244,7 +244,7 @@ def _openai_incompatible_agent_closure(
             closures=delegation_closures,
         )
         if target_name in config.agents
-        and config.get_agent_execution_scope(target_name) not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+        and config.resolve_entity(target_name).execution_scope not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
     )
 
 
@@ -261,7 +261,7 @@ def _unsupported_worker_scope_error(agent_names: list[str], config: Config) -> J
         )
     }
     invalid_execution_scopes = {
-        config.get_agent_execution_scope(agent_name)
+        config.resolve_entity(agent_name).execution_scope
         for agent_name in invalid_scope_agents
         if agent_name in config.agents
     }

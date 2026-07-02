@@ -1070,7 +1070,7 @@ class MCPServerManager:
         metadata = TOOL_METADATA.get(tool_name)
         if metadata is None or metadata.factory is not None:
             return set()
-        if tool_name == "memory" and config.get_agent_memory_backend(agent_name) == "none":
+        if tool_name == "memory" and config.resolve_entity(agent_name).memory_backend == "none":
             return set()
         return set(metadata.function_names)
 

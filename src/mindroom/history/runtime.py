@@ -1063,29 +1063,18 @@ def _resolve_entity_preparation_inputs(
     has_authored_compaction_config: bool | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
 ) -> HistoryPreparationInputs:
+    resolved_entity = config.resolve_entity(entity_name)
     resolved_history_settings = history_settings
     if resolved_history_settings is None:
-        resolved_history_settings = (
-            config.get_entity_history_settings(entity_name)
-            if entity_name is not None
-            else config.get_default_history_settings()
-        )
+        resolved_history_settings = resolved_entity.history_settings
 
     resolved_compaction_config = compaction_config
     if resolved_compaction_config is None:
-        resolved_compaction_config = (
-            config.get_entity_compaction_config(entity_name)
-            if entity_name is not None
-            else config.get_default_compaction_config()
-        )
+        resolved_compaction_config = resolved_entity.compaction_config
 
     resolved_has_authored_compaction_config = has_authored_compaction_config
     if resolved_has_authored_compaction_config is None:
-        resolved_has_authored_compaction_config = (
-            config.has_authored_entity_compaction_config(entity_name)
-            if entity_name is not None
-            else config.has_authored_default_compaction_config()
-        )
+        resolved_has_authored_compaction_config = resolved_entity.has_authored_compaction_config
 
     runtime_model = config.resolve_runtime_model(
         entity_name=entity_name,

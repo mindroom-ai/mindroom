@@ -115,14 +115,14 @@ def _resolve_active_compaction_settings(
             room_id=room_id,
             runtime_paths=runtime_paths if room_id is not None else None,
         )
-        return runtime_model, config.get_entity_compaction_config(agent_name)
+        return runtime_model, config.resolve_entity(agent_name).compaction_config
 
     if agent.team_id not in config.teams:
         runtime_model = config.resolve_runtime_model(
             entity_name=None,
             active_model_name=active_model_name,
         )
-        return runtime_model, config.get_default_compaction_config()
+        return runtime_model, config.resolve_entity(None).compaction_config
 
     runtime_model = config.resolve_runtime_model(
         entity_name=agent.team_id,
@@ -130,7 +130,7 @@ def _resolve_active_compaction_settings(
         room_id=room_id,
         runtime_paths=runtime_paths,
     )
-    return runtime_model, config.get_entity_compaction_config(agent.team_id)
+    return runtime_model, config.resolve_entity(agent.team_id).compaction_config
 
 
 def _validate_compaction_budget(

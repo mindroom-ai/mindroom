@@ -11,6 +11,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.egress import policy as egress_policy_module
 from mindroom.tools import approved_egress as approved_egress_module
 
@@ -121,10 +124,10 @@ def test_request_network_access_posts_worker_key_grant(
     monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_API_URL", f"http://127.0.0.1:{server.server_port}")
     monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_TOKEN", "token")
 
-    class Config:
-        def get_agent_execution_scope(self, agent_name: str) -> str:
-            self.agent_name = agent_name
-            return "user_agent"
+    config = Config(
+        agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="user_agent")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
 
     context = SimpleNamespace(
         agent_name="assistant",
@@ -132,7 +135,7 @@ def test_request_network_access_posts_worker_key_grant(
         resolved_thread_id=None,
         thread_id="$thread",
         requester_id="@user:server",
-        config=Config(),
+        config=config,
         runtime_paths=object(),
     )
     monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", lambda: context)
@@ -249,10 +252,10 @@ def test_request_network_access_posts_grant_without_blocking_event_loop(
             raise AssertionError(msg)
         return {"expires_at": 123}
 
-    class Config:
-        def get_agent_execution_scope(self, agent_name: str) -> str:
-            self.agent_name = agent_name
-            return "shared"
+    config = Config(
+        agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="shared")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
 
     context = SimpleNamespace(
         agent_name="assistant",
@@ -260,7 +263,7 @@ def test_request_network_access_posts_grant_without_blocking_event_loop(
         resolved_thread_id=None,
         thread_id="$thread",
         requester_id="@user:server",
-        config=Config(),
+        config=config,
         runtime_paths=object(),
     )
     monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)

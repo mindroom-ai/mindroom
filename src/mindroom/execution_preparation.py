@@ -843,7 +843,7 @@ async def prepare_agent_execution_context(
         thread_history_render_limits=None,
         fallback_static_token_budget=_fallback_static_token_budget(
             context_window=runtime_model.context_window,
-            reserve_tokens=config.get_entity_compaction_config(agent_name).reserve_tokens,
+            reserve_tokens=config.resolve_entity(agent_name).compaction_config.reserve_tokens,
         ),
         attachment_context=_ThreadAttachmentContext(
             storage_path=runtime_paths.storage_root,
@@ -925,11 +925,9 @@ async def _prepare_bound_team_execution_context(
         ),
         fallback_static_token_budget=_fallback_static_token_budget(
             context_window=active_context_window,
-            reserve_tokens=(
-                config.get_entity_compaction_config(team_name).reserve_tokens
-                if team_name is not None and team_name in config.teams
-                else config.get_default_compaction_config().reserve_tokens
-            ),
+            reserve_tokens=config.resolve_entity(
+                team_name if team_name is not None and team_name in config.teams else None,
+            ).compaction_config.reserve_tokens,
         ),
         pipeline_timing=pipeline_timing,
     )

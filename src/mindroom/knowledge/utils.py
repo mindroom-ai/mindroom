@@ -366,7 +366,7 @@ def _schedule_refresh_for_availability(
 def _semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple[str, ...]:
     return tuple(
         base_id
-        for base_id in config.get_agent_knowledge_base_ids(agent_name)
+        for base_id in config.resolve_entity(agent_name).knowledge_base_ids
         if config.get_knowledge_base_config(base_id).mode == "semantic"
     )
 

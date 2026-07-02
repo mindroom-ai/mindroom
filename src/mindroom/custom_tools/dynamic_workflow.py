@@ -703,9 +703,8 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict
         list(tool_names),
         tool_registry_preloaded=True,
     )
-    authored_overrides = {
-        entry.name: entry.tool_config_overrides for entry in context.config.get_agent_tool_configs(context.agent_name)
-    }
+    entity_view = context.config.resolve_entity(context.agent_name)
+    authored_overrides = {entry.name: entry.tool_config_overrides for entry in entity_view.tool_configs}
     toolkits: dict[str, Toolkit] = {}
     for tool_name in tool_names:
         toolkit = build_agent_toolkit(
@@ -714,7 +713,7 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict
             config=context.config,
             runtime_paths=context.runtime_paths,
             worker_tools=worker_tools,
-            runtime_overrides=context.config.get_agent_tool_runtime_overrides(context.agent_name, tool_name),
+            runtime_overrides=entity_view.tool_runtime_overrides(tool_name),
             tool_config_overrides=authored_overrides.get(tool_name),
             execution_identity=execution_identity,
             session_id=context.session_id,
@@ -797,7 +796,7 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
     persisted = load_scoped_credentials("dynamic_workflow", credentials_manager=credentials_manager, worker_target=None)
     if persisted:
         values.update(persisted)
-    for entry in context.config.get_agent_tool_configs(context.agent_name):
+    for entry in context.config.resolve_entity(context.agent_name).tool_configs:
         if entry.name == "dynamic_workflow":
             values.update(entry.tool_config_overrides)
     raw_allowed = values.get("allowed_tools")
