@@ -9,9 +9,11 @@ a recorder. This module owns that lifecycle exactly once; ``mindroom.ai`` and
 ``mindroom.teams`` supply thin adapters carrying the entity-specific attempt
 bodies as injected callables.
 
-Every ``ResponseTurnContext`` field is consumed by the drivers themselves;
-state that only the attempt bodies need stays captured inside the adapter
-closures and never crosses this seam.
+``ResponseTurnContext`` is the per-turn identity carrier built once by the
+caller that owns the turn: the drivers consume its Matrix-identity fields,
+while ``active_event_ids`` and ``system_enrichment_items`` ride along for the
+entity prepare chains. Mutable per-turn state (collectors, recorders,
+callbacks) stays out of it and crosses via ``TurnSinks`` or the adapters.
 """
 
 from __future__ import annotations

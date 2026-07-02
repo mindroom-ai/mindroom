@@ -4901,6 +4901,49 @@ class TestUserIdPassthrough:
         assert mock_agent.additional_context == "existing context\n\nsession preamble\n\nsystem enrichment"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("include_openai_compat_guidance", "expected_sender"),
+        [(True, None), (False, "@alice:example.com")],
+    )
+    async def test_prepare_agent_and_prompt_derives_current_sender_from_requester(
+        self,
+        tmp_path: Path,
+        include_openai_compat_guidance: bool,
+        expected_sender: str | None,
+    ) -> None:
+        """OpenAI-compatible preparation suppresses the Matrix sender; Matrix turns keep it."""
+        config = _config()
+        mock_agent = MagicMock()
+        prepared_execution = _PreparedExecutionContext(
+            messages=(Message(role="user", content="prepared prompt"),),
+            unseen_event_ids=[],
+            prepared_history=PreparedHistoryState(),
+        )
+
+        with (
+            patch(
+                "mindroom.ai.build_memory_prompt_parts",
+                new_callable=AsyncMock,
+                return_value=MemoryPromptParts(),
+            ),
+            patch("mindroom.ai.create_agent", return_value=mock_agent),
+            patch(
+                "mindroom.ai.prepare_agent_execution_context",
+                new=AsyncMock(return_value=prepared_execution),
+            ) as mock_prepare_execution,
+        ):
+            await _prepare_agent_and_prompt(
+                make_turn_context("general", requester_id="@alice:example.com"),
+                prompt="test",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=config,
+                include_openai_compat_guidance=include_openai_compat_guidance,
+            )
+
+        assert mock_prepare_execution.await_args is not None
+        assert mock_prepare_execution.await_args.kwargs["current_sender_id"] == expected_sender
+
+    @pytest.mark.asyncio
     async def test_ai_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
         """Non-streaming replies should build agents against the orchestrator-owned config file."""
         config_path = tmp_path / "custom-config.yaml"
