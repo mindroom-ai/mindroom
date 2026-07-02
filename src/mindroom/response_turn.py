@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
 
 from mindroom import ai_runtime
@@ -52,9 +52,7 @@ __all__ = [
     "BlockingTurnAdapter",
     "CancelledAttempt",
     "CompletedAttempt",
-    "ContinuationCapability",
     "DynamicContinuationRunState",
-    "EmptyRunCapability",
     "EmptyRunDiscard",
     "ErroredAttempt",
     "HandledAttempt",
@@ -291,31 +289,12 @@ class AttemptResolved:
 
 
 @dataclass(frozen=True)
-class ContinuationCapability:
-    """Enable dynamic-tool continuations for the turn.
-
-    The iteration budget is always ``DYNAMIC_TOOL_CONTINUATION_LIMIT``:
-    ``continuation_decision_from_tools`` hardcodes that constant for its
-    continue/stop decision, so a per-adapter limit would silently desync
-    from the loop budget.
-    """
-
-
-@dataclass(frozen=True)
 class EmptyRunDiscard:
     """Identity of one empty completed run to purge from session history."""
 
     session_id: str | None
     run_id: str | None
     output_tokens: int | None
-
-
-@dataclass(frozen=True)
-class EmptyRunCapability:
-    """Enable the empty-completed-run guard with an entity-specific discard."""
-
-    notice_text: str
-    discard: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
 
 
 @dataclass(frozen=True)
@@ -342,11 +321,10 @@ class BlockingTurnAdapter:
     snapshot_partial: Callable[[], TurnPartialSnapshot]
     release_attempt_entity: Callable[[ScopeSessionContext | None], None]
     close_runtime_dbs: Callable[[ScopeSessionContext | None], None]
+    discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     on_scope_opened: Callable[[ScopeSessionContext | None], None] | None = None
     finalize_attempt: Callable[[ScopeSessionContext | None], None] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
-    continuation: ContinuationCapability | None = None
-    empty_run: EmptyRunCapability | None = None
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
 
 
@@ -362,12 +340,11 @@ class StreamingTurnAdapter[ChunkT]:
     snapshot_partial: Callable[[], TurnPartialSnapshot]
     release_attempt_entity: Callable[[ScopeSessionContext | None], None]
     close_runtime_dbs: Callable[[ScopeSessionContext | None], None]
+    discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
+    make_notice_chunk: Callable[[str], ChunkT]
     on_scope_opened: Callable[[ScopeSessionContext | None], None] | None = None
     finalize_attempt: Callable[[ScopeSessionContext | None], None] | None = None
-    make_notice_chunk: Callable[[str], ChunkT] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
-    continuation: ContinuationCapability | None = None
-    empty_run: EmptyRunCapability | None = None
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
 
 
@@ -383,20 +360,6 @@ def _raise_missing_stream_resolution(entity_label: str) -> NoReturn:
     # the turn silently: nothing recorded, no metadata published, no log.
     msg = f"streaming attempt for {entity_label!r} ended without yielding its AttemptResolved sentinel"
     raise RuntimeError(msg)
-
-
-def _effective_continuation_limit(
-    continuation: ContinuationCapability | None,
-    empty_run: EmptyRunCapability | None,
-) -> int:
-    """Return the turn's extra-iteration budget beyond the first attempt.
-
-    The empty-run one-shot retry borrows a continuation slot when continuations
-    are enabled; without them it still needs one slot of its own.
-    """
-    if continuation is not None:
-        return DYNAMIC_TOOL_CONTINUATION_LIMIT
-    return 1 if empty_run is not None else 0
 
 
 def _reset_turn_state_for_dynamic_continuation(
@@ -493,31 +456,22 @@ def _record_turn_cancelled_fallback(
     )
 
 
-@dataclass(frozen=True)
-class _EmptyRunOutcome:
-    """How the empty-run guard settled one empty completed attempt."""
-
-    retry_granted: bool
-    notice_text: str | None = None
-
-
 def _settle_empty_run(
     ctx: ResponseTurnContext,
-    empty_run: EmptyRunCapability,
+    discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None],
     release_attempt_entity: Callable[[ScopeSessionContext | None], None],
     run: TurnRunState,
     resolution: CompletedAttempt,
     *,
     continuation_count: int,
-    limit: int,
-) -> _EmptyRunOutcome:
-    """Discard one empty completed run and decide whether one retry is granted.
+) -> bool:
+    """Discard one empty completed run; return whether one retry is granted.
 
     The one-shot retry borrows a continuation slot so the outer loop's
     iteration budget stays authoritative; a granted retry closes the spent
     entity's runtime state exactly like the continuation handoff.
     """
-    empty_run.discard(
+    discard_empty_run(
         run.scope_context,
         EmptyRunDiscard(
             session_id=resolution.session_id or ctx.session_id,
@@ -525,11 +479,11 @@ def _settle_empty_run(
             output_tokens=resolution.output_tokens,
         ),
     )
-    if not run.empty_response_retried and continuation_count < limit:
+    if not run.empty_response_retried and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
         run.empty_response_retried = True
         release_attempt_entity(run.scope_context)
-        return _EmptyRunOutcome(retry_granted=True)
-    return _EmptyRunOutcome(retry_granted=False, notice_text=empty_run.notice_text)
+        return True
+    return False
 
 
 def _advance_turn_continuation(
@@ -565,13 +519,12 @@ async def run_blocking_response_turn(
 ) -> str:
     """Run one blocking response turn to a final user-visible text."""
     run = TurnRunState()
-    limit = _effective_continuation_limit(adapter.continuation, adapter.empty_run)
     try:
         with adapter.open_scope() as scope_context:
             run.scope_context = scope_context
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
-            for continuation_count in range(limit + 1):
+            for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
                 try:
                     resolution = await adapter.run_attempt(run, continuation)
                     settled = _settle_blocking_attempt(
@@ -582,7 +535,6 @@ async def run_blocking_response_turn(
                         resolution,
                         continuation,
                         continuation_count=continuation_count,
-                        limit=limit,
                     )
                 finally:
                     if adapter.finalize_attempt is not None:
@@ -622,7 +574,6 @@ def _settle_blocking_attempt(
     continuation: DynamicContinuationRunState,
     *,
     continuation_count: int,
-    limit: int,
 ) -> str | DynamicContinuationRunState:
     """Settle one blocking attempt: return final text or the advanced continuation."""
     # The blocking envelope publishes run metadata before dispatching on the
@@ -642,72 +593,105 @@ def _settle_blocking_attempt(
         raise build_cancelled_error(resolution.reason)
     if isinstance(resolution, ErroredAttempt):
         return resolution.user_message_text
-    return _settle_completed_blocking_attempt(
+    settle = _settle_completed_attempt(
         ctx,
-        adapter,
         sinks,
         run,
         resolution,
         continuation,
+        discard_empty_run=adapter.discard_empty_run,
+        release_attempt_entity=adapter.release_attempt_entity,
         continuation_count=continuation_count,
-        limit=limit,
     )
+    if settle.keep_going:
+        return settle.continuation
+    run.turn_state.record_completed(
+        sinks.turn_recorder,
+        run_metadata=run.run_metadata,
+        assistant_text=settle.recorded_text,
+        completed_tools=list(settle.recorded_tools),
+    )
+    return settle.response_text
 
 
-def _settle_completed_blocking_attempt(
+@dataclass(frozen=True)
+class _CompletionSettle:
+    """Driver-internal plan for finishing one completed attempt."""
+
+    keep_going: bool
+    continuation: DynamicContinuationRunState
+    notice_texts: tuple[str, ...]
+    recorded_text: str
+    recorded_tools: tuple[ToolTraceEntry, ...]
+    response_text: str
+
+
+def _settle_completed_attempt(
     ctx: ResponseTurnContext,
-    adapter: BlockingTurnAdapter,
     sinks: TurnSinks,
     run: TurnRunState,
     resolution: CompletedAttempt,
     continuation: DynamicContinuationRunState,
     *,
+    discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None],
+    release_attempt_entity: Callable[[ScopeSessionContext | None], None],
     continuation_count: int,
-    limit: int,
-) -> str | DynamicContinuationRunState:
-    """Settle one completed blocking attempt into final text or a continuation."""
-    if resolution.is_empty and adapter.empty_run is not None:
-        empty_outcome = _settle_empty_run(
+) -> _CompletionSettle:
+    """Settle one completed attempt into a record/deliver plan or a continuation."""
+    if resolution.is_empty:
+        retry_granted = _settle_empty_run(
             ctx,
-            adapter.empty_run,
-            adapter.release_attempt_entity,
+            discard_empty_run,
+            release_attempt_entity,
             run,
             resolution,
             continuation_count=continuation_count,
-            limit=limit,
         )
-        if empty_outcome.retry_granted:
-            return continuation
-        run.turn_state.record_completed(
-            sinks.turn_recorder,
-            run_metadata=run.run_metadata,
-            assistant_text="",
-            completed_tools=[],
+        if retry_granted:
+            return _CompletionSettle(
+                keep_going=True,
+                continuation=continuation,
+                notice_texts=(),
+                recorded_text="",
+                recorded_tools=(),
+                response_text="",
+            )
+        # The notice falls through: run metadata and recorder completion
+        # still apply to this notice-only turn.
+        return _CompletionSettle(
+            keep_going=False,
+            continuation=continuation,
+            notice_texts=(ai_runtime.EMPTY_RESPONSE_NOTICE,),
+            recorded_text="",
+            recorded_tools=(),
+            response_text=ai_runtime.EMPTY_RESPONSE_NOTICE,
         )
-        assert empty_outcome.notice_text is not None
-        return empty_outcome.notice_text
-    decision = (
-        continuation_decision_from_tools(
-            resolution.tool_executions,
-            original_prompt=continuation.original_prompt,
-            continuation_count=continuation_count,
-        )
-        if adapter.continuation is not None
-        else None
+    decision = continuation_decision_from_tools(
+        resolution.tool_executions,
+        original_prompt=continuation.original_prompt,
+        continuation_count=continuation_count,
     )
-    response_text = resolution.response_text
-    replayable_text = resolution.replayable_text
-    if decision is not None:
-        if decision.should_continue:
-            return _advance_turn_continuation(
+    if decision.should_continue:
+        return _CompletionSettle(
+            keep_going=True,
+            continuation=_advance_turn_continuation(
                 sinks,
-                adapter.release_attempt_entity,
+                release_attempt_entity,
                 run,
                 resolution,
                 continuation,
                 next_prompt=decision.next_prompt,
-            )
-        if decision.limit_message is not None and decision.continuation is not None:
+            ),
+            notice_texts=(),
+            recorded_text="",
+            recorded_tools=(),
+            response_text="",
+        )
+    notice_texts: tuple[str, ...] = ()
+    recorded_text = resolution.replayable_text
+    response_text = resolution.response_text
+    if decision.limit_message is not None:
+        if decision.continuation is not None:
             logger.warning(
                 "Dynamic tool continuation limit reached",
                 entity=ctx.entity_label,
@@ -715,97 +699,21 @@ def _settle_completed_blocking_attempt(
                 tool_name=decision.continuation.tool_name,
                 status=decision.continuation.status,
             )
-        if decision.limit_message is not None and not resolution.has_visible_content:
+        if not resolution.has_visible_content:
+            notice_texts = (decision.limit_message,)
+            recorded_text = decision.limit_message
             response_text = decision.limit_message
-            replayable_text = decision.limit_message
-    run.turn_state.record_completed(
-        sinks.turn_recorder,
-        run_metadata=run.run_metadata,
-        assistant_text=replayable_text,
-        completed_tools=list(resolution.completed_tools),
-    )
-    return response_text
-
-
-@dataclass(frozen=True)
-class _StreamCompletionSettle:
-    """Driver-internal plan for finishing one completed streaming attempt."""
-
-    keep_going: bool
-    continuation: DynamicContinuationRunState
-    notice_texts: tuple[str, ...]
-    recorded_text: str
-
-
-def _settle_completed_stream_attempt(
-    ctx: ResponseTurnContext,
-    adapter: StreamingTurnAdapter[Any],
-    sinks: TurnSinks,
-    run: TurnRunState,
-    resolution: CompletedAttempt,
-    continuation: DynamicContinuationRunState,
-    *,
-    continuation_count: int,
-    limit: int,
-) -> _StreamCompletionSettle:
-    """Settle one completed streaming attempt into notices, recording text, and continuation."""
-    notice_texts: list[str] = []
-    keep_going = False
-    recorded_text = resolution.replayable_text
-    if resolution.is_empty and adapter.empty_run is not None:
-        empty_outcome = _settle_empty_run(
-            ctx,
-            adapter.empty_run,
-            adapter.release_attempt_entity,
-            run,
-            resolution,
-            continuation_count=continuation_count,
-            limit=limit,
-        )
-        if empty_outcome.retry_granted:
-            keep_going = True
-        else:
-            # The notice falls through: run metadata and recorder completion
-            # still apply to this notice-only turn.
-            assert empty_outcome.notice_text is not None
-            notice_texts.append(empty_outcome.notice_text)
-    if not keep_going and adapter.continuation is not None:
-        decision = continuation_decision_from_tools(
-            resolution.tool_executions,
-            original_prompt=continuation.original_prompt,
-            continuation_count=continuation_count,
-        )
-        if decision.should_continue:
-            continuation = _advance_turn_continuation(
-                sinks,
-                adapter.release_attempt_entity,
-                run,
-                resolution,
-                continuation,
-                next_prompt=decision.next_prompt,
-            )
-            keep_going = True
-        elif decision.limit_message is not None:
-            if decision.continuation is not None:
-                logger.warning(
-                    "Dynamic tool continuation limit reached during streaming",
-                    entity=ctx.entity_label,
-                    function_name=decision.continuation.function_name,
-                    tool_name=decision.continuation.tool_name,
-                    status=decision.continuation.status,
-                )
-            if not resolution.has_visible_content:
-                notice_texts.append(decision.limit_message)
-                recorded_text = decision.limit_message
-    return _StreamCompletionSettle(
-        keep_going=keep_going,
+    return _CompletionSettle(
+        keep_going=False,
         continuation=continuation,
-        notice_texts=tuple(notice_texts),
+        notice_texts=notice_texts,
         recorded_text=recorded_text,
+        recorded_tools=resolution.completed_tools,
+        response_text=response_text,
     )
 
 
-async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
+async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
     ctx: ResponseTurnContext,
     adapter: StreamingTurnAdapter[ChunkT],
     sinks: TurnSinks,
@@ -814,13 +722,12 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
 ) -> AsyncGenerator[ChunkT, None]:
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
     run = TurnRunState()
-    limit = _effective_continuation_limit(adapter.continuation, adapter.empty_run)
     try:
         with adapter.open_scope() as scope_context:
             run.scope_context = scope_context
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
-            for continuation_count in range(limit + 1):
+            for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
                 resolution: StreamAttemptResolution | None = None
                 keep_going = False
                 try:
@@ -856,20 +763,19 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                                 resolution,
                             )
                         raise build_cancelled_error(resolution.reason)
-                    settle = _settle_completed_stream_attempt(
+                    settle = _settle_completed_attempt(
                         ctx,
-                        adapter,
                         sinks,
                         run,
                         resolution,
                         continuation,
+                        discard_empty_run=adapter.discard_empty_run,
+                        release_attempt_entity=adapter.release_attempt_entity,
                         continuation_count=continuation_count,
-                        limit=limit,
                     )
                     continuation = settle.continuation
                     keep_going = settle.keep_going
                     for notice_text in settle.notice_texts:
-                        assert adapter.make_notice_chunk is not None
                         yield adapter.make_notice_chunk(notice_text)
                     if not keep_going:
                         if sinks.run_metadata_collector is not None and resolution.metadata_content is not None:
@@ -878,7 +784,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                             sinks.turn_recorder,
                             run_metadata=run.run_metadata,
                             assistant_text=settle.recorded_text,
-                            completed_tools=list(resolution.completed_tools),
+                            completed_tools=list(settle.recorded_tools),
                         )
                 finally:
                     if adapter.finalize_attempt is not None:
@@ -900,7 +806,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
         if adapter.unexpected_error_text is None:
             raise
         logger.exception("Response turn failed", entity=ctx.entity_label)
-        yield cast("ChunkT", adapter.unexpected_error_text(e))
+        yield adapter.make_notice_chunk(adapter.unexpected_error_text(e))
         return
     finally:
         adapter.close_runtime_dbs(run.scope_context)

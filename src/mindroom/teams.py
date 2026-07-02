@@ -85,9 +85,7 @@ from mindroom.response_turn import (
     BlockingTurnAdapter,
     CancelledAttempt,
     CompletedAttempt,
-    ContinuationCapability,
     DynamicContinuationRunState,
-    EmptyRunCapability,
     ErroredAttempt,
     HandledAttempt,
     ResponseTurnContext,
@@ -1400,12 +1398,60 @@ def _resolved_team_session_id(scope_context: ScopeSessionContext | None, session
     return None
 
 
-def _build_team_turn_capabilities(
+async def _ensure_attempt_team_members(
+    holder: _TeamTurnHolder,
+    agent_names: list[str],
+    orchestrator: OrchestratorRuntime,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    session_id: str | None,
+    reason_prefix: str,
+    configured_team_name: str | None,
+) -> ResolvedExactTeamMembers:
+    """Return the turn's member set, rebuilding released members.
+
+    A continuation releases the spent members; the rebuild bakes the loaded
+    dynamic-tool schema into fresh member agents.
+    """
+    members = holder.team_members
+    if members is None:
+        members = await asyncio.to_thread(
+            _materialize_team_members,
+            agent_names,
+            orchestrator,
+            execution_identity,
+            session_id=session_id,
+            reason_prefix=reason_prefix,
+            configured_team_name=configured_team_name,
+        )
+        holder.team_members = members
+    return members
+
+
+def _initial_team_continuation(
+    *,
+    message: str,
+    current_timestamp_ms: float | None,
+    current_prompt_is_structured: bool,
+    run_id: str | None,
+) -> DynamicContinuationRunState:
+    """Build the continuation state for one team turn's first attempt."""
+    return DynamicContinuationRunState.initial(
+        prompt=message,
+        model_prompt=None,
+        current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
+        run_id=run_id,
+        continuation_model_prompt_tail="",
+    )
+
+
+def _build_team_empty_run_discard(
     *,
     session_id: str | None,
     entity_name: str,
-) -> EmptyRunCapability:
-    """Build the empty-run guard capability for one team turn."""
+) -> Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]:
+    """Build the empty-run discard callback for one team turn."""
 
     def _discard_empty_team_run(scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
         resolved_session_id = _resolved_team_session_id(scope_context, discard.session_id or session_id)
@@ -1420,7 +1466,7 @@ def _build_team_turn_capabilities(
             output_tokens=discard.output_tokens,
         )
 
-    return EmptyRunCapability(notice_text=ai_runtime.EMPTY_RESPONSE_NOTICE, discard=_discard_empty_team_run)
+    return _discard_empty_team_run
 
 
 @dataclass
@@ -1951,20 +1997,15 @@ async def team_response(  # noqa: C901, PLR0915
         continuation_state: DynamicContinuationRunState,
     ) -> BlockingAttemptResolution:
         """Run one team attempt, including its media-fallback retries."""
-        attempt_members = holder.team_members
-        if attempt_members is None:
-            # A continuation released the spent members; rebuild them so the
-            # loaded dynamic-tool schema is baked into fresh member agents.
-            attempt_members = await asyncio.to_thread(
-                _materialize_team_members,
-                agent_names,
-                orchestrator,
-                execution_identity,
-                session_id=session_id,
-                reason_prefix=reason_prefix,
-                configured_team_name=configured_team_name,
-            )
-            holder.team_members = attempt_members
+        attempt_members = await _ensure_attempt_team_members(
+            holder,
+            agent_names,
+            orchestrator,
+            execution_identity,
+            session_id=session_id,
+            reason_prefix=reason_prefix,
+            configured_team_name=configured_team_name,
+        )
         attempt_agents = attempt_members.agents
         # Resolve the runtime model once so the Team instance and the run
         # metadata cannot disagree (thread overrides can change mid-turn).
@@ -2260,7 +2301,7 @@ async def team_response(  # noqa: C901, PLR0915
             entity_name=configured_team_name or team_name,
         )
 
-    team_empty_run = _build_team_turn_capabilities(
+    discard_team_empty_run = _build_team_empty_run_discard(
         session_id=session_id,
         entity_name=configured_team_name or team_name,
     )
@@ -2280,8 +2321,7 @@ async def team_response(  # noqa: C901, PLR0915
         close_runtime_dbs=_close_team_attempt_dbs,
         finalize_attempt=_finalize_team_attempt,
         unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_name),
-        continuation=ContinuationCapability(),
-        empty_run=team_empty_run,
+        discard_empty_run=discard_team_empty_run,
     )
     return await run_blocking_response_turn(
         ResponseTurnContext(
@@ -2297,13 +2337,11 @@ async def team_response(  # noqa: C901, PLR0915
         ),
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
-        continuation=DynamicContinuationRunState.initial(
-            prompt=message,
-            model_prompt=None,
+        continuation=_initial_team_continuation(
+            message=message,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
             run_id=run_id,
-            continuation_model_prompt_tail="",
         ),
     )
 
@@ -3073,7 +3111,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             entity_name=configured_team_name or team_label,
         )
 
-    team_empty_run = _build_team_turn_capabilities(
+    discard_team_empty_run = _build_team_empty_run_discard(
         session_id=session_id,
         entity_name=configured_team_name or team_label,
     )
@@ -3103,8 +3141,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
         finalize_attempt=_finalize_team_stream_attempt,
         make_notice_chunk=lambda text: text,
         unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_label),
-        continuation=ContinuationCapability(),
-        empty_run=team_empty_run,
+        discard_empty_run=discard_team_empty_run,
     )
     response_stream = stream_response_turn(
         ResponseTurnContext(
@@ -3120,13 +3157,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
         ),
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
-        continuation=DynamicContinuationRunState.initial(
-            prompt=message,
-            model_prompt=None,
+        continuation=_initial_team_continuation(
+            message=message,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
             run_id=run_id,
-            continuation_model_prompt_tail="",
         ),
     )
     # Close the driver generator deterministically when this wrapper unwinds so

@@ -75,9 +75,7 @@ from mindroom.response_turn import (
     BlockingTurnAdapter,
     CancelledAttempt,
     CompletedAttempt,
-    ContinuationCapability,
     DynamicContinuationRunState,
-    EmptyRunCapability,
     ErroredAttempt,
     HandledAttempt,
     ResponseTurnContext,
@@ -367,7 +365,7 @@ class _AgentTurnCallbacks:
     on_scope_opened: Callable[[ScopeSessionContext | None], None]
     release_attempt_entity: Callable[[ScopeSessionContext | None], None]
     close_runtime_dbs: Callable[[ScopeSessionContext | None], None]
-    empty_run: EmptyRunCapability
+    discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None]
 
 
@@ -445,10 +443,7 @@ def _build_agent_turn_callbacks(
         on_scope_opened=_on_scope_opened,
         release_attempt_entity=_release_attempt_entity,
         close_runtime_dbs=_close_runtime_dbs,
-        empty_run=EmptyRunCapability(
-            notice_text=ai_runtime.EMPTY_RESPONSE_NOTICE,
-            discard=_discard_empty_run,
-        ),
+        discard_empty_run=_discard_empty_run,
         persist_standalone_replay=_persist_standalone_replay,
     )
 
@@ -1649,9 +1644,8 @@ async def ai_response(
         ),
         release_attempt_entity=callbacks.release_attempt_entity,
         close_runtime_dbs=callbacks.close_runtime_dbs,
+        discard_empty_run=callbacks.discard_empty_run,
         on_scope_opened=callbacks.on_scope_opened,
-        continuation=ContinuationCapability(),
-        empty_run=callbacks.empty_run,
         persist_standalone_replay=callbacks.persist_standalone_replay,
     )
     return await run_blocking_response_turn(
@@ -2242,11 +2236,10 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         snapshot_partial=lambda: _streaming_partial_snapshot(holder),
         release_attempt_entity=callbacks.release_attempt_entity,
         close_runtime_dbs=callbacks.close_runtime_dbs,
+        discard_empty_run=callbacks.discard_empty_run,
         on_scope_opened=callbacks.on_scope_opened,
         finalize_attempt=_finalize_streaming_attempt,
         make_notice_chunk=lambda text: RunContentEvent(content=text),
-        continuation=ContinuationCapability(),
-        empty_run=callbacks.empty_run,
         persist_standalone_replay=callbacks.persist_standalone_replay,
     )
     response_stream = stream_response_turn(

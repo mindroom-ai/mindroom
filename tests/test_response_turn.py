@@ -11,14 +11,13 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from agno.models.response import ToolExecution
 
+from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingTurnAdapter,
     CancelledAttempt,
     CompletedAttempt,
-    ContinuationCapability,
     DynamicContinuationRunState,
-    EmptyRunCapability,
     EmptyRunDiscard,
     ErroredAttempt,
     HandledAttempt,
@@ -39,8 +38,6 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from mindroom.history import ScopeSessionContext
-
-_DEFAULT_CONTINUATION = ContinuationCapability()
 
 
 @dataclass
@@ -174,8 +171,6 @@ def _blocking_adapter(
     log: _AdapterLog,
     run_attempt: Callable[[TurnRunState, DynamicContinuationRunState], Awaitable[Any]],
     *,
-    continuation: ContinuationCapability | None = _DEFAULT_CONTINUATION,
-    empty_run: EmptyRunCapability | None = None,
     with_standalone_replay: bool = True,
     unexpected_error_text: Callable[[Exception], str] | None = None,
 ) -> BlockingTurnAdapter:
@@ -188,10 +183,9 @@ def _blocking_adapter(
         snapshot_partial=lambda: log.snapshot,
         release_attempt_entity=lambda _scope: _bump(log, "released"),
         close_runtime_dbs=lambda _scope: _bump(log, "closed"),
+        discard_empty_run=lambda _scope, discard: log.discards.append(discard),
         finalize_attempt=lambda _scope: _bump(log, "finalized"),
         unexpected_error_text=unexpected_error_text,
-        continuation=continuation,
-        empty_run=empty_run,
         persist_standalone_replay=_persist if with_standalone_replay else None,
     )
 
@@ -203,8 +197,6 @@ def _streaming_adapter(
         AsyncGenerator[str | AttemptResolved, None],
     ],
     *,
-    continuation: ContinuationCapability | None = _DEFAULT_CONTINUATION,
-    empty_run: EmptyRunCapability | None = None,
     with_standalone_replay: bool = True,
     unexpected_error_text: Callable[[Exception], str] | None = None,
 ) -> StreamingTurnAdapter[str]:
@@ -217,24 +209,16 @@ def _streaming_adapter(
         snapshot_partial=lambda: log.snapshot,
         release_attempt_entity=lambda _scope: _bump(log, "released"),
         close_runtime_dbs=lambda _scope: _bump(log, "closed"),
-        finalize_attempt=lambda _scope: _bump(log, "finalized"),
+        discard_empty_run=lambda _scope, discard: log.discards.append(discard),
         make_notice_chunk=lambda text: f"notice:{text}",
+        finalize_attempt=lambda _scope: _bump(log, "finalized"),
         unexpected_error_text=unexpected_error_text,
-        continuation=continuation,
-        empty_run=empty_run,
         persist_standalone_replay=_persist if with_standalone_replay else None,
     )
 
 
 def _bump(log: _AdapterLog, attr: str) -> None:
     setattr(log, attr, getattr(log, attr) + 1)
-
-
-def _empty_run_capability(log: _AdapterLog) -> EmptyRunCapability:
-    return EmptyRunCapability(
-        notice_text="empty notice",
-        discard=lambda _scope, discard: log.discards.append(discard),
-    )
 
 
 async def _collect(stream: AsyncIterator[str]) -> list[str]:
@@ -517,42 +501,19 @@ def test_blocking_empty_run_grants_one_retry_then_notice() -> None:
     result = asyncio.run(
         run_blocking_response_turn(
             _ctx(),
-            _blocking_adapter(log, _attempt, empty_run=_empty_run_capability(log)),
+            _blocking_adapter(log, _attempt),
             TurnSinks(turn_recorder=cast("Any", recorder)),
             continuation=_continuation(),
         ),
     )
 
-    assert result == "empty notice"
+    assert result == EMPTY_RESPONSE_NOTICE
     assert attempts == 2
     assert [discard.run_id for discard in log.discards] == ["run-1", "run-2"]
     assert log.released == 1
     assert recorder.completed_calls == [
         {"run_metadata": None, "assistant_text": "", "completed_tools": []},
     ]
-
-
-def test_blocking_empty_run_without_continuation_still_retries_once() -> None:
-    """The empty-run guard has its own retry slot when continuations are disabled."""
-    log = _AdapterLog()
-    attempts = 0
-
-    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
-        nonlocal attempts
-        attempts += 1
-        return CompletedAttempt(is_empty=True)
-
-    result = asyncio.run(
-        run_blocking_response_turn(
-            _ctx(),
-            _blocking_adapter(log, _attempt, continuation=None, empty_run=_empty_run_capability(log)),
-            TurnSinks(),
-            continuation=_continuation(),
-        ),
-    )
-
-    assert result == "empty notice"
-    assert attempts == 2
 
 
 def test_blocking_empty_retry_borrows_continuation_slot_within_shared_budget() -> None:
@@ -573,7 +534,7 @@ def test_blocking_empty_retry_borrows_continuation_slot_within_shared_budget() -
     result = asyncio.run(
         run_blocking_response_turn(
             _ctx(),
-            _blocking_adapter(log, _attempt, empty_run=_empty_run_capability(log)),
+            _blocking_adapter(log, _attempt),
             TurnSinks(),
             continuation=_continuation(),
         ),
@@ -849,14 +810,14 @@ def test_streaming_empty_run_retries_then_yields_notice_and_records() -> None:
         _collect(
             stream_response_turn(
                 _ctx(),
-                _streaming_adapter(log, _attempt, empty_run=_empty_run_capability(log)),
+                _streaming_adapter(log, _attempt),
                 TurnSinks(turn_recorder=cast("Any", recorder)),
                 continuation=_continuation(),
             ),
         ),
     )
 
-    assert chunks == ["notice:empty notice"]
+    assert chunks == [f"notice:{EMPTY_RESPONSE_NOTICE}"]
     assert attempts == 2
     assert [discard.run_id for discard in log.discards] == ["run-1", "run-2"]
     # The notice-only turn still records an empty completion.
@@ -955,8 +916,8 @@ def test_streaming_finalize_runs_when_attempt_raises() -> None:
     assert log.closed == 1
 
 
-def test_streaming_unexpected_error_yields_shaped_text() -> None:
-    """Unexpected streaming exceptions become one shaped terminal chunk when configured."""
+def test_streaming_unexpected_error_yields_shaped_notice_chunk() -> None:
+    """Unexpected streaming exceptions become one shaped terminal notice chunk."""
     log = _AdapterLog()
 
     async def _attempt(
@@ -978,7 +939,7 @@ def test_streaming_unexpected_error_yields_shaped_text() -> None:
         ),
     )
 
-    assert chunks == ["chunk", "shaped: boom"]
+    assert chunks == ["chunk", "notice:shaped: boom"]
 
 
 def test_streaming_attempt_without_sentinel_raises() -> None:
