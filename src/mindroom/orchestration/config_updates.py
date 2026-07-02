@@ -154,7 +154,7 @@ def _get_changed_agents(
 
 def _culture_signature_for_agent(agent_name: str, config: Config) -> tuple[str, str, str] | None:
     """Return the relevant culture tuple used for restart decisions."""
-    assignment = config.get_agent_culture(agent_name)
+    assignment = config.resolve_entity(agent_name).culture
     if assignment is None:
         return None
     culture_name, culture_config = assignment
