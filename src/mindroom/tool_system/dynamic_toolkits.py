@@ -113,13 +113,14 @@ def _sanitize_loaded_tools(
 ) -> tuple[list[str], list[str]]:
     deferred_tool_names = _deferred_tool_names(config, agent_name)
     deferred_tool_name_set = set(deferred_tool_names)
+    entity_view = config.resolve_entity(agent_name)
     invalid_tools: list[str] = []
     valid: list[str] = []
     for tool_name in loaded_tools:
         if tool_name not in deferred_tool_name_set:
             invalid_tools.append(tool_name)
             continue
-        if config.resolve_entity(agent_name).deferred_tool_scope_incompatible_tools(tool_name):
+        if entity_view.deferred_tool_scope_incompatible_tools(tool_name):
             invalid_tools.append(tool_name)
             continue
         valid.append(tool_name)
