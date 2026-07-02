@@ -2513,20 +2513,15 @@ async def team_response_stream(  # noqa: C901, PLR0915
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[_TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt, ending with its ``AttemptResolved`` sentinel."""
-        attempt_members = holder.team_members
-        if attempt_members is None:
-            # A continuation released the spent members; rebuild them so the
-            # loaded dynamic-tool schema is baked into fresh member agents.
-            attempt_members = await asyncio.to_thread(
-                _materialize_team_members,
-                requested_agent_names,
-                orchestrator,
-                execution_identity,
-                session_id=session_id,
-                reason_prefix=reason_prefix,
-                configured_team_name=configured_team_name,
-            )
-            holder.team_members = attempt_members
+        attempt_members = await _ensure_attempt_team_members(
+            holder,
+            requested_agent_names,
+            orchestrator,
+            execution_identity,
+            session_id=session_id,
+            reason_prefix=reason_prefix,
+            configured_team_name=configured_team_name,
+        )
         attempt_agents = attempt_members.agents
         # Resolve the runtime model here and pass it down so the Team instance
         # and the run metadata cannot disagree: prepare re-resolves with the
