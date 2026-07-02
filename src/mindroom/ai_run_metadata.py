@@ -256,29 +256,31 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
         value is not None
         for value in (
             context_raw_input_tokens,
-            context_input_tokens,
             context_cache_read_tokens,
             context_cache_write_tokens,
         )
     )
-    resolved_context_input_tokens = context_input_tokens
+    # Provider usage counters are authoritative for context occupancy; the
+    # pre-flight `context_input_tokens` estimate is only a fallback when the
+    # provider reported nothing (for example a request that failed early).
+    resolved_context_input_tokens = _context_input_tokens_from_counts(
+        input_tokens=context_raw_input_tokens if explicit_context_scope else usage_input_tokens,
+        cache_read_tokens=(
+            context_cache_read_tokens
+            if explicit_context_scope
+            else _int_usage_value(usage_payload, "cache_read_tokens")
+        ),
+        cache_write_tokens=(
+            context_cache_write_tokens
+            if explicit_context_scope
+            else _int_usage_value(usage_payload, "cache_write_tokens")
+        ),
+        provider=provider,
+        configured_provider=model_config.provider if model_config is not None else None,
+        model_id=model_id,
+    )
     if resolved_context_input_tokens is None:
-        resolved_context_input_tokens = _context_input_tokens_from_counts(
-            input_tokens=context_raw_input_tokens if explicit_context_scope else usage_input_tokens,
-            cache_read_tokens=(
-                context_cache_read_tokens
-                if explicit_context_scope
-                else _int_usage_value(usage_payload, "cache_read_tokens")
-            ),
-            cache_write_tokens=(
-                context_cache_write_tokens
-                if explicit_context_scope
-                else _int_usage_value(usage_payload, "cache_write_tokens")
-            ),
-            provider=provider,
-            configured_provider=model_config.provider if model_config is not None else None,
-            model_id=model_id,
-        )
+        resolved_context_input_tokens = context_input_tokens
     resolved_context_cache_read_tokens = context_cache_read_tokens
     if resolved_context_cache_read_tokens is None and not explicit_context_scope:
         resolved_context_cache_read_tokens = _int_usage_value(usage_payload, "cache_read_tokens")
