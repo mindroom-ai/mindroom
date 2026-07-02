@@ -58,7 +58,10 @@ from mindroom.history import (
     team_tool_definition_payloads_for_logging,
     update_scope_seen_event_ids,
 )
-from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
+from mindroom.history.interrupted_replay import (
+    split_interrupted_tool_trace,
+    tool_execution_call_id,
+)
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
@@ -84,6 +87,7 @@ from mindroom.response_turn import (
     CompletedAttempt,
     ContinuationCapability,
     DynamicContinuationRunState,
+    EmptyRunCapability,
     ErroredAttempt,
     HandledAttempt,
     ResponseTurnContext,
@@ -124,7 +128,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
-    from mindroom.response_turn import TurnRunState
+    from mindroom.response_turn import EmptyRunDiscard, TurnRunState
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -322,10 +326,14 @@ def _team_response_text(response: TeamRunOutput | RunOutput) -> str:
 def _has_visible_team_output(response: TeamRunOutput | RunOutput) -> bool:
     """Return whether one terminal team output carries real member or consensus text.
 
-    The "No team response generated." placeholder does not count, so the
-    dynamic-tool continuation limit message can replace it.
+    Judges only the run's own output: whitespace-only content does not count,
+    and neither do session-history assistant messages (excluded in
+    ``_get_response_content``) — both made the empty-run guard dead after the
+    first turn of a session. The "No team response generated." placeholder
+    does not count either, so the dynamic-tool continuation limit message can
+    replace it.
     """
-    return bool(format_team_response(response)) or bool(_get_response_content(response))
+    return bool(format_team_response(response)) or bool(_get_response_content(response).strip())
 
 
 def _format_terminal_team_response(
@@ -400,11 +408,11 @@ def _format_contributions_recursive(  # noqa: C901
                 elif isinstance(member_resp, RunOutput):
                     agent_name = member_resp.agent_name or "Team Member"
                     content = _get_response_content(member_resp)
-                    if content:
+                    if content.strip():
                         parts.append(_format_member_contribution(agent_name, content, indent))
 
         if include_consensus:
-            if response.content:
+            if response.content and str(response.content).strip():
                 parts.extend(_format_team_consensus(response.content, indent))
             elif parts:
                 parts.append(_format_no_consensus_note(indent))
@@ -412,7 +420,7 @@ def _format_contributions_recursive(  # noqa: C901
     elif isinstance(response, RunOutput):
         agent_name = response.agent_name or "Agent"
         content = _get_response_content(response)
-        if content:
+        if content.strip():
             parts.append(_format_member_contribution(agent_name, content, indent))
 
     return parts
@@ -421,25 +429,20 @@ def _format_contributions_recursive(  # noqa: C901
 def _get_response_content(response: TeamRunOutput | RunOutput) -> str:
     """Get content from a response object.
 
-    Args:
-        response: The response to extract content from
-
-    Returns:
-        The extracted content as a string
-
+    When the run carries no direct content, this concatenates the run's own
+    assistant messages. Agno folds prior-session history into
+    ``response.messages`` with ``from_history=True``; those are excluded so
+    a content-less run cannot recycle earlier turns' text as its output.
     """
     if response.content:
         return str(response.content)
 
-    # Note: This concatenates ALL assistant messages, which might include
-    # multiple turns in a conversation. Consider if you want just the
-    # last message or all of them.
     if response.messages:
         messages_list: list[Any] = response.messages
         content_parts = [
             str(msg.content)
             for msg in messages_list
-            if isinstance(msg, Message) and msg.role == "assistant" and msg.content
+            if isinstance(msg, Message) and msg.role == "assistant" and msg.content and not msg.from_history
         ]
 
         return "\n\n".join(content_parts) if content_parts else ""
@@ -1397,6 +1400,38 @@ def _empty_partial_text() -> str:
     return ""
 
 
+def _resolved_team_session_id(scope_context: ScopeSessionContext | None, session_id: str | None) -> str | None:
+    """Return the effective team session id, falling back to the opened scope session."""
+    if session_id is not None:
+        return session_id
+    if scope_context is not None and scope_context.session is not None:
+        return scope_context.session.session_id
+    return None
+
+
+def _build_team_turn_capabilities(
+    *,
+    session_id: str | None,
+    entity_name: str,
+) -> EmptyRunCapability:
+    """Build the empty-run guard capability for one team turn."""
+
+    def _discard_empty_team_run(scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
+        resolved_session_id = _resolved_team_session_id(scope_context, discard.session_id or session_id)
+        if resolved_session_id is None:
+            return
+        ai_runtime.discard_empty_completed_run(
+            scope_context=scope_context,
+            session_id=resolved_session_id,
+            run_id=discard.run_id,
+            session_type=SessionType.TEAM,
+            entity_name=entity_name,
+            output_tokens=discard.output_tokens,
+        )
+
+    return EmptyRunCapability(notice_text=ai_runtime.EMPTY_RESPONSE_NOTICE, discard=_discard_empty_team_run)
+
+
 @dataclass
 class _TeamTurnHolder:
     """Live per-turn team state shared between attempt closures and adapter callbacks."""
@@ -2144,6 +2179,8 @@ async def team_response(  # noqa: C901, PLR0915
                 partial_text=partial_text,
                 completed_tools=tuple(completed_tools),
                 interrupted_tools=tuple(interrupted_tools),
+                session_id=response.session_id,
+                run_id=response.run_id or attempt_run_id,
                 metadata_content=metadata_content,
             )
         if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
@@ -2161,6 +2198,10 @@ async def team_response(  # noqa: C901, PLR0915
                 event_ids=_run_metadata_seen_event_ids(run_metadata),
             )
 
+        response_session_id: str | None = None
+        response_run_id: str | None = None
+        response_output_tokens: int | None = None
+        is_empty_run = False
         if isinstance(response, (TeamRunOutput, RunOutput)):
             if isinstance(response, TeamRunOutput) and response.member_responses:
                 logger.debug("team_member_response_count", response_count=len(response.member_responses))
@@ -2172,6 +2213,10 @@ async def team_response(  # noqa: C901, PLR0915
                 )
             team_response_text = _team_response_text(response)
             has_visible_output = _has_visible_team_output(response)
+            response_session_id = response.session_id
+            response_run_id = response.run_id
+            response_output_tokens = response.metrics.output_tokens if response.metrics is not None else None
+            is_empty_run = response.status == RunStatus.completed and not run_tool_executions and not has_visible_output
         else:
             logger.warning(
                 "team_response_unexpected_type",
@@ -2201,7 +2246,11 @@ async def team_response(  # noqa: C901, PLR0915
             response_text=response_text,
             replayable_text=response_text,
             has_visible_content=has_visible_output,
+            is_empty=is_empty_run,
+            session_id=response_session_id,
+            run_id=response_run_id,
             attempt_run_id=attempt_run_id,
+            output_tokens=response_output_tokens,
             tool_executions=tuple(run_tool_executions),
             completed_tools=tuple(
                 _extract_completed_team_tool_trace(response)
@@ -2222,6 +2271,10 @@ async def team_response(  # noqa: C901, PLR0915
             entity_name=configured_team_name or team_name,
         )
 
+    team_empty_run = _build_team_turn_capabilities(
+        session_id=session_id,
+        entity_name=configured_team_name or team_name,
+    )
     _release_team_attempt_members, _close_team_attempt_dbs = _build_team_runtime_db_callbacks(holder)
     adapter = BlockingTurnAdapter(
         open_scope=lambda: open_bound_scope_session_context(
@@ -2239,6 +2292,7 @@ async def team_response(  # noqa: C901, PLR0915
         finalize_attempt=_finalize_team_attempt,
         unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_name),
         continuation=ContinuationCapability(),
+        empty_run=team_empty_run,
     )
     return await run_blocking_response_turn(
         ResponseTurnContext(
@@ -2757,6 +2811,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
                                 partial_text=partial_text,
                                 completed_tools=tuple(completed_tool_trace),
                                 interrupted_tools=tuple(interrupted_tool_trace),
+                                session_id=event.session_id,
+                                run_id=event.run_id or attempt_run_id,
                                 metadata_content=event_metadata_content,
                             ),
                         )
@@ -2811,12 +2867,21 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         event,
                         team_display_names=team_members.display_names,
                     )
+                    event_has_visible = _has_visible_team_output(event)
                     yield response_text
                     yield AttemptResolved(
                         CompletedAttempt(
-                            replayable_text=response_text,
-                            has_visible_content=_has_visible_team_output(event),
+                            replayable_text=response_text if event_has_visible else "",
+                            has_visible_content=event_has_visible,
+                            is_empty=(
+                                event.status == RunStatus.completed
+                                and not event_tool_executions
+                                and not event_has_visible
+                            ),
+                            session_id=event.session_id,
+                            run_id=event.run_id,
                             attempt_run_id=attempt_run_id,
+                            output_tokens=event.metrics.output_tokens if event.metrics is not None else None,
                             tool_executions=tuple(event_tool_executions),
                             completed_tools=tuple(_extract_completed_team_tool_trace(event)),
                             metadata_content=event_metadata_content,
@@ -2894,6 +2959,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             partial_text=_current_canonical_partial_text(),
                             completed_tools=tuple(completed_tools),
                             interrupted_tools=tuple(pending.trace_entry for pending in pending_tools),
+                            session_id=event.session_id,
+                            run_id=event.run_id or attempt_run_id,
                             metadata_content=cancelled_metadata_content,
                         ),
                     )
@@ -2996,35 +3063,37 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     session_id=session_id,
                     event_ids=[reply_to_event_id, *unseen_event_ids],
                 )
-            if emitted_output or completed_tool_executions:
-                end_metadata_content: dict[str, Any] | None = None
-                if run_metadata_collector is not None:
-                    end_metadata_content = _build_streamed_team_run_metadata_content(
-                        config=config,
-                        prepared_execution=prepared_execution,
-                        completed_run_event=completed_run_event,
-                        usage=usage,
-                        run_id=(completed_run_event.run_id if completed_run_event is not None else None)
-                        or attempt_run_id,
-                        session_id=(completed_run_event.session_id if completed_run_event is not None else None)
-                        or session_id,
-                        status=RunStatus.completed,
-                        tool_count=len(completed_tool_executions),
-                    )
-                canonical_text = _current_canonical_partial_text()
-                yield AttemptResolved(
-                    CompletedAttempt(
-                        replayable_text=(
-                            _format_team_header(team_members.display_names) + canonical_text if canonical_text else ""
-                        ),
-                        has_visible_content=bool(canonical_text),
-                        attempt_run_id=attempt_run_id,
-                        output_tokens=usage.request_metric_totals.get("output_tokens"),
-                        tool_executions=tuple(completed_tool_executions),
-                        completed_tools=tuple(completed_tools),
-                        metadata_content=end_metadata_content,
-                    ),
+            # Real Agno team streams end without a terminal run output, so this
+            # is the resolution point where the empty-run guard must fire.
+            end_metadata_content: dict[str, Any] | None = None
+            if run_metadata_collector is not None:
+                end_metadata_content = _build_streamed_team_run_metadata_content(
+                    config=config,
+                    prepared_execution=prepared_execution,
+                    completed_run_event=completed_run_event,
+                    usage=usage,
+                    run_id=(completed_run_event.run_id if completed_run_event is not None else None) or attempt_run_id,
+                    session_id=(completed_run_event.session_id if completed_run_event is not None else None)
+                    or session_id,
+                    status=RunStatus.completed,
+                    tool_count=len(completed_tool_executions),
                 )
+            canonical_text = _current_canonical_partial_text()
+            yield AttemptResolved(
+                CompletedAttempt(
+                    replayable_text=(
+                        _format_team_header(team_members.display_names) + canonical_text if canonical_text else ""
+                    ),
+                    has_visible_content=bool(canonical_text),
+                    is_empty=not emitted_output and not completed_tool_executions,
+                    run_id=attempt_run_id,
+                    attempt_run_id=attempt_run_id,
+                    output_tokens=usage.request_metric_totals.get("output_tokens"),
+                    tool_executions=tuple(completed_tool_executions),
+                    completed_tools=tuple(completed_tools),
+                    metadata_content=end_metadata_content,
+                ),
+            )
             return
 
     def _finalize_team_stream_attempt(scope_context: ScopeSessionContext | None) -> None:
@@ -3037,6 +3106,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
             session_id=session_id,
             entity_name=configured_team_name or team_label,
         )
+
+    team_empty_run = _build_team_turn_capabilities(
+        session_id=session_id,
+        entity_name=configured_team_name or team_label,
+    )
 
     def _snapshot_stream_partial() -> TurnPartialSnapshot:
         return TurnPartialSnapshot(
@@ -3064,6 +3138,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
         make_notice_chunk=lambda text: text,
         unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_label),
         continuation=ContinuationCapability(),
+        empty_run=team_empty_run,
     )
     response_stream = stream_response_turn(
         ResponseTurnContext(

@@ -316,8 +316,8 @@ class TestAIErrorDisplay:
         event_id, text = edited_messages[0]
         assert event_id == "$thinking_msg"
         assert text == _CANCELLED_RESPONSE_NOTE
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.delivery.terminal_status == "cancelled"
+        assert outcome.delivery.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
     async def test_cancelled_run_status_preserves_user_stop_note(self, tmp_path: Path) -> None:
@@ -380,8 +380,8 @@ class TestAIErrorDisplay:
         event_id, text = edited_messages[0]
         assert event_id == "$thinking_msg"
         assert text == _CANCELLED_RESPONSE_NOTE
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.delivery.terminal_status == "cancelled"
+        assert outcome.delivery.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
     async def test_collected_stream_cancelled_event_preserves_user_stop_note(self, tmp_path: Path) -> None:
@@ -444,8 +444,8 @@ class TestAIErrorDisplay:
         event_id, text = edited_messages[0]
         assert event_id == "$thinking_msg"
         assert text == _CANCELLED_RESPONSE_NOTE
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.delivery.terminal_status == "cancelled"
+        assert outcome.delivery.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
     async def test_run_cancelled_event_preserves_user_stop_note_in_streaming(self, tmp_path: Path) -> None:
@@ -504,8 +504,8 @@ class TestAIErrorDisplay:
         event_id, text = edited_messages[-1]
         assert event_id == "$thinking_msg"
         assert text == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.delivery.terminal_status == "cancelled"
+        assert outcome.delivery.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
     async def test_various_error_messages_are_user_friendly(self, tmp_path: Path) -> None:
@@ -629,10 +629,10 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_ai.return_value = "Response without knowledge"
 
-            delivery = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner.process_and_respond(
                 _response_request(),
             )
 
-        assert delivery.event_id == "$response_id"
+        assert generation.delivery.event_id == "$response_id"
         assert mock_ai.call_args.kwargs["knowledge"] is None
         bot.logger.exception.assert_not_called()
