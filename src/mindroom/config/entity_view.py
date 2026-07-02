@@ -8,7 +8,6 @@ only external consumer, so the entity-keyed surface stays one documented seam.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from functools import cached_property
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -29,49 +28,49 @@ class ResolvedEntityView:
     raises for unknown entities.
     Views are cheap per-call snapshots over one loaded ``Config``; config hot-reload replaces the
     ``Config`` object, so never store a view beyond the current operation.
-    Views compare by identity (``eq=False``): each `resolve_entity` call returns a fresh view.
-    List-valued fields are cached on first access; treat them as read-only.
+    Views compare by identity (``eq=False``): each `resolve_entity` call returns a fresh view,
+    and every field access resolves fresh values, so nothing survives a config reload by accident.
     """
 
     _config: Config = field(repr=False)
     name: str | None
 
-    @cached_property
+    @property
     def history_settings(self) -> ResolvedHistorySettings:
         """Effective history replay settings for this scope."""
         if self.name is None:
             return self._config._default_history_settings()
         return self._config._entity_history_settings(self.name)
 
-    @cached_property
+    @property
     def compaction_config(self) -> CompactionConfig:
         """Effective destructive compaction config for this scope."""
         if self.name is None:
             return self._config._default_compaction_config()
         return self._config._entity_compaction_config(self.name)
 
-    @cached_property
+    @property
     def has_authored_compaction_config(self) -> bool:
         """Whether destructive compaction was explicitly configured for this scope."""
         if self.name is None:
             return self._config._has_authored_default_compaction_config()
         return self._config._has_authored_entity_compaction_config(self.name)
 
-    @cached_property
+    @property
     def memory_backend(self) -> MemoryBackend:
         """Effective memory backend; every non-agent scope (team, router, defaults) inherits the global backend."""
         if self.name is None:
             return self._config.memory.backend
         return self._config._agent_memory_backend(self.name)
 
-    @cached_property
+    @property
     def memory_search(self) -> MemorySearchConfig:
         """Effective file-memory search settings; every non-agent scope inherits the global settings."""
         if self.name is None:
             return self._config.memory.search
         return self._config._agent_memory_search(self.name)
 
-    @cached_property
+    @property
     def model_name(self) -> str:
         """Authored model name for this agent, team, or router."""
         if self.name is None:
@@ -85,17 +84,17 @@ class ResolvedEntityView:
             raise ValueError(msg)
         return self.name
 
-    @cached_property
+    @property
     def available_tools(self) -> list[str]:
         """All tools this agent may use after dynamic loading."""
         return self._config._agent_available_tools(self._agent_name())
 
-    @cached_property
+    @property
     def tool_configs(self) -> list[EffectiveToolConfig]:
         """Effective runtime tool config entries for each authored owner."""
         return self._config._agent_tool_configs(self._agent_name())
 
-    @cached_property
+    @property
     def authored_deferred_tool_configs(self) -> list[EffectiveToolConfig]:
         """One entry per authored deferred tool in effective order."""
         return self._config._agent_authored_deferred_tool_configs(self._agent_name())
@@ -112,7 +111,7 @@ class ResolvedEntityView:
         """Return expanded deferred tools invalid for this agent's effective execution scope."""
         return self._config._deferred_tool_scope_incompatible_tools(self._agent_name(), authored_tool_name)
 
-    @cached_property
+    @property
     def culture(self) -> tuple[str, CultureConfig] | None:
         """Configured culture assignment for this agent, if any.
 
@@ -122,22 +121,22 @@ class ResolvedEntityView:
         """
         return self._config._agent_culture(self._agent_name())
 
-    @cached_property
+    @property
     def knowledge_base_ids(self) -> list[str]:
         """Shared and private knowledge base IDs assigned to this agent."""
         return self._config._agent_knowledge_base_ids(self._agent_name())
 
-    @cached_property
+    @property
     def private_knowledge_base_id(self) -> str | None:
         """Synthetic knowledge base ID for this agent's private knowledge, if enabled."""
         return self._config._agent_private_knowledge_base_id(self._agent_name())
 
-    @cached_property
+    @property
     def execution_scope(self) -> WorkerScope | None:
         """Internal derived execution scope for this agent."""
         return self._config._agent_execution_scope(self._agent_name())
 
-    @cached_property
+    @property
     def scope_label(self) -> str:
         """User-facing authored scope label for this agent."""
         return self._config._agent_scope_label(self._agent_name())
