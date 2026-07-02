@@ -26,6 +26,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import ScopeSessionContext
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 
 if TYPE_CHECKING:
@@ -206,6 +207,33 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(tmp_
 
 
 @pytest.mark.asyncio
+async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(tmp_path: Path) -> None:
+    """The delivery-only notice must never be recorded as model text it could replay from history."""
+    recorder = TurnRecorder(user_message="test")
+    first_agent = _mock_agent(_completed_run("run-empty-1", None))
+    second_agent = _mock_agent(_completed_run("run-empty-2", None))
+
+    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+        mock_prepare.side_effect = [
+            _prepared_prompt_result(first_agent),
+            _prepared_prompt_result(second_agent),
+        ]
+
+        result = await ai_response(
+            agent_name="general",
+            prompt="test",
+            session_id="session-1",
+            runtime_paths=_runtime_paths(tmp_path),
+            config=_config(),
+            turn_recorder=recorder,
+        )
+
+    assert result == EMPTY_RESPONSE_NOTICE
+    assert recorder.outcome == "completed"
+    assert recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
 async def test_stream_agent_response_retries_once_after_empty_completed_stream(tmp_path: Path) -> None:
     """One empty completed stream should trigger exactly one fresh streaming attempt."""
 
@@ -273,3 +301,38 @@ async def test_stream_agent_response_yields_fallback_notice_when_retry_is_also_e
     assert contents == [EMPTY_RESPONSE_NOTICE]
     first_agent.arun.assert_called_once()
     second_agent.arun.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_response_fallback_notice_stays_out_of_the_turn_recorder(tmp_path: Path) -> None:
+    """The streamed delivery-only notice must never be recorded as model text either."""
+
+    async def empty_stream() -> AsyncIterator[object]:
+        yield RunCompletedEvent(content=None)
+
+    recorder = TurnRecorder(user_message="test")
+    first_agent = _mock_streaming_agent(empty_stream())
+    second_agent = _mock_streaming_agent(empty_stream())
+
+    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+        mock_prepare.side_effect = [
+            _prepared_prompt_result(first_agent),
+            _prepared_prompt_result(second_agent),
+        ]
+
+        chunks = [
+            chunk
+            async for chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session-1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                turn_recorder=recorder,
+            )
+        ]
+
+    contents = [cast("str", chunk.content) for chunk in chunks if isinstance(chunk, RunContentEvent)]
+    assert contents == [EMPTY_RESPONSE_NOTICE]
+    assert recorder.outcome == "completed"
+    assert recorder.assistant_text == ""
