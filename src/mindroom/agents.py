@@ -1440,6 +1440,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     if agent_runtime.tool_base_dir is not None and not disable_runtime_capabilities:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
+        instructions.append(config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"))
 
     file_mode_knowledge_instruction = (
         None
