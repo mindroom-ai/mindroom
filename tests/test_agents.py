@@ -1053,8 +1053,8 @@ def test_resolve_agent_runtime_uses_shared_agent_roots_for_shared_agents(tmp_pat
 
     runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
 
-    assert runtime.is_private is False
-    assert runtime.worker_key is None
+    assert runtime.execution.is_private is False
+    assert runtime.execution.worker_key is None
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace is None
     assert runtime.tool_base_dir is None
@@ -1104,9 +1104,9 @@ def test_resolve_agent_runtime_keeps_user_scope_worker_key_for_shared_agents(tmp
         create=True,
     )
 
-    assert runtime.is_private is False
-    assert runtime.execution_scope == "user"
-    assert runtime.worker_key == resolve_worker_key("user", identity, agent_name="general")
+    assert runtime.execution.is_private is False
+    assert runtime.execution.execution_scope == "user"
+    assert runtime.execution.worker_key == resolve_worker_key("user", identity, agent_name="general")
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace is None
     assert runtime.tool_base_dir is None
@@ -1125,9 +1125,9 @@ def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_p
 
     runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
 
-    assert runtime.is_private is False
-    assert runtime.execution_scope == "shared"
-    assert runtime.worker_key is None
+    assert runtime.execution.is_private is False
+    assert runtime.execution.execution_scope == "shared"
+    assert runtime.execution.worker_key is None
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace is None
 
@@ -1167,8 +1167,8 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
     )
     expected_worker_key = resolve_worker_key("user", identity, agent_name="general")
     assert expected_worker_key is not None
-    assert runtime.is_private is True
-    assert runtime.worker_key == expected_worker_key
+    assert runtime.execution.is_private is True
+    assert runtime.execution.worker_key == expected_worker_key
     assert runtime.state_root == _private_instance_state_root_path(
         tmp_path,
         worker_key=expected_worker_key,

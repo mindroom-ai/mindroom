@@ -722,13 +722,13 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         credentials_manager,
         shared_storage_path,
         worker_tools,
-        agent_runtime.execution_scope,
-        (config.get_worker_grantable_credentials() if agent_runtime.execution_scope is not None else None),
+        agent_runtime.execution.execution_scope,
+        (config.get_worker_grantable_credentials() if agent_runtime.execution.execution_scope is not None else None),
         agent_name,
         tool_config_overrides,
         agent_runtime.tool_base_dir,
         config.defaults.tool_output_auto_save_threshold_bytes,
-        agent_runtime.is_private,
+        agent_runtime.execution.is_private,
         execution_identity,
         runtime_overrides,
     )
@@ -1480,13 +1480,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     )
     culture_storage_root = resolved_storage_path
     cache_private_culture = False
-    if agent_runtime.is_private and persist_runtime_state:
-        worker_key = agent_runtime.worker_key
+    if agent_runtime.execution.is_private and persist_runtime_state:
+        worker_key = agent_runtime.execution.worker_key
         if worker_key is None:
             msg = f"Private agent '{agent_name}' requires a worker key to resolve culture state"
             raise ValueError(msg)
-        execution_scope = agent_runtime.execution_scope
-        execution_identity = agent_runtime.execution_identity
+        execution_scope = agent_runtime.execution.execution_scope
+        execution_identity = agent_runtime.execution.execution_identity
         if execution_scope is None or execution_identity is None:
             msg = f"Private agent '{agent_name}' requires an execution scope and identity to resolve culture state"
             raise ValueError(msg)
