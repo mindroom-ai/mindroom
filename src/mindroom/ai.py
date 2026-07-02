@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from contextlib import aclosing
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from agno.db.base import SessionType
@@ -31,16 +32,6 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
     empty_request_metric_totals,
 )
-from mindroom.ai_turn_state import AITurnState
-from mindroom.cancellation import build_cancelled_error
-from mindroom.constants import (
-    MATRIX_EVENT_ID_METADATA_KEY,
-    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
-    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
-    MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
-    RuntimePaths,
-)
-from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history import (
@@ -78,22 +69,44 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs, MediaKind
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
+from mindroom.response_turn import (
+    AttemptResolved,
+    BlockingTurnAdapter,
+    CancelledAttempt,
+    CompletedAttempt,
+    ContinuationCapability,
+    DynamicContinuationRunState,
+    EmptyRunCapability,
+    ErroredAttempt,
+    HandledAttempt,
+    ResponseTurnContext,
+    StreamingTurnAdapter,
+    TurnPartialSnapshot,
+    TurnSinks,
+    build_matrix_run_metadata,
+    run_blocking_response_turn,
+    stream_response_turn,
+)
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timing_scope
 from mindroom.tool_system.events import StreamingToolTracker, complete_pending_tool_block, format_tool_combined
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
+    from contextlib import AbstractContextManager
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
     from agno.models.response import ToolExecution
 
+    from mindroom.ai_turn_state import AITurnState
     from mindroom.config.main import Config, ResolvedRuntimeModel
+    from mindroom.constants import RuntimePaths
     from mindroom.history import CompactionLifecycle
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.response_turn import EmptyRunDiscard, StandaloneReplaySnapshot, TurnRunState
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -150,55 +163,26 @@ def _model_prompt_tail_after_raw_prompt(*, raw_prompt: str, model_prompt: str | 
     return model_prompt_tail
 
 
-@dataclass(frozen=True)
-class _DynamicContinuationRunState:
-    """Prompt and run identity for a dynamic-tool continuation sequence."""
-
-    original_prompt: str
-    active_prompt: str
-    active_model_prompt: str | None
-    active_current_timestamp_ms: float | None
-    active_current_prompt_is_structured: bool
-    active_run_id: str | None
-    continuation_model_prompt_tail: str
-
-    @classmethod
-    def initial(
-        cls,
-        *,
-        prompt: str,
-        model_prompt: str | None,
-        current_timestamp_ms: float | None,
-        current_prompt_is_structured: bool,
-        run_id: str | None,
-    ) -> _DynamicContinuationRunState:
-        return cls(
-            original_prompt=prompt,
-            active_prompt=prompt,
-            active_model_prompt=model_prompt,
-            active_current_timestamp_ms=current_timestamp_ms,
-            active_current_prompt_is_structured=current_prompt_is_structured,
-            active_run_id=run_id,
-            continuation_model_prompt_tail=_model_prompt_tail_after_raw_prompt(
-                raw_prompt=prompt,
-                model_prompt=model_prompt,
-            ),
-        )
-
-    def advance(
-        self,
-        *,
-        continuation_prompt: str,
-        previous_run_id: str | None,
-    ) -> _DynamicContinuationRunState:
-        return replace(
-            self,
-            active_prompt=continuation_prompt,
-            active_model_prompt=self.continuation_model_prompt_tail or None,
-            active_current_timestamp_ms=None,
-            active_current_prompt_is_structured=False,
-            active_run_id=ai_runtime.next_retry_run_id(previous_run_id),
-        )
+def _initial_agent_continuation(
+    *,
+    prompt: str,
+    model_prompt: str | None,
+    current_timestamp_ms: float | None,
+    current_prompt_is_structured: bool,
+    run_id: str | None,
+) -> DynamicContinuationRunState:
+    """Build the initial continuation state for one agent response turn."""
+    return DynamicContinuationRunState.initial(
+        prompt=prompt,
+        model_prompt=model_prompt,
+        current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
+        run_id=run_id,
+        continuation_model_prompt_tail=_model_prompt_tail_after_raw_prompt(
+            raw_prompt=prompt,
+            model_prompt=model_prompt,
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -317,90 +301,6 @@ def _build_timing_scope(
     return "unknown"
 
 
-def _reset_turn_state_for_dynamic_continuation(
-    *,
-    turn_recorder: TurnRecorder | None,
-    run_metadata: dict[str, Any] | None,
-    completed_tools_for_turn: Sequence[ToolTraceEntry],
-) -> AITurnState:
-    turn_state = AITurnState(prior_completed_tools=completed_tools_for_turn)
-    turn_state.sync_partial(
-        turn_recorder,
-        run_metadata=run_metadata,
-        assistant_text="",
-        completed_tools=[],
-        interrupted_tools=[],
-    )
-    return turn_state
-
-
-def _advance_dynamic_continuation(
-    *,
-    agent: Agent | None,
-    scope_context: ScopeSessionContext | None,
-    continuation_state: _DynamicContinuationRunState,
-    next_prompt: str | None,
-    previous_run_id: str | None,
-    turn_recorder: TurnRecorder | None,
-    run_metadata: dict[str, Any] | None,
-    completed_tools_for_turn: Sequence[ToolTraceEntry],
-) -> tuple[_DynamicContinuationRunState, AITurnState]:
-    """Close the spent agent and prepare run state for one more continuation.
-
-    Shared by the blocking and streaming loops so the continuation handoff stays
-    identical across both paths.
-    """
-    close_agent_runtime_state_dbs(
-        agent,
-        shared_scope_storage=scope_context.storage if scope_context is not None else None,
-    )
-    advanced_state = continuation_state.advance(
-        continuation_prompt=next_prompt or continuation_state.original_prompt,
-        previous_run_id=previous_run_id,
-    )
-    turn_state = _reset_turn_state_for_dynamic_continuation(
-        turn_recorder=turn_recorder,
-        run_metadata=run_metadata,
-        completed_tools_for_turn=completed_tools_for_turn,
-    )
-    return advanced_state, turn_state
-
-
-def _discard_empty_run_and_grant_retry(
-    *,
-    agent: Agent | None,
-    scope_context: ScopeSessionContext | None,
-    session_id: str,
-    run_id: str | None,
-    entity_name: str,
-    output_tokens: int | None,
-    empty_response_retried: bool,
-    continuation_count: int,
-) -> bool:
-    """Discard one empty completed run and decide whether one retry is granted.
-
-    Shared by the blocking and streaming loops so the empty-retry handoff stays
-    identical across both paths. The one-shot retry borrows a dynamic-continuation
-    slot so the outer loop's iteration budget stays authoritative; a granted retry
-    closes the spent agent's runtime state DBs exactly like the continuation handoff.
-    """
-    ai_runtime.discard_empty_completed_run(
-        scope_context=scope_context,
-        session_id=session_id,
-        run_id=run_id,
-        session_type=SessionType.AGENT,
-        entity_name=entity_name,
-        output_tokens=output_tokens,
-    )
-    if empty_response_retried or continuation_count >= DYNAMIC_TOOL_CONTINUATION_LIMIT:
-        return False
-    close_agent_runtime_state_dbs(
-        agent,
-        shared_scope_storage=scope_context.storage if scope_context is not None else None,
-    )
-    return True
-
-
 @timed("system_prompt_assembly.system_enrichment_render")
 def _render_system_enrichment_context(
     system_enrichment_items: Sequence[EnrichmentItem],
@@ -446,6 +346,116 @@ class _StreamingAttemptState:
     @property
     def completed_tools(self) -> list[ToolTraceEntry]:
         return self.tool_tracker.completed_tools
+
+
+@dataclass
+class _AgentTurnHolder:
+    """Live per-turn agent state shared between attempt closures and adapter callbacks."""
+
+    agent: Agent | None = None
+    attempt: _MediaAttempt | None = None
+    state: _StreamingAttemptState | None = None
+    attempt_started: bool = False
+
+
+@dataclass(frozen=True)
+class _AgentTurnCallbacks:
+    """Adapter callbacks shared by the blocking and streaming agent turns."""
+
+    open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]]
+    on_scope_opened: Callable[[ScopeSessionContext | None], None]
+    release_attempt_entity: Callable[[ScopeSessionContext | None], None]
+    close_runtime_dbs: Callable[[ScopeSessionContext | None], None]
+    empty_run: EmptyRunCapability
+    persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None]
+
+
+def _build_agent_turn_callbacks(
+    holder: _AgentTurnHolder,
+    *,
+    agent_name: str,
+    prompt: str,
+    session_id: str,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+) -> _AgentTurnCallbacks:
+    """Build the entity-specific turn-driver callbacks for one agent response."""
+
+    def _open_scope() -> AbstractContextManager[ScopeSessionContext | None]:
+        return open_resolved_scope_session_context(
+            agent_name=agent_name,
+            scope=HistoryScope(kind="agent", scope_id=agent_name),
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+        )
+
+    def _on_scope_opened(scope_context: ScopeSessionContext | None) -> None:
+        ai_runtime.scrub_queued_notice_session_context(
+            scope_context=scope_context,
+            entity_name=agent_name,
+        )
+
+    def _close_runtime_dbs(scope_context: ScopeSessionContext | None) -> None:
+        close_agent_runtime_state_dbs(
+            holder.agent,
+            shared_scope_storage=scope_context.storage if scope_context is not None else None,
+        )
+
+    def _release_attempt_entity(scope_context: ScopeSessionContext | None) -> None:
+        _close_runtime_dbs(scope_context)
+        holder.agent = None
+
+    def _discard_empty_run(scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
+        ai_runtime.discard_empty_completed_run(
+            scope_context=scope_context,
+            session_id=discard.session_id or session_id,
+            run_id=discard.run_id,
+            session_type=SessionType.AGENT,
+            entity_name=agent_name,
+            output_tokens=discard.output_tokens,
+        )
+
+    def _persist_standalone_replay(
+        scope_context: ScopeSessionContext | None,
+        snapshot: StandaloneReplaySnapshot,
+    ) -> None:
+        persist_interrupted_replay(
+            scope_context=scope_context,
+            session_id=snapshot.session_id or session_id,
+            run_id=snapshot.run_id,
+            user_message=prompt,
+            partial_text=snapshot.partial_text,
+            completed_tools=snapshot.completed_tools,
+            interrupted_tools=snapshot.interrupted_tools,
+            run_metadata=snapshot.run_metadata,
+            is_team=False,
+        )
+
+    return _AgentTurnCallbacks(
+        open_scope=_open_scope,
+        on_scope_opened=_on_scope_opened,
+        release_attempt_entity=_release_attempt_entity,
+        close_runtime_dbs=_close_runtime_dbs,
+        empty_run=EmptyRunCapability(
+            notice_text=ai_runtime.EMPTY_RESPONSE_NOTICE,
+            discard=_discard_empty_run,
+        ),
+        persist_standalone_replay=_persist_standalone_replay,
+    )
+
+
+def _streaming_partial_snapshot(holder: _AgentTurnHolder) -> TurnPartialSnapshot:
+    """Return the live partial-output view of one streaming agent turn."""
+    state = holder.state or _StreamingAttemptState()
+    return TurnPartialSnapshot(
+        assistant_text=state.assistant_text,
+        completed_tools=tuple(state.completed_tools),
+        interrupted_tools=tuple(pending.trace_entry for pending in state.pending_tools),
+        attempt_run_id=holder.attempt.attempt_run_id if holder.attempt is not None else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -697,73 +707,6 @@ def _extract_interrupted_partial_text(
     if _is_run_cancelled_boilerplate(stripped):
         return ""
     return stripped
-
-
-def _raise_agent_run_cancelled(reason: str | None) -> NoReturn:
-    """Raise the canonical agent cancellation error."""
-    raise build_cancelled_error(reason)
-
-
-def _normalized_string_list(values: object) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    normalized: list[str] = []
-    for value in values:
-        if isinstance(value, str) and value and value not in normalized:
-            normalized.append(value)
-    return normalized
-
-
-def build_matrix_run_metadata(
-    reply_to_event_id: str | None,
-    unseen_event_ids: list[str],
-    *,
-    room_id: str | None = None,
-    thread_id: str | None = None,
-    requester_id: str | None = None,
-    correlation_id: str | None = None,
-    tools_schema: list[dict[str, object]] | None = None,
-    model_params: dict[str, Any] | None = None,
-    extra_metadata: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    """Build metadata dict for a run, tracking consumed Matrix event ids."""
-    metadata = dict(extra_metadata or {})
-    if room_id is not None:
-        metadata["room_id"] = room_id
-    if thread_id is not None:
-        metadata["thread_id"] = thread_id
-    if reply_to_event_id is not None:
-        metadata["reply_to_event_id"] = reply_to_event_id
-    if requester_id is not None:
-        metadata["requester_id"] = requester_id
-    if correlation_id is not None:
-        metadata["correlation_id"] = correlation_id
-    if tools_schema is not None:
-        metadata["tools_schema"] = tools_schema
-    else:
-        metadata.setdefault("tools_schema", [])
-    if model_params is not None:
-        metadata["model_params"] = model_params
-    else:
-        metadata.setdefault("model_params", {})
-    source_event_ids = _normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
-    if reply_to_event_id:
-        seen_event_ids = _normalized_string_list(
-            [
-                reply_to_event_id,
-                *source_event_ids,
-                *_normalized_string_list(metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)),
-                *unseen_event_ids,
-            ],
-        )
-        metadata[MATRIX_EVENT_ID_METADATA_KEY] = reply_to_event_id
-        metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = seen_event_ids
-    if MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY in metadata and not isinstance(
-        metadata[MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY],
-        dict,
-    ):
-        metadata.pop(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY, None)
-    return metadata or None
 
 
 def resolve_run_correlation_id(
@@ -1405,7 +1348,7 @@ async def _prepare_agent_run_context(
     )
 
 
-async def ai_response(  # noqa: C901, PLR0915
+async def ai_response(
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -1551,288 +1494,185 @@ async def ai_response(  # noqa: C901, PLR0915
         ),
     )
     media_inputs = media or MediaInputs()
-    resolved_requester_id = user_id
     resolved_correlation_id = resolve_run_correlation_id(
         correlation_id,
         reply_to_event_id=reply_to_event_id,
         matrix_run_metadata=matrix_run_metadata,
     )
-    agent: Agent | None = None
-    scope_context: ScopeSessionContext | None = None
-    standalone_interrupted_replay_persisted = False
-    empty_response_retried = False
-    turn_state = AITurnState()
-    unseen_event_ids: list[str] = []
-    metadata: dict[str, Any] | None = None
-    run_extra_content: dict[str, Any] | None = None
-    attempt: _MediaAttempt | None = None
     try:
+        _assert_agent_target(agent_name, config)
+    except ValueError as e:
+        return get_user_friendly_error_message(e, agent_name)
+
+    holder = _AgentTurnHolder()
+    callbacks = _build_agent_turn_callbacks(
+        holder,
+        agent_name=agent_name,
+        prompt=prompt,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+    )
+
+    async def _run_blocking_attempt(
+        run: TurnRunState,
+        continuation_state: DynamicContinuationRunState,
+    ) -> CompletedAttempt | CancelledAttempt | ErroredAttempt:
+        """Run one agent attempt, including its media-fallback retries."""
         try:
-            _assert_agent_target(agent_name, config)
-        except ValueError as e:
-            return get_user_friendly_error_message(e, agent_name)
-
-        async def _run_blocking_attempt(continuation_count: int) -> str | None:  # noqa: C901, PLR0911, PLR0912, PLR0915
-            """Run one agent attempt; return final text, or None to continue the turn."""
-            nonlocal agent, attempt, continuation_state, empty_response_retried, metadata, run_extra_content
-            nonlocal standalone_interrupted_replay_persisted, turn_state, unseen_event_ids
-            try:
-                run_context = await _prepare_agent_run_context(
-                    agent_name=agent_name,
-                    prompt=continuation_state.active_prompt,
-                    session_id=session_id,
-                    runtime_paths=runtime_paths,
-                    config=config,
-                    scope_context=scope_context,
-                    thread_history=thread_history,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    knowledge=knowledge,
-                    include_interactive_questions=include_interactive_questions,
-                    include_openai_compat_guidance=include_openai_compat_guidance,
-                    reply_to_event_id=reply_to_event_id,
-                    active_event_ids=active_event_ids,
-                    execution_identity=execution_identity,
-                    compaction_outcomes_collector=compaction_outcomes_collector,
-                    compaction_lifecycle=compaction_lifecycle,
-                    delegation_depth=delegation_depth,
-                    refresh_scheduler=refresh_scheduler,
-                    system_enrichment_items=system_enrichment_items,
-                    model_prompt=continuation_state.active_model_prompt,
-                    current_timestamp_ms=continuation_state.active_current_timestamp_ms,
-                    current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
-                    user_id=user_id,
-                    requester_id=resolved_requester_id,
-                    correlation_id=resolved_correlation_id,
-                    matrix_run_metadata=matrix_run_metadata,
-                    turn_recorder=turn_recorder,
-                    pipeline_timing=pipeline_timing,
-                )
-            except Exception as e:
-                logger.exception("Error preparing agent", agent=agent_name)
-                return get_user_friendly_error_message(e, agent_name)
-            prepared_run = run_context.prepared_run
-            agent = prepared_run.agent
-            run_input = run_context.run_input
-            unseen_event_ids = prepared_run.unseen_event_ids
-            metadata = run_context.metadata
-            run_extra_content = run_context.run_extra_content
-
-            attempt = _MediaAttempt.initial(
-                run_input,
-                media_inputs,
-                agent.model,
-                fallback_prompt=run_context.inline_media_fallback_prompt,
-                run_id=continuation_state.active_run_id,
-            )
-            attempt_result = await _run_non_streaming_agent_attempts(
-                run_context=run_context,
-                attempt=attempt,
+            run_context = await _prepare_agent_run_context(
+                agent_name=agent_name,
+                prompt=continuation_state.active_prompt,
+                session_id=session_id,
+                runtime_paths=runtime_paths,
+                config=config,
+                scope_context=run.scope_context,
+                thread_history=thread_history,
+                room_id=room_id,
+                thread_id=thread_id,
+                knowledge=knowledge,
+                include_interactive_questions=include_interactive_questions,
+                include_openai_compat_guidance=include_openai_compat_guidance,
+                reply_to_event_id=reply_to_event_id,
+                active_event_ids=active_event_ids,
+                execution_identity=execution_identity,
+                compaction_outcomes_collector=compaction_outcomes_collector,
+                compaction_lifecycle=compaction_lifecycle,
+                delegation_depth=delegation_depth,
+                refresh_scheduler=refresh_scheduler,
+                system_enrichment_items=system_enrichment_items,
+                model_prompt=continuation_state.active_model_prompt,
+                current_timestamp_ms=continuation_state.active_current_timestamp_ms,
+                current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
                 user_id=user_id,
-                run_id=continuation_state.active_run_id,
-                run_id_callback=run_id_callback,
-                scope_context=scope_context,
+                requester_id=user_id,
+                correlation_id=resolved_correlation_id,
+                matrix_run_metadata=matrix_run_metadata,
+                turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
             )
-            attempt = attempt_result.attempt
-            if attempt_result.user_error is not None:
-                return get_user_friendly_error_message(attempt_result.user_error, agent_name)
-            response = cast("RunOutput", attempt_result.response)
+        except Exception as e:
+            logger.exception("Error preparing agent", agent=agent_name)
+            return ErroredAttempt(get_user_friendly_error_message(e, agent_name))
+        prepared_run = run_context.prepared_run
+        holder.agent = prepared_run.agent
+        run.unseen_event_ids = prepared_run.unseen_event_ids
+        run.run_metadata = run_context.metadata
+        run.run_extra_content = run_context.run_extra_content
 
-            response_tool_trace = _extract_tool_trace(response)
-            if tool_trace_collector is not None:
-                tool_trace_collector.extend(response_tool_trace)
-            if run_metadata_collector is not None:
-                run_metadata = build_ai_run_metadata_content(
-                    config=config,
-                    model_name=prepared_run.runtime_model_name,
-                    run_id=response.run_id,
-                    session_id=response.session_id or session_id,
-                    status=response.status,
-                    model=response.model,
-                    model_provider=response.model_provider,
-                    metrics=response.metrics,
-                    context_input_tokens=prepared_run.prepared_history.prepared_context_tokens,
-                    tool_count=len(response.tools) if response.tools is not None else 0,
-                    prepared_history=prepared_run.prepared_history,
-                )
-                run_metadata_collector.update(run_metadata)
+        attempt = _MediaAttempt.initial(
+            run_context.run_input,
+            media_inputs,
+            prepared_run.agent.model,
+            fallback_prompt=run_context.inline_media_fallback_prompt,
+            run_id=continuation_state.active_run_id,
+        )
+        holder.attempt = attempt
+        attempt_result = await _run_non_streaming_agent_attempts(
+            run_context=run_context,
+            attempt=attempt,
+            user_id=user_id,
+            run_id=continuation_state.active_run_id,
+            run_id_callback=run_id_callback,
+            scope_context=run.scope_context,
+            pipeline_timing=pipeline_timing,
+        )
+        if attempt_result.user_error is not None:
+            return ErroredAttempt(get_user_friendly_error_message(attempt_result.user_error, agent_name))
+        response = cast("RunOutput", attempt_result.response)
 
-            if response.status == RunStatus.cancelled:
-                partial_text = _extract_interrupted_partial_text(
-                    response.content,
-                    messages=response.messages,
-                )
-                completed_tools, interrupted_tools = _extract_cancelled_tool_trace(response)
-                if turn_recorder is not None:
-                    turn_state.record_interrupted(
-                        turn_recorder,
-                        run_metadata=metadata,
-                        assistant_text=partial_text,
-                        completed_tools=completed_tools,
-                        interrupted_tools=interrupted_tools,
-                    )
-                if turn_recorder is None:
-                    persist_interrupted_replay(
-                        scope_context=scope_context,
-                        session_id=response.session_id or session_id,
-                        run_id=response.run_id or attempt.attempt_run_id or str(uuid4()),
-                        user_message=prompt,
-                        partial_text=partial_text,
-                        completed_tools=turn_state.completed_tools_for(completed_tools),
-                        interrupted_tools=interrupted_tools,
-                        run_metadata=metadata,
-                        is_team=False,
-                    )
-                    standalone_interrupted_replay_persisted = True
-                _raise_agent_run_cancelled(response.content)
-            if response.status == RunStatus.error:
-                return get_user_friendly_error_message(
+        response_tool_trace = _extract_tool_trace(response)
+        if tool_trace_collector is not None:
+            tool_trace_collector.extend(response_tool_trace)
+        metadata_content: dict[str, Any] | None = None
+        if run_metadata_collector is not None:
+            metadata_content = build_ai_run_metadata_content(
+                config=config,
+                model_name=prepared_run.runtime_model_name,
+                run_id=response.run_id,
+                session_id=response.session_id or session_id,
+                status=response.status,
+                model=response.model,
+                model_provider=response.model_provider,
+                metrics=response.metrics,
+                context_input_tokens=prepared_run.prepared_history.prepared_context_tokens,
+                tool_count=len(response.tools) if response.tools is not None else 0,
+                prepared_history=prepared_run.prepared_history,
+            )
+
+        if response.status == RunStatus.cancelled:
+            partial_text = _extract_interrupted_partial_text(
+                response.content,
+                messages=response.messages,
+            )
+            completed_tools, interrupted_tools = _extract_cancelled_tool_trace(response)
+            return CancelledAttempt(
+                reason=response.content,
+                partial_text=partial_text,
+                completed_tools=tuple(completed_tools),
+                interrupted_tools=tuple(interrupted_tools),
+                session_id=response.session_id,
+                run_id=response.run_id or attempt.attempt_run_id,
+                metadata_content=metadata_content,
+            )
+        if response.status == RunStatus.error:
+            return ErroredAttempt(
+                get_user_friendly_error_message(
                     Exception(str(response.content or "Unknown agent error")),
                     agent_name,
-                )
-            if ai_runtime.is_empty_completed_run(response):
-                if _discard_empty_run_and_grant_retry(
-                    agent=agent,
-                    scope_context=scope_context,
-                    session_id=response.session_id or session_id,
-                    run_id=response.run_id,
-                    entity_name=agent_name,
-                    output_tokens=_usage_metric_int(response.metrics, "output_tokens"),
-                    empty_response_retried=empty_response_retried,
-                    continuation_count=continuation_count,
-                ):
-                    empty_response_retried = True
-                    agent = None
-                    return None
-                if turn_recorder is not None:
-                    turn_state.record_completed(
-                        turn_recorder,
-                        run_metadata=metadata,
-                        assistant_text="",
-                        completed_tools=[],
-                    )
-                return ai_runtime.EMPTY_RESPONSE_NOTICE
-
-            continuation_decision = continuation_decision_from_tools(
-                response.tools,
-                original_prompt=continuation_state.original_prompt,
-                continuation_count=continuation_count,
-            )
-            completed_tools_for_turn = turn_state.completed_tools_for(response_tool_trace)
-            if continuation_decision.should_continue:
-                continuation_state, turn_state = _advance_dynamic_continuation(
-                    agent=agent,
-                    scope_context=scope_context,
-                    continuation_state=continuation_state,
-                    next_prompt=continuation_decision.next_prompt,
-                    previous_run_id=attempt.attempt_run_id,
-                    turn_recorder=turn_recorder,
-                    run_metadata=metadata,
-                    completed_tools_for_turn=completed_tools_for_turn,
-                )
-                agent = None
-                return None
-            if continuation_decision.limit_message is not None and continuation_decision.continuation is not None:
-                logger.warning(
-                    "Dynamic tool continuation limit reached",
-                    agent=agent_name,
-                    function_name=continuation_decision.continuation.function_name,
-                    tool_name=continuation_decision.continuation.tool_name,
-                    status=continuation_decision.continuation.status,
-                )
-
-            response_text = _extract_response_content(response, show_tool_calls=show_tool_calls)
-            if continuation_decision.limit_message is not None and not response.content:
-                response_text = continuation_decision.limit_message
-            if turn_recorder is not None:
-                replayable_response_text = _extract_replayable_response_text(response)
-                if continuation_decision.limit_message is not None and not response.content:
-                    replayable_response_text = continuation_decision.limit_message
-                turn_state.record_completed(
-                    turn_recorder,
-                    run_metadata=metadata,
-                    assistant_text=replayable_response_text,
-                    completed_tools=response_tool_trace,
-                )
-            return response_text
-
-        with open_resolved_scope_session_context(
-            agent_name=agent_name,
-            scope=HistoryScope(kind="agent", scope_id=agent_name),
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-        ) as opened_scope_context:
-            scope_context = opened_scope_context
-            ai_runtime.scrub_queued_notice_session_context(
-                scope_context=scope_context,
-                entity_name=agent_name,
-            )
-            continuation_state = _DynamicContinuationRunState.initial(
-                prompt=prompt,
-                model_prompt=model_prompt,
-                current_timestamp_ms=current_timestamp_ms,
-                current_prompt_is_structured=current_prompt_is_structured,
-                run_id=run_id,
-            )
-            for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
-                attempt_text = await _run_blocking_attempt(continuation_count)
-                if attempt_text is not None:
-                    return attempt_text
-            # The continuation loop always returns on its final iteration: at
-            # continuation_count == DYNAMIC_TOOL_CONTINUATION_LIMIT the decision
-            # carries a limit_message and never asks to continue.
-            msg = "dynamic tool continuation loop must return within its iteration budget"
-            raise AssertionError(msg)
-    except asyncio.CancelledError:
-        if turn_recorder is not None:
-            turn_state.record_interrupted_from_recorder(
-                turn_recorder,
-                run_metadata=(
-                    metadata
-                    if metadata is not None
-                    else turn_recorder.run_metadata
-                    or build_matrix_run_metadata(
-                        reply_to_event_id,
-                        unseen_event_ids,
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        requester_id=resolved_requester_id,
-                        correlation_id=resolved_correlation_id,
-                        extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
-                    )
                 ),
+                metadata_content=metadata_content,
             )
-        elif not standalone_interrupted_replay_persisted:
-            persist_interrupted_replay(
-                scope_context=scope_context,
-                session_id=session_id,
-                run_id=(attempt.attempt_run_id if attempt is not None else run_id) or str(uuid4()),
-                user_message=prompt,
-                partial_text="",
-                completed_tools=turn_state.completed_tools_for([]),
-                interrupted_tools=[],
-                run_metadata=metadata
-                if metadata is not None
-                else build_matrix_run_metadata(
-                    reply_to_event_id,
-                    unseen_event_ids,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    requester_id=resolved_requester_id,
-                    correlation_id=resolved_correlation_id,
-                    extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
-                ),
-                is_team=False,
-            )
-        raise
-    finally:
-        close_agent_runtime_state_dbs(
-            agent,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
+        return CompletedAttempt(
+            response_text=_extract_response_content(response, show_tool_calls=show_tool_calls),
+            replayable_text=_extract_replayable_response_text(response),
+            has_visible_content=bool(response.content),
+            is_empty=ai_runtime.is_empty_completed_run(response),
+            session_id=response.session_id,
+            run_id=response.run_id,
+            attempt_run_id=attempt.attempt_run_id,
+            output_tokens=_usage_metric_int(response.metrics, "output_tokens"),
+            tool_executions=tuple(response.tools or ()),
+            completed_tools=tuple(response_tool_trace),
+            metadata_content=metadata_content,
         )
+
+    adapter = BlockingTurnAdapter(
+        open_scope=callbacks.open_scope,
+        run_attempt=_run_blocking_attempt,
+        snapshot_partial=lambda: TurnPartialSnapshot(
+            attempt_run_id=holder.attempt.attempt_run_id if holder.attempt is not None else None,
+        ),
+        release_attempt_entity=callbacks.release_attempt_entity,
+        close_runtime_dbs=callbacks.close_runtime_dbs,
+        on_scope_opened=callbacks.on_scope_opened,
+        continuation=ContinuationCapability(),
+        empty_run=callbacks.empty_run,
+        persist_standalone_replay=callbacks.persist_standalone_replay,
+    )
+    return await run_blocking_response_turn(
+        ResponseTurnContext(
+            entity_label=agent_name,
+            session_id=session_id,
+            run_id=run_id,
+            correlation_id=resolved_correlation_id,
+            reply_to_event_id=reply_to_event_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=user_id,
+            matrix_run_metadata=matrix_run_metadata,
+        ),
+        adapter,
+        TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
+        continuation=_initial_agent_continuation(
+            prompt=prompt,
+            model_prompt=model_prompt,
+            current_timestamp_ms=current_timestamp_ms,
+            current_prompt_is_structured=current_prompt_is_structured,
+            run_id=run_id,
+        ),
+    )
 
 
 @timed("model_request_to_completion")
@@ -2138,397 +1978,299 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         ),
     )
     media_inputs = media or MediaInputs()
-    resolved_requester_id = user_id
     resolved_correlation_id = resolve_run_correlation_id(
         correlation_id,
         reply_to_event_id=reply_to_event_id,
         matrix_run_metadata=matrix_run_metadata,
     )
-    agent: Agent | None = None
-    scope_context: ScopeSessionContext | None = None
-    standalone_interrupted_replay_persisted = False
-    empty_response_retried = False
-    turn_state = AITurnState()
-    unseen_event_ids: list[str] = []
-    metadata: dict[str, Any] | None = None
-    run_extra_content: dict[str, Any] | None = None
-    attempt: _MediaAttempt | None = None
-    state = _StreamingAttemptState()
-
     try:
-        try:
-            _assert_agent_target(agent_name, config)
-        except ValueError as e:
-            yield get_user_friendly_error_message(e, agent_name)
+        _assert_agent_target(agent_name, config)
+    except ValueError as e:
+        yield get_user_friendly_error_message(e, agent_name)
+        return
+
+    holder = _AgentTurnHolder(state=_StreamingAttemptState())
+    callbacks = _build_agent_turn_callbacks(
+        holder,
+        agent_name=agent_name,
+        prompt=prompt,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+    )
+
+    def _finalize_streaming_attempt(scope_context: ScopeSessionContext | None) -> None:
+        if not holder.attempt_started:
             return
+        holder.attempt_started = False
+        ai_runtime.cleanup_queued_notice_state(
+            run_output=None,
+            storage=scope_context.storage if scope_context is not None else None,
+            session_id=session_id,
+            session_type=SessionType.AGENT,
+            entity_name=agent_name,
+        )
 
-        async def _run_streaming_attempt(  # noqa: C901, PLR0912, PLR0915
-            continuation_count: int,
-        ) -> AsyncGenerator[AIStreamChunk, None]:
-            """Stream one agent attempt; set keep_going when the turn should continue."""
-            nonlocal agent, attempt, continuation_state, empty_response_retried, keep_going, metadata
-            nonlocal run_extra_content, standalone_interrupted_replay_persisted, state, turn_state
-            nonlocal unseen_event_ids
-            try:
-                run_context = await _prepare_agent_run_context(
-                    agent_name=agent_name,
-                    prompt=continuation_state.active_prompt,
-                    session_id=session_id,
-                    runtime_paths=runtime_paths,
-                    config=config,
-                    scope_context=scope_context,
-                    thread_history=thread_history,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    knowledge=knowledge,
-                    include_interactive_questions=include_interactive_questions,
-                    include_openai_compat_guidance=include_openai_compat_guidance,
-                    reply_to_event_id=reply_to_event_id,
-                    active_event_ids=active_event_ids,
-                    execution_identity=execution_identity,
-                    compaction_outcomes_collector=compaction_outcomes_collector,
-                    compaction_lifecycle=compaction_lifecycle,
-                    delegation_depth=delegation_depth,
-                    refresh_scheduler=refresh_scheduler,
-                    system_enrichment_items=system_enrichment_items,
-                    model_prompt=continuation_state.active_model_prompt,
-                    current_timestamp_ms=continuation_state.active_current_timestamp_ms,
-                    current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
-                    user_id=user_id,
-                    requester_id=resolved_requester_id,
-                    correlation_id=resolved_correlation_id,
-                    matrix_run_metadata=matrix_run_metadata,
-                    turn_recorder=turn_recorder,
-                    pipeline_timing=pipeline_timing,
-                )
-            except Exception as e:
-                logger.exception("Error preparing agent for streaming", agent=agent_name)
-                yield get_user_friendly_error_message(e, agent_name)
-                return
-            prepared_run = run_context.prepared_run
-            agent = prepared_run.agent
-            run_input = run_context.run_input
-            unseen_event_ids = prepared_run.unseen_event_ids
-            prepared_context_input_tokens = prepared_run.prepared_history.prepared_context_tokens
-            metadata = run_context.metadata
-            run_extra_content = run_context.run_extra_content
-
-            attempt = _MediaAttempt.initial(
-                run_input,
-                media_inputs,
-                agent.model,
-                fallback_prompt=run_context.inline_media_fallback_prompt,
-                run_id=continuation_state.active_run_id,
+    async def _run_streaming_attempt(  # noqa: C901, PLR0915
+        run: TurnRunState,
+        continuation_state: DynamicContinuationRunState,
+    ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
+        """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
+        try:
+            run_context = await _prepare_agent_run_context(
+                agent_name=agent_name,
+                prompt=continuation_state.active_prompt,
+                session_id=session_id,
+                runtime_paths=runtime_paths,
+                config=config,
+                scope_context=run.scope_context,
+                thread_history=thread_history,
+                room_id=room_id,
+                thread_id=thread_id,
+                knowledge=knowledge,
+                include_interactive_questions=include_interactive_questions,
+                include_openai_compat_guidance=include_openai_compat_guidance,
+                reply_to_event_id=reply_to_event_id,
+                active_event_ids=active_event_ids,
+                execution_identity=execution_identity,
+                compaction_outcomes_collector=compaction_outcomes_collector,
+                compaction_lifecycle=compaction_lifecycle,
+                delegation_depth=delegation_depth,
+                refresh_scheduler=refresh_scheduler,
+                system_enrichment_items=system_enrichment_items,
+                model_prompt=continuation_state.active_model_prompt,
+                current_timestamp_ms=continuation_state.active_current_timestamp_ms,
+                current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
+                user_id=user_id,
+                requester_id=user_id,
+                correlation_id=resolved_correlation_id,
+                matrix_run_metadata=matrix_run_metadata,
+                turn_recorder=turn_recorder,
+                pipeline_timing=pipeline_timing,
             )
+        except Exception as e:
+            logger.exception("Error preparing agent for streaming", agent=agent_name)
+            yield get_user_friendly_error_message(e, agent_name)
+            yield AttemptResolved(HandledAttempt())
+            return
+        prepared_run = run_context.prepared_run
+        holder.agent = prepared_run.agent
+        run.unseen_event_ids = prepared_run.unseen_event_ids
+        prepared_context_input_tokens = prepared_run.prepared_history.prepared_context_tokens
+        run.run_metadata = run_context.metadata
+        run.run_extra_content = run_context.run_extra_content
+
+        attempt = _MediaAttempt.initial(
+            run_context.run_input,
+            media_inputs,
+            prepared_run.agent.model,
+            fallback_prompt=run_context.inline_media_fallback_prompt,
+            run_id=continuation_state.active_run_id,
+        )
+        holder.attempt = attempt
+        holder.attempt_started = True
+        turn_state = run.turn_state
+        state = _StreamingAttemptState()
+
+        for retried_after_media_fallback in (False, True):
             state = _StreamingAttemptState()
+            holder.state = state
 
-            try:
-                for retried_after_media_fallback in (False, True):
-                    state = _StreamingAttemptState()
-
-                    def _sync_live_turn_recorder(
-                        *,
-                        state_ref: _StreamingAttemptState = state,
-                        turn_state_ref: AITurnState = turn_state,
-                        metadata_ref: dict[str, Any] | None = metadata,
-                    ) -> None:
-                        turn_state_ref.sync_partial(
-                            turn_recorder,
-                            run_metadata=metadata_ref,
-                            assistant_text=state_ref.assistant_text,
-                            completed_tools=state_ref.completed_tools,
-                            interrupted_tools=[pending.trace_entry for pending in state_ref.pending_tools],
-                        )
-
-                    async for stream_chunk in _stream_agent_attempt_chunks(
-                        run_context=run_context,
-                        attempt=attempt,
-                        state=state,
-                        show_tool_calls=show_tool_calls,
-                        user_id=user_id,
-                        run_id_callback=run_id_callback,
-                        retried_after_media_fallback=retried_after_media_fallback,
-                        state_updated=_sync_live_turn_recorder,
-                        pipeline_timing=pipeline_timing,
-                    ):
-                        yield stream_chunk
-
-                    if state.media_fallback_retry_requested:
-                        attempt.retry(
-                            run_input,
-                            fallback_prompt=run_context.inline_media_fallback_prompt,
-                            extra_removed_kinds=state.media_fallback_removed_kinds,
-                            retry_media_inputs=state.media_fallback_retry_inputs or MediaInputs(),
-                            run_id=continuation_state.active_run_id,
-                        )
-                        continue
-
-                    run_error = state.user_error or state.stream_exception
-                    if run_error is not None:
-                        if state.assistant_text or state.completed_tools or state.pending_tools:
-                            interrupted_tools = [pending.trace_entry for pending in state.pending_tools]
-                            if turn_recorder is not None:
-                                turn_state.record_interrupted(
-                                    turn_recorder,
-                                    run_metadata=metadata,
-                                    assistant_text=state.assistant_text,
-                                    completed_tools=state.completed_tools,
-                                    interrupted_tools=interrupted_tools,
-                                )
-                            elif not standalone_interrupted_replay_persisted:
-                                persist_interrupted_replay(
-                                    scope_context=scope_context,
-                                    session_id=session_id,
-                                    run_id=attempt.attempt_run_id or str(uuid4()),
-                                    user_message=prompt,
-                                    partial_text=state.assistant_text,
-                                    completed_tools=turn_state.completed_tools_for(state.completed_tools),
-                                    interrupted_tools=interrupted_tools,
-                                    run_metadata=metadata,
-                                    is_team=False,
-                                )
-                                standalone_interrupted_replay_persisted = True
-                        yield get_user_friendly_error_message(run_error, agent_name)
-                        return
-
-                    if state.cancelled_run_event is not None:
-                        interrupted_tools = [pending.trace_entry for pending in state.pending_tools]
-                        if turn_recorder is not None:
-                            turn_state.record_interrupted(
-                                turn_recorder,
-                                run_metadata=metadata,
-                                assistant_text=state.assistant_text,
-                                completed_tools=state.completed_tools,
-                                interrupted_tools=interrupted_tools,
-                            )
-                        if run_metadata_collector is not None:
-                            fallback_metrics = build_model_request_metrics_fallback(
-                                state.request_metric_totals,
-                                state.first_token_latency,
-                                state.observed_request_metric_fields,
-                            )
-                            cancelled_metadata = build_ai_run_metadata_content(
-                                config=config,
-                                model_name=prepared_run.runtime_model_name,
-                                run_id=state.cancelled_run_event.run_id,
-                                session_id=state.cancelled_run_event.session_id or session_id,
-                                status=RunStatus.cancelled,
-                                model=state.latest_model_id,
-                                model_provider=state.latest_model_provider,
-                                metrics=fallback_metrics,
-                                context_input_tokens=prepared_context_input_tokens,
-                                context_raw_input_tokens=state.latest_request_input_tokens,
-                                context_cache_read_tokens=state.latest_request_cache_read_tokens,
-                                context_cache_write_tokens=state.latest_request_cache_write_tokens,
-                                tool_count=state.observed_tool_calls,
-                                prepared_history=prepared_run.prepared_history,
-                            )
-                            run_metadata_collector.update(cancelled_metadata)
-                        if turn_recorder is None:
-                            persist_interrupted_replay(
-                                scope_context=scope_context,
-                                session_id=state.cancelled_run_event.session_id or session_id,
-                                run_id=state.cancelled_run_event.run_id or attempt.attempt_run_id or str(uuid4()),
-                                user_message=prompt,
-                                partial_text=state.assistant_text,
-                                completed_tools=turn_state.completed_tools_for(state.completed_tools),
-                                interrupted_tools=interrupted_tools,
-                                run_metadata=metadata,
-                                is_team=False,
-                            )
-                            standalone_interrupted_replay_persisted = True
-                        _raise_agent_run_cancelled(state.cancelled_run_event.reason)
-
-                    break
-
-                if _stream_completed_without_visible_output(state) and not state.completed_tool_executions:
-                    completed_event = state.completed_run_event
-                    assert completed_event is not None
-                    if _discard_empty_run_and_grant_retry(
-                        agent=agent,
-                        scope_context=scope_context,
-                        session_id=completed_event.session_id or session_id,
-                        run_id=completed_event.run_id,
-                        entity_name=agent_name,
-                        output_tokens=state.request_metric_totals.get("output_tokens"),
-                        empty_response_retried=empty_response_retried,
-                        continuation_count=continuation_count,
-                    ):
-                        empty_response_retried = True
-                        agent = None
-                        keep_going = True
-                        return
-                    # The notice must fall through: the run-metadata recording and
-                    # recorder completion below still apply to this notice-only turn.
-                    yield RunContentEvent(content=ai_runtime.EMPTY_RESPONSE_NOTICE)
-
-                continuation_decision = continuation_decision_from_tools(
-                    state.completed_tool_executions,
-                    original_prompt=continuation_state.original_prompt,
-                    continuation_count=continuation_count,
+            def _sync_live_turn_recorder(
+                *,
+                state_ref: _StreamingAttemptState = state,
+                turn_state_ref: AITurnState = turn_state,
+                metadata_ref: dict[str, Any] | None = run.run_metadata,
+            ) -> None:
+                turn_state_ref.sync_partial(
+                    turn_recorder,
+                    run_metadata=metadata_ref,
+                    assistant_text=state_ref.assistant_text,
+                    completed_tools=state_ref.completed_tools,
+                    interrupted_tools=[pending.trace_entry for pending in state_ref.pending_tools],
                 )
-                completed_tools_for_turn = turn_state.completed_tools_for(state.completed_tools)
-                if continuation_decision.should_continue:
-                    continuation_state, turn_state = _advance_dynamic_continuation(
-                        agent=agent,
-                        scope_context=scope_context,
-                        continuation_state=continuation_state,
-                        next_prompt=continuation_decision.next_prompt,
-                        previous_run_id=attempt.attempt_run_id,
-                        turn_recorder=turn_recorder,
-                        run_metadata=metadata,
-                        completed_tools_for_turn=completed_tools_for_turn,
-                    )
-                    agent = None
-                    keep_going = True
-                    return
-                if continuation_decision.limit_message is not None and continuation_decision.continuation is not None:
-                    logger.warning(
-                        "Dynamic tool continuation limit reached during streaming",
-                        agent=agent_name,
-                        function_name=continuation_decision.continuation.function_name,
-                        tool_name=continuation_decision.continuation.tool_name,
-                        status=continuation_decision.continuation.status,
-                    )
-                    if not state.assistant_text and not state.canonical_final_body_candidate:
-                        state.assistant_text = continuation_decision.limit_message
-                        yield RunContentEvent(content=continuation_decision.limit_message)
 
+            async for stream_chunk in _stream_agent_attempt_chunks(
+                run_context=run_context,
+                attempt=attempt,
+                state=state,
+                show_tool_calls=show_tool_calls,
+                user_id=user_id,
+                run_id_callback=run_id_callback,
+                retried_after_media_fallback=retried_after_media_fallback,
+                state_updated=_sync_live_turn_recorder,
+                pipeline_timing=pipeline_timing,
+            ):
+                yield stream_chunk
+
+            if state.media_fallback_retry_requested:
+                attempt.retry(
+                    run_context.run_input,
+                    fallback_prompt=run_context.inline_media_fallback_prompt,
+                    extra_removed_kinds=state.media_fallback_removed_kinds,
+                    retry_media_inputs=state.media_fallback_retry_inputs or MediaInputs(),
+                    run_id=continuation_state.active_run_id,
+                )
+                continue
+
+            run_error = state.user_error or state.stream_exception
+            if run_error is not None:
+                if state.assistant_text or state.completed_tools or state.pending_tools:
+                    interrupted_tools = [pending.trace_entry for pending in state.pending_tools]
+                    if turn_recorder is not None:
+                        turn_state.record_interrupted(
+                            turn_recorder,
+                            run_metadata=run.run_metadata,
+                            assistant_text=state.assistant_text,
+                            completed_tools=state.completed_tools,
+                            interrupted_tools=interrupted_tools,
+                        )
+                    elif not run.standalone_replay_persisted:
+                        persist_interrupted_replay(
+                            scope_context=run.scope_context,
+                            session_id=session_id,
+                            run_id=attempt.attempt_run_id or str(uuid4()),
+                            user_message=prompt,
+                            partial_text=state.assistant_text,
+                            completed_tools=turn_state.completed_tools_for(state.completed_tools),
+                            interrupted_tools=interrupted_tools,
+                            run_metadata=run.run_metadata,
+                            is_team=False,
+                        )
+                        run.standalone_replay_persisted = True
+                yield get_user_friendly_error_message(run_error, agent_name)
+                yield AttemptResolved(HandledAttempt())
+                return
+
+            if state.cancelled_run_event is not None:
+                cancelled_metadata: dict[str, Any] | None = None
                 if run_metadata_collector is not None:
                     fallback_metrics = build_model_request_metrics_fallback(
                         state.request_metric_totals,
                         state.first_token_latency,
                         state.observed_request_metric_fields,
                     )
-                    final_status = (
-                        RunStatus.error if _stream_completed_without_visible_output(state) else RunStatus.completed
-                    )
-                    usage_metrics, usage_metrics_fallback = _select_streaming_usage_metrics(
-                        state.completed_run_event.metrics if state.completed_run_event is not None else None,
-                        fallback_metrics,
-                    )
-                    run_metadata = build_ai_run_metadata_content(
+                    cancelled_metadata = build_ai_run_metadata_content(
                         config=config,
                         model_name=prepared_run.runtime_model_name,
-                        run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
-                        session_id=(
-                            state.completed_run_event.session_id
-                            if state.completed_run_event is not None
-                            and state.completed_run_event.session_id is not None
-                            else session_id
-                        ),
-                        status=final_status,
+                        run_id=state.cancelled_run_event.run_id,
+                        session_id=state.cancelled_run_event.session_id or session_id,
+                        status=RunStatus.cancelled,
                         model=state.latest_model_id,
                         model_provider=state.latest_model_provider,
-                        metrics=usage_metrics,
-                        metrics_fallback=usage_metrics_fallback,
+                        metrics=fallback_metrics,
                         context_input_tokens=prepared_context_input_tokens,
                         context_raw_input_tokens=state.latest_request_input_tokens,
                         context_cache_read_tokens=state.latest_request_cache_read_tokens,
                         context_cache_write_tokens=state.latest_request_cache_write_tokens,
-                        tool_count=(
-                            len(state.completed_run_event.tools)
-                            if state.completed_run_event is not None and state.completed_run_event.tools is not None
-                            else state.observed_tool_calls
-                        ),
+                        tool_count=state.observed_tool_calls,
                         prepared_history=prepared_run.prepared_history,
                     )
-                    run_metadata_collector.update(run_metadata)
-                if turn_recorder is not None:
-                    final_visible_body = state.assistant_text or state.canonical_final_body_candidate or ""
-                    turn_state.record_completed(
-                        turn_recorder,
-                        run_metadata=metadata,
-                        assistant_text=final_visible_body,
-                        completed_tools=state.completed_tools,
-                    )
-                return
-            finally:
-                ai_runtime.cleanup_queued_notice_state(
-                    run_output=None,
-                    storage=scope_context.storage if scope_context is not None else None,
-                    session_id=session_id,
-                    session_type=SessionType.AGENT,
-                    entity_name=agent_name,
+                yield AttemptResolved(
+                    CancelledAttempt(
+                        reason=state.cancelled_run_event.reason,
+                        partial_text=state.assistant_text,
+                        completed_tools=tuple(state.completed_tools),
+                        interrupted_tools=tuple(pending.trace_entry for pending in state.pending_tools),
+                        session_id=state.cancelled_run_event.session_id,
+                        run_id=state.cancelled_run_event.run_id or attempt.attempt_run_id,
+                        metadata_content=cancelled_metadata,
+                    ),
                 )
+                return
 
-        with open_resolved_scope_session_context(
-            agent_name=agent_name,
-            scope=HistoryScope(kind="agent", scope_id=agent_name),
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-        ) as opened_scope_context:
-            scope_context = opened_scope_context
-            ai_runtime.scrub_queued_notice_session_context(
-                scope_context=scope_context,
-                entity_name=agent_name,
+            break
+
+        metadata_content: dict[str, Any] | None = None
+        if run_metadata_collector is not None:
+            fallback_metrics = build_model_request_metrics_fallback(
+                state.request_metric_totals,
+                state.first_token_latency,
+                state.observed_request_metric_fields,
             )
-            continuation_state = _DynamicContinuationRunState.initial(
-                prompt=prompt,
-                model_prompt=model_prompt,
-                current_timestamp_ms=current_timestamp_ms,
-                current_prompt_is_structured=current_prompt_is_structured,
-                run_id=run_id,
+            final_status = RunStatus.error if _stream_completed_without_visible_output(state) else RunStatus.completed
+            usage_metrics, usage_metrics_fallback = _select_streaming_usage_metrics(
+                state.completed_run_event.metrics if state.completed_run_event is not None else None,
+                fallback_metrics,
             )
-            for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
-                keep_going = False
-                async for stream_chunk in _run_streaming_attempt(continuation_count):
-                    yield stream_chunk
-                if not keep_going:
-                    return
-            # The continuation loop always returns on its final iteration: at
-            # continuation_count == DYNAMIC_TOOL_CONTINUATION_LIMIT the decision
-            # carries a limit_message and never asks to continue.
-            msg = "dynamic tool continuation loop must return within its iteration budget"
-            raise AssertionError(msg)
-    except asyncio.CancelledError:
-        interrupted_tools = [pending.trace_entry for pending in state.pending_tools]
-        if turn_recorder is not None:
-            turn_state.record_interrupted(
-                turn_recorder,
-                run_metadata=metadata
-                if metadata is not None
-                else turn_recorder.run_metadata
-                or build_matrix_run_metadata(
-                    reply_to_event_id,
-                    unseen_event_ids,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    requester_id=resolved_requester_id,
-                    correlation_id=resolved_correlation_id,
-                    extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
+            metadata_content = build_ai_run_metadata_content(
+                config=config,
+                model_name=prepared_run.runtime_model_name,
+                run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
+                session_id=(
+                    state.completed_run_event.session_id
+                    if state.completed_run_event is not None and state.completed_run_event.session_id is not None
+                    else session_id
                 ),
-                assistant_text=state.assistant_text,
-                completed_tools=state.completed_tools,
-                interrupted_tools=interrupted_tools,
-            )
-        elif not standalone_interrupted_replay_persisted:
-            persist_interrupted_replay(
-                scope_context=scope_context,
-                session_id=session_id,
-                run_id=(attempt.attempt_run_id if attempt is not None else run_id) or str(uuid4()),
-                user_message=prompt,
-                partial_text=state.assistant_text,
-                completed_tools=turn_state.completed_tools_for(state.completed_tools),
-                interrupted_tools=interrupted_tools,
-                run_metadata=metadata
-                if metadata is not None
-                else build_matrix_run_metadata(
-                    reply_to_event_id,
-                    unseen_event_ids,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    requester_id=resolved_requester_id,
-                    correlation_id=resolved_correlation_id,
-                    extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
+                status=final_status,
+                model=state.latest_model_id,
+                model_provider=state.latest_model_provider,
+                metrics=usage_metrics,
+                metrics_fallback=usage_metrics_fallback,
+                context_input_tokens=prepared_context_input_tokens,
+                context_raw_input_tokens=state.latest_request_input_tokens,
+                context_cache_read_tokens=state.latest_request_cache_read_tokens,
+                context_cache_write_tokens=state.latest_request_cache_write_tokens,
+                tool_count=(
+                    len(state.completed_run_event.tools)
+                    if state.completed_run_event is not None and state.completed_run_event.tools is not None
+                    else state.observed_tool_calls
                 ),
-                is_team=False,
+                prepared_history=prepared_run.prepared_history,
             )
-        raise
-    finally:
-        close_agent_runtime_state_dbs(
-            agent,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
+        yield AttemptResolved(
+            CompletedAttempt(
+                replayable_text=state.assistant_text or state.canonical_final_body_candidate or "",
+                has_visible_content=bool(state.assistant_text or state.canonical_final_body_candidate),
+                is_empty=_stream_completed_without_visible_output(state) and not state.completed_tool_executions,
+                session_id=state.completed_run_event.session_id if state.completed_run_event is not None else None,
+                run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
+                attempt_run_id=attempt.attempt_run_id,
+                output_tokens=state.request_metric_totals.get("output_tokens"),
+                tool_executions=tuple(state.completed_tool_executions),
+                completed_tools=tuple(state.completed_tools),
+                metadata_content=metadata_content,
+            ),
         )
+
+    adapter = StreamingTurnAdapter[AIStreamChunk](
+        open_scope=callbacks.open_scope,
+        run_attempt=_run_streaming_attempt,
+        snapshot_partial=lambda: _streaming_partial_snapshot(holder),
+        release_attempt_entity=callbacks.release_attempt_entity,
+        close_runtime_dbs=callbacks.close_runtime_dbs,
+        on_scope_opened=callbacks.on_scope_opened,
+        finalize_attempt=_finalize_streaming_attempt,
+        make_notice_chunk=lambda text: RunContentEvent(content=text),
+        continuation=ContinuationCapability(),
+        empty_run=callbacks.empty_run,
+        persist_standalone_replay=callbacks.persist_standalone_replay,
+    )
+    response_stream = stream_response_turn(
+        ResponseTurnContext(
+            entity_label=agent_name,
+            session_id=session_id,
+            run_id=run_id,
+            correlation_id=resolved_correlation_id,
+            reply_to_event_id=reply_to_event_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=user_id,
+            matrix_run_metadata=matrix_run_metadata,
+        ),
+        adapter,
+        TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
+        continuation=_initial_agent_continuation(
+            prompt=prompt,
+            model_prompt=model_prompt,
+            current_timestamp_ms=current_timestamp_ms,
+            current_prompt_is_structured=current_prompt_is_structured,
+            run_id=run_id,
+        ),
+    )
+    # Close the driver generator deterministically when this wrapper unwinds so
+    # its cleanup does not wait for event-loop async-generator finalization.
+    async with aclosing(response_stream) as closing_stream:
+        async for chunk in closing_stream:
+            yield chunk

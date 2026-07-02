@@ -118,6 +118,7 @@ class _InvokeAgent:
             status=RunStatus.completed,
             model=self.model.id,
             model_provider="openai",
+            metrics=None,
         )
 
 

@@ -62,13 +62,9 @@ path = "mindroom.ai"
 depends_on = [
     "mindroom.agents",
     "mindroom.ai_run_metadata",
-    "mindroom.ai_turn_state",
     "mindroom.ai_runtime",
-    "mindroom.cancellation",
-    "mindroom.constants",
     "mindroom.credentials",
     "mindroom.credentials_sync",
-    "mindroom.dynamic_tool_continuation",
     "mindroom.error_handling",
     "mindroom.execution_preparation",
     "mindroom.history",
@@ -80,9 +76,28 @@ depends_on = [
     "mindroom.media_inputs",
     "mindroom.memory",
     "mindroom.metadata_merge",
+    "mindroom.response_turn",
     "mindroom.timing",
     "mindroom.tool_system.events",
     "mindroom.user_turn_time",
+]
+
+# The shared response-turn drivers own the turn lifecycle for both the agent
+# and (after adoption) team envelopes; entity modules inject adapters.
+[[modules]]
+path = "mindroom.response_turn"
+depends_on = [
+    "mindroom.ai_runtime",
+    "mindroom.ai_turn_state",
+    "mindroom.cancellation",
+    "mindroom.constants",
+    "mindroom.dynamic_tool_continuation",
+    "mindroom.logging_config",
+    "mindroom.metadata_merge",
+]
+visibility = [
+    "mindroom.ai",
+    "mindroom.teams",
 ]
 
 [[modules]]
@@ -94,12 +109,12 @@ depends_on = [
 [[modules]]
 path = "mindroom.ai_turn_state"
 depends_on = []
-visibility = ["mindroom.ai"]
+visibility = ["mindroom.response_turn"]
 
 [[modules]]
 path = "mindroom.dynamic_tool_continuation"
 depends_on = []
-visibility = ["mindroom.ai"]
+visibility = ["mindroom.response_turn"]
 
 [[modules]]
 path = "mindroom.agents"
@@ -198,6 +213,7 @@ visibility = [
     "mindroom.execution_preparation",
     "mindroom.history.runtime",
     "mindroom.response_lifecycle",
+    "mindroom.response_turn",
     "mindroom.teams",
     "mindroom.thread_summary",
     "mindroom.topic_generator",
