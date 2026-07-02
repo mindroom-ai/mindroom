@@ -54,11 +54,82 @@ def test_request_network_access_rejects_internal_hostname_before_grant(
     with pytest.raises(ValueError, match="points at an internal name"):
         asyncio.run(
             _approved_egress_tool().request_network_access(
-                "metadata.google.internal",
+                ["metadata.google.internal"],
                 5,
                 "Need metadata",
             ),
         )
+
+
+def test_request_network_access_rejects_whole_batch_on_one_bad_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One invalid hostname must fail the whole batch before any grant is created."""
+
+    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
+        msg = "a rejected batch should not create any grant"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
+
+    with pytest.raises(ValueError, match="points at an internal name"):
+        asyncio.run(
+            _approved_egress_tool().request_network_access(
+                ["docs.example.com", "metadata.google.internal"],
+                5,
+                "Need docs and metadata",
+            ),
+        )
+
+
+def test_request_network_access_rejects_bare_string_hostnames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare string must not be iterated as characters."""
+
+    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
+        msg = "a rejected batch should not create any grant"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
+
+    with pytest.raises(TypeError, match="hostnames must be a list"):
+        asyncio.run(
+            _approved_egress_tool().request_network_access(
+                "docs.example.com",  # type: ignore[arg-type]
+                5,
+                "Need docs",
+            ),
+        )
+
+
+def test_request_network_access_rejects_empty_hostnames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty hostname list is a caller error, not a silent no-op."""
+
+    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
+        msg = "an empty batch should not create any grant"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
+
+    with pytest.raises(ValueError, match="hostnames must not be empty"):
+        asyncio.run(_approved_egress_tool().request_network_access([], 5, "Need nothing"))
+
+
+def test_request_network_access_caps_batch_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Oversized batches must fail so one approval card stays reviewable."""
+
+    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
+        msg = "an oversized batch should not create any grant"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
+    hostnames = [f"host{index}.example.com" for index in range(21)]
+
+    with pytest.raises(ValueError, match="at most 20 hostnames"):
+        asyncio.run(_approved_egress_tool().request_network_access(hostnames, 5, "Need many hosts"))
 
 
 def test_effective_ttl_rejects_non_integer_max_ttl_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,13 +157,13 @@ def test_request_network_access_skips_grant_when_static_allowed(
 
     result = asyncio.run(
         _approved_egress_tool().request_network_access(
-            "docs.example.com",
+            ["docs.example.com", "api.example.com"],
             5,
             "Need documentation",
         ),
     )
 
-    assert "docs.example.com is already allowed" in result
+    assert "Already allowed by the static egress allowlist: docs.example.com, api.example.com" in result
     assert "No temporary grant was created" in result
 
 
@@ -153,7 +224,7 @@ def test_request_network_access_posts_worker_key_grant(
     try:
         result = asyncio.run(
             _approved_egress_tool().request_network_access(
-                "docs.example.com",
+                ["docs.example.com"],
                 5,
                 "Need docs",
             ),
@@ -272,7 +343,7 @@ def test_request_network_access_posts_grant_without_blocking_event_loop(
     async def invoke_tool() -> str:
         task = asyncio.create_task(
             _approved_egress_tool().request_network_access(
-                "docs.example.com",
+                ["docs.example.com"],
                 5,
                 "Need docs",
             ),
@@ -284,3 +355,74 @@ def test_request_network_access_posts_grant_without_blocking_event_loop(
     result = asyncio.run(invoke_tool())
 
     assert result.startswith("Approved temporary network access to docs.example.com")
+
+
+def _shared_worker_context() -> SimpleNamespace:
+    config = Config(
+        agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="shared")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+    return SimpleNamespace(
+        agent_name="assistant",
+        room_id="!room:server",
+        resolved_thread_id=None,
+        thread_id="$thread",
+        requester_id="@user:server",
+        config=config,
+        runtime_paths=object(),
+    )
+
+
+def test_request_network_access_posts_one_grant_per_blocked_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One call dedupes hostnames, skips static-allowed ones, and grants each blocked one."""
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    payloads: list[dict[str, object]] = []
+
+    def post_grant(payload: dict[str, object]) -> dict[str, object]:
+        payloads.append(payload)
+        return {"expires_at": 123}
+
+    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
+    monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", _shared_worker_context)
+
+    result = asyncio.run(
+        _approved_egress_tool().request_network_access(
+            ["api.other.test", "docs.example.com", "cdn.other.test", "api.other.test"],
+            5,
+            "Need APIs",
+        ),
+    )
+
+    assert [payload["hostname"] for payload in payloads] == ["api.other.test", "cdn.other.test"]
+    assert all(payload["ttl_seconds"] == 300 for payload in payloads)
+    assert result.startswith("Approved temporary network access to api.other.test, cdn.other.test for 5 minutes.")
+    assert "Already allowed by the static egress allowlist (no grant needed): docs.example.com." in result
+
+
+def test_request_network_access_reports_partial_grants_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mid-batch policy failure must report which hostnames already received grants."""
+
+    def post_grant(payload: dict[str, object]) -> dict[str, object]:
+        if payload["hostname"] == "cdn.other.test":
+            msg = "policy service is down"
+            raise RuntimeError(msg)
+        return {"expires_at": 123}
+
+    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
+    monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", _shared_worker_context)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"created grants for api\.other\.test but failed to grant cdn\.other\.test: policy service is down",
+    ):
+        asyncio.run(
+            _approved_egress_tool().request_network_access(
+                ["api.other.test", "cdn.other.test"],
+                5,
+                "Need APIs",
+            ),
+        )

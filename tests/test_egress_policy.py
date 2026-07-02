@@ -275,7 +275,7 @@ def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytes
 
     result = asyncio.run(
         approved_egress_module.approved_egress_tools()().request_network_access(
-            "docs.example.com",
+            ["docs.example.com"],
             5,
             "Need docs",
         ),
@@ -302,10 +302,10 @@ def test_tool_static_allow_short_circuit_agrees_with_policy_decision(
 
     result = asyncio.run(
         approved_egress_module.approved_egress_tools()().request_network_access(
-            "docs.example.com",
+            ["docs.example.com"],
             5,
             "Need docs",
         ),
     )
 
-    assert "docs.example.com is already allowed" in result
+    assert "Already allowed by the static egress allowlist: docs.example.com" in result

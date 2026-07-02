@@ -2404,22 +2404,26 @@ async def test_evaluate_tool_approval_rule_action_requires_approval(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    ("hostname", "expected"),
+    ("hostnames", "expected"),
     [
-        ("docs.example.com", False),
-        ("docs.other.test", True),
-        (123, True),
-        ("https://docs.example.com", True),
+        (["docs.example.com"], False),
+        (["docs.example.com", "api.example.com"], False),
+        (["docs.example.com", "docs.other.test"], True),
+        (["docs.other.test"], True),
+        ([123], True),
+        (["https://docs.example.com"], True),
+        ("docs.example.com", True),
+        ([], True),
     ],
 )
 @pytest.mark.asyncio
 async def test_evaluate_tool_approval_honors_tool_approval_exemption(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    hostname: object,
+    hostnames: object,
     expected: bool,
 ) -> None:
-    """request_network_access calls for statically allowlisted hostnames need no approval."""
+    """request_network_access calls where every hostname is statically allowlisted need no approval."""
     monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -2435,7 +2439,7 @@ async def test_evaluate_tool_approval_honors_tool_approval_exemption(
         config,
         runtime_paths,
         "request_network_access",
-        {"hostname": hostname, "ttl_minutes": 5, "reason": "Need docs."},
+        {"hostnames": hostnames, "ttl_minutes": 5, "reason": "Need docs."},
         "code",
     )
 

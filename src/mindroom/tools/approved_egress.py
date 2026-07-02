@@ -43,6 +43,9 @@ _DEFAULT_MAX_TTL_SECONDS = 6 * 60 * 60
 _DEFAULT_POLICY_API_URL = "http://mindroom-egress-proxy:8080"
 _MAX_ALLOWLIST_ENTRIES_IN_TOOL_DESCRIPTION = 80
 _MAX_REASON_CHARS = 500
+# Keeps one approval card reviewable: the approver must be able to read every
+# hostname a single approval covers.
+_MAX_HOSTNAMES_PER_REQUEST = 20
 
 
 def _env_int(name: str, default: int) -> int:
@@ -75,29 +78,36 @@ def _static_allowlist_description() -> str:
 
 def _request_network_access_description() -> str:
     return (
-        "Request temporary worker egress to one exact external hostname. "
-        "Use this only when the worker needs a hostname that is not already allowed.\n\n"
+        "Request temporary worker egress to one or more exact external hostnames. "
+        "Batch every hostname the task needs into a single call so one approval covers all of them. "
+        "Use this only when the worker needs hostnames that are not already allowed.\n\n"
         f"{_static_allowlist_description()}"
     )
 
 
 def _request_network_access_is_approval_exempt(arguments: Mapping[str, object]) -> bool:
-    """True when the hostname is already statically allowed, so approval would be redundant.
+    """True when every requested hostname is already statically allowed, so approval would be redundant.
 
-    Fails closed: anything that is not a provably allowlisted hostname keeps the
-    Matrix approval card. The tool re-checks the allowlist at execution and
+    Fails closed: anything that is not a provably allowlisted hostname list keeps
+    the Matrix approval card. The tool re-checks the allowlist at execution and
     returns the no-grant result, so a skipped card can only mint a grant if the
     allowlist itself shrinks between this check and execution — an accepted
     operator-edit race measured in microseconds.
     """
-    hostname = arguments.get("hostname")
-    if not isinstance(hostname, str):
+    hostnames = arguments.get("hostnames")
+    if not isinstance(hostnames, list) or not hostnames:
         return False
-    try:
-        host = canonical_hostname(hostname)
-    except ValueError:
-        return False
-    return is_hostname_allowed(host, resolve_worker_egress_policy())
+    policy = resolve_worker_egress_policy()
+    for hostname in hostnames:
+        if not isinstance(hostname, str):
+            return False
+        try:
+            host = canonical_hostname(hostname)
+        except ValueError:
+            return False
+        if not is_hostname_allowed(host, policy):
+            return False
+    return True
 
 
 register_tool_approval_exemption("request_network_access", _request_network_access_is_approval_exempt)
@@ -149,6 +159,20 @@ def _normalize_reason(value: str) -> str:
         msg = "reason must not be empty"
         raise ValueError(msg)
     return normalized[:_MAX_REASON_CHARS]
+
+
+def _canonical_hostnames(hostnames: list[str]) -> list[str]:
+    """Canonicalize and dedupe the requested hostnames, rejecting the whole batch on any bad entry."""
+    if isinstance(hostnames, str) or not isinstance(hostnames, list):
+        msg = "hostnames must be a list of hostnames"
+        raise TypeError(msg)
+    if not hostnames:
+        msg = "hostnames must not be empty"
+        raise ValueError(msg)
+    if len(hostnames) > _MAX_HOSTNAMES_PER_REQUEST:
+        msg = f"request at most {_MAX_HOSTNAMES_PER_REQUEST} hostnames per call"
+        raise ValueError(msg)
+    return list(dict.fromkeys(canonical_hostname(hostname) for hostname in hostnames))
 
 
 def _effective_ttl_seconds(requested_ttl_seconds: int) -> int:
@@ -247,10 +271,10 @@ class _ApprovedEgressTools(Toolkit):
         super().__init__(
             name="approved_egress",
             instructions=(
-                "Use this tool when a worker needs temporary access to an external hostname that the egress proxy "
-                "blocks. Request one exact hostname, a TTL in minutes, and a concise reason. The "
-                "request_network_access tool definition lists static allowlist patterns that do not need an approval "
-                "request."
+                "Use this tool when a worker needs temporary access to external hostnames that the egress proxy "
+                "blocks. Request every needed exact hostname in one call so a single approval covers all of them, "
+                "with a TTL in minutes and a concise reason. The request_network_access tool definition lists "
+                "static allowlist patterns that do not need an approval request."
             ),
             tools=[self.request_network_access],
         )
@@ -260,14 +284,20 @@ class _ApprovedEgressTools(Toolkit):
 
     async def request_network_access(
         self,
-        hostname: str,
+        hostnames: list[str],
         ttl_minutes: int,
         reason: str,
     ) -> str:
-        """Request temporary worker egress to one exact external hostname."""
-        host = canonical_hostname(hostname)
-        if is_hostname_allowed(host, resolve_worker_egress_policy()):
-            return f"{host} is already allowed by the static egress allowlist. No temporary grant was created."
+        """Request temporary worker egress to one or more exact external hostnames."""
+        hosts = _canonical_hostnames(hostnames)
+        policy = resolve_worker_egress_policy()
+        already_allowed = [host for host in hosts if is_hostname_allowed(host, policy)]
+        blocked = [host for host in hosts if host not in already_allowed]
+        if not blocked:
+            return (
+                f"Already allowed by the static egress allowlist: {', '.join(already_allowed)}. "
+                "No temporary grant was created."
+            )
         normalized_reason = _normalize_reason(reason)
         requested_ttl_seconds = ttl_minutes * 60
         effective_ttl_seconds = _effective_ttl_seconds(requested_ttl_seconds)
@@ -277,27 +307,39 @@ class _ApprovedEgressTools(Toolkit):
             msg = "request_network_access requires a live MindRoom Matrix tool context"
             raise RuntimeError(msg)
         subject = _grant_subject(context)
-        payload: dict[str, object] = {
-            "hostname": host,
-            "subject_type": subject.subject_type,
-            "subject": subject.subject,
-            "agent_name": context.agent_name,
-            "requester_id": context.requester_id,
-            "room_id": context.room_id,
-            "thread_id": context.resolved_thread_id or context.thread_id,
-            "ttl_seconds": effective_ttl_seconds,
-            "approved_by": context.requester_id,
-            "reason": normalized_reason,
-        }
-        grant = await asyncio.to_thread(
-            _post_grant,
-            payload,
-        )
-        expiry = grant.get("expires_at")
+        granted: list[str] = []
+        expiry: object = None
+        for host in blocked:
+            payload: dict[str, object] = {
+                "hostname": host,
+                "subject_type": subject.subject_type,
+                "subject": subject.subject,
+                "agent_name": context.agent_name,
+                "requester_id": context.requester_id,
+                "room_id": context.room_id,
+                "thread_id": context.resolved_thread_id or context.thread_id,
+                "ttl_seconds": effective_ttl_seconds,
+                "approved_by": context.requester_id,
+                "reason": normalized_reason,
+            }
+            try:
+                grant = await asyncio.to_thread(_post_grant, payload)
+            except RuntimeError as exc:
+                if granted:
+                    msg = f"created grants for {', '.join(granted)} but failed to grant {host}: {exc}"
+                    raise RuntimeError(msg) from exc
+                raise
+            granted.append(host)
+            expiry = grant.get("expires_at")
         capped = " Deployment policy capped the requested TTL." if effective_ttl_seconds < requested_ttl_seconds else ""
+        skipped = (
+            f" Already allowed by the static egress allowlist (no grant needed): {', '.join(already_allowed)}."
+            if already_allowed
+            else ""
+        )
         return (
-            f"Approved temporary network access to {host} for {effective_ttl_seconds // 60} minutes. "
-            f"Expires at Unix time {expiry}.{capped}"
+            f"Approved temporary network access to {', '.join(granted)} for {effective_ttl_seconds // 60} minutes. "
+            f"Expires at Unix time {expiry}.{capped}{skipped}"
         )
 
 

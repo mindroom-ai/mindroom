@@ -1648,14 +1648,14 @@ async def test_request_network_access_static_allowlist_skips_matrix_approval(
 
     result = await FunctionCall(
         function=function,
-        arguments={"hostname": "docs.example.com", "ttl_minutes": ttl_minutes, "reason": "Need docs."},
+        arguments={"hostnames": ["docs.example.com"], "ttl_minutes": ttl_minutes, "reason": "Need docs."},
         call_id="call-1",
     ).aexecute()
 
     assert result.status == "success"
     assert (
         result.result
-        == "docs.example.com is already allowed by the static egress allowlist. No temporary grant was created."
+        == "Already allowed by the static egress allowlist: docs.example.com. No temporary grant was created."
     )
     client.room_send.assert_not_awaited()
 
@@ -1665,7 +1665,7 @@ async def test_request_network_access_blocked_host_still_uses_matrix_approval(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Blocked egress requests should still go through Matrix approval before reaching the tool."""
+    """Batches containing any blocked hostname should still go through Matrix approval before reaching the tool."""
     runtime_paths = test_runtime_paths(tmp_path)
     monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
     config = _request_network_access_config(runtime_paths)
@@ -1676,7 +1676,7 @@ async def test_request_network_access_blocked_host_still_uses_matrix_approval(
     result = await bridge(
         "request_network_access",
         toolkit.async_functions["request_network_access"].entrypoint,
-        {"hostname": "docs.other.test", "ttl_minutes": 5, "reason": "Need docs."},
+        {"hostnames": ["docs.example.com", "docs.other.test"], "ttl_minutes": 5, "reason": "Need docs."},
     )
 
     assert result == (
