@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from json import JSONDecodeError
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from tests.conftest import (
     bind_runtime_paths,
+    make_turn_context,
     replace_turn_controller_deps,
     request_envelope,
     runtime_paths_for,
@@ -299,18 +301,21 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
             ),
         ):
             response = await ai_response(
-                agent_name="general",
+                make_turn_context(
+                    "general",
+                    session_id=target.session_id or "session-1",
+                    correlation_id=request.reply_to_event_id or "corr-test",
+                    reply_to_event_id=request.reply_to_event_id,
+                    room_id=request.room_id,
+                    thread_id=request.thread_id,
+                    requester_id=request.user_id,
+                    matrix_run_metadata=request.matrix_run_metadata,
+                ),
                 prompt=request.prompt,
                 model_prompt="model prompt",
-                session_id=target.session_id or "session-1",
                 runtime_paths=runtime_paths,
                 config=config,
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                reply_to_event_id=request.reply_to_event_id,
-                user_id=request.user_id,
                 execution_identity=dispatch_context.execution_identity,
-                matrix_run_metadata=request.matrix_run_metadata,
             )
         assert response == "Done"
         return "$response:localhost"
@@ -469,16 +474,19 @@ async def test_streaming_tool_call_shares_correlation_id_across_streaming_sinks(
         chunks = [
             chunk
             async for chunk in stream_agent_response(
-                agent_name="general",
+                make_turn_context(
+                    "general",
+                    session_id="!room:localhost:$thread:localhost",
+                    correlation_id="$event:localhost",
+                    reply_to_event_id="$event:localhost",
+                    room_id="!room:localhost",
+                    thread_id="$thread:localhost",
+                    requester_id="@user:localhost",
+                ),
                 prompt="hello",
                 model_prompt="model prompt",
-                session_id="!room:localhost:$thread:localhost",
                 runtime_paths=runtime_paths,
                 config=config,
-                room_id="!room:localhost",
-                thread_id="$thread:localhost",
-                reply_to_event_id="$event:localhost",
-                user_id="@user:localhost",
                 execution_identity=execution_identity,
             )
         ]
@@ -542,14 +550,18 @@ async def test_non_matrix_request_mints_uuid_correlation_id_across_sinks(tmp_pat
             return_value=[{"name": "demo_tool", "description": "Echo"}],
         ),
     ):
+        expected_correlation_id = uuid.uuid4().hex
         response = await ai_response(
-            agent_name="general",
+            make_turn_context(
+                "general",
+                session_id="openai-session",
+                correlation_id=expected_correlation_id,
+                requester_id="@api-user:localhost",
+            ),
             prompt="hello",
             model_prompt="model prompt",
-            session_id="openai-session",
             runtime_paths=runtime_paths,
             config=config,
-            user_id="@api-user:localhost",
             execution_identity=execution_identity,
         )
 
@@ -561,6 +573,7 @@ async def test_non_matrix_request_mints_uuid_correlation_id_across_sinks(tmp_pat
 
     assert isinstance(correlation_id, str)
     assert re.fullmatch(r"[0-9a-f]{32}", correlation_id)
+    assert correlation_id == expected_correlation_id
     assert tool_entry["correlation_id"] == correlation_id
     assert metadata["correlation_id"] == correlation_id
     assert "reply_to_event_id" not in metadata

@@ -2119,8 +2119,8 @@ class TestStreamingBehavior:
         bot.client.room_send.return_value = mock_send_response
         pipeline_timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
 
-        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncIterator[str]:
-            system_enrichment_items = kwargs["system_enrichment_items"]
+        async def fake_stream_agent_response(*args: object, **_kwargs: object) -> AsyncIterator[str]:
+            system_enrichment_items = args[0].system_enrichment_items
             assert len(system_enrichment_items) == 1
             assert (
                 f"Knowledge base `{base_id}` is initializing and unavailable for semantic search this turn."
@@ -2186,8 +2186,8 @@ class TestStreamingBehavior:
             base_id="fresh_turn_docs",
         )
 
-        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
-            system_enrichment_items = kwargs["system_enrichment_items"]
+        async def fake_ai_response(*args: object, **_kwargs: object) -> str:
+            system_enrichment_items = args[0].system_enrichment_items
             assert len(system_enrichment_items) == 1
             assert "Knowledge base `fresh_turn_docs` is initializing" in system_enrichment_items[0].text
             return "handled"

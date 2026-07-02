@@ -15,6 +15,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.memory import MemoryPromptParts
+from tests.conftest import make_turn_context
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -81,12 +82,10 @@ class TestMemoryIntegration:
             patch("mindroom.ai.create_agent", return_value=MagicMock()),
         ):
             response = await ai_response(
-                agent_name="general",
+                make_turn_context("general", session_id="test_session", room_id="!test:room"),
                 prompt="What is 2+2?",
-                session_id="test_session",
                 runtime_paths=runtime_paths,
                 config=config,
-                room_id="!test:room",
             )
 
             # Verify response
@@ -129,12 +128,10 @@ class TestMemoryIntegration:
             patch("mindroom.ai.create_agent", return_value=MagicMock()),
         ):
             await ai_response(
-                agent_name="general",
+                make_turn_context("general", session_id="test_session", room_id=None),
                 prompt="Hello",
-                session_id="test_session",
                 runtime_paths=runtime_paths,
                 config=config,
-                room_id=None,
             )
 
             # Verify memory enhancement remains agent-scoped
@@ -161,9 +158,8 @@ class TestMemoryIntegration:
             patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory),
         ):
             response = await ai_response(
-                agent_name="general",
+                make_turn_context("general", session_id="session"),
                 prompt="Test",
-                session_id="session",
                 runtime_paths=self._runtime_paths(tmp_path),
                 config=config,
             )
@@ -188,9 +184,8 @@ class TestMemoryIntegration:
         ):
             # First interaction
             await ai_response(
-                agent_name="general",
+                make_turn_context("general", session_id="session1"),
                 prompt="Remember this: A=1",
-                session_id="session1",
                 runtime_paths=self._runtime_paths(tmp_path),
                 config=config,
             )
@@ -205,9 +200,8 @@ class TestMemoryIntegration:
             mock_memory.search.return_value = {"results": [{"memory": "Remember this: A=1", "id": "1"}]}
 
             await ai_response(
-                agent_name="general",
+                make_turn_context("general", session_id="session2"),
                 prompt="What is A?",
-                session_id="session2",
                 runtime_paths=self._runtime_paths(tmp_path),
                 config=config,
             )

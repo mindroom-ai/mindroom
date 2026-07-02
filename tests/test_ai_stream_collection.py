@@ -11,6 +11,7 @@ from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStar
 from mindroom.ai import _collect_streamed_response_content, ai_response
 from mindroom.config.main import Config
 from mindroom.tool_system.events import ToolTraceEntry
+from tests.conftest import make_turn_context
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -82,7 +83,7 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(monkeypat
     """Explicit stream collection should still work when inline tool markers are hidden."""
     seen_kwargs: dict[str, object] = {}
 
-    async def fake_stream_agent_response(**kwargs: object) -> AsyncGenerator[object, None]:
+    async def fake_stream_agent_response(_ctx: object, **kwargs: object) -> AsyncGenerator[object, None]:
         seen_kwargs.update(kwargs)
         yield RunContentEvent(content="Before.")
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}))
@@ -95,9 +96,8 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(monkeypat
 
     trace: list[ToolTraceEntry] = []
     body = await ai_response(
-        agent_name="general",
+        make_turn_context("general", session_id="session"),
         prompt="Read",
-        session_id="session",
         runtime_paths=cast("RuntimePaths", object()),
         config=Config(),
         show_tool_calls=False,

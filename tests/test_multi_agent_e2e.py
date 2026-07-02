@@ -185,7 +185,8 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         # Verify AI was called with separate raw and model-facing prompts.
         mock_ai.assert_called_once()
         ai_kwargs = mock_ai.call_args.kwargs
-        assert ai_kwargs["agent_name"] == "calculator"
+        ai_ctx = mock_ai.call_args.args[0]
+        assert ai_ctx.entity_label == "calculator"
         assert (
             ai_kwargs["prompt"]
             == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
@@ -195,15 +196,15 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
             == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         )
         assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
-        assert ai_kwargs["session_id"] == f"{test_room_id}:$thread_root:localhost"
+        assert ai_ctx.session_id == f"{test_room_id}:$thread_root:localhost"
         assert ai_kwargs["thread_history"] == []
         assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
         assert ai_kwargs["config"] == config
-        assert ai_kwargs["room_id"] == test_room_id
+        assert ai_ctx.room_id == test_room_id
         assert ai_kwargs["knowledge"] is None
-        assert ai_kwargs["user_id"] == test_user_id
+        assert ai_ctx.requester_id == test_user_id
         assert ai_kwargs["media"] == MediaInputs()
-        assert ai_kwargs["reply_to_event_id"] == "$test_event:localhost"
+        assert ai_ctx.reply_to_event_id == "$test_event:localhost"
         assert ai_kwargs["show_tool_calls"] is True
         assert ai_kwargs["run_metadata_collector"] == {}
 
@@ -537,22 +538,23 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             # Should process the message with explicit mention
             mock_ai.assert_called_once()
             ai_kwargs = mock_ai.call_args.kwargs
-            assert ai_kwargs["agent_name"] == "calculator"
+            ai_ctx = mock_ai.call_args.args[0]
+            assert ai_ctx.entity_label == "calculator"
             assert ai_kwargs["prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
             assert ai_kwargs["model_prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
             assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
-            assert ai_kwargs["session_id"] == f"{test_room_id}:{thread_root_id}"
+            assert ai_ctx.session_id == f"{test_room_id}:{thread_root_id}"
             assert ai_kwargs["thread_history"][0].body.startswith("[")
             assert ai_kwargs["thread_history"][0].body.endswith("What's 10% of 100?")
             assert ai_kwargs["thread_history"][1].body == "10% of 100 is 10"
             assert ai_kwargs["thread_history"][2].body == "I can also help"
             assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
-            assert ai_kwargs["room_id"] == test_room_id
+            assert ai_ctx.room_id == test_room_id
             assert ai_kwargs["knowledge"] is None
-            assert ai_kwargs["user_id"] == test_user_id
+            assert ai_ctx.requester_id == test_user_id
             assert ai_kwargs["media"] == MediaInputs()
-            assert ai_kwargs["reply_to_event_id"] == f"$test_event2:{domain}"
+            assert ai_ctx.reply_to_event_id == f"$test_event2:{domain}"
             assert ai_kwargs["show_tool_calls"] is True
             assert ai_kwargs["tool_trace_collector"] == []
             assert ai_kwargs["run_metadata_collector"] == {}

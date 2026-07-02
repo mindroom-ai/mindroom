@@ -2544,22 +2544,24 @@ class TestAgentBot:
         # Should call AI and send response based on streaming mode
         if enable_streaming:
             mock_stream_agent_response.assert_called_once()
+            stream_args = mock_stream_agent_response.call_args.args
             stream_kwargs = mock_stream_agent_response.call_args.kwargs
-            assert stream_kwargs["agent_name"] == "calculator"
+            stream_ctx = stream_args[0]
+            assert stream_ctx.entity_label == "calculator"
             assert stream_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
             assert stream_kwargs["model_prompt"] == f"{mention_id}: What's 2+2?"
             assert stream_kwargs["current_timestamp_ms"] == 1_774_019_700_000.0
-            assert stream_kwargs["session_id"] == "!test:localhost:$thread_root_id"
+            assert stream_ctx.session_id == "!test:localhost:$thread_root_id"
             assert stream_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert stream_kwargs["config"] == config
             assert stream_kwargs["thread_history"] == []
-            assert stream_kwargs["room_id"] == "!test:localhost"
+            assert stream_ctx.room_id == "!test:localhost"
             assert stream_kwargs["knowledge"] is None
-            assert stream_kwargs["user_id"] == "@user:localhost"
-            assert isinstance(stream_kwargs["run_id"], str)
-            assert stream_kwargs["run_id"]
+            assert stream_ctx.requester_id == "@user:localhost"
+            assert isinstance(stream_ctx.run_id, str)
+            assert stream_ctx.run_id
             assert stream_kwargs["media"] == MediaInputs()
-            assert stream_kwargs["reply_to_event_id"] == "event123"
+            assert stream_ctx.reply_to_event_id == "event123"
             assert stream_kwargs["show_tool_calls"] is True
             assert stream_kwargs["run_metadata_collector"] == {}
             assert "compaction_outcomes_collector" not in stream_kwargs
@@ -2569,22 +2571,24 @@ class TestAgentBot:
             assert bot.client.room_send.call_count >= 2
         else:
             mock_ai_response.assert_called_once()
+            ai_args = mock_ai_response.call_args.args
             ai_kwargs = mock_ai_response.call_args.kwargs
-            assert ai_kwargs["agent_name"] == "calculator"
+            ai_ctx = ai_args[0]
+            assert ai_ctx.entity_label == "calculator"
             assert ai_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
             assert ai_kwargs["model_prompt"] == f"{mention_id}: What's 2+2?"
             assert ai_kwargs["current_timestamp_ms"] == 1_774_019_700_000.0
-            assert ai_kwargs["session_id"] == "!test:localhost:$thread_root_id"
+            assert ai_ctx.session_id == "!test:localhost:$thread_root_id"
             assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
             assert ai_kwargs["thread_history"] == []
-            assert ai_kwargs["room_id"] == "!test:localhost"
+            assert ai_ctx.room_id == "!test:localhost"
             assert ai_kwargs["knowledge"] is None
-            assert ai_kwargs["user_id"] == "@user:localhost"
-            assert isinstance(ai_kwargs["run_id"], str)
-            assert ai_kwargs["run_id"]
+            assert ai_ctx.requester_id == "@user:localhost"
+            assert isinstance(ai_ctx.run_id, str)
+            assert ai_ctx.run_id
             assert ai_kwargs["media"] == MediaInputs()
-            assert ai_kwargs["reply_to_event_id"] == "event123"
+            assert ai_ctx.reply_to_event_id == "event123"
             assert ai_kwargs["show_tool_calls"] is True
             assert ai_kwargs["collect_streamed_response"] is True
             assert ai_kwargs["tool_trace_collector"] == []
@@ -3390,7 +3394,7 @@ class TestAgentBot:
                     ),
                 )
 
-            assert mock_ai_response.call_args.kwargs["active_event_ids"] == {"$active"}
+            assert mock_ai_response.call_args.args[0].active_event_ids == frozenset({"$active"})
         finally:
             running_task.cancel()
             other_room_task.cancel()
@@ -3527,7 +3531,7 @@ class TestAgentBot:
                         ),
                     )
 
-            assert mock_stream.call_args.kwargs["active_event_ids"] == {"$active"}
+            assert mock_stream.call_args.args[0].active_event_ids == frozenset({"$active"})
         finally:
             running_task.cancel()
             other_room_task.cancel()
