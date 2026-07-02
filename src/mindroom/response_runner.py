@@ -1276,6 +1276,15 @@ class ResponseRunner:
                                 and delivery_request.existing_event_is_placeholder,
                                 header=None,
                                 show_tool_calls=show_tool_calls,
+                                # The live collector dict: the turn driver fills it
+                                # at terminal settle, before the stream's final
+                                # edit snapshots extra_content, so the ai_run
+                                # metadata lands on the wire (mirrors the agent
+                                # streaming path).
+                                extra_content=_merge_response_extra_content(
+                                    team_run_metadata_content,
+                                    request.attachment_ids,
+                                ),
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
                                 visible_event_id_callback=_note_visible_response_event_id,
