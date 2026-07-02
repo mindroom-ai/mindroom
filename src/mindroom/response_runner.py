@@ -317,19 +317,16 @@ class _ResponseGenerationOutcome:
 
     delivery: FinalDeliveryOutcome
     run_succeeded: bool
-    attempt_run_ids: tuple[str, ...] = ()
 
 
 def _generation_outcome(
     delivery: FinalDeliveryOutcome,
     turn_recorder: TurnRecorder,
-    attempt_run_ids: list[str],
 ) -> _ResponseGenerationOutcome:
-    """Assemble one generation outcome from the turn's recorder and run ids."""
+    """Assemble one generation outcome from the turn's recorder."""
     return _ResponseGenerationOutcome(
         delivery=delivery,
         run_succeeded=turn_recorder.outcome == "completed",
-        attempt_run_ids=tuple(attempt_run_ids),
     )
 
 
@@ -1966,6 +1963,7 @@ class ResponseRunner:
         run_id: str | None = None,
         response_kind: str = "ai",
         on_delivery_started: Callable[[str | None], None] | None = None,
+        attempt_run_id_collector: list[str] | None = None,
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a response without streaming."""
         if request.pipeline_timing is not None:
@@ -1998,7 +1996,9 @@ class ResponseRunner:
         )
         tool_trace: list[Any] = []
         run_metadata_content: dict[str, Any] = {}
-        attempt_run_ids: list[str] = []
+        # The caller's list survives raising exit paths (cancellation, stream
+        # re-raises), unlike the returned outcome.
+        attempt_run_ids = attempt_run_id_collector if attempt_run_id_collector is not None else []
         active_event_ids = self._active_response_event_ids(request.room_id)
         turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
@@ -2007,7 +2007,7 @@ class ResponseRunner:
         )
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
-            return _generation_outcome(delivery, turn_recorder, attempt_run_ids)
+            return _generation_outcome(delivery, turn_recorder)
 
         try:
             try:
@@ -2103,6 +2103,7 @@ class ResponseRunner:
         run_id: str | None = None,
         response_kind: str = "ai",
         on_delivery_started: Callable[[str | None], None] | None = None,
+        attempt_run_id_collector: list[str] | None = None,
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a streamed response."""
         if request.pipeline_timing is not None:
@@ -2134,7 +2135,9 @@ class ResponseRunner:
             create_storage=history_storage_factory,
         )
         run_metadata_content: dict[str, Any] = {}
-        attempt_run_ids: list[str] = []
+        # The caller's list survives raising exit paths (cancellation, stream
+        # re-raises), unlike the returned outcome.
+        attempt_run_ids = attempt_run_id_collector if attempt_run_id_collector is not None else []
         active_event_ids = self._active_response_event_ids(request.room_id)
         tool_trace: list[Any] = []
         transport_outcome: StreamTransportOutcome | None = None
@@ -2145,7 +2148,7 @@ class ResponseRunner:
         )
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
-            return _generation_outcome(delivery, turn_recorder, attempt_run_ids)
+            return _generation_outcome(delivery, turn_recorder)
 
         try:
             try:
@@ -2342,6 +2345,7 @@ class ResponseRunner:
         self._note_pipeline_metadata(request, response_kind="agent", used_streaming=use_streaming)
         final_delivery_outcome: FinalDeliveryOutcome | None = None
         generation: _ResponseGenerationOutcome | None = None
+        attempt_run_ids: list[str] = []
         response_run_id = str(uuid4())
         progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
         resolved_correlation_id = self._correlation_id_for_request(request)
@@ -2392,12 +2396,14 @@ class ResponseRunner:
                     delivery_request,
                     run_id=response_run_id,
                     on_delivery_started=progress.note_delivery_started,
+                    attempt_run_id_collector=attempt_run_ids,
                 )
             else:
                 generation = await self.process_and_respond(
                     delivery_request,
                     run_id=response_run_id,
                     on_delivery_started=progress.note_delivery_started,
+                    attempt_run_id_collector=attempt_run_ids,
                 )
             final_delivery_outcome = generation.delivery
 
@@ -2487,11 +2493,9 @@ class ResponseRunner:
                 )
         assert final_delivery_outcome is not None
         post_response_outcome = ResponseOutcome(
-            response_run_id=(
-                generation.attempt_run_ids[-1]
-                if generation is not None and generation.attempt_run_ids
-                else response_run_id
-            ),
+            # The live collector list also covers raising exit paths, where the
+            # returned generation outcome never materialized.
+            response_run_id=attempt_run_ids[-1] if attempt_run_ids else response_run_id,
             session_id=session_id,
             session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
             execution_identity=execution_identity,

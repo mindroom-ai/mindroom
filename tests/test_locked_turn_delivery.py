@@ -61,12 +61,16 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     effect_outcomes: list[object] = []
+    effect_response_outcomes: list[object] = []
 
-    async def fake_post_effects(final_outcome: object, *_args: object) -> None:
+    async def fake_post_effects(final_outcome: object, response_outcome: object, *_args: object) -> None:
         effect_outcomes.append(final_outcome)
+        effect_response_outcomes.append(response_outcome)
 
     async def failing_process(_request: object, **kwargs: object) -> _ResponseGenerationOutcome:
         on_delivery_started = cast("Callable[[str | None], None]", kwargs["on_delivery_started"])
+        collector = cast("list[str]", kwargs["attempt_run_id_collector"])
+        collector.append("run-attempt-1")
         on_delivery_started("$stream-event")
         msg = "delivery pipe burst"
         raise RuntimeError(msg)
@@ -89,6 +93,8 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
     assert len(effect_outcomes) == 1
     assert effect_outcomes[0].terminal_status == "error"
     assert effect_outcomes[0].failure_reason == "delivery pipe burst"
+    # The caller-owned collector keeps the real attempt id on raising paths.
+    assert effect_response_outcomes[0].response_run_id == "run-attempt-1"
 
 
 @pytest.mark.asyncio
