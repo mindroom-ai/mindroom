@@ -7,6 +7,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from mindroom.config.agent import CultureConfig
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryBackend, MemorySearchConfig
     from mindroom.config.models import CompactionConfig, EffectiveToolConfig
@@ -52,14 +53,14 @@ class ResolvedEntityView:
 
     @cached_property
     def memory_backend(self) -> MemoryBackend:
-        """Effective memory backend; non-agent scopes inherit the global backend."""
+        """Effective memory backend; every non-agent scope (team, router, defaults) inherits the global backend."""
         if self.name is None:
             return self._config.memory.backend
         return self._config.get_agent_memory_backend(self.name)
 
     @cached_property
     def memory_search(self) -> MemorySearchConfig:
-        """Effective file-memory search settings; non-agent scopes inherit the global settings."""
+        """Effective file-memory search settings; every non-agent scope inherits the global settings."""
         if self.name is None:
             return self._config.memory.search
         return self._config.get_agent_memory_search(self.name)
@@ -104,6 +105,16 @@ class ResolvedEntityView:
     def deferred_tool_scope_incompatible_tools(self, authored_tool_name: str) -> list[str]:
         """Return expanded deferred tools invalid for this agent's effective execution scope."""
         return self._config.get_deferred_tool_scope_incompatible_tools(self._agent_name(), authored_tool_name)
+
+    @cached_property
+    def culture(self) -> tuple[str, CultureConfig] | None:
+        """Configured culture assignment for this agent, if any."""
+        return self._config.get_agent_culture(self._agent_name())
+
+    @cached_property
+    def knowledge_base_ids(self) -> list[str]:
+        """Shared and private knowledge base IDs assigned to this agent."""
+        return self._config.get_agent_knowledge_base_ids(self._agent_name())
 
     @cached_property
     def execution_scope(self) -> WorkerScope | None:
