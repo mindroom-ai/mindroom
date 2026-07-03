@@ -11,9 +11,7 @@ from mindroom.bot import AgentBot
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress, _ResponseGenerationOutcome
-from tests.conftest import bind_runtime_paths, patch_response_runner_module, unwrap_extracted_collaborator
-from tests.identity_helpers import fixture_entity_matrix_id
-from tests.test_ai_user_id import (
+from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config_with_team,
     _knowledge_access_support,
@@ -22,6 +20,8 @@ from tests.test_ai_user_id import (
     _set_gateway_method,
     _team_orchestrator,
 )
+from tests.conftest import bind_runtime_paths, patch_response_runner_module, unwrap_extracted_collaborator
+from tests.identity_helpers import fixture_entity_matrix_id
 from tests.test_response_runner_focused import _bot, _noop_typing, _plain_request, _target
 
 if TYPE_CHECKING:

@@ -508,6 +508,10 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 ### Step 4: Testing & Quality
 
 - **Test Before Committing**: **NEVER** claim a task is complete without running `pytest` to ensure all tests pass.
+- **Test at the Owning Seam**: New behavior tests target the collaborator seam that owns the behavior (`ResponseRunner`, `DeliveryGateway`, `TurnPolicy`, `TurnController`, `CoalescingGate`, `IngressValidator`, `EditRegenerator`), not the `AgentBot`/`TeamBot` facade.
+  Fake collaborators through the conftest seam installers (`install_generate_response_mock`, `install_send_response_mock`, `replace_edit_regenerator_deps`) or the `*Deps` dataclasses, never by assigning mocks onto bot attributes.
+  A test needing more than 3 patches is a smell that it is testing through the wrong seam.
+  Genuinely end-to-end tests belong in the slim integration files (`test_multi_agent_bot.py`, `test_threading_error.py`), which stay small by design.
 - **Run Pre-commit Hooks**: After `uv sync --all-extras`, run `uv run pre-commit run --all-files` before committing to enforce code style and quality.
 - **Update Tach Boundaries in the Same PR**: If your PR changes a Tach-governed boundary, update `tach.toml` in the same PR, follow the guidance in the comment at the top of that file, and run `uv run tach check --dependencies --interfaces`.
 - **Handle Linter Issues**:
