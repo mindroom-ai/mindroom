@@ -69,7 +69,7 @@ def _target(*, thread_id: str | None = None, reply_to_event_id: str = "$event") 
 def _envelope(target: MessageTarget, *, source_event_id: str = "$event") -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id=source_event_id,
-        room_id="!room:localhost",
+        room_id=target.room_id,
         target=target,
         requester_id="@user:localhost",
         sender_id="@user:localhost",
