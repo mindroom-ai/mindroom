@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_primary_runtime_paths
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 if TYPE_CHECKING:
@@ -90,6 +90,15 @@ def test_team_dispatch_raises_a_purposeful_error(tmp_path: Path) -> None:
         },
     )
     context = _context(config, "super_team", tmp_path)
+
+    with pytest.raises(ValueError, match="requires an agent dispatch"):
+        context.resolve_worker_target()
+
+
+def test_router_dispatch_raises_a_purposeful_error(tmp_path: Path) -> None:
+    """A router-named dispatch context fails loudly like any non-agent dispatch."""
+    config = Config(agents={"code": {"display_name": "Code"}})
+    context = _context(config, ROUTER_AGENT_NAME, tmp_path)
 
     with pytest.raises(ValueError, match="requires an agent dispatch"):
         context.resolve_worker_target()
