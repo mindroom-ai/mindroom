@@ -2943,9 +2943,12 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
 
     call_run_ids: list[str | None] = []
     callback_run_ids: list[str] = []
+    recorder = _team_turn_recorder("Analyze this.")
+    outcomes_at_attempt_start: list[str] = []
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         call_run_ids.append(_kwargs["run_id"])
+        outcomes_at_attempt_start.append(recorder.outcome)
         if len(call_run_ids) == 1:
             yield TeamRunOutput(content="Error code: 500 - audio input is not supported", status=RunStatus.error)
             return
@@ -2973,7 +2976,7 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
             async for chunk in team_response_stream(
                 agent_ids=team_agent_ids,
                 message="Analyze this.",
-                turn_recorder=_team_turn_recorder("Analyze this."),
+                turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
                 ctx=make_turn_context(run_id="run-789", session_id=None),
@@ -2989,6 +2992,10 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
     assert call_run_ids[1] is not None
     assert call_run_ids[1] != "run-789"
     assert callback_run_ids == [run_id for run_id in call_run_ids if run_id is not None]
+    # A retried errored attempt records nothing: interruption recording only
+    # fires after the retry decision is rejected.
+    assert outcomes_at_attempt_start == ["pending", "pending"]
+    assert recorder.outcome == "completed"
 
 
 @pytest.mark.asyncio

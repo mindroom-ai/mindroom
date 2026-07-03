@@ -2582,6 +2582,19 @@ async def team_response_stream(  # noqa: C901, PLR0915
             if turn_recorder.assistant_text or turn_recorder.completed_tools or turn_recorder.interrupted_tools:
                 run.turn_state.record_interrupted_from_recorder(turn_recorder, run_metadata=run_metadata)
 
+        async def _capture_stream_interrupt(stream: AsyncIterator[Any]) -> AsyncGenerator[Any, None]:
+            """Record partial work interrupted when the model stream itself raises.
+
+            Mirrors the agent path's ``state.stream_exception`` capture: the raw
+            exception still propagates to the shared driver's friendly-error arm.
+            """
+            try:
+                async for event in stream:
+                    yield event
+            except Exception:
+                _record_interrupted_team_turn()
+                raise
+
         def _start_tool(
             *,
             scope_key: str,
@@ -2721,14 +2734,16 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 if attempt_media_inputs.has_any()
                 else attempt_prompt
             )
-            raw_stream = stream_with_llm_request_log_context(
-                cast("AsyncGenerator[Any, None]", raw_stream),
-                request_context=_team_request_log_context(
-                    ctx,
-                    team_name=configured_team_name or team_label,
-                    prompt=continuation_state.active_prompt,
-                    run_input=stream_run_input,
-                    metadata=run_metadata,
+            raw_stream = _capture_stream_interrupt(
+                stream_with_llm_request_log_context(
+                    cast("AsyncGenerator[Any, None]", raw_stream),
+                    request_context=_team_request_log_context(
+                        ctx,
+                        team_name=configured_team_name or team_label,
+                        prompt=continuation_state.active_prompt,
+                        run_input=stream_run_input,
+                        metadata=run_metadata,
+                    ),
                 ),
             )
             async for event in raw_stream:

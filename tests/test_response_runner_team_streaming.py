@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import suppress
 from dataclasses import replace
 from types import SimpleNamespace
@@ -1710,3 +1711,49 @@ async def test_persist_interrupted_recorder_off_loop_swallows_persist_failure(tm
             run_id=None,
             is_team=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_persist_interrupted_recorder_off_loop_propagates_cancellation(tmp_path: Path) -> None:
+    """Cancellation of the awaiting turn still propagates through the persist guard."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+        message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        orchestrator=_team_orchestrator(config, runtime_paths),
+    )
+    recorder = TurnRecorder(user_message="Hello")
+    recorder.record_interrupted(
+        run_metadata=None,
+        assistant_text="partial",
+        completed_tools=[],
+        interrupted_tools=[],
+    )
+    release = threading.Event()
+
+    with patch.object(
+        coordinator,
+        "_persist_interrupted_recorder",
+        side_effect=lambda **_kwargs: release.wait(timeout=5),
+    ):
+        waiter = asyncio.get_running_loop().create_task(
+            coordinator._persist_interrupted_recorder_off_loop(
+                recorder=recorder,
+                session_scope=coordinator.deps.state_writer.history_scope(),
+                session_id="session-1",
+                execution_identity=None,
+                run_id=None,
+                is_team=True,
+            ),
+        )
+        await asyncio.sleep(0.05)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        release.set()

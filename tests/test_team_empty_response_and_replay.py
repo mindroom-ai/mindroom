@@ -420,3 +420,39 @@ async def test_team_response_stream_leaves_recorder_pending_when_error_has_no_pa
         ]
 
     assert recorder.outcome == "pending"
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_records_interrupted_turn_when_stream_raises() -> None:
+    """A raw exception from the model stream records partial work interrupted."""
+    orchestrator, config = _make_orchestrator()
+
+    stream_error = "transport died"
+
+    async def stream() -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        raise RuntimeError(stream_error)
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(return_value=stream())
+    recorder = TurnRecorder(user_message="Analyze this.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-1"),
+            )
+        ]
+
+    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+    assert "transport died" in rendered
+    assert recorder.outcome == "interrupted"
+    assert "Member answer" in recorder.assistant_text
