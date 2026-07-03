@@ -26,15 +26,14 @@ from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from tests.conftest import (
     drain_coalescing,
 )
-
-if TYPE_CHECKING:
-    from mindroom.bot import AgentBot
-
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _matrix_room,
     _wait_for_room_cache_idle,
 )
+
+if TYPE_CHECKING:
+    from mindroom.bot import AgentBot
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):

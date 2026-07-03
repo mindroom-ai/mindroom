@@ -34,16 +34,15 @@ from tests.conftest import (
     request_envelope,
     unwrap_extracted_collaborator,
 )
-
-if TYPE_CHECKING:
-    from mindroom.bot import AgentBot
-
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _matrix_room,
     _message,
     thread_history_result,
 )
+
+if TYPE_CHECKING:
+    from mindroom.bot import AgentBot
 
 
 def test_plain_reply_event_info_has_no_thread_routing_root() -> None:

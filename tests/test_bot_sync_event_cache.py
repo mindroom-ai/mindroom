@@ -28,10 +28,6 @@ from tests.conftest import (
     TEST_PASSWORD,
 )
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _bind_owned_runtime_support,
@@ -43,6 +39,9 @@ from tests.threading_helpers import (
     _save_certified_sync_token,
     _wait_for_room_cache_idle,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):

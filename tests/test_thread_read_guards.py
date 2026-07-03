@@ -26,13 +26,6 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from mindroom.bot import AgentBot
-    from mindroom.matrix.cache import ThreadHistoryResult
-
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_races_fetch,
@@ -49,6 +42,12 @@ from tests.threading_helpers import (
     _wait_for_room_cache_idle,
     thread_history_result,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.bot import AgentBot
+    from mindroom.matrix.cache import ThreadHistoryResult
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):

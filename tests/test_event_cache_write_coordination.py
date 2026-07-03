@@ -17,13 +17,6 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
-
-if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
-    from typing import Any
-
-    from mindroom.bot import AgentBot
-
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _conversation_runtime,
@@ -37,6 +30,12 @@ from tests.threading_helpers import (
     _wait_for_room_cache_idle,
     thread_history_result,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+    from typing import Any
+
+    from mindroom.bot import AgentBot
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):

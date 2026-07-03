@@ -36,10 +36,6 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
 from tests.threading_helpers import (
     _conversation_runtime,
     _conversation_runtime_config,
@@ -54,6 +50,9 @@ from tests.threading_helpers import (
     _wait_for_room_cache_idle,
     thread_history_result,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
