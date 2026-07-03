@@ -122,7 +122,7 @@ SKILLS_TOOL_USAGE_PROMPT = """When using skills, access them via the skill tools
 - get_skill_instructions(...)
 - get_skill_reference(...)
 - get_skill_script(...)
-Do not open an existing skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.
+Do not open a global skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.
 """
 
 WORKSPACE_SKILL_AUTHORING_PROMPT = """If you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.

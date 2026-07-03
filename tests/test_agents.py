@@ -3241,6 +3241,7 @@ def test_agent_without_workspace_omits_skill_authoring_guidance(tmp_path: Path) 
     """Agents without a workspace should not be told to write workspace skill files."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].memory_backend = "mem0"
 
     agent = _create_agent_for_test("general", config)
 
