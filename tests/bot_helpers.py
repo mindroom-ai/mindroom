@@ -917,24 +917,6 @@ def make_mock_agent_user() -> AgentMatrixUser:
     )
 
 
-def make_mock_agent_users() -> dict[str, AgentMatrixUser]:
-    """Create mock agent users."""
-    return {
-        "calculator": AgentMatrixUser(
-            agent_name="calculator",
-            password=TEST_PASSWORD,
-            display_name="CalculatorAgent",
-            user_id="@mindroom_calculator:localhost",
-        ),
-        "general": AgentMatrixUser(
-            agent_name="general",
-            password=TEST_PASSWORD,
-            display_name="GeneralAgent",
-            user_id="@mindroom_general:localhost",
-        ),
-    }
-
-
 @dataclass
 class _SyncStubVectorDb:
     documents: list[Document]
