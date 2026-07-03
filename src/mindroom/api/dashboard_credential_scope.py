@@ -173,7 +173,9 @@ def resolve_dashboard_agent_execution_scope_request(
             agent_name=None,
             persisted_policy=None,
             persisted_execution_scope=None,
-            requested_execution_scope=execution_scope_override if execution_scope_override_provided else None,
+            requested_execution_scope=(
+                execution_scope_override if execution_scope_override_provided else config.defaults.worker_scope
+            ),
             execution_scope_override_provided=execution_scope_override_provided,
             draft_scope_preview=True,
         )
