@@ -808,6 +808,7 @@ class TestMultiAgentOrchestrator:
                     "global_users": ["@alice:localhost"],
                     "default_room_access": False,
                 },
+                mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
             ),
             tmp_path,
         )
@@ -817,6 +818,10 @@ class TestMultiAgentOrchestrator:
         router_bot = MagicMock()
         router_bot.client = AsyncMock()
         orchestrator.agent_bots = {"router": router_bot}
+
+        state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
+        state.add_account(INTERNAL_USER_ACCOUNT_KEY, "mindroom_user", "internal-password")
+        state.save(runtime_paths=orchestrator.runtime_paths)
 
         room_members: dict[str, set[str] | None] = {
             "!room1:localhost": None,
@@ -838,7 +843,10 @@ class TestMultiAgentOrchestrator:
             await orchestrator._ensure_room_invitations()
 
         invited_users_by_room = {(call.args[1], call.args[2]) for call in mock_invite.await_args_list}
-        assert invited_users_by_room == {("!room2:localhost", "@alice:localhost")}
+        assert invited_users_by_room == {
+            ("!room2:localhost", "@mindroom_user:localhost"),
+            ("!room2:localhost", "@alice:localhost"),
+        }
 
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_invites_authorized_users_to_standalone_rooms(
