@@ -10687,6 +10687,21 @@ def needs_runtime_tools() -> type[Toolkit]:
     return NeedsRuntimeTools
 ```
 
+### Dispatch-time worker targets
+
+`WORKER_TARGET` covers toolkits that receive their worker target at construction.
+Tools that compose other registered tools while handling a call (for example building a sub-toolkit with `get_tool_by_name`) resolve the same target from the live runtime context instead:
+
+```python
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
+
+context = get_tool_runtime_context()
+worker_target = context.resolve_worker_target()
+```
+
+This returns the exact worker target that agent toolkit construction uses, so requester-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
+`resolve_worker_target()` raises `ValueError` for team and router dispatches, because those contexts have no single agent execution scope to mirror; catch it if your tool can run inside a team.
+
 ## MCP via plugins (advanced)
 
 MindRoom supports native MCP servers in `config.yaml` — see [MCP](https://docs.mindroom.chat/mcp/) for the normal setup path.

@@ -53,7 +53,7 @@ from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
-    build_worker_target_from_runtime_env,
+    build_agent_toolkit_worker_target,
     resolve_agent_owned_path,
     shared_storage_root,
 )
@@ -480,16 +480,12 @@ def _build_registered_agent_tool(
     runtime_overrides: dict[str, object] | None,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
-    worker_target = build_worker_target_from_runtime_env(
+    worker_target = build_agent_toolkit_worker_target(
         worker_scope,
         agent_name,
+        is_private=routing_agent_is_private,
         execution_identity=execution_identity,
         runtime_paths=runtime_paths,
-        private_agent_names=(
-            frozenset({agent_name})
-            if worker_scope == "user_agent" and routing_agent_is_private
-            else (frozenset() if worker_scope == "user_agent" else None)
-        ),
     )
 
     return get_tool_by_name(

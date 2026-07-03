@@ -3364,6 +3364,7 @@ expose = [
     "agent_state_root_path",
     "agent_workspace_relative_path",
     "agent_workspace_root_path",
+    "build_agent_toolkit_worker_target",
     "build_tool_execution_identity",
     "build_worker_target_from_runtime_env",
     "get_tool_execution_identity",

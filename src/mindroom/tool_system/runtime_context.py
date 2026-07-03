@@ -24,7 +24,7 @@ from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.plugin_identity import validate_plugin_name
-from mindroom.tool_system.worker_routing import build_tool_execution_identity, build_worker_target_from_runtime_env
+from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 
 if TYPE_CHECKING:
     import asyncio
@@ -95,20 +95,25 @@ class ToolRuntimeContext:
         building search backends, sub-toolkits) need the same worker target
         that agent toolkit construction uses, so requester-scoped state —
         OAuth MCP sessions, scoped credentials — resolves identically.
-        Mirrors the inputs of agents._build_registered_agent_tool.
+
+        Raises:
+            ValueError: For team and router dispatches, whose contexts carry
+                the entity name and therefore have no single agent execution
+                scope for a composed toolkit to mirror.
+
         """
-        worker_scope = self.config.agent_execution_scope(self.agent_name)
-        routing_agent_is_private = self.config.get_agent(self.agent_name).private is not None
-        if worker_scope == "user_agent":
-            private_agent_names = frozenset({self.agent_name}) if routing_agent_is_private else frozenset()
-        else:
-            private_agent_names = None
-        return build_worker_target_from_runtime_env(
-            worker_scope,
+        if self.agent_name not in self.config.agents:
+            msg = (
+                f"resolve_worker_target requires an agent dispatch; {self.agent_name!r} is not a configured agent. "
+                "Team and router dispatches have no single agent execution scope."
+            )
+            raise ValueError(msg)
+        return build_agent_toolkit_worker_target(
+            self.config.resolve_entity(self.agent_name).execution_scope,
             self.agent_name,
+            is_private=self.config.get_agent(self.agent_name).private is not None,
             execution_identity=build_execution_identity_from_runtime_context(self),
             runtime_paths=self.runtime_paths,
-            private_agent_names=private_agent_names,
         )
 
 
