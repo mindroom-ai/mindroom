@@ -22,7 +22,7 @@ from tests.ai_user_id_helpers import (
 )
 from tests.conftest import bind_runtime_paths, patch_response_runner_module, unwrap_extracted_collaborator
 from tests.identity_helpers import fixture_entity_matrix_id
-from tests.test_response_runner_focused import _bot, _noop_typing, _plain_request, _target
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

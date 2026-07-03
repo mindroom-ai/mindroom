@@ -42,6 +42,7 @@ from tests.ai_user_id_helpers import (
     _config_with_team,
     _config_with_team_matrix_message,
     _handled_response_event_id,
+    _install_inert_post_response_effects,
     _knowledge_access_support,
     _make_bot,
     _open_team_scope_context,
@@ -116,7 +117,6 @@ async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_pat
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -127,6 +127,7 @@ async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_pat
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
+        _install_inert_post_response_effects(coordinator)
 
         await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
@@ -165,7 +166,6 @@ async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -176,6 +176,7 @@ async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
+        _install_inert_post_response_effects(coordinator)
 
         await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
@@ -211,7 +212,6 @@ async def test_generate_team_response_passes_resolved_correlation_id_to_team_res
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -222,6 +222,7 @@ async def test_generate_team_response_passes_resolved_correlation_id_to_team_res
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$original"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
+        _install_inert_post_response_effects(coordinator)
 
         await coordinator.generate_team_response_helper(
             _response_request(
@@ -560,7 +561,6 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
         patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -573,6 +573,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
+        _install_inert_post_response_effects(coordinator)
 
         async def consume_delivery_and_fail(request: object) -> StreamTransportOutcome:
             accumulated = ""

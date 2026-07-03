@@ -69,6 +69,7 @@ from tests.ai_user_id_helpers import (
     _config_with_matrix_message,
     _knowledge_access_support,
     _make_bot,
+    _mark_requester_online,
     _open_agent_scope_context,
     _plugin,
     _prepared_prompt_result,
@@ -169,17 +170,17 @@ async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    if use_streaming:
+        _mark_requester_online(bot.client, "@alice:localhost")
 
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=use_streaming)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
-    ):
+    with patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)):
         coordinator = _build_response_runner(
             bot,
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
+            enable_streaming=use_streaming,
         )
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
 
@@ -250,11 +251,9 @@ async def test_process_and_respond_streaming_preserves_user_stop_outcome(
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    _mark_requester_online(bot.client, "@alice:localhost")
 
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
-    ):
+    with patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)):
         coordinator = _build_response_runner(
             bot,
             config=config,
@@ -356,10 +355,7 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
 
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [first, second])])
 
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
-    ):
+    with patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai:
         coordinator = _build_response_runner(
             bot,
             config=config,
@@ -378,6 +374,7 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
                     is_refreshing=lambda _base_id: False,
                 ),
             ),
+            enable_streaming=False,
         )
 
         async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
@@ -1306,7 +1303,6 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
 
     with (
         patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="done")) as mock_ai_response,
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         coordinator = _build_response_runner(
@@ -1316,6 +1312,7 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
             storage_path=tmp_path,
             requester_id="@owner:localhost",
             message_target=target,
+            enable_streaming=False,
         )
         build_calls: list[dict[str, object]] = []
         original_build_execution_identity = coordinator.deps.tool_runtime.build_execution_identity
@@ -1713,10 +1710,8 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
         correlation_id="corr-stream-cancel",
     )
 
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
-    ):
+    _mark_requester_online(bot.client, "@alice:localhost")
+    with patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)):
         coordinator = _build_response_runner(
             bot,
             config=config,

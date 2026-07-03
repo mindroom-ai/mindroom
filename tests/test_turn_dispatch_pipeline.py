@@ -60,7 +60,6 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
 )
 from mindroom.teams import TeamIntent, TeamMode, TeamResolution
-from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.bot_helpers import (
@@ -1080,20 +1079,7 @@ class TestAgentBot(AgentBotTestBase):
             },
         )
 
-        with (
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch(
-                "mindroom.turn_policy.decide_team_formation",
-                new_callable=MagicMock,
-                return_value=TeamResolution.none(),
-            ),
-            patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
-            patch(
-                "mindroom.turn_controller.interactive.handle_text_response",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-        ):
+        with patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False):
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
@@ -1163,14 +1149,7 @@ class TestAgentBot(AgentBotTestBase):
             },
         )
 
-        with (
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch(
-                "mindroom.turn_controller.interactive.handle_text_response",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-        ):
+        with patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False):
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
@@ -1252,7 +1231,6 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=envelope,
             ),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._response_runner,
                 "active_thread_ids_for_room",
@@ -1350,7 +1328,6 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -2066,12 +2043,6 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch(
-                "mindroom.turn_policy.decide_team_formation",
-                new_callable=MagicMock,
-                return_value=TeamResolution.none(),
-            ),
-            patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=None),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
         ):

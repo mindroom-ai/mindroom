@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeVar, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import nio
 from agno.db.base import SessionType
 from agno.models.message import Message
 
@@ -37,7 +39,7 @@ from mindroom.hooks.registry import HookRegistryState
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.post_response_effects import PostResponseEffectsSupport
+from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.response_runner import (
     ResponseRequest,
@@ -61,7 +63,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable
+    from collections.abc import Callable, Generator, Iterable
     from pathlib import Path
 
     from agno.knowledge.knowledge import Knowledge
@@ -246,6 +248,17 @@ def _open_team_scope_context(
     )
 
 
+def _mark_requester_online(client: AsyncMock, user_id: str, room_id: str = "!test:localhost") -> None:
+    """Make the requester show as online in the client's synced room cache.
+
+    ``should_use_streaming`` reads presence from ``client.rooms`` first, so this
+    drives the streaming decision through its real input instead of a patch.
+    """
+    room = nio.MatrixRoom(room_id, "@mindroom_general:localhost")
+    room.users[user_id] = nio.MatrixUser(user_id, presence="online")
+    client.rooms = {room_id: room}
+
+
 def _make_bot(
     tmp_path: Path,
     *,
@@ -256,6 +269,7 @@ def _make_bot(
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
     bot.stop_manager = MagicMock()
+    bot.stop_manager.add_stop_button = AsyncMock()
     bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.agent_name = agent_name
@@ -310,6 +324,7 @@ def _build_response_runner(
     message_target: MessageTarget | None = None,
     orchestrator: object | None = None,
     knowledge_access_support: SimpleNamespace | None = None,
+    enable_streaming: bool = True,
 ) -> ResponseRunner:
     """Build a real response runner for one bot-shaped test double."""
 
@@ -319,7 +334,7 @@ def _build_response_runner(
         return storage if storage is not None else MagicMock()
 
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
-    bot.enable_streaming = True
+    bot.enable_streaming = enable_streaming
     bot.show_tool_calls = False
     bot.orchestrator = orchestrator
     bot._conversation_resolver = MagicMock()
@@ -495,4 +510,40 @@ def _response_request(
         media=media,
         user_id=user_id,
         correlation_id=correlation_id,
+    )
+
+
+class _InertPostResponseEffects(PostResponseEffectsSupport):
+    """Post-response support whose per-response deps carry no side effects.
+
+    The real ``apply_post_response_effects`` still runs; every effect it guards
+    on (interactive registration, memory persistence, run-metadata linkage,
+    thread summaries) is absent from the built deps, so tests exercise the
+    lifecycle without patching the module function.
+    """
+
+    def build_deps(
+        self,
+        *,
+        room_id: str,
+        interactive_agent_name: str,
+        queue_memory_persistence: Callable[[], None] | None = None,
+        persist_response_event_id: Callable[[str, str], None] | None = None,
+    ) -> PostResponseEffectsDeps:
+        del room_id, interactive_agent_name, queue_memory_persistence, persist_response_event_id
+        return PostResponseEffectsDeps(logger=self.logger)
+
+
+def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
+    """Swap the post-response collaborator for the inert variant at the deps seam."""
+    support = coordinator.deps.post_response_effects
+    coordinator.deps = replace(
+        coordinator.deps,
+        post_response_effects=_InertPostResponseEffects(
+            runtime=support.runtime,
+            logger=support.logger,
+            runtime_paths=support.runtime_paths,
+            delivery_gateway=support.delivery_gateway,
+            conversation_cache=support.conversation_cache,
+        ),
     )
