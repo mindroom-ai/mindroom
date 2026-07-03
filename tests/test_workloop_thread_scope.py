@@ -21,7 +21,13 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalDeliveryRequest, ResponseHookService
+from mindroom.delivery_gateway import (
+    DeliveryGateway,
+    DeliveryGatewayDeps,
+    FinalDeliveryRequest,
+    ResponseHookService,
+    ResponseIdentity,
+)
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_CANCELLED,
@@ -764,9 +770,11 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
                 target=response_envelope.target,
                 existing_event_id=None,
                 response_text="visible response",
-                response_kind="ai",
-                response_envelope=response_envelope,
-                correlation_id="corr-late-workloop-cleanup",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=response_envelope,
+                    correlation_id="corr-late-workloop-cleanup",
+                ),
                 tool_trace=None,
                 extra_content=None,
             ),

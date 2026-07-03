@@ -48,6 +48,7 @@ __all__ = [
     "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
     "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE",
     "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
+    "WORKSPACE_SKILL_AUTHORING_PROMPT",
 ]
 
 
@@ -121,7 +122,24 @@ SKILLS_TOOL_USAGE_PROMPT = """When using skills, access them via the skill tools
 - get_skill_instructions(...)
 - get_skill_reference(...)
 - get_skill_script(...)
-Do not open SKILL.md directly with file tools.
+Do not open a global skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.
+"""
+
+WORKSPACE_SKILL_AUTHORING_PROMPT = """If you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.
+A skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.
+`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:
+
+---
+name: my-skill
+description: One-line summary of when to use this skill
+---
+
+# My Skill
+Step-by-step instructions...
+
+Do not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.
+A workspace skill you create or edit becomes available on your next run, without any config change.
+Workspace skill scripts cannot be executed through get_skill_script; run them with your shell tools if you have them.
 """
 
 HIDDEN_TOOL_CALLS_PROMPT = """Your tool calls are not visible to the user in the chat. They only see your text responses.

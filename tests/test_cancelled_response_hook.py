@@ -20,6 +20,7 @@ from mindroom.delivery_gateway import (
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     ResponseHookService,
+    ResponseIdentity,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
@@ -133,10 +134,12 @@ def _response_lifecycle(
             response_hooks=response_hooks,
             logger=get_logger("tests.response_lifecycle"),
         ),
-        response_kind="ai",
+        identity=ResponseIdentity(
+            response_kind="ai",
+            response_envelope=response_envelope,
+            correlation_id=correlation_id,
+        ),
         pipeline_timing=None,
-        response_envelope=response_envelope,
-        correlation_id=correlation_id,
     )
 
 
@@ -337,10 +340,12 @@ async def test_response_hook_service_emit_cancelled(tmp_path: Path) -> None:
     service = ResponseHookService(hook_context=hook_context)
 
     await service.emit_cancelled_response(
-        correlation_id="corr-svc",
-        envelope=_envelope(),
+        identity=ResponseIdentity(
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-svc",
+        ),
         visible_response_event_id="$vis",
-        response_kind="ai",
     )
 
     assert len(seen) == 1
@@ -366,8 +371,11 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
 
     # Should not raise
     await service.emit_cancelled_response(
-        correlation_id="corr-noop",
-        envelope=_envelope(),
+        identity=ResponseIdentity(
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-noop",
+        ),
     )
 
 
@@ -521,9 +529,11 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
             target=MessageTarget.resolve("!room:localhost", None, "$event"),
             existing_event_id=None,
             response_text="suppressed",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-suppressed-final",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-suppressed-final",
+            ),
             tool_trace=None,
             extra_content=None,
         ),
@@ -661,9 +671,11 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
                 existing_event_id=existing_event_id,
                 existing_event_is_placeholder=False,
                 response_text="visible response",
-                response_kind="ai",
-                response_envelope=_envelope(),
-                correlation_id="corr-delivery-failure",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_envelope(),
+                    correlation_id="corr-delivery-failure",
+                ),
                 tool_trace=None,
                 extra_content=None,
             ),
@@ -736,9 +748,11 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
                 canonical_final_body_candidate="final body",
             ),
             initial_delivery_kind="sent",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-final-only-provider",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-final-only-provider",
+            ),
             tool_trace=None,
             extra_content=None,
             existing_event_id="$thinking",
@@ -810,9 +824,11 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
             existing_event_id="$placeholder",
             existing_event_is_placeholder=True,
             response_text="suppressed",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-suppressed-cleanup-fail",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-suppressed-cleanup-fail",
+            ),
             tool_trace=None,
             extra_content=None,
         ),
@@ -880,9 +896,11 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
             existing_event_id="$placeholder",
             existing_event_is_placeholder=True,
             response_text="suppressed",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-suppressed-cleanup-exception",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-suppressed-cleanup-exception",
+            ),
             tool_trace=None,
             extra_content=None,
         ),

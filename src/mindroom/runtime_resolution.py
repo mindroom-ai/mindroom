@@ -53,20 +53,11 @@ class ResolvedAgentExecution:
 class ResolvedAgentRuntime:
     """Resolved runtime state for one `(agent_name, execution_identity)` materialization."""
 
-    agent_name: str
-    policy: ResolvedAgentPolicy
-    execution_scope: WorkerScope | None
-    execution_identity: ToolExecutionIdentity | None
-    worker_key: str | None
+    execution: ResolvedAgentExecution
     state_root: Path
     workspace: ResolvedAgentWorkspace | None
     tool_base_dir: Path | None
     file_memory_root: Path | None
-
-    @property
-    def is_private(self) -> bool:
-        """Return whether the resolved runtime uses a private agent definition."""
-        return self.policy.is_private
 
 
 @dataclass(frozen=True)
@@ -246,11 +237,7 @@ def resolve_agent_runtime(
     tool_base_dir = workspace.root if workspace is not None else None
     file_memory_root = workspace.file_memory_path if workspace is not None else None
     return ResolvedAgentRuntime(
-        agent_name=agent_name,
-        policy=resolved_execution.policy,
-        execution_scope=resolved_execution.execution_scope,
-        execution_identity=resolved_execution.execution_identity,
-        worker_key=resolved_execution.worker_key,
+        execution=resolved_execution,
         state_root=state_root,
         workspace=workspace,
         tool_base_dir=tool_base_dir,
@@ -311,7 +298,7 @@ def resolve_knowledge_binding(
             field_name=f"knowledge base '{base_id}' path",
         ),
         incremental_sync_on_access=(
-            refresh_enabled and (agent_runtime.policy.private_agent_knowledge_enabled or not start_watchers)
+            refresh_enabled and (agent_runtime.execution.policy.private_agent_knowledge_enabled or not start_watchers)
         ),
     )
 
