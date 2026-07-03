@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeVar, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import nio
 from agno.db.base import SessionType
 from agno.models.message import Message
 
@@ -270,6 +271,17 @@ def _open_team_scope_context(
     )
 
 
+def _mark_requester_online(client: AsyncMock, user_id: str, room_id: str = "!test:localhost") -> None:
+    """Make the requester show as online in the client's synced room cache.
+
+    ``should_use_streaming`` reads presence from ``client.rooms`` first, so this
+    drives the streaming decision through its real input instead of a patch.
+    """
+    room = nio.MatrixRoom(room_id, "@mindroom_general:localhost")
+    room.users[user_id] = nio.MatrixUser(user_id, presence="online")
+    client.rooms = {room_id: room}
+
+
 def _make_bot(
     tmp_path: Path,
     *,
@@ -280,6 +292,7 @@ def _make_bot(
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
     bot.stop_manager = MagicMock()
+    bot.stop_manager.add_stop_button = AsyncMock()
     bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.agent_name = agent_name
@@ -335,6 +348,7 @@ def _build_response_runner(
     message_target: MessageTarget | None = None,
     orchestrator: object | None = None,
     knowledge_access_support: SimpleNamespace | None = None,
+    enable_streaming: bool = True,
 ) -> ResponseRunner:
     """Build a real response runner for one bot-shaped test double."""
 
@@ -344,7 +358,7 @@ def _build_response_runner(
         return storage if storage is not None else MagicMock()
 
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
-    bot.enable_streaming = True
+    bot.enable_streaming = enable_streaming
     bot.show_tool_calls = False
     bot.orchestrator = orchestrator
     bot._conversation_resolver = MagicMock()
