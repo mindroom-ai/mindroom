@@ -32,7 +32,12 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
 )
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalizeStreamedResponseRequest
+from mindroom.delivery_gateway import (
+    DeliveryGateway,
+    DeliveryGatewayDeps,
+    FinalizeStreamedResponseRequest,
+    ResponseIdentity,
+)
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
@@ -3989,9 +3994,11 @@ class TestStreamingBehavior:
                     visible_body_state="visible_body",
                 ),
                 initial_delivery_kind="sent",
-                response_kind="ai",
-                response_envelope=response_envelope,
-                correlation_id="corr-final-transform-success",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=response_envelope,
+                    correlation_id="corr-final-transform-success",
+                ),
                 tool_trace=None,
                 extra_content=None,
             ),
@@ -4012,10 +4019,12 @@ class TestStreamingBehavior:
                 response_hooks=response_hooks,
                 logger=MagicMock(),
             ),
-            response_kind="ai",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-final-transform-success",
+            ),
             pipeline_timing=None,
-            response_envelope=response_envelope,
-            correlation_id="corr-final-transform-success",
         )
         finalized = await lifecycle.finalize(
             outcome,
@@ -4090,9 +4099,11 @@ class TestStreamingBehavior:
                     canonical_final_body_candidate="canonical final",
                 ),
                 initial_delivery_kind="sent",
-                response_kind="ai",
-                response_envelope=response_envelope,
-                correlation_id="corr-final-transform-noop",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=response_envelope,
+                    correlation_id="corr-final-transform-noop",
+                ),
                 tool_trace=None,
                 extra_content=None,
             ),
@@ -4107,10 +4118,12 @@ class TestStreamingBehavior:
                 response_hooks=response_hooks,
                 logger=MagicMock(),
             ),
-            response_kind="ai",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-final-transform-noop",
+            ),
             pipeline_timing=None,
-            response_envelope=response_envelope,
-            correlation_id="corr-final-transform-noop",
         )
         finalized = await lifecycle.finalize(
             outcome,
@@ -4195,9 +4208,11 @@ class TestStreamingBehavior:
                     canonical_final_body_candidate=raw_interactive,
                 ),
                 initial_delivery_kind="sent",
-                response_kind="ai",
-                response_envelope=response_envelope,
-                correlation_id="corr-final-transform-interactive",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=response_envelope,
+                    correlation_id="corr-final-transform-interactive",
+                ),
                 tool_trace=None,
                 extra_content=None,
             ),
