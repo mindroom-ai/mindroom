@@ -62,6 +62,18 @@ from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
+from tests.bot_helpers import (
+    AgentBotTestBase,
+    _approval_reload_config,
+    _approval_removal_plan,
+    _cleanup_recorder,
+    _live_pending_approval,
+    _mock_approval_reload_bot,
+    _mock_managed_bot,
+    _run_orchestrator_start_until_ready,
+    _runtime_bound_config,
+    _wait_for_pending_approval_id,
+)
 from tests.conftest import (
     TEST_PASSWORD,
     bind_mock_config_cache,
@@ -75,20 +87,6 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
-
-
-from tests.bot_helpers import (
-    AgentBotTestBase,
-    _approval_reload_config,
-    _approval_removal_plan,
-    _cleanup_recorder,
-    _live_pending_approval,
-    _mock_approval_reload_bot,
-    _mock_managed_bot,
-    _run_orchestrator_start_until_ready,
-    _runtime_bound_config,
-    _wait_for_pending_approval_id,
-)
 
 
 class TestAgentBot(AgentBotTestBase):

@@ -63,24 +63,6 @@ from mindroom.response_runner import (
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
-from tests.conftest import (
-    delivered_matrix_event,
-    delivered_matrix_side_effect,
-    message_origin,
-    patch_response_runner_module,
-    replace_delivery_gateway_deps,
-    request_envelope,
-    runtime_paths_for,
-)
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
-    from pathlib import Path
-
-    from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
-    from mindroom.matrix.users import AgentMatrixUser
-    from mindroom.post_response_effects import ResponseOutcome
-
 from tests.bot_helpers import (
     AgentBotTestBase,
     _empty_full_thread_history,
@@ -101,6 +83,23 @@ from tests.bot_helpers import (
     _visible_response_event_id,
     make_mock_agent_user,
 )
+from tests.conftest import (
+    delivered_matrix_event,
+    delivered_matrix_side_effect,
+    message_origin,
+    patch_response_runner_module,
+    replace_delivery_gateway_deps,
+    request_envelope,
+    runtime_paths_for,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
+    from pathlib import Path
+
+    from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
+    from mindroom.matrix.users import AgentMatrixUser
+    from mindroom.post_response_effects import ResponseOutcome
 
 
 @pytest.fixture
