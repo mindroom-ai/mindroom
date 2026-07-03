@@ -64,8 +64,8 @@ class _BoundHookMatrixAdmin:
         """Invite one user into one room."""
         return await invite_to_room(self.client, room_id, user_id)
 
-    async def get_room_members(self, room_id: str) -> set[str]:
-        """Return the current joined members for one room."""
+    async def get_room_members(self, room_id: str) -> set[str] | None:
+        """Return the current joined members for one room, or ``None`` when the fetch fails."""
         return await get_room_members(self.client, room_id)
 
     async def add_room_to_space(self, space_room_id: str, room_id: str) -> bool:
