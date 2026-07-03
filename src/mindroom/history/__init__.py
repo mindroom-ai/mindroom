@@ -10,7 +10,6 @@ from mindroom.history.prompt_tokens import (
     StaticTokenEstimator,
     agent_static_token_estimator,
     agent_tool_definition_payloads_for_logging,
-    compute_prompt_token_breakdown,
     team_static_token_estimator,
     team_tool_definition_payloads_for_logging,
 )
@@ -80,7 +79,6 @@ __all__ = [
     "apply_replay_plan",
     "close_agent_runtime_state_dbs",
     "close_team_runtime_state_dbs",
-    "compute_prompt_token_breakdown",
     "context_budget_after_reserve",
     "create_scope_session_storage",
     "finalize_history_preparation",

@@ -444,8 +444,8 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
 
 
 @pytest.mark.asyncio
-async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_body(tmp_path: Path) -> None:
-    """Lifecycle completion edits should reuse the zero-filtered notice text."""
+async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path: Path) -> None:
+    """Lifecycle completion edits should reuse the outcome notice text."""
     config, runtime_paths = _make_config(tmp_path)
     bot = AgentBot(
         agent_user=AgentMatrixUser(
@@ -476,9 +476,6 @@ async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_
         compacted_run_count=12,
         compacted_at="2026-01-01T00:00:00Z",
         history_budget_tokens=100_000,
-        role_instructions_tokens=0,
-        tool_definition_tokens=0,
-        current_prompt_tokens=62,
     )
 
     target = MessageTarget.resolve("!room:localhost", None, "$reply")
@@ -522,12 +519,9 @@ async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_
     assert sent_content["io.mindroom.compaction"]["threshold_tokens"] == 80_000
     assert sent_content["io.mindroom.compaction"]["duration_ms"] == 123
     assert sent_content["body"] == outcome.format_notice()
-    assert sent_content["body"] == (
-        "\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget\n   Overhead: 62 prompt"
-    )
+    assert sent_content["body"] == ("\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget")
     assert sent_content["formatted_body"] == (
-        "<em>\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget<br/>"
-        "   Overhead: 62 prompt</em>"
+        "<em>\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget</em>"
     )
 
 

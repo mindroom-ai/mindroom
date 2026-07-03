@@ -22,7 +22,8 @@ from mindroom.history.compaction import (
 )
 from mindroom.history.prompt_tokens import (
     StaticTokenEstimator,
-    _estimate_tool_definition_tokens,
+    _estimate_prepared_tool_definition_tokens,
+    _prepare_tools_for_estimation,
     estimate_agent_static_tokens,
 )
 from mindroom.history.types import (
@@ -40,6 +41,12 @@ from tests.history_helpers import (  # noqa: F401
     _completed_run,
     _session,
 )
+
+
+def _tool_definition_tokens(tools: object) -> int:
+    """Estimate model-visible tool schema and instruction tokens for one tool list."""
+    prepared_tools, tool_instructions = _prepare_tools_for_estimation(tools)
+    return _estimate_prepared_tool_definition_tokens(prepared_tools, tool_instructions=tool_instructions)
 
 
 def test_estimate_static_tokens_includes_tool_definitions() -> None:
@@ -84,12 +91,12 @@ def test_estimate_static_tokens_includes_tool_definitions() -> None:
             "parameters": expected_export_tool.parameters,
         },
     ]
-    tool_tokens = _estimate_tool_definition_tokens(agent_with_tools)
+    tool_tokens = _tool_definition_tokens(agent_with_tools.tools)
     assert tool_tokens == (
         len(stable_serialize(expected_payloads)) // 4
         + estimate_text_tokens("Always cite the relevant document section when using search_docs.")
     )
-    assert _estimate_tool_definition_tokens(baseline_agent) == 0
+    assert _tool_definition_tokens(baseline_agent.tools) == 0
     assert tool_tokens > 0
 
 
@@ -165,7 +172,7 @@ def test_estimate_tool_definition_tokens_processes_functions_with_custom_paramet
     assert expected_tool.description == "Sync the current event draft into the shared calendar."
     assert expected_tool.parameters["additionalProperties"] is False
     assert (
-        _estimate_tool_definition_tokens(agent)
+        _tool_definition_tokens(agent.tools)
         == len(
             stable_serialize(
                 [
@@ -185,7 +192,7 @@ def test_estimate_tool_definition_tokens_ignores_empty_toolkit() -> None:
     agent = _agent()
     agent.tools = [Toolkit(name="empty")]
 
-    assert _estimate_tool_definition_tokens(agent) == 0
+    assert _tool_definition_tokens(agent.tools) == 0
 
 
 def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages() -> None:

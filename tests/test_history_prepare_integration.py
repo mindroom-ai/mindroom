@@ -12,7 +12,6 @@ from agno.agent import Agent
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.session.summary import SessionSummary
-from agno.tools.function import Function
 from defusedxml.ElementTree import fromstring
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
@@ -35,10 +34,7 @@ from mindroom.history.runtime import (
 from mindroom.history.storage import (
     update_scope_seen_event_ids,
 )
-from mindroom.history.types import (
-    CompactionOutcome,
-    HistoryScope,
-)
+from mindroom.history.types import HistoryScope
 from mindroom.memory import MemoryPromptParts
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.conftest import (
@@ -576,111 +572,6 @@ async def test_prepare_agent_and_prompt_keeps_matrix_current_sender_when_persist
     assert prepared_agent is live_agent
     assert prepared.replays_persisted_history is True
     assert full_prompt == 'Current message:\n<msg from="@alice:localhost"><![CDATA[Current prompt]]></msg>'
-
-
-def _make_test_compaction_outcome() -> CompactionOutcome:
-    return CompactionOutcome(
-        mode="auto",
-        session_id="session-1",
-        scope="agent:test_agent",
-        summary="Merged summary",
-        summary_model="summary-model",
-        before_tokens=30_000,
-        after_tokens=12_000,
-        window_tokens=128_000,
-        threshold_tokens=96_000,
-        runs_before=20,
-        runs_after=8,
-        compacted_run_count=12,
-        compacted_at="2026-01-01T00:00:00Z",
-    )
-
-
-@pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_enriches_compaction_outcomes(
-    tmp_path: Path,
-) -> None:
-    config, runtime_paths = _make_config(tmp_path)
-
-    def search_docs(query: str) -> str:
-        return query
-
-    live_agent = _agent()
-    live_agent.role = "Engineer"
-    live_agent.instructions = ["Keep the response concise."]
-    live_agent.tools = [Function.from_callable(search_docs)]
-
-    original_outcome = _make_test_compaction_outcome()
-    prepared_execution = _PreparedExecutionContext(
-        messages=(Message(role="user", content="Current prompt"),),
-        unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(compaction_outcomes=[original_outcome]),
-    )
-
-    with (
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch(
-            "mindroom.ai.prepare_agent_execution_context",
-            new=AsyncMock(return_value=prepared_execution),
-        ),
-    ):
-        prepared_run = await _prepare_agent_and_prompt(
-            make_turn_context("test_agent"),
-            prompt="Current prompt",
-            runtime_paths=runtime_paths,
-            config=config,
-        )
-
-    prepared = prepared_run.prepared_history
-    assert len(prepared.compaction_outcomes) == 1
-    assert prepared.compaction_outcomes[0] is not original_outcome
-    assert prepared.compaction_outcomes[0].role_instructions_tokens is not None
-    assert prepared.compaction_outcomes[0].tool_definition_tokens is not None
-    assert prepared.compaction_outcomes[0].current_prompt_tokens is not None
-
-
-@pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
-    tmp_path: Path,
-) -> None:
-    config, runtime_paths = _make_config(tmp_path)
-    live_agent = _agent()
-    live_agent.role = ""
-    live_agent.instructions = []
-    live_agent.tools = None
-
-    original_outcome = _make_test_compaction_outcome()
-    prepared_execution = _PreparedExecutionContext(
-        messages=(Message(role="user", content="x" * 248),),
-        unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(compaction_outcomes=[original_outcome]),
-    )
-
-    with (
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch(
-            "mindroom.ai.prepare_agent_execution_context",
-            new=AsyncMock(return_value=prepared_execution),
-        ),
-    ):
-        prepared_run = await _prepare_agent_and_prompt(
-            make_turn_context("test_agent"),
-            prompt="Current prompt",
-            runtime_paths=runtime_paths,
-            config=config,
-        )
-
-    prepared = prepared_run.prepared_history
-    outcome = prepared.compaction_outcomes[0]
-    assert outcome.role_instructions_tokens == 0
-    assert outcome.tool_definition_tokens == 0
-    assert outcome.current_prompt_tokens == 62
-    notice = outcome.format_notice()
-    assert "0 instructions" not in notice
-    assert "0 tools" not in notice
-    assert "62 prompt" in notice
 
 
 @pytest.mark.asyncio

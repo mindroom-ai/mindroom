@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from contextlib import aclosing
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -41,7 +41,6 @@ from mindroom.history import (
     agent_tool_definition_payloads_for_logging,
     apply_replay_plan,
     close_agent_runtime_state_dbs,
-    compute_prompt_token_breakdown,
     note_prepared_history_timing,
     open_resolved_scope_session_context,
 )
@@ -297,11 +296,6 @@ def _render_system_enrichment_context(
     system_enrichment_items: Sequence[EnrichmentItem],
 ) -> str:
     return render_system_enrichment_block(system_enrichment_items)
-
-
-@timed("system_prompt_assembly.compaction_token_breakdown")
-def _compute_compaction_token_breakdown(agent: Agent, full_prompt: str) -> dict[str, int]:
-    return compute_prompt_token_breakdown(agent=agent, full_prompt=full_prompt)
 
 
 @dataclass
@@ -1174,10 +1168,6 @@ async def _prepare_agent_and_prompt(
     unseen_event_ids = prepared_execution.unseen_event_ids
     run_messages = prepared_execution.messages
 
-    if prepared_history.compaction_outcomes:
-        breakdown = _compute_compaction_token_breakdown(agent, render_prepared_messages_text(run_messages))
-        enriched_outcomes = [replace(o, **breakdown) for o in prepared_history.compaction_outcomes]
-        prepared_history = replace(prepared_history, compaction_outcomes=enriched_outcomes)
     logger.info(
         "Preparing agent and prompt",
         agent=agent_name,
