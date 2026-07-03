@@ -34,6 +34,22 @@ from mindroom.response_runner import (
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.turn_policy import _ResponderAvailability
+from tests.bot_helpers import (
+    AgentBotTestBase,
+    _configured_team_test_config,
+    _configured_team_user,
+    _empty_full_thread_history,
+    _handled_response_event_id,
+    _hook_envelope,
+    _hook_plugin,
+    _install_runtime_cache_support,
+    _make_matrix_client_mock,
+    _noop_typing_indicator,
+    _visible_message,
+    _visible_response_event_id,
+    _wrap_extracted_collaborators,
+    make_mock_agent_user,
+)
 from tests.conftest import (
     TEST_PASSWORD,
     delivered_matrix_event,
@@ -57,24 +73,6 @@ if TYPE_CHECKING:
         RuntimePaths,
     )
     from mindroom.matrix.users import AgentMatrixUser
-
-
-from tests.bot_helpers import (
-    AgentBotTestBase,
-    _configured_team_test_config,
-    _configured_team_user,
-    _empty_full_thread_history,
-    _handled_response_event_id,
-    _hook_envelope,
-    _hook_plugin,
-    _install_runtime_cache_support,
-    _make_matrix_client_mock,
-    _noop_typing_indicator,
-    _visible_message,
-    _visible_response_event_id,
-    _wrap_extracted_collaborators,
-    make_mock_agent_user,
-)
 
 
 @pytest.fixture

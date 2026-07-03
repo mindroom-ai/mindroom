@@ -62,6 +62,24 @@ from mindroom.teams import TeamIntent, TeamMode, TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
+from tests.bot_helpers import (
+    AgentBotTestBase,
+    _agent_response_handled_turn,
+    _handled_response_event_id,
+    _hook_envelope,
+    _install_runtime_cache_support,
+    _make_matrix_client_mock,
+    _matrix_room,
+    _replace_turn_policy_deps,
+    _room_audio_event,
+    _room_image_event,
+    _runtime_bound_config,
+    _set_turn_store_tracker,
+    _visible_message,
+    _visible_response_event_id,
+    _wrap_extracted_collaborators,
+    make_mock_agent_user,
+)
 from tests.conftest import (
     TEST_PASSWORD,
     drain_coalescing,
@@ -82,26 +100,6 @@ from tests.identity_helpers import entity_ids
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
-
-
-from tests.bot_helpers import (
-    AgentBotTestBase,
-    _agent_response_handled_turn,
-    _handled_response_event_id,
-    _hook_envelope,
-    _install_runtime_cache_support,
-    _make_matrix_client_mock,
-    _matrix_room,
-    _replace_turn_policy_deps,
-    _room_audio_event,
-    _room_image_event,
-    _runtime_bound_config,
-    _set_turn_store_tracker,
-    _visible_message,
-    _visible_response_event_id,
-    _wrap_extracted_collaborators,
-    make_mock_agent_user,
-)
 
 
 @pytest.fixture

@@ -23,10 +23,6 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _install_runtime_write_coordinator,
@@ -36,6 +32,9 @@ from tests.threading_helpers import (
     _runtime_event_cache,
     thread_history_result,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):

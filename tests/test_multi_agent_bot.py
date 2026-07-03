@@ -33,6 +33,17 @@ from mindroom.orchestrator import (
     _MultiAgentOrchestrator,
 )
 from mindroom.startup_errors import PermanentStartupError
+from tests.bot_helpers import (
+    AgentBotTestBase,
+    _install_runtime_cache_support,
+    _make_matrix_client_mock,
+    _runtime_bound_config,
+    _set_turn_store_tracker,
+    _turn_store,
+    _visible_message,
+    _wrap_extracted_collaborators,
+    make_mock_agent_user,
+)
 from tests.conftest import (
     TEST_PASSWORD,
     drain_coalescing,
@@ -45,19 +56,6 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path
-
-
-from tests.bot_helpers import (
-    AgentBotTestBase,
-    _install_runtime_cache_support,
-    _make_matrix_client_mock,
-    _runtime_bound_config,
-    _set_turn_store_tracker,
-    _turn_store,
-    _visible_message,
-    _wrap_extracted_collaborators,
-    make_mock_agent_user,
-)
 
 
 @pytest.fixture
