@@ -46,7 +46,6 @@ from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history import (
     CompactionLifecycle,
-    CompactionOutcome,
     HistoryScope,
     PreparedHistoryState,
     ResolvedHistorySettings,
@@ -163,7 +162,6 @@ async def prepare_history_for_run_for_test(
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: "ToolExecutionIdentity | None",
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     storage: "BaseDb | None" = None,
     session: "AgentSession | TeamSession | None" = None,
     history_settings: ResolvedHistorySettings | None = None,
@@ -209,7 +207,6 @@ async def prepare_history_for_run_for_test(
         "resolved_inputs": resolved_inputs,
         "runtime_paths": runtime_paths,
         "config": config,
-        "compaction_outcomes_collector": compaction_outcomes_collector,
         "scope": resolved_scope,
         "compaction_lifecycle": compaction_lifecycle,
     }

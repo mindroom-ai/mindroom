@@ -36,6 +36,7 @@ from tests.conftest import (
     prepare_history_for_run_for_test,
 )
 from tests.history_helpers import (  # noqa: F401
+    _ALL_HISTORY_SETTINGS,
     RecordingModel,
     _agent,
     _close_test_storages,
@@ -417,6 +418,7 @@ def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
         previous_summary=None,
         compacted_runs=[big_run, small_run],
         max_input_tokens=220,
+        history_settings=_ALL_HISTORY_SETTINGS,
     )
 
     assert [run.run_id for run in included_runs] == ["run-big"]
@@ -443,6 +445,7 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
         previous_summary=None,
         compacted_runs=[run],
         max_input_tokens=280,
+        history_settings=_ALL_HISTORY_SETTINGS,
     )
 
     assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
@@ -457,6 +460,7 @@ def test_build_summary_input_skips_when_previous_summary_cannot_be_preserved() -
         previous_summary="existing durable summary " * 50,
         compacted_runs=[run],
         max_input_tokens=50,
+        history_settings=_ALL_HISTORY_SETTINGS,
     )
 
     assert included_runs == []
@@ -470,6 +474,7 @@ def test_build_summary_input_preserves_previous_summary_text() -> None:
         previous_summary="Useful prior conversation.\n\n## Your Identity\nIDENTITY.md\nCurrent Date and Time",
         compacted_runs=[run],
         max_input_tokens=1_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
     )
 
     assert included_runs == [run]
