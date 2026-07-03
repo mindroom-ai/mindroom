@@ -263,3 +263,4 @@ AgentVaultAccessTools  # unused class (src/mindroom/custom_tools/agent_vault_acc
 _agent_vault_access_tools  # unused function (src/mindroom/tools/__init__.py)
 _.apply_derived_defaults  # unused method (src/mindroom/custom_tools/todo.py)
 _.exactly_one_of_title_or_sub_template  # unused method (src/mindroom/custom_tools/todo.py)
+_.resolve_worker_target  # plugin-facing API method (src/mindroom/tool_system/runtime_context.py)

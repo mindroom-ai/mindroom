@@ -24,7 +24,7 @@ from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.plugin_identity import validate_plugin_name
-from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.tool_system.worker_routing import build_tool_execution_identity, build_worker_target_from_runtime_env
 
 if TYPE_CHECKING:
     import asyncio
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling import SchedulingRuntime
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.workers.models import WorkerReadyProgress
 
 _ToolContextReturn = TypeVar("_ToolContextReturn")
@@ -87,6 +87,29 @@ class ToolRuntimeContext:
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
+
+    def resolve_worker_target(self) -> ResolvedWorkerTarget:
+        """Resolve the worker target for toolkits built on behalf of this dispatch.
+
+        Tools that compose other registered tools at call time (plugins
+        building search backends, sub-toolkits) need the same worker target
+        that agent toolkit construction uses, so requester-scoped state —
+        OAuth MCP sessions, scoped credentials — resolves identically.
+        Mirrors the inputs of agents._build_registered_agent_tool.
+        """
+        worker_scope = self.config.agent_execution_scope(self.agent_name)
+        routing_agent_is_private = self.config.get_agent(self.agent_name).private is not None
+        if worker_scope == "user_agent":
+            private_agent_names = frozenset({self.agent_name}) if routing_agent_is_private else frozenset()
+        else:
+            private_agent_names = None
+        return build_worker_target_from_runtime_env(
+            worker_scope,
+            self.agent_name,
+            execution_identity=build_execution_identity_from_runtime_context(self),
+            runtime_paths=self.runtime_paths,
+            private_agent_names=private_agent_names,
+        )
 
 
 @dataclass(frozen=True)
