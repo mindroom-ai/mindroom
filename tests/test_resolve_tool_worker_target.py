@@ -53,7 +53,7 @@ def test_private_user_agent_scope_resolves_requester_scoped_target(tmp_path: Pat
 
 
 def test_resolution_matches_agent_construction_recipe(tmp_path: Path) -> None:
-    """The method matches build_worker_target_from_runtime_env with agent-construction inputs."""
+    """The method matches build_worker_target_from_runtime_env fed literal agent-construction inputs."""
     config = Config(
         agents={
             "mind": {
@@ -63,24 +63,25 @@ def test_resolution_matches_agent_construction_recipe(tmp_path: Path) -> None:
             "helper": {"display_name": "Helper"},
         },
     )
-    for agent_name in ("mind", "helper"):
-        context = _context(config, agent_name, tmp_path)
-        worker_scope = config.agent_execution_scope(agent_name)
-        agent_config = config.agents.get(agent_name)
-        is_private = agent_config is not None and agent_config.private is not None
-        if worker_scope == "user_agent":
-            private_agent_names = frozenset({agent_name}) if is_private else frozenset()
-        else:
-            private_agent_names = None
-        expected = build_worker_target_from_runtime_env(
-            worker_scope,
-            agent_name,
-            execution_identity=build_execution_identity_from_runtime_context(context),
-            runtime_paths=context.runtime_paths,
-            private_agent_names=private_agent_names,
-        )
 
-        assert context.resolve_worker_target() == expected
+    mind_context = _context(config, "mind", tmp_path)
+    assert mind_context.resolve_worker_target() == build_worker_target_from_runtime_env(
+        "user_agent",
+        "mind",
+        execution_identity=build_execution_identity_from_runtime_context(mind_context),
+        runtime_paths=mind_context.runtime_paths,
+        private_agent_names=frozenset({"mind"}),
+    )
+
+    helper_context = _context(config, "helper", tmp_path)
+    assert config.agent_execution_scope("helper") is None
+    assert helper_context.resolve_worker_target() == build_worker_target_from_runtime_env(
+        None,
+        "helper",
+        execution_identity=build_execution_identity_from_runtime_context(helper_context),
+        runtime_paths=helper_context.runtime_paths,
+        private_agent_names=None,
+    )
 
 
 def test_public_execution_scope_accessor_matches_internal(tmp_path: Path) -> None:

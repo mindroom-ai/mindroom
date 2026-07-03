@@ -98,8 +98,7 @@ class ToolRuntimeContext:
         Mirrors the inputs of agents._build_registered_agent_tool.
         """
         worker_scope = self.config.agent_execution_scope(self.agent_name)
-        agent_config = self.config.agents.get(self.agent_name)
-        routing_agent_is_private = agent_config is not None and agent_config.private is not None
+        routing_agent_is_private = self.config.get_agent(self.agent_name).private is not None
         if worker_scope == "user_agent":
             private_agent_names = frozenset({self.agent_name}) if routing_agent_is_private else frozenset()
         else:
