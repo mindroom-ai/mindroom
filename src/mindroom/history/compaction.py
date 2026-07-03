@@ -32,7 +32,6 @@ from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     CompactionOutcome,
-    HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
     ResolvedHistorySettings,
@@ -170,7 +169,6 @@ async def compact_scope_history(
     summary_input_budget: int,
     summary_model: Model,
     summary_model_name: str,
-    active_context_window: int | None,
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
     summary_prompt: str,
@@ -292,7 +290,6 @@ async def compact_scope_history(
         scope=scope,
         history_settings=history_settings,
     )
-    resolved_window_tokens = replay_window_tokens or active_context_window or 0
     outcome = CompactionOutcome(
         mode="manual" if state.force_compact_before_next_run else "auto",
         session_id=session.session_id,
@@ -301,7 +298,7 @@ async def compact_scope_history(
         summary_model=summary_model_name,
         before_tokens=before_tokens,
         after_tokens=after_tokens,
-        window_tokens=resolved_window_tokens,
+        window_tokens=replay_window_tokens or 0,
         threshold_tokens=threshold_tokens or 0,
         runs_before=before_run_count,
         runs_after=len(after_visible_runs),
@@ -588,9 +585,8 @@ def _build_summary_input(
     previous_summary: str | None,
     compacted_runs: Sequence[RunOutput | TeamRunOutput],
     max_input_tokens: int,
-    history_settings: ResolvedHistorySettings | None = None,
+    history_settings: ResolvedHistorySettings,
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
-    resolved_history_settings = history_settings or _default_compaction_history_settings()
     summary_block = ""
     if previous_summary is not None and previous_summary.strip():
         escaped_summary = _escape_xml_content(previous_summary)
@@ -603,13 +599,13 @@ def _build_summary_input(
 
     included_runs: list[RunOutput | TeamRunOutput] = []
     for run in compacted_runs:
-        run_tokens = _estimate_serialized_run_tokens(run, resolved_history_settings)
+        run_tokens = _estimate_serialized_run_tokens(run, history_settings)
         if run_tokens > remaining:
             if not included_runs:
                 return _build_oversized_summary_input(
                     summary_block=summary_block,
                     compacted_runs=[run],
-                    history_settings=resolved_history_settings,
+                    history_settings=history_settings,
                     max_input_tokens=max_input_tokens,
                 )
             break
@@ -620,7 +616,7 @@ def _build_summary_input(
         return summary_block, []
 
     serialized_runs = "\n\n".join(
-        _serialize_run(run, index, resolved_history_settings) for index, run in enumerate(included_runs)
+        _serialize_run(run, index, history_settings) for index, run in enumerate(included_runs)
     )
     return _compose_summary_input(summary_block, serialized_runs), included_runs
 
@@ -697,13 +693,6 @@ def _serialize_run_excerpt(
 
     lines.append("</run>")
     return "\n".join(lines)
-
-
-def _default_compaction_history_settings() -> ResolvedHistorySettings:
-    return ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
 
 
 def _compaction_replay_messages(

@@ -63,7 +63,6 @@ from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_approval import is_process_active_approval_card
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
@@ -1864,22 +1863,6 @@ class AgentBot:
         receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="media")
         await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
-
-    def _agent_has_matrix_messaging_tool(self, agent_name: str, session_id: str | None = None) -> bool:
-        """Return whether an agent can issue Matrix message actions."""
-        try:
-            tool_names = [
-                entry.name
-                for entry in visible_tool_surface(
-                    agent_name=agent_name,
-                    config=self.config,
-                    session_id=session_id,
-                    enable_dynamic_tools_manager=False,
-                ).runtime_tool_configs
-            ]
-        except ValueError:
-            return False
-        return "matrix_message" in tool_names
 
     async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
         """Run one edit-regenerated turn through this bot's response path."""

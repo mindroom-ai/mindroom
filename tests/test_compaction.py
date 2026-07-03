@@ -1,28 +1,19 @@
-"""Tests for history compaction token breakdown (ISSUE-074)."""
+"""Tests for compaction policy, outcome notices, and AI run metadata."""
 # ruff: noqa: D102
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-from agno.agent import Agent
 from agno.db.base import SessionType
-from agno.models.message import Message
 from agno.session.team import TeamSession
-from agno.tools.function import Function
-from agno.tools.toolkit import Toolkit
 
-from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
-from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.policy import classify_compaction_decision
-from mindroom.history.prompt_tokens import _estimate_tool_definition_tokens, compute_prompt_token_breakdown
 from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import (
@@ -32,11 +23,9 @@ from mindroom.history.types import (
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
-    _to_k,
 )
-from mindroom.memory import MemoryPromptParts
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths
+from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,17 +34,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_agent(
-    role: str = "Short role.",
-    instructions: list[str] | None = None,
-) -> MagicMock:
-    agent = MagicMock(spec=Agent)
-    agent.role = role
-    agent.instructions = instructions or []
-    agent.tools = None
-    return agent
 
 
 def _make_outcome(**overrides: object) -> CompactionOutcome:
@@ -167,31 +145,6 @@ def test_compaction_policy_classifies_trigger_and_required_modes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _to_k helper tests
-# ---------------------------------------------------------------------------
-
-
-class TestToK:
-    """Tests for _to_k floor-rounding helper."""
-
-    def test_boundary_values(self) -> None:
-        assert _to_k(0) == "0"
-        assert _to_k(999) == "999"
-        assert _to_k(1000) == "~1K"
-        assert _to_k(1499) == "~1K"
-        assert _to_k(1500) == "~1K"
-        assert _to_k(1999) == "~1K"
-        assert _to_k(2000) == "~2K"
-        assert _to_k(2500) == "~2K"
-        assert _to_k(3500) == "~3K"
-        assert _to_k(145826) == "~145K"
-
-    def test_no_fabricated_savings_at_boundary(self) -> None:
-        """before=1500, after=1499 must not show different K buckets."""
-        assert _to_k(1500) == _to_k(1499)
-
-
-# ---------------------------------------------------------------------------
 # CompactionOutcome tests
 # ---------------------------------------------------------------------------
 
@@ -209,45 +162,6 @@ class TestCompactionOutcome:
         notice = outcome.format_notice()
         assert notice == "\U0001f4e6 Compacted 12 runs: 1,500 \u2192 1,499 / 2,000 history budget"
 
-    def test_format_notice_uses_enriched_token_breakdown(self) -> None:
-        outcome = _make_outcome(
-            role_instructions_tokens=35_000,
-            tool_definition_tokens=15_000,
-            current_prompt_tokens=62_000,
-            window_tokens=128_000,
-        )
-        notice = outcome.format_notice()
-        assert notice == (
-            "\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 128,000 history budget\n"
-            "   Overhead: ~35K instructions + ~15K tools + ~62K prompt"
-        )
-
-    def test_format_notice_with_partial_breakdown(self) -> None:
-        outcome = _make_outcome(role_instructions_tokens=8_000)
-        notice = outcome.format_notice()
-        assert "~8K instructions" in notice
-        assert "tools" not in notice
-
-    def test_format_notice_suppresses_zero_valued_breakdown(self) -> None:
-        outcome = _make_outcome(
-            role_instructions_tokens=0,
-            tool_definition_tokens=0,
-            current_prompt_tokens=62_000,
-        )
-        notice = outcome.format_notice()
-        assert "instructions" not in notice
-        assert "tools" not in notice
-        assert "~62K prompt" in notice
-
-    def test_format_notice_all_zero_breakdown_omits_overhead_line(self) -> None:
-        outcome = _make_outcome(
-            role_instructions_tokens=0,
-            tool_definition_tokens=0,
-            current_prompt_tokens=0,
-        )
-        notice = outcome.format_notice()
-        assert "Overhead" not in notice
-
     def test_format_notice_omits_unknown_history_budget(self) -> None:
         outcome = _make_outcome(history_budget_tokens=None)
         notice = outcome.format_notice()
@@ -262,66 +176,12 @@ class TestCompactionOutcome:
         assert meta["history_budget_tokens"] == 100_000
         assert meta["threshold_tokens"] == 80_000
         assert meta["compacted_run_count"] == 12
-        assert "role_instructions_tokens" not in meta
-        assert "tool_definition_tokens" not in meta
-        assert "current_prompt_tokens" not in meta
 
     def test_to_notice_metadata_keeps_window_tokens_when_history_budget_unknown(self) -> None:
         outcome = _make_outcome(history_budget_tokens=None)
         meta = outcome.to_notice_metadata()
         assert meta["version"] == 3
         assert meta["window_tokens"] == 100_000
-
-    def test_to_notice_metadata_with_breakdown(self) -> None:
-        outcome = _make_outcome(
-            role_instructions_tokens=2_000,
-            tool_definition_tokens=1_500,
-            current_prompt_tokens=100,
-        )
-        meta = outcome.to_notice_metadata()
-        assert meta["version"] == 3
-        assert meta["history_budget_tokens"] == 100_000
-        assert meta["threshold_tokens"] == 80_000
-        assert meta["role_instructions_tokens"] == 2_000
-        assert meta["tool_definition_tokens"] == 1_500
-        assert meta["current_prompt_tokens"] == 100
-
-
-@pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(tmp_path: Path) -> None:
-    """Compaction notice enrichment should hide zero-valued overhead segments."""
-    config, runtime_paths = _make_prepare_config(tmp_path)
-    live_agent = _make_agent(role="", instructions=[])
-
-    prepared_execution = _PreparedExecutionContext(
-        messages=(Message(role="user", content="x" * 248),),
-        unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(compaction_outcomes=[_make_outcome()]),
-    )
-
-    with (
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch(
-            "mindroom.ai.prepare_agent_execution_context",
-            new=AsyncMock(return_value=prepared_execution),
-        ),
-    ):
-        prepared_run = await _prepare_agent_and_prompt(
-            make_turn_context("test_agent"),
-            prompt="Current prompt",
-            runtime_paths=runtime_paths,
-            config=config,
-        )
-
-    prepared = prepared_run.prepared_history
-    outcome = prepared.compaction_outcomes[0]
-    assert outcome.role_instructions_tokens == 0
-    assert outcome.tool_definition_tokens == 0
-    assert outcome.current_prompt_tokens == 62
-    assert outcome.format_notice() == (
-        "\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget\n   Overhead: 62 prompt"
-    )
 
 
 def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_path: Path) -> None:
@@ -507,76 +367,3 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
     finally:
         first_storage.close()
         second_storage.close()
-
-
-# ---------------------------------------------------------------------------
-# Token estimation tests
-# ---------------------------------------------------------------------------
-
-
-class TestEstimateToolDefinitionTokens:
-    """Tests for estimate_tool_definition_tokens."""
-
-    def test_no_tools(self) -> None:
-        agent = _make_agent()
-        assert _estimate_tool_definition_tokens(agent) == 0
-
-    def test_with_toolkit(self) -> None:
-        func = Function(
-            name="test_func",
-            description="A test function",
-            parameters={"type": "object", "properties": {"x": {"type": "string"}}},
-        )
-        toolkit = Toolkit(name="test_toolkit")
-        toolkit.functions = {"test_func": func}
-        agent = _make_agent()
-        agent.tools = [toolkit]
-        tokens = _estimate_tool_definition_tokens(agent)
-        assert tokens > 0
-
-    def test_with_function(self) -> None:
-        func = Function(
-            name="calculator",
-            description="Does math",
-            parameters={"type": "object"},
-        )
-        agent = _make_agent()
-        agent.tools = [func]
-        tokens = _estimate_tool_definition_tokens(agent)
-        assert tokens > 0
-
-
-class TestComputePromptTokenBreakdown:
-    """Tests for compute_prompt_token_breakdown."""
-
-    def test_returns_all_keys(self) -> None:
-        agent = _make_agent(role="x" * 100, instructions=["y" * 50])
-        breakdown = compute_prompt_token_breakdown(agent=agent, full_prompt="z" * 200)
-        assert "role_instructions_tokens" in breakdown
-        assert "tool_definition_tokens" in breakdown
-        assert "current_prompt_tokens" in breakdown
-
-    def test_role_instructions_tokens_value(self) -> None:
-        agent = _make_agent(role="x" * 40, instructions=["y" * 60])
-        breakdown = compute_prompt_token_breakdown(agent=agent, full_prompt="prompt")
-        # (40 + 60) / 4 = 25
-        assert breakdown["role_instructions_tokens"] == 25
-
-    def test_current_prompt_tokens_value(self) -> None:
-        agent = _make_agent()
-        breakdown = compute_prompt_token_breakdown(agent=agent, full_prompt="x" * 120)
-        assert breakdown["current_prompt_tokens"] == 30
-
-    def test_team_tools_are_included(self) -> None:
-        team = MagicMock()
-        team.tools = [Function.from_callable(lambda value: value)]
-
-        breakdown = compute_prompt_token_breakdown(team=team, full_prompt="z" * 200)
-
-        assert breakdown["tool_definition_tokens"] > 0
-        assert breakdown["current_prompt_tokens"] == 50
-
-    def test_no_prompt(self) -> None:
-        agent = _make_agent()
-        breakdown = compute_prompt_token_breakdown(agent=agent)
-        assert "current_prompt_tokens" not in breakdown

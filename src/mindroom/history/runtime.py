@@ -293,7 +293,6 @@ async def prepare_scope_history(
     resolved_inputs: HistoryPreparationInputs,
     runtime_paths: RuntimePaths,
     config: Config,
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     scope_context: ScopeSessionContext | None = None,
     scope: HistoryScope | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
@@ -390,8 +389,6 @@ async def prepare_scope_history(
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_ready")
             pipeline_timing.note(compaction_reply_outcome=compaction_reply_outcome)
-    if compaction_outcomes_collector is not None:
-        compaction_outcomes_collector.extend(compaction_outcomes)
     return PreparedScopeHistory(
         scope=scope_context.scope,
         session=scope_context.session,
@@ -531,7 +528,6 @@ async def _run_scope_compaction(
         summary_input_budget=execution_plan.summary_input_budget_tokens,
         summary_model=summary_model,
         summary_model_name=execution_plan.compaction_model_name,
-        active_context_window=resolved_inputs.active_context_window,
         replay_window_tokens=execution_plan.replay_window_tokens,
         threshold_tokens=execution_plan.trigger_threshold_tokens,
         summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
@@ -661,7 +657,6 @@ async def prepare_bound_scope_history(
     full_prompt: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     scope_context: ScopeSessionContext | None = None,
     team_name: str | None = None,
     active_model_name: str | None = None,
@@ -724,7 +719,6 @@ async def prepare_bound_scope_history(
         resolved_inputs=resolved_inputs,
         runtime_paths=runtime_paths,
         config=config,
-        compaction_outcomes_collector=compaction_outcomes_collector,
         scope_context=scope_context,
         scope=bound_scope.scope,
         compaction_lifecycle=compaction_lifecycle,

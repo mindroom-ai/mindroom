@@ -39,8 +39,10 @@ from mindroom.history.types import (
     CompactionLifecycleProgress,
     CompactionLifecycleStart,
     CompactionOutcome,
+    HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
+    ResolvedHistorySettings,
 )
 from mindroom.hooks import (
     HookRegistry,
@@ -54,6 +56,11 @@ from tests.conftest import (
 )
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
+
+_ALL_HISTORY_SETTINGS = ResolvedHistorySettings(
+    policy=HistoryPolicy(mode="all"),
+    max_tool_calls_from_history=None,
+)
 
 
 @dataclass

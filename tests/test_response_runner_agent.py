@@ -245,7 +245,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        bot._handle_interactive_question = AsyncMock()
         mock_stream_agent_response = MagicMock()
 
         with patch(
@@ -421,7 +420,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        bot._handle_interactive_question = AsyncMock()
         mock_stream_agent_response = MagicMock(return_value=mock_streaming_response())
         with patch(
             "mindroom.delivery_gateway.send_streaming_response",
@@ -511,7 +509,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        bot._handle_interactive_question = AsyncMock()
 
         captured_collector: dict[str, Any] = {}
 
@@ -610,7 +607,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        bot._handle_interactive_question = AsyncMock()
 
         def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
             async def _gen() -> AsyncGenerator[str, None]:
@@ -680,7 +676,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        bot._handle_interactive_question = AsyncMock()
 
         def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
             async def _gen() -> AsyncGenerator[str, None]:
@@ -753,7 +748,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        bot._handle_interactive_question = AsyncMock()
         mock_stream_agent_response = MagicMock(return_value=mock_streaming_response())
         with (
             patch(
@@ -1004,7 +998,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        bot._handle_interactive_question = AsyncMock()
 
         running_task = asyncio.create_task(asyncio.sleep(60))
         done_task = asyncio.create_task(asyncio.sleep(0))
@@ -1464,7 +1457,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        bot._handle_interactive_question = AsyncMock()
 
         with (
             patch_response_runner_module(

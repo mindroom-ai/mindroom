@@ -100,7 +100,6 @@ def _make_bot(tmp_path: Path) -> AgentBot:
     bot.client.user_id = agent_user.user_id
     bot.client.rooms = {"!team:localhost": MagicMock(room_id="!team:localhost")}
     bot.orchestrator = MagicMock(config=config)
-    bot._handle_interactive_question = AsyncMock()
     return install_runtime_cache_support(bot)
 
 

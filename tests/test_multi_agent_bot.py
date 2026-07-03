@@ -588,7 +588,6 @@ class TestAgentBot(AgentBotTestBase):
             assert stream_ctx.reply_to_event_id == "event123"
             assert stream_kwargs["show_tool_calls"] is True
             assert stream_kwargs["run_metadata_collector"] == {}
-            assert "compaction_outcomes_collector" not in stream_kwargs
             mock_ai_response.assert_not_called()
             # With streaming and stop button: initial message + reaction + edits
             # Note: The exact count may vary based on implementation
@@ -617,33 +616,9 @@ class TestAgentBot(AgentBotTestBase):
             assert ai_kwargs["collect_streamed_response"] is True
             assert ai_kwargs["tool_trace_collector"] == []
             assert ai_kwargs["run_metadata_collector"] == {}
-            assert "compaction_outcomes_collector" not in ai_kwargs
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final
             assert bot.client.room_send.call_count >= 2
-
-    def test_agent_has_matrix_messaging_tool_when_openclaw_compat_enabled(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """openclaw_compat should imply matrix_message availability without explicit config."""
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(
-                        display_name="CalculatorAgent",
-                        rooms=["!test:localhost"],
-                        tools=["openclaw_compat"],
-                        include_default_tools=False,
-                    ),
-                },
-            ),
-            tmp_path,
-        )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-        assert bot._agent_has_matrix_messaging_tool("calculator") is True
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:

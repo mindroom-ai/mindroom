@@ -53,6 +53,7 @@ from tests.conftest import (
     prepare_history_for_run_for_test,
 )
 from tests.history_helpers import (  # noqa: F401
+    _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
     _agent,
     _close_test_storages,
@@ -545,6 +546,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
                 previous_summary=previous_summary,
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
+                history_settings=_ALL_HISTORY_SETTINGS,
             )[1],
         )
 
@@ -687,6 +689,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
                 previous_summary=previous_summary,
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
+                history_settings=_ALL_HISTORY_SETTINGS,
             )[1],
         )
 
@@ -972,6 +975,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
                 previous_summary=previous_summary,
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
+                history_settings=_ALL_HISTORY_SETTINGS,
             )[1],
         )
 

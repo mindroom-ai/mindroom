@@ -206,7 +206,7 @@ def _visible_authored_tool_configs(
     visible_by_name: dict[str, EffectiveToolConfig] = {}
     hidden_deferred_by_name: dict[str, EffectiveToolConfig] = {}
 
-    for authored_entry in config._get_agent_authored_tool_configs(agent_name):
+    for authored_entry in config.resolve_entity(agent_name).authored_tool_configs:
         is_loaded_deferred = authored_entry.defer and authored_entry.name in loaded_deferred_tools
         is_visible_owner = not authored_entry.defer or is_loaded_deferred
         for tool_name in config.expand_tool_names([authored_entry.name]):

@@ -77,9 +77,11 @@ from tests.ai_user_id_helpers import (
     _runtime_paths,
     _SessionStorage,
     _set_gateway_method,
+    bind_runtime_paths,
+)
+from tests.bot_helpers import (
     _stream_outcome,
     _visible_response_event_id,
-    bind_runtime_paths,
 )
 from tests.conftest import (
     message_origin,
@@ -759,7 +761,6 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
     bot.config = config
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
-    bot._handle_interactive_question = AsyncMock()
 
     storage = _SessionStorage()
     sequence: list[str] = []
@@ -1145,7 +1146,6 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
     bot.config = config
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
-    bot._handle_interactive_question = AsyncMock()
 
     storage = _SessionStorage()
     sequence: list[str] = []

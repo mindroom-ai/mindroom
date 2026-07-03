@@ -59,6 +59,7 @@ from tests.conftest import (
     prepare_history_for_run_for_test,
 )
 from tests.history_helpers import (  # noqa: F401
+    _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
     _agent,
     _close_test_storages,
@@ -415,6 +416,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
                 previous_summary=None,
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
+                history_settings=_ALL_HISTORY_SETTINGS,
             )[1],
         )
         == 1
@@ -423,6 +425,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
                 previous_summary="merged summary",
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
+                history_settings=_ALL_HISTORY_SETTINGS,
             )[1],
         )
         == 1
@@ -478,7 +481,6 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             summary_input_budget=summary_input_budget,
             summary_model=FakeModel(id="summary-model", provider="fake"),
             summary_model_name="summary-model",
-            active_context_window=16_000,
             replay_window_tokens=16_000,
             threshold_tokens=1,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1055,6 +1057,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
                 previous_summary=None,
                 compacted_runs=list(working_session.runs or []),
                 max_input_tokens=budget,
+                history_settings=_ALL_HISTORY_SETTINGS,
             )[1],
         )
         == 1
@@ -1062,6 +1065,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             previous_summary=summary_text,
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
+            history_settings=_ALL_HISTORY_SETTINGS,
         )[1]
         == []
     )
@@ -1141,7 +1145,6 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
             ),
             available_history_budget=1,
             summary_input_budget=16_000,
-            active_context_window=64_000,
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1206,6 +1209,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
                 previous_summary=None,
                 compacted_runs=list(session.runs or []),
                 max_input_tokens=budget,
+                history_settings=_ALL_HISTORY_SETTINGS,
             )[1],
         )
         == 1
@@ -1213,6 +1217,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             previous_summary=summary_text,
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
+            history_settings=_ALL_HISTORY_SETTINGS,
         )[1]
         == []
     )
@@ -1234,7 +1239,6 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             summary_input_budget=summary_input_budget,
             summary_model=FakeModel(id="summary-model", provider="fake"),
             summary_model_name="summary-model",
-            active_context_window=16_000,
             replay_window_tokens=16_000,
             threshold_tokens=1,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1292,6 +1296,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
                 previous_summary=None,
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
+                history_settings=_ALL_HISTORY_SETTINGS,
             )[1],
         )
         == 1
@@ -1300,6 +1305,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
                 previous_summary="merged summary",
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
+                history_settings=_ALL_HISTORY_SETTINGS,
             )[1],
         )
         == 1

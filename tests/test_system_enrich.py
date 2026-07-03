@@ -185,7 +185,6 @@ def _make_bot(tmp_path: Path) -> AgentBot:
     bot.client = MagicMock()
     bot.client.user_id = agent_user.user_id
     bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
-    bot._handle_interactive_question = AsyncMock()
     return bot
 
 

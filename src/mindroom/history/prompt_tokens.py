@@ -82,15 +82,6 @@ def _estimate_agent_non_prompt_static_tokens(agent: Agent) -> int:
     return static_tokens + _estimate_prepared_tool_definition_tokens(prepared_tools)
 
 
-def _estimate_tool_definition_tokens(agent: Agent) -> int:
-    """Estimate the model-visible tool schema and tool instructions for one agent."""
-    prepared_tools, tool_instructions = _prepare_tools_for_estimation(agent.tools)
-    return _estimate_prepared_tool_definition_tokens(
-        prepared_tools,
-        tool_instructions=tool_instructions,
-    )
-
-
 def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
     """Estimate the non-history team prompt using Agno's team system-message builder."""
     return team_static_token_estimator(team).estimate(full_prompt)
@@ -344,35 +335,3 @@ def _agent_prompt_estimation_inputs(agent: Agent) -> tuple[AgentSession, RunOutp
         session_state={},
     )
     return session, run_response, run_context
-
-
-def compute_prompt_token_breakdown(
-    agent: Agent | None = None,
-    team: Team | None = None,
-    full_prompt: str | None = None,
-) -> dict[str, int]:
-    """Compute token breakdown for system prompt, tool defs, and current prompt."""
-    breakdown: dict[str, int] = {}
-
-    if agent is not None:
-        sys_chars = len(agent.role or "")
-        instructions = agent.instructions
-        if isinstance(instructions, str):
-            sys_chars += len(instructions)
-        elif isinstance(instructions, list):
-            for instruction in instructions:
-                sys_chars += len(str(instruction))
-        breakdown["role_instructions_tokens"] = sys_chars // 4  # same floor as estimate_text_tokens
-
-    tool_tokens = 0
-    if agent is not None:
-        tool_tokens = _estimate_tool_definition_tokens(agent)
-    elif team is not None:
-        prepared_tools, _tool_instructions = _prepare_tools_for_estimation(team.tools)
-        tool_tokens = _estimate_prepared_tool_definition_tokens(prepared_tools)
-    breakdown["tool_definition_tokens"] = tool_tokens
-
-    if full_prompt is not None:
-        breakdown["current_prompt_tokens"] = estimate_text_tokens(full_prompt)
-
-    return breakdown

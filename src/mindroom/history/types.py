@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, TypedDict, TypeGuard, cast
+from typing import Literal, Protocol, TypedDict, cast
 
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
@@ -248,25 +248,9 @@ class CompactionLifecycle(Protocol):
         """Edit the lifecycle notice after failed compaction."""
 
 
-def _to_k(tokens: int) -> str:
-    """Abbreviate token counts: ``145826`` → ``~145K``, values <1000 as-is.
-
-    Uses floor rounding so nearby values do not jump across adjacent ``K``
-    buckets when this helper is used for compact auxiliary counts.
-    """
-    if tokens >= 1000:
-        return f"~{tokens // 1000}K"
-    return str(tokens)
-
-
 def _format_exact_tokens(tokens: int) -> str:
     """Format token counts exactly with thousands separators."""
     return f"{tokens:,}"
-
-
-def _should_render_overhead_tokens(tokens: int | None) -> TypeGuard[int]:
-    """Return whether one overhead segment should appear in the notice."""
-    return tokens is not None and tokens != 0
 
 
 @dataclass(frozen=True)
@@ -287,9 +271,6 @@ class CompactionOutcome:
     compacted_run_count: int
     compacted_at: str
     history_budget_tokens: int | None = None
-    role_instructions_tokens: int | None = None
-    tool_definition_tokens: int | None = None
-    current_prompt_tokens: int | None = None
     lifecycle_notice_event_id: str | None = None
     duration_ms: int | None = None
     status: _CompactionLifecycleStatus = "success"
@@ -315,12 +296,6 @@ class CompactionOutcome:
             meta["history_budget_tokens"] = self.history_budget_tokens
         if self.threshold_tokens:
             meta["threshold_tokens"] = self.threshold_tokens
-        if self.role_instructions_tokens is not None:
-            meta["role_instructions_tokens"] = self.role_instructions_tokens
-        if self.tool_definition_tokens is not None:
-            meta["tool_definition_tokens"] = self.tool_definition_tokens
-        if self.current_prompt_tokens is not None:
-            meta["current_prompt_tokens"] = self.current_prompt_tokens
         if self.lifecycle_notice_event_id is not None:
             meta["lifecycle_notice_event_id"] = self.lifecycle_notice_event_id
         if self.duration_ms is not None:
@@ -335,15 +310,6 @@ class CompactionOutcome:
         )
         if self.history_budget_tokens is not None:
             line1 += f" / {_format_exact_tokens(self.history_budget_tokens)} history budget"
-        overhead_parts: list[str] = []
-        if _should_render_overhead_tokens(self.role_instructions_tokens):
-            overhead_parts.append(f"{_to_k(self.role_instructions_tokens)} instructions")
-        if _should_render_overhead_tokens(self.tool_definition_tokens):
-            overhead_parts.append(f"{_to_k(self.tool_definition_tokens)} tools")
-        if _should_render_overhead_tokens(self.current_prompt_tokens):
-            overhead_parts.append(f"{_to_k(self.current_prompt_tokens)} prompt")
-        if overhead_parts:
-            return f"{line1}\n   Overhead: {' + '.join(overhead_parts)}"
         return line1
 
 

@@ -95,8 +95,10 @@ from tests.ai_user_id_helpers import (
     _response_request,
     _runtime_paths,
     _SessionStorage,
-    _stream_outcome,
     bind_runtime_paths,
+)
+from tests.bot_helpers import (
+    _stream_outcome,
 )
 from tests.conftest import (
     make_turn_context,
@@ -442,7 +444,6 @@ class TestUserIdPassthrough:
         bot.storage_path = tmp_path
         bot.runtime_paths = runtime_paths
         bot._knowledge_access_support = _knowledge_access_support()
-        bot._handle_interactive_question = AsyncMock()
         with patch("mindroom.response_runner.stream_agent_response") as mock_stream:
             coordinator = _build_response_runner(
                 bot,
