@@ -622,29 +622,6 @@ class TestAgentBot(AgentBotTestBase):
             # With stop button support: initial + reaction + final
             assert bot.client.room_send.call_count >= 2
 
-    def test_agent_has_matrix_messaging_tool_when_openclaw_compat_enabled(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """openclaw_compat should imply matrix_message availability without explicit config."""
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(
-                        display_name="CalculatorAgent",
-                        rooms=["!test:localhost"],
-                        tools=["openclaw_compat"],
-                        include_default_tools=False,
-                    ),
-                },
-            ),
-            tmp_path,
-        )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-        assert bot._agent_has_matrix_messaging_tool("calculator") is True
-
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test agent bot not responding when not mentioned."""

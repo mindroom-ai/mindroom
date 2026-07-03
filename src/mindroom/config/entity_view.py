@@ -95,6 +95,11 @@ class ResolvedEntityView:
         return self._config._agent_tool_configs(self._agent_name())
 
     @property
+    def authored_tool_configs(self) -> list[EffectiveToolConfig]:
+        """Effective authored tool config entries before preset/implied expansion."""
+        return self._config._get_agent_authored_tool_configs(self._agent_name())
+
+    @property
     def authored_deferred_tool_configs(self) -> list[EffectiveToolConfig]:
         """One entry per authored deferred tool in effective order."""
         return self._config._agent_authored_deferred_tool_configs(self._agent_name())

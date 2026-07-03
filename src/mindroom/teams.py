@@ -1679,7 +1679,7 @@ def _create_team_instance(
     team_display_name: str,
     scope_context: ScopeSessionContext | None,
     execution_identity: ToolExecutionIdentity | None,
-    model_name: str | None = None,
+    model_name: str,
     configured_team_name: str | None = None,
 ) -> Team:
     """Create a configured Team instance.
@@ -1694,7 +1694,7 @@ def _create_team_instance(
             is available for this request.
         execution_identity: Request execution identity used for provider-specific
             model behavior such as codex prompt-cache keying
-        model_name: Optional model name override
+        model_name: Resolved model name for the shared team model
         configured_team_name: Optional configured team id for stable team-scope history
 
     Returns:
@@ -1704,7 +1704,7 @@ def _create_team_instance(
     model = model_loading.get_model_instance(
         config,
         runtime_paths,
-        model_name or "default",
+        model_name,
         execution_identity=execution_identity,
     )
     # Coordinate-mode tool calls run through the shared team model in v1.

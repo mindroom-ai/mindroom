@@ -408,6 +408,7 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
             team_display_name="Team-alpha-zeta",
             scope_context=scope_context,
             execution_identity=None,
+            model_name="default",
             configured_team_name="pair",
         )
 
@@ -467,6 +468,7 @@ def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None
             team_display_name="Team-alpha-zeta",
             scope_context=scope_context,
             execution_identity=None,
+            model_name="default",
             configured_team_name="pair",
         )
 

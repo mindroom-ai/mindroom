@@ -802,6 +802,15 @@ def test_matrix_metadata_injection_is_loaded_state_aware(tmp_path: Path) -> None
     assert _agent_has_matrix_messaging_tool(config, "code", "thread-a")
 
 
+def test_openclaw_compat_implies_matrix_messaging_tool(tmp_path: Path) -> None:
+    """openclaw_compat should imply matrix_message availability without explicit config."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["openclaw_compat"]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    assert _agent_has_matrix_messaging_tool(config, "code", None)
+
+
 def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_path: Path) -> None:
     """Prompt catalog text should remain stable while loaded-state suffix changes."""
     raw = _base_config_data()
