@@ -442,7 +442,6 @@ class TestUserIdPassthrough:
         bot.storage_path = tmp_path
         bot.runtime_paths = runtime_paths
         bot._knowledge_access_support = _knowledge_access_support()
-        bot._handle_interactive_question = AsyncMock()
         with patch("mindroom.response_runner.stream_agent_response") as mock_stream:
             coordinator = _build_response_runner(
                 bot,

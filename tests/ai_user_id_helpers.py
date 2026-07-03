@@ -25,7 +25,7 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -47,6 +47,11 @@ from mindroom.response_runner import (
 from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
+)
+from tests.bot_helpers import (  # noqa: F401
+    _handled_response_event_id,
+    _stream_outcome,
+    _visible_response_event_id,
 )
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
@@ -75,35 +80,6 @@ def bind_runtime_paths(config: Config, runtime_paths: RuntimePaths) -> Config:
     bound = _bind_runtime_paths(config, runtime_paths)
     persist_entity_accounts(bound, runtime_paths)
     return bound
-
-
-def _stream_outcome(
-    event_id: str | None,
-    body: str,
-    *,
-    terminal_status: str = "completed",
-    visible_body_state: str = "visible_body",
-    failure_reason: str | None = None,
-) -> StreamTransportOutcome:
-    return StreamTransportOutcome(
-        last_physical_stream_event_id=event_id,
-        terminal_status=terminal_status,
-        rendered_body=body,
-        visible_body_state=visible_body_state,
-        failure_reason=failure_reason,
-    )
-
-
-def _visible_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
-    if isinstance(outcome, str) or outcome is None:
-        return outcome
-    return outcome.final_visible_event_id
-
-
-def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
-    if isinstance(outcome, str) or outcome is None:
-        return outcome
-    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
 
 
 def _set_gateway_method(gateway: DeliveryGateway, name: str, value: T) -> T:
@@ -287,7 +263,6 @@ def _make_bot(
     bot.config = config
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
-    bot._handle_interactive_question = AsyncMock()
     return bot
 
 

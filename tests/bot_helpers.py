@@ -36,15 +36,12 @@ from mindroom.dispatch_source import (
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
-from mindroom.history import CompactionOutcome
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
     MessageEnvelope,
 )
-from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
-from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -53,7 +50,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.response_runner import (
     ResponseRequest,
-    ResponseRunner,
 )
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.tool_approval import _shutdown_approval_store
@@ -66,7 +62,6 @@ from tests.conftest import (
     make_event_cache_write_coordinator_mock,
     make_matrix_client_mock,
     message_origin,
-    replace_response_runner_deps,
     replace_turn_controller_deps,
     runtime_paths_for,
     test_runtime_paths,
@@ -234,25 +229,10 @@ def _turn_store(bot: AgentBot | TeamBot) -> TurnStore:
     return unwrap_extracted_collaborator(bot._turn_store)
 
 
-def _mock_turn_store(bot: AgentBot | TeamBot, *, is_handled: bool = False) -> TurnStore:
-    """Patch the existing turn store in place for tests that only need dedupe control."""
-    turn_store = _turn_store(bot)
-    turn_store.is_handled = MagicMock(return_value=is_handled)
-    return turn_store
-
-
 def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> MagicMock:
     """Swap the private handled-turn ledger behind one turn store for test assertions."""
     _turn_store(bot)._ledger = tracker
     return tracker
-
-
-def _replace_response_runner_runtime_deps(
-    bot: AgentBot,
-    **changes: object,
-) -> ResponseRunner:
-    """Rebuild the response coordinator with updated runtime-captured deps."""
-    return replace_response_runner_deps(bot, **changes)
 
 
 def _set_knowledge_for_agent(bot: AgentBot, knowledge_for_agent: MagicMock) -> MagicMock:
@@ -506,24 +486,6 @@ def _approval_reload_config(tmp_path: Path, *, include_code: bool) -> Config:
     )
 
 
-def _code_only_config(tmp_path: Path, *, rooms: list[str]) -> Config:
-    """Return one minimal config with only the code agent."""
-    return _runtime_bound_config(
-        Config(
-            agents={
-                "code": {
-                    "display_name": "CodeAgent",
-                    "role": "Writes code",
-                    "model": "default",
-                    "rooms": rooms,
-                },
-            },
-            models={"default": {"provider": "test", "id": "test-model"}},
-        ),
-        tmp_path,
-    )
-
-
 def _mock_approval_reload_bot(
     config: Config,
     *,
@@ -640,26 +602,6 @@ def _cleanup_recorder(event_order: list[str]) -> Callable[[], Awaitable[None]]:
         event_order.append("cleanup")
 
     return _cleanup
-
-
-def _mock_shared_knowledge_manager(
-    *,
-    base_id: str,
-    storage_root: Path,
-    knowledge_path: Path,
-    knowledge: object,
-) -> KnowledgeManager:
-    manager = MagicMock(spec=KnowledgeManager)
-    manager.base_id = base_id
-    manager.storage_path = storage_root
-    manager.knowledge_path = knowledge_path
-    manager._cached_persisted_indexing_state = SimpleNamespace(
-        status="complete",
-        availability=KnowledgeAvailability.READY.value,
-    )
-    manager.matches.return_value = True
-    manager.get_knowledge.return_value = knowledge
-    return manager
 
 
 def _hook_plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
@@ -968,24 +910,6 @@ class _FailingStubVectorDb:
     ) -> list[Document]:
         _ = (query, limit, filters)
         raise RuntimeError(self.error_message)
-
-
-def _make_compaction_outcome(*, mode: str = "auto") -> CompactionOutcome:
-    return CompactionOutcome(
-        mode=mode,
-        session_id="!test:localhost:$thread_root_id",
-        scope="agent:general",
-        summary="## Goal\nPreserve <summary> & keep context.",
-        summary_model="compact-model",
-        before_tokens=30000,
-        after_tokens=12000,
-        window_tokens=200000,
-        threshold_tokens=100000,
-        runs_before=18,
-        runs_after=7,
-        compacted_run_count=12,
-        compacted_at="2026-03-22T20:15:00Z",
-    )
 
 
 class AgentBotTestBase:

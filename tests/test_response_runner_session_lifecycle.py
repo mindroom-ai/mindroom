@@ -762,7 +762,6 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
     bot.config = config
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
-    bot._handle_interactive_question = AsyncMock()
 
     storage = _SessionStorage()
     sequence: list[str] = []
@@ -1148,7 +1147,6 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
     bot.config = config
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
-    bot._handle_interactive_question = AsyncMock()
 
     storage = _SessionStorage()
     sequence: list[str] = []

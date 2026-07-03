@@ -211,7 +211,6 @@ class TestAIErrorDisplay:
             edited_messages.append((event_id, text))
 
         bot._edit_message = mock_edit_message
-        bot._handle_interactive_question = AsyncMock()
 
         # Mock stream_agent_response to yield an error message
         with patch("mindroom.response_runner.stream_agent_response") as mock_stream:
@@ -388,7 +387,6 @@ class TestAIErrorDisplay:
         """Collected non-streaming RunCancelledEvent should keep a user-stop label."""
         bot = _mock_bot(tmp_path)
         bot.config.agents["test_agent"].show_tool_calls = True
-        bot._handle_interactive_question = AsyncMock()
 
         edited_messages: list[tuple[str, str]] = []
 
@@ -451,7 +449,6 @@ class TestAIErrorDisplay:
     async def test_run_cancelled_event_preserves_user_stop_note_in_streaming(self, tmp_path: Path) -> None:
         """RunCancelledEvent should keep a user-stop label in the final streamed edit."""
         bot = _mock_bot(tmp_path)
-        bot._handle_interactive_question = AsyncMock()
 
         edited_messages: list[tuple[str, str]] = []
 
