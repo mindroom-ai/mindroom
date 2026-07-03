@@ -118,7 +118,7 @@ if TYPE_CHECKING:
     from agno.metrics import RunMetrics
     from agno.models.response import ToolExecution
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
     from mindroom.history import CompactionLifecycle, PreparedHistoryState
     from mindroom.history.turn_recorder import TurnRecorder
@@ -1800,16 +1800,11 @@ def build_materialized_team_instance(
     config: Config,
     runtime_paths: RuntimePaths,
     scope_context: ScopeSessionContext | None,
-    model_name: str | None,
+    model_name: str,
     configured_team_name: str | None,
     execution_identity: ToolExecutionIdentity | None,
 ) -> Team:
     """Build one agno.Team instance for already-materialized members."""
-    resolved_team_runtime_model = config.resolve_runtime_model(
-        entity_name=configured_team_name,
-        active_model_name=model_name,
-    )
-    resolved_team_model_name = resolved_team_runtime_model.model_name
     team_label = f"Team-{'-'.join(requested_agent_names)}"
     return _create_team_instance(
         agents=agents,
@@ -1819,7 +1814,7 @@ def build_materialized_team_instance(
         team_display_name=team_label,
         scope_context=scope_context,
         execution_identity=execution_identity,
-        model_name=resolved_team_model_name,
+        model_name=model_name,
         configured_team_name=configured_team_name,
     )
 
@@ -1834,7 +1829,7 @@ async def prepare_materialized_team_execution(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     config: Config,
     runtime_paths: RuntimePaths,
-    active_model_name: str | None,
+    runtime_model: ResolvedRuntimeModel,
     response_sender_id: str | None,
     current_sender_id: str | None,
     configured_team_name: str | None,
@@ -1850,13 +1845,6 @@ async def prepare_materialized_team_execution(
         _append_additional_context(team, rendered_system_context)
         for agent in agents:
             _append_additional_context(agent, rendered_system_context)
-    runtime_model = config.resolve_runtime_model(
-        entity_name=configured_team_name,
-        active_model_name=active_model_name,
-        room_id=ctx.room_id,
-        thread_id=ctx.thread_id,
-        runtime_paths=runtime_paths,
-    )
     prepared_execution = await prepare_bound_team_run_context(
         ctx,
         scope_context=scope_context,
@@ -1867,7 +1855,7 @@ async def prepare_materialized_team_execution(
         runtime_paths=runtime_paths,
         config=config,
         entity_name=configured_team_name,
-        active_model_name=active_model_name,
+        active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
@@ -1988,17 +1976,15 @@ async def team_response(  # noqa: C901, PLR0915
             configured_team_name=configured_team_name,
         )
         attempt_agents = attempt_members.agents
-        # Resolve the runtime model here and pass it down so the Team instance
-        # and the run metadata cannot disagree: prepare re-resolves with the
-        # same inputs synchronously (no await in between) and short-circuits
-        # on this name.
-        attempt_model_name = config.resolve_runtime_model(
+        # Resolve the runtime model once here and hand it down so the Team
+        # instance and the run metadata cannot disagree.
+        attempt_runtime_model = config.resolve_runtime_model(
             entity_name=configured_team_name,
             active_model_name=model_name,
             room_id=ctx.room_id,
             thread_id=ctx.thread_id,
             runtime_paths=orchestrator.runtime_paths,
-        ).model_name
+        )
         team = build_materialized_team_instance(
             requested_agent_names=attempt_members.requested_agent_names,
             agents=attempt_agents,
@@ -2006,7 +1992,7 @@ async def team_response(  # noqa: C901, PLR0915
             config=config,
             runtime_paths=orchestrator.runtime_paths,
             scope_context=run.scope_context,
-            model_name=attempt_model_name,
+            model_name=attempt_runtime_model.model_name,
             configured_team_name=configured_team_name,
             execution_identity=execution_identity,
         )
@@ -2020,7 +2006,7 @@ async def team_response(  # noqa: C901, PLR0915
             thread_history=thread_history,
             config=config,
             runtime_paths=orchestrator.runtime_paths,
-            active_model_name=attempt_model_name,
+            runtime_model=attempt_runtime_model,
             response_sender_id=response_sender_id,
             current_sender_id=user_id,
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,
@@ -2459,17 +2445,15 @@ async def team_response_stream(  # noqa: C901, PLR0915
             configured_team_name=configured_team_name,
         )
         attempt_agents = attempt_members.agents
-        # Resolve the runtime model here and pass it down so the Team instance
-        # and the run metadata cannot disagree: prepare re-resolves with the
-        # same inputs synchronously (no await in between) and short-circuits
-        # on this name.
-        attempt_model_name = config.resolve_runtime_model(
+        # Resolve the runtime model once here and hand it down so the Team
+        # instance and the run metadata cannot disagree.
+        attempt_runtime_model = config.resolve_runtime_model(
             entity_name=configured_team_name,
             active_model_name=model_name,
             room_id=ctx.room_id,
             thread_id=ctx.thread_id,
             runtime_paths=orchestrator.runtime_paths,
-        ).model_name
+        )
         team = build_materialized_team_instance(
             requested_agent_names=attempt_members.requested_agent_names,
             agents=attempt_agents,
@@ -2477,7 +2461,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             config=config,
             runtime_paths=orchestrator.runtime_paths,
             scope_context=run.scope_context,
-            model_name=attempt_model_name,
+            model_name=attempt_runtime_model.model_name,
             configured_team_name=configured_team_name,
             execution_identity=execution_identity,
         )
@@ -2491,7 +2475,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             thread_history=thread_history,
             config=config,
             runtime_paths=orchestrator.runtime_paths,
-            active_model_name=attempt_model_name,
+            runtime_model=attempt_runtime_model,
             response_sender_id=response_sender_id,
             current_sender_id=user_id,
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,

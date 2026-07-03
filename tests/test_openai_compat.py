@@ -2924,7 +2924,7 @@ class TestTeamCompletion:
         assert re.fullmatch(r"[0-9a-f]{32}", preparation_ctx.correlation_id)
         assert preparation_kwargs["configured_team_name"] == "super_team"
         assert preparation_ctx.matrix_run_metadata is None
-        assert preparation_kwargs["active_model_name"] == "default"
+        assert preparation_kwargs["runtime_model"].model_name == "default"
 
     def test_team_listed_in_models(self, team_app_client: TestClient) -> None:
         """Teams appear in /v1/models with team/ prefix."""

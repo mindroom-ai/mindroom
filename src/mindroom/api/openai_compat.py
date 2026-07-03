@@ -852,7 +852,7 @@ async def _prepare_openai_team_prompt(
         thread_history=thread_history,
         config=config,
         runtime_paths=runtime_paths,
-        active_model_name=config.resolve_runtime_model(entity_name=team_name).model_name,
+        runtime_model=config.resolve_runtime_model(entity_name=team_name),
         response_sender_id=None,
         current_sender_id=None,
         configured_team_name=team_name,
