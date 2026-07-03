@@ -10213,6 +10213,15 @@ If multiple skills share the same name, the last one wins (agent workspace > use
 
 Agent workspace skills are only available to the owning agent at runtime. They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
 
+## Authoring skills as an agent
+
+Agents never need write access to a global skill root to create skills.
+The bundled, plugin, and user roots can be read-only at runtime, for example in container or Kubernetes deployments where the image filesystem and `~/.mindroom` are not writable.
+An agent can always author skills in its own workspace at `<workspace>/skills/<skill-name>/SKILL.md`, using the same `SKILL.md` format described above.
+Workspace-rooted file tools address this location as the relative path `skills/<skill-name>/SKILL.md`.
+Agents with a workspace receive this guidance in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which can be overridden via the root `prompts` block (see [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides)).
+A new or edited workspace skill is picked up on the agent's next run without a config change.
+
 ## Configuring skills
 
 Add skills to an agent allowlist in `config.yaml`:

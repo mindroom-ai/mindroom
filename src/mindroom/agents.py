@@ -1416,6 +1416,7 @@ def _build_agent_instructions(
 
     if agent_runtime.tool_base_dir is not None and not disable_runtime_capabilities:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
+        instructions.append(config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"))
 
     file_mode_knowledge_instruction = (
         None
