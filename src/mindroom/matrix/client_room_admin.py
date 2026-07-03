@@ -535,13 +535,13 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
     return False
 
 
-async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
-    """Get the current members of a room."""
+async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str] | None:
+    """Get the current members of a room, or ``None`` when the fetch fails."""
     response = await client.joined_members(room_id)
     if isinstance(response, nio.JoinedMembersResponse):
         return {member.user_id for member in response.members}
-    logger.warning("matrix_room_members_fetch_failed", room_id=room_id)
-    return set()
+    logger.warning("matrix_room_members_fetch_failed", room_id=room_id, error=str(response))
+    return None
 
 
 async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:

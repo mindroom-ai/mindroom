@@ -88,9 +88,12 @@ async def is_external_trigger_owner_joined_target_room(
     client: nio.AsyncClient,
     snapshot: TriggerDeliverySnapshot,
 ) -> bool:
-    """Return whether the trigger owner is currently joined to the delivery room."""
+    """Return whether the trigger owner is currently joined to the delivery room.
+
+    A failed membership fetch counts as not joined so delivery stays fail-closed.
+    """
     member_ids = await get_room_members(client, snapshot.resolved_room_id)
-    return snapshot.owner_user_id in member_ids
+    return member_ids is not None and snapshot.owner_user_id in member_ids
 
 
 def _external_trigger_content_metadata(

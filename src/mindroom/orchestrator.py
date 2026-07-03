@@ -1530,6 +1530,9 @@ class _MultiAgentOrchestrator:
             return
 
         current_members = await get_room_members(router_bot.client, root_space_id)
+        if current_members is None:
+            logger.warning("room_invitations_skipped_members_unavailable", room_id=root_space_id)
+            return
         for user_id in sorted(invite_user_ids):
             log_context = {"user_id": user_id, "room_id": root_space_id}
             await self._invite_user_if_missing(
@@ -1588,6 +1591,9 @@ class _MultiAgentOrchestrator:
         authorized_user_ids.discard(user_id)
         for room_id in joined_rooms:
             room_members = await get_room_members(router_bot.client, room_id)
+            if room_members is None:
+                logger.warning("room_invitations_skipped_members_unavailable", room_id=room_id)
+                continue
             await self._invite_user_if_missing(
                 room_id,
                 user_id,
@@ -1665,6 +1671,9 @@ class _MultiAgentOrchestrator:
                 continue
 
             current_members = await get_room_members(router_bot.client, room_id)
+            if current_members is None:
+                logger.warning("room_invitations_skipped_members_unavailable", room_id=room_id)
+                continue
             await self._invite_authorized_users_to_room(room_id, current_members, authorized_user_ids, config)
             if configured_bots:
                 await self._invite_configured_bots_to_room(room_id, current_members, configured_bots)
