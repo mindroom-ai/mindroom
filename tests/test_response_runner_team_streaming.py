@@ -36,13 +36,6 @@ from mindroom.response_runner import (
 )
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
-from tests.identity_helpers import fixture_entity_matrix_id
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
-    from pathlib import Path
-
-
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config,
@@ -61,6 +54,11 @@ from tests.ai_user_id_helpers import (
     _team_orchestrator,
     bind_runtime_paths,
 )
+from tests.identity_helpers import fixture_entity_matrix_id
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Awaitable, Callable
+    from pathlib import Path
 
 
 @pytest.mark.asyncio

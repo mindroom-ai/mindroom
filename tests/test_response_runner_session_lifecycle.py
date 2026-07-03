@@ -63,18 +63,6 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_worker_key,
 )
-from tests.conftest import (
-    message_origin,
-    request_envelope,
-)
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
-    from pathlib import Path
-
-    from agno.session.team import TeamSession
-
-
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config,
@@ -92,6 +80,16 @@ from tests.ai_user_id_helpers import (
     _visible_response_event_id,
     bind_runtime_paths,
 )
+from tests.conftest import (
+    message_origin,
+    request_envelope,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Awaitable, Callable
+    from pathlib import Path
+
+    from agno.session.team import TeamSession
 
 
 def test_persist_interrupted_turn_closes_storage_after_write(tmp_path: Path) -> None:

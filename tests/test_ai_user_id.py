@@ -84,21 +84,6 @@ from mindroom.tool_system.worker_routing import (
     stream_with_tool_execution_identity,
     tool_execution_identity,
 )
-from tests.conftest import (
-    make_turn_context,
-    make_visible_message,
-)
-from tests.identity_helpers import persist_entity_accounts
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
-    from pathlib import Path
-
-    from agno.session.agent import AgentSession
-
-    from mindroom.final_delivery import StreamTransportOutcome
-
-
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config,
@@ -113,6 +98,19 @@ from tests.ai_user_id_helpers import (
     _stream_outcome,
     bind_runtime_paths,
 )
+from tests.conftest import (
+    make_turn_context,
+    make_visible_message,
+)
+from tests.identity_helpers import persist_entity_accounts
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, AsyncIterator
+    from pathlib import Path
+
+    from agno.session.agent import AgentSession
+
+    from mindroom.final_delivery import StreamTransportOutcome
 
 
 def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
