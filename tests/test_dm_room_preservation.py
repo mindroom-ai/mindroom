@@ -216,6 +216,50 @@ class TestDMPreservationDuringCleanup:
                 reason="Bot no longer configured for this room",
             )
 
+    async def test_orphaned_bot_cleanup_leaves_when_orphan_is_own_account(self, tmp_path: Path) -> None:
+        """The sweeping client's own account must leave instead of kick (Matrix forbids self-kick)."""
+        client = AsyncMock()
+        client.user_id = "@mindroom_orphaned:server"
+        config = _config_with_runtime_paths(
+            tmp_path,
+            agents={
+                "configured_agent": AgentConfig(
+                    display_name="Configured Agent",
+                    role="Agent that should be in rooms",
+                ),
+            },
+        )
+        current_domain = config.get_domain(runtime_paths_for(config))
+        members = ["@user:server", "@mindroom_orphaned:server", f"@mindroom_configured_agent:{current_domain}"]
+
+        with (
+            patch(
+                "mindroom.matrix.room_cleanup.get_room_members",
+                return_value=members,
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup._get_all_known_bot_user_ids",
+                return_value={"@mindroom_orphaned:server", f"@mindroom_configured_agent:{current_domain}"},
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup.configured_bot_user_ids_for_room",
+                return_value={f"@mindroom_configured_agent:{current_domain}"},
+            ),
+        ):
+            client.room_leave = AsyncMock(return_value=nio.RoomLeaveResponse())
+
+            removed_bots = await _cleanup_orphaned_bots_in_room(
+                client,
+                "!regular:server",
+                config,
+                runtime_paths_for(config),
+            )
+
+            # Should leave the room itself instead of kicking its own account
+            assert removed_bots == ["@mindroom_orphaned:server"]
+            client.room_leave.assert_called_once_with("!regular:server")
+            client.room_kick.assert_not_called()
+
     async def test_orphaned_bot_cleanup_preserves_drifted_current_bot_username(self, tmp_path: Path) -> None:
         """Current managed bots with persisted username drift must not be treated as orphaned."""
         client = AsyncMock()

@@ -83,7 +83,7 @@ async def _cleanup_orphaned_bots_in_room(
         persisted_invited_rooms_by_bot: Preloaded persisted invited rooms keyed by bot Matrix user ID
 
     Returns:
-        List of bot Matrix user IDs that were kicked
+        List of bot Matrix user IDs that were removed from the room
 
     """
     # Never evict bots from the root space — the router is the creator/admin
@@ -111,7 +111,7 @@ async def _cleanup_orphaned_bots_in_room(
     if persisted_invited_rooms_by_bot is None:
         persisted_invited_rooms_by_bot = _load_all_persisted_invited_rooms(config, runtime_paths)
 
-    kicked_bots = []
+    removed_bots = []
 
     for user_id in member_ids:
         matrix_id = MatrixID.parse(user_id)
@@ -137,22 +137,45 @@ async def _cleanup_orphaned_bots_in_room(
                 configured_bots=sorted(configured_bot_ids),
             )
 
-            # Kick the bot
-            kick_response = await client.room_kick(room_id, user_id, reason="Bot no longer configured for this room")
+            if await _remove_orphaned_bot(client, room_id, matrix_id):
+                removed_bots.append(user_id)
 
-            if isinstance(kick_response, nio.RoomKickResponse):
-                logger.info("orphaned_bot_kicked", agent=matrix_id.username, room_id=room_id, user_id=user_id)
-                kicked_bots.append(user_id)
-            else:
-                logger.error(
-                    "orphaned_bot_kick_failed",
-                    agent=matrix_id.username,
-                    room_id=room_id,
-                    user_id=user_id,
-                    error=str(kick_response),
-                )
+    return removed_bots
 
-    return kicked_bots
+
+async def _remove_orphaned_bot(client: nio.AsyncClient, room_id: str, matrix_id: MatrixID) -> bool:
+    """Remove one orphaned bot from a room, returning True on success.
+
+    Matrix forbids kicking your own account (M_FORBIDDEN), so when the orphan
+    is the sweeping client itself it leaves the room instead of kicking.
+    """
+    user_id = matrix_id.full_id
+    if user_id == client.user_id:
+        leave_response = await client.room_leave(room_id)
+        if isinstance(leave_response, nio.RoomLeaveResponse):
+            logger.info("orphaned_bot_left", agent=matrix_id.username, room_id=room_id, user_id=user_id)
+            return True
+        logger.error(
+            "orphaned_bot_leave_failed",
+            agent=matrix_id.username,
+            room_id=room_id,
+            user_id=user_id,
+            error=str(leave_response),
+        )
+        return False
+
+    kick_response = await client.room_kick(room_id, user_id, reason="Bot no longer configured for this room")
+    if isinstance(kick_response, nio.RoomKickResponse):
+        logger.info("orphaned_bot_kicked", agent=matrix_id.username, room_id=room_id, user_id=user_id)
+        return True
+    logger.error(
+        "orphaned_bot_kick_failed",
+        agent=matrix_id.username,
+        room_id=room_id,
+        user_id=user_id,
+        error=str(kick_response),
+    )
+    return False
 
 
 async def cleanup_all_orphaned_bots(
@@ -166,7 +189,7 @@ async def cleanup_all_orphaned_bots(
     in the rooms that need cleaning.
 
     Returns:
-        Dictionary mapping room IDs to lists of kicked bot Matrix user IDs
+        Dictionary mapping room IDs to lists of removed bot Matrix user IDs
 
     """
     # Track what we're doing
