@@ -24,7 +24,7 @@ from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.plugin_identity import validate_plugin_name
-from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 
 if TYPE_CHECKING:
     import asyncio
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling import SchedulingRuntime
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.workers.models import WorkerReadyProgress
 
 _ToolContextReturn = TypeVar("_ToolContextReturn")
@@ -87,6 +87,34 @@ class ToolRuntimeContext:
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
+
+    def resolve_worker_target(self) -> ResolvedWorkerTarget:
+        """Resolve the worker target for toolkits built on behalf of this dispatch.
+
+        Tools that compose other registered tools at call time (plugins
+        building search backends, sub-toolkits) need the same worker target
+        that agent toolkit construction uses, so requester-scoped state —
+        OAuth MCP sessions, scoped credentials — resolves identically.
+
+        Raises:
+            ValueError: For team and router dispatches, whose contexts carry
+                the entity name and therefore have no single agent execution
+                scope for a composed toolkit to mirror.
+
+        """
+        if self.agent_name not in self.config.agents:
+            msg = (
+                f"resolve_worker_target requires an agent dispatch; {self.agent_name!r} is not a configured agent. "
+                "Team and router dispatches have no single agent execution scope."
+            )
+            raise ValueError(msg)
+        return build_agent_toolkit_worker_target(
+            self.config.resolve_entity(self.agent_name).execution_scope,
+            self.agent_name,
+            is_private=self.config.get_agent(self.agent_name).private is not None,
+            execution_identity=build_execution_identity_from_runtime_context(self),
+            runtime_paths=self.runtime_paths,
+        )
 
 
 @dataclass(frozen=True)

@@ -79,6 +79,15 @@ def _is_placeholder_delivery_failure(failure_reason: str) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class ResponseIdentity:
+    """Identify which visible response a delivery or hook call belongs to."""
+
+    response_kind: str
+    response_envelope: MessageEnvelope
+    correlation_id: str
+
+
 @dataclass
 class ResponseHookService:
     """Own response hook execution around final delivery."""
@@ -88,24 +97,22 @@ class ResponseHookService:
     async def apply_before_response(  # noqa: D102
         self,
         *,
-        correlation_id: str,
-        envelope: MessageEnvelope,
+        identity: ResponseIdentity,
         response_text: str,
-        response_kind: str,
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
     ) -> ResponseDraft:
         draft = ResponseDraft(
             response_text=response_text,
-            response_kind=response_kind,
+            response_kind=identity.response_kind,
             tool_trace=deepcopy(tool_trace) if tool_trace is not None else None,
             extra_content=deepcopy(extra_content) if extra_content is not None else None,
-            envelope=envelope,
+            envelope=identity.response_envelope,
         )
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_BEFORE_RESPONSE):
             return draft
         context = BeforeResponseContext(
-            **self.hook_context.base_kwargs(EVENT_MESSAGE_BEFORE_RESPONSE, correlation_id),
+            **self.hook_context.base_kwargs(EVENT_MESSAGE_BEFORE_RESPONSE, identity.correlation_id),
             draft=draft,
         )
         return await emit_transform(self.hook_context.registry, EVENT_MESSAGE_BEFORE_RESPONSE, context)
@@ -113,20 +120,18 @@ class ResponseHookService:
     async def apply_final_response_transform(  # noqa: D102
         self,
         *,
-        correlation_id: str,
-        envelope: MessageEnvelope,
+        identity: ResponseIdentity,
         response_text: str,
-        response_kind: str,
     ) -> FinalResponseDraft:
         draft = FinalResponseDraft(
             response_text=response_text,
-            response_kind=response_kind,
-            envelope=envelope,
+            response_kind=identity.response_kind,
+            envelope=identity.response_envelope,
         )
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM):
             return draft
         context = FinalResponseTransformContext(
-            **self.hook_context.base_kwargs(EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM, correlation_id),
+            **self.hook_context.base_kwargs(EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM, identity.correlation_id),
             draft=draft,
         )
         return await emit_final_response_transform(
@@ -138,24 +143,22 @@ class ResponseHookService:
     async def emit_after_response(  # noqa: D102
         self,
         *,
-        correlation_id: str,
-        envelope: MessageEnvelope,
+        identity: ResponseIdentity,
         response_text: str,
         response_event_id: str,
         delivery_kind: Literal["sent", "edited"],
-        response_kind: str,
         continue_on_cancelled: bool = False,
     ) -> None:
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_AFTER_RESPONSE):
             return
         context = AfterResponseContext(
-            **self.hook_context.base_kwargs(EVENT_MESSAGE_AFTER_RESPONSE, correlation_id),
+            **self.hook_context.base_kwargs(EVENT_MESSAGE_AFTER_RESPONSE, identity.correlation_id),
             result=ResponseResult(
                 response_text=response_text,
                 response_event_id=response_event_id,
                 delivery_kind=delivery_kind,
-                response_kind=response_kind,
-                envelope=envelope,
+                response_kind=identity.response_kind,
+                envelope=identity.response_envelope,
             ),
         )
         await emit(
@@ -168,20 +171,18 @@ class ResponseHookService:
     async def emit_cancelled_response(  # noqa: D102
         self,
         *,
-        correlation_id: str,
-        envelope: MessageEnvelope,
+        identity: ResponseIdentity,
         visible_response_event_id: str | None = None,
-        response_kind: str = "ai",
         failure_reason: str | None = None,
     ) -> None:
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_CANCELLED):
             return
         context = CancelledResponseContext(
-            **self.hook_context.base_kwargs(EVENT_MESSAGE_CANCELLED, correlation_id),
+            **self.hook_context.base_kwargs(EVENT_MESSAGE_CANCELLED, identity.correlation_id),
             info=CancelledResponseInfo(
-                envelope=envelope,
+                envelope=identity.response_envelope,
                 visible_response_event_id=visible_response_event_id,
-                response_kind=response_kind,
+                response_kind=identity.response_kind,
                 failure_reason=failure_reason,
             ),
         )
@@ -211,9 +212,7 @@ class FinalDeliveryRequest:  # noqa: D101
     target: MessageTarget
     existing_event_id: str | None
     response_text: str
-    response_kind: str
-    response_envelope: MessageEnvelope
-    correlation_id: str
+    identity: ResponseIdentity
     tool_trace: list[ToolTraceEntry] | None
     extra_content: dict[str, Any] | None
     existing_event_is_placeholder: bool = False
@@ -228,9 +227,7 @@ class CancelledVisibleNoteRequest:
     event_id: str
     existing_event_is_placeholder: bool
     cancel_source: Literal["user_stop", "sync_restart", "interrupted"]
-    response_kind: str
-    response_envelope: MessageEnvelope
-    correlation_id: str
+    identity: ResponseIdentity
 
 
 @dataclass(frozen=True)
@@ -239,9 +236,7 @@ class _PlaceholderFailureUpdateRequest:
 
     target: MessageTarget
     event_id: str
-    response_kind: str
-    response_envelope: MessageEnvelope
-    correlation_id: str
+    identity: ResponseIdentity
     failure_reason: str
     tool_trace: list[ToolTraceEntry] | None
     extra_content: dict[str, Any] | None
@@ -323,9 +318,7 @@ class FinalizeStreamedResponseRequest:
     target: MessageTarget
     stream_transport_outcome: StreamTransportOutcome
     initial_delivery_kind: Literal["sent", "edited"]
-    response_kind: str
-    response_envelope: MessageEnvelope
-    correlation_id: str
+    identity: ResponseIdentity
     tool_trace: list[ToolTraceEntry] | None
     extra_content: dict[str, Any] | None
     existing_event_id: str | None = None
@@ -356,9 +349,7 @@ class DeliveryGateway:
         *,
         room_id: str,
         streamed_event_id: str | None,
-        response_kind: str,
-        response_envelope: MessageEnvelope,
-        correlation_id: str,
+        identity: ResponseIdentity,
         failure_reason: str,
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
@@ -368,9 +359,7 @@ class DeliveryGateway:
             cleanup_failure = await self._redact_visible_response_event(
                 room_id=room_id,
                 event_id=streamed_event_id,
-                response_kind=response_kind,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
+                identity=identity,
                 redaction_reason="Completed placeholder-only streamed response",
                 failure_reason=failure_reason,
             )
@@ -396,18 +385,16 @@ class DeliveryGateway:
         *,
         room_id: str,
         event_id: str,
-        response_kind: str,
-        response_envelope: MessageEnvelope,
-        correlation_id: str,
+        identity: ResponseIdentity,
         redaction_reason: str,
         failure_reason: str | None = None,
     ) -> str | None:
         """Redact one visible response event and return a failure reason when cleanup fails."""
         self.deps.logger.warning(
             "Visible response was already delivered before suppression; attempting cleanup",
-            response_kind=response_kind,
-            source_event_id=response_envelope.source_event_id,
-            correlation_id=correlation_id,
+            response_kind=identity.response_kind,
+            source_event_id=identity.response_envelope.source_event_id,
+            correlation_id=identity.correlation_id,
             visible_response_event_id=event_id,
         )
         try:
@@ -423,8 +410,8 @@ class DeliveryGateway:
                 "Failed to redact visible response during cleanup",
                 room_id=room_id,
                 event_id=event_id,
-                response_kind=response_kind,
-                correlation_id=correlation_id,
+                response_kind=identity.response_kind,
+                correlation_id=identity.correlation_id,
             )
             return str(error) or failure_reason or f"failed to redact suppressed response {event_id}"
         if not redacted:
@@ -463,9 +450,9 @@ class DeliveryGateway:
             "Failed to deliver placeholder failure update",
             room_id=request.target.room_id,
             event_id=request.event_id,
-            response_kind=request.response_kind,
-            source_event_id=request.response_envelope.source_event_id,
-            correlation_id=request.correlation_id,
+            response_kind=request.identity.response_kind,
+            source_event_id=request.identity.response_envelope.source_event_id,
+            correlation_id=request.identity.correlation_id,
             failure_reason=request.failure_reason,
         )
         return FinalDeliveryOutcome(
@@ -598,10 +585,8 @@ class DeliveryGateway:
         """Apply before_response hooks and perform the final send or edit."""
         try:
             draft = await self.deps.response_hooks.apply_before_response(
-                correlation_id=request.correlation_id,
-                envelope=request.response_envelope,
+                identity=request.identity,
                 response_text=request.response_text,
-                response_kind=request.response_kind,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
             )
@@ -611,9 +596,7 @@ class DeliveryGateway:
                 cleanup_failure = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
                     event_id=request.existing_event_id,
-                    response_kind=request.response_kind,
-                    response_envelope=request.response_envelope,
-                    correlation_id=request.correlation_id,
+                    identity=request.identity,
                     redaction_reason="Cancelled placeholder response",
                     failure_reason=failure_reason,
                 )
@@ -633,9 +616,7 @@ class DeliveryGateway:
                 cleanup_failure = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
                     event_id=request.existing_event_id,
-                    response_kind=request.response_kind,
-                    response_envelope=request.response_envelope,
-                    correlation_id=request.correlation_id,
+                    identity=request.identity,
                     redaction_reason="Failed placeholder response before delivery",
                     failure_reason=failure_reason,
                 )
@@ -667,17 +648,15 @@ class DeliveryGateway:
         if draft.suppress:
             self.deps.logger.info(
                 "Response suppressed by hook",
-                response_kind=request.response_kind,
-                source_event_id=request.response_envelope.source_event_id,
-                correlation_id=request.correlation_id,
+                response_kind=request.identity.response_kind,
+                source_event_id=request.identity.response_envelope.source_event_id,
+                correlation_id=request.identity.correlation_id,
             )
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
                 cleanup_failure = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
                     event_id=request.existing_event_id,
-                    response_kind=request.response_kind,
-                    response_envelope=request.response_envelope,
-                    correlation_id=request.correlation_id,
+                    identity=request.identity,
                     redaction_reason="Suppressed placeholder response",
                     failure_reason="suppressed_by_hook",
                 )
@@ -748,9 +727,7 @@ class DeliveryGateway:
                     _PlaceholderFailureUpdateRequest(
                         target=request.target,
                         event_id=request.existing_event_id,
-                        response_kind=request.response_kind,
-                        response_envelope=request.response_envelope,
-                        correlation_id=request.correlation_id,
+                        identity=request.identity,
                         failure_reason="delivery_failed",
                         tool_trace=draft.tool_trace,
                         extra_content=draft.extra_content,
@@ -830,9 +807,7 @@ class DeliveryGateway:
         cleanup_failure = await self._redact_visible_response_event(
             room_id=request.target.room_id,
             event_id=request.event_id,
-            response_kind=request.response_kind,
-            response_envelope=request.response_envelope,
-            correlation_id=request.correlation_id,
+            identity=request.identity,
             redaction_reason="Failed cancelled placeholder response",
             failure_reason=failure_reason,
         )
@@ -1100,9 +1075,7 @@ class DeliveryGateway:
                 _PlaceholderFailureUpdateRequest(
                     target=request.target,
                     event_id=placeholder_event_id,
-                    response_kind=request.response_kind,
-                    response_envelope=request.response_envelope,
-                    correlation_id=request.correlation_id,
+                    identity=request.identity,
                     failure_reason=failure_reason,
                     tool_trace=request.tool_trace,
                     extra_content=request.extra_content,
@@ -1112,9 +1085,7 @@ class DeliveryGateway:
         return await self._cleanup_completed_placeholder_only_stream(
             room_id=request.target.room_id,
             streamed_event_id=placeholder_event_id,
-            response_kind=request.response_kind,
-            response_envelope=request.response_envelope,
-            correlation_id=request.correlation_id,
+            identity=request.identity,
             failure_reason=failure_reason,
             tool_trace=request.tool_trace,
             extra_content=request.extra_content,
@@ -1152,9 +1123,7 @@ class DeliveryGateway:
                     cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
                         room_id=request.target.room_id,
                         streamed_event_id=stream_outcome.last_physical_stream_event_id,
-                        response_kind=request.response_kind,
-                        response_envelope=request.response_envelope,
-                        correlation_id=request.correlation_id,
+                        identity=request.identity,
                         failure_reason=failure_reason,
                         tool_trace=request.tool_trace,
                         extra_content=request.extra_content,
@@ -1264,9 +1233,7 @@ class DeliveryGateway:
                         existing_event_id=existing_event_id,
                         existing_event_is_placeholder=existing_event_is_placeholder,
                         response_text=stream_outcome.canonical_final_body_candidate,
-                        response_kind=request.response_kind,
-                        response_envelope=request.response_envelope,
-                        correlation_id=request.correlation_id,
+                        identity=request.identity,
                         tool_trace=request.tool_trace,
                         extra_content=request.extra_content,
                     ),
@@ -1276,9 +1243,7 @@ class DeliveryGateway:
                 return await self._cleanup_completed_placeholder_only_stream(
                     room_id=request.target.room_id,
                     streamed_event_id=streamed_event_id,
-                    response_kind=request.response_kind,
-                    response_envelope=request.response_envelope,
-                    correlation_id=request.correlation_id,
+                    identity=request.identity,
                     failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
                     tool_trace=request.tool_trace,
                     extra_content=request.extra_content,
@@ -1372,10 +1337,8 @@ class DeliveryGateway:
                         extra_content=request.extra_content,
                     )
                 final_transform_draft = await self.deps.response_hooks.apply_final_response_transform(
-                    correlation_id=request.correlation_id,
-                    envelope=request.response_envelope,
+                    identity=request.identity,
                     response_text=final_body_candidate,
-                    response_kind=request.response_kind,
                 )
                 if (
                     final_transform_draft.response_text != final_body_candidate
@@ -1394,12 +1357,12 @@ class DeliveryGateway:
                     except asyncio.CancelledError:
                         self.deps.logger.warning(
                             "Final streamed-response transform edit cancelled; preserving streamed success",
-                            correlation_id=request.correlation_id,
+                            correlation_id=request.identity.correlation_id,
                         )
                     except Exception:
                         self.deps.logger.exception(
                             "Final streamed-response transform edit failed; preserving streamed success",
-                            correlation_id=request.correlation_id,
+                            correlation_id=request.identity.correlation_id,
                         )
                     else:
                         if final_outcome is not None:
@@ -1407,12 +1370,12 @@ class DeliveryGateway:
             except asyncio.CancelledError:
                 self.deps.logger.warning(
                     "Final streamed-response transform cancelled; preserving streamed success",
-                    correlation_id=request.correlation_id,
+                    correlation_id=request.identity.correlation_id,
                 )
             except Exception:
                 self.deps.logger.exception(
                     "Final streamed-response transform failed; preserving streamed success",
-                    correlation_id=request.correlation_id,
+                    correlation_id=request.identity.correlation_id,
                 )
 
             assert streamed_event_id is not None
@@ -1450,7 +1413,7 @@ class DeliveryGateway:
         except Exception:
             self.deps.logger.exception(
                 "Unexpected error in finalize_streamed_response",
-                correlation_id=request.correlation_id,
+                correlation_id=request.identity.correlation_id,
             )
             visible_event_id = stream_outcome.visible_event_id
             event_id = visible_event_id

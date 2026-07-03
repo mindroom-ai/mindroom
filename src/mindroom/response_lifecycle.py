@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from structlog.stdlib import BoundLogger
 
-    from mindroom.delivery_gateway import ResponseHookService
+    from mindroom.delivery_gateway import ResponseHookService, ResponseIdentity
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.history import HistoryScope
     from mindroom.hooks import MessageEnvelope
@@ -360,16 +360,12 @@ class ResponseLifecycle:
         self,
         deps: ResponseLifecycleDeps,
         *,
-        response_kind: str,
+        identity: ResponseIdentity,
         pipeline_timing: DispatchPipelineTiming | None,
-        response_envelope: MessageEnvelope,
-        correlation_id: str,
     ) -> None:
         self.deps = deps
-        self.response_kind = response_kind
+        self.identity = identity
         self.pipeline_timing = pipeline_timing
-        self.response_envelope = response_envelope
-        self.correlation_id = correlation_id
 
     def _log_effects_failure_after_visible_delivery(
         self,
@@ -380,7 +376,7 @@ class ResponseLifecycle:
         """Log one non-fatal post-response failure after visible delivery succeeded."""
         self.deps.logger.error(
             "Post-response effects failed after visible delivery",
-            response_kind=self.response_kind,
+            response_kind=self.identity.response_kind,
             response_event_id=response_event_id,
             failure_reason=str(error),
             error_type=error.__class__.__name__,
@@ -440,7 +436,7 @@ class ResponseLifecycle:
             room_id=room_id,
             thread_id=thread_id,
             session_type=session_type,
-            correlation_id=self.correlation_id,
+            correlation_id=self.identity.correlation_id,
             create_storage=create_storage,
         )
 
@@ -507,20 +503,16 @@ class ResponseLifecycle:
                     and final_delivery_outcome.delivery_kind is not None
                 ):
                     await self.deps.response_hooks.emit_after_response(
-                        correlation_id=self.correlation_id,
-                        envelope=self.response_envelope,
+                        identity=self.identity,
                         response_text=final_delivery_outcome.final_visible_body,
                         response_event_id=response_event_id,
                         delivery_kind=final_delivery_outcome.delivery_kind,
-                        response_kind=self.response_kind,
                         continue_on_cancelled=True,
                     )
             else:
                 await self.deps.response_hooks.emit_cancelled_response(
-                    correlation_id=self.correlation_id,
-                    envelope=self.response_envelope,
+                    identity=self.identity,
                     visible_response_event_id=response_event_id,
-                    response_kind=self.response_kind,
                     failure_reason=final_delivery_outcome.failure_reason,
                 )
         except asyncio.CancelledError as error:

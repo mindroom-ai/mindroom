@@ -10213,6 +10213,15 @@ If multiple skills share the same name, the last one wins (agent workspace > use
 
 Agent workspace skills are only available to the owning agent at runtime. They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
 
+## Authoring skills as an agent
+
+Agents never need write access to a global skill root to create skills.
+The bundled, plugin, and user roots can be read-only at runtime, for example in container or Kubernetes deployments where the image filesystem and `~/.mindroom` are not writable.
+An agent can always author skills in its own workspace at `<workspace>/skills/<skill-name>/SKILL.md`, using the same `SKILL.md` format described above.
+Workspace-rooted file tools address this location as the relative path `skills/<skill-name>/SKILL.md`.
+Agents with a workspace receive this guidance in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which can be overridden via the root `prompts` block (see [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides)).
+A new or edited workspace skill is picked up on the agent's next run without a config change.
+
 ## Configuring skills
 
 Add skills to an agent allowlist in `config.yaml`:
@@ -10677,6 +10686,21 @@ def needs_runtime_tools() -> type[Toolkit]:
 
     return NeedsRuntimeTools
 ```
+
+### Dispatch-time worker targets
+
+`WORKER_TARGET` covers toolkits that receive their worker target at construction.
+Tools that compose other registered tools while handling a call (for example building a sub-toolkit with `get_tool_by_name`) resolve the same target from the live runtime context instead:
+
+```python
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
+
+context = get_tool_runtime_context()
+worker_target = context.resolve_worker_target()
+```
+
+This returns the exact worker target that agent toolkit construction uses, so requester-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
+`resolve_worker_target()` raises `ValueError` for team and router dispatches, because those contexts have no single agent execution scope to mirror; catch it if your tool can run inside a team.
 
 ## MCP via plugins (advanced)
 

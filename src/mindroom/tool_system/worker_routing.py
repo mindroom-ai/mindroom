@@ -378,6 +378,32 @@ def build_worker_target_from_runtime_env(
     )
 
 
+def build_agent_toolkit_worker_target(
+    worker_scope: WorkerScope | None,
+    agent_name: str,
+    *,
+    is_private: bool,
+    execution_identity: ToolExecutionIdentity | None,
+    runtime_paths: RuntimePaths,
+) -> ResolvedWorkerTarget:
+    """Build the worker target used when constructing one agent's registered toolkits.
+
+    Single source of truth for the `private_agent_names` derivation shared by
+    agent toolkit construction and dispatch-time tool composition.
+    """
+    if worker_scope == "user_agent":
+        private_agent_names = frozenset({agent_name}) if is_private else frozenset()
+    else:
+        private_agent_names = None
+    return build_worker_target_from_runtime_env(
+        worker_scope,
+        agent_name,
+        execution_identity=execution_identity,
+        runtime_paths=runtime_paths,
+        private_agent_names=private_agent_names,
+    )
+
+
 def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | None) -> bool:
     """Return whether a worker scope can use shared-only dashboard integrations."""
     return worker_scope in (None, "shared")
