@@ -164,7 +164,19 @@ def resolve_dashboard_agent_execution_scope_request(
         )
 
     if agent_name not in config.agents:
-        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
+        if not allow_draft_override:
+            raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
+        # A draft agent exists only in the dashboard's unsaved config, so resolve it
+        # as an agent-less scope preview: no persisted policy, no per-agent
+        # authorization, and never an authoritative credential status.
+        return _DashboardAgentExecutionScopeResolution(
+            agent_name=None,
+            persisted_policy=None,
+            persisted_execution_scope=None,
+            requested_execution_scope=execution_scope_override if execution_scope_override_provided else None,
+            execution_scope_override_provided=execution_scope_override_provided,
+            draft_scope_preview=True,
+        )
 
     persisted_policy = resolve_agent_policy_from_data(
         agent_name,

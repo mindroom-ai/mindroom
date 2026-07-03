@@ -1612,16 +1612,21 @@ def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
     assert tools_by_name["homeassistant"]["dashboard_configuration_supported"] is False
 
 
-def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
-    """Tool preview should reject unknown agents instead of falling back to shared state."""
+def test_get_tools_unknown_agent_previews_draft_scope(test_client: TestClient) -> None:
+    """Tool preview should serve unsaved draft agents as a non-authoritative scope preview."""
     config = _config_with_worker_scope("shared")
     runtime_paths = main._app_runtime_paths(main.app)
 
     with patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)):
-        response = test_client.get("/api/tools/?agent_name=missing")
+        response = test_client.get("/api/tools/?agent_name=draft_agent&execution_scope=user")
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Unknown agent: missing"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status_authoritative"] is False
+    tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
+    assert "calculator" in tools_by_name
+    assert tools_by_name["homeassistant"]["execution_scope_supported"] is False
+    assert tools_by_name["calculator"]["execution_scope_supported"] is True
 
 
 def test_get_tools_requires_agent_reply_permission_for_agent_scoped_status(test_client: TestClient) -> None:

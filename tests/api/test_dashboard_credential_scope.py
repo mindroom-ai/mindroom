@@ -118,6 +118,33 @@ class TestResolveDashboardAgentExecutionScopeRequest:
             )
         assert exc_info.value.status_code == 404
 
+    def test_unknown_agent_with_drafts_allowed_resolves_as_scope_preview(self) -> None:
+        """An unknown (unsaved draft) agent resolves as an agent-less scope preview."""
+        resolution = resolve_dashboard_agent_execution_scope_request(
+            config=_config(),
+            agent_name="draft_agent",
+            execution_scope_override_provided=True,
+            execution_scope_override="user_agent",
+            allow_draft_override=True,
+        )
+        assert resolution.agent_name is None
+        assert resolution.persisted_policy is None
+        assert resolution.requested_execution_scope == "user_agent"
+        assert resolution.draft_scope_preview is True
+
+    def test_unknown_agent_without_override_resolves_as_unscoped_preview(self) -> None:
+        """An unknown draft agent without an override previews the unscoped target."""
+        resolution = resolve_dashboard_agent_execution_scope_request(
+            config=_config(),
+            agent_name="draft_agent",
+            execution_scope_override_provided=False,
+            execution_scope_override=None,
+            allow_draft_override=True,
+        )
+        assert resolution.agent_name is None
+        assert resolution.requested_execution_scope is None
+        assert resolution.draft_scope_preview is True
+
     def test_agent_without_override_uses_persisted_scope(self) -> None:
         """Without an override the persisted agent scope is used."""
         resolution = resolve_dashboard_agent_execution_scope_request(
