@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeVar, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -37,7 +38,7 @@ from mindroom.hooks.registry import HookRegistryState
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.post_response_effects import PostResponseEffectsSupport
+from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.response_runner import (
     ResponseRequest,
@@ -56,7 +57,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable
+    from collections.abc import Callable, Generator, Iterable
     from pathlib import Path
 
     from agno.knowledge.knowledge import Knowledge
@@ -520,4 +521,40 @@ def _response_request(
         media=media,
         user_id=user_id,
         correlation_id=correlation_id,
+    )
+
+
+class _InertPostResponseEffects(PostResponseEffectsSupport):
+    """Post-response support whose per-response deps carry no side effects.
+
+    The real ``apply_post_response_effects`` still runs; every effect it guards
+    on (interactive registration, memory persistence, run-metadata linkage,
+    thread summaries) is absent from the built deps, so tests exercise the
+    lifecycle without patching the module function.
+    """
+
+    def build_deps(
+        self,
+        *,
+        room_id: str,
+        interactive_agent_name: str,
+        queue_memory_persistence: Callable[[], None] | None = None,
+        persist_response_event_id: Callable[[str, str], None] | None = None,
+    ) -> PostResponseEffectsDeps:
+        del room_id, interactive_agent_name, queue_memory_persistence, persist_response_event_id
+        return PostResponseEffectsDeps(logger=self.logger)
+
+
+def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
+    """Swap the post-response collaborator for the inert variant at the deps seam."""
+    support = coordinator.deps.post_response_effects
+    coordinator.deps = replace(
+        coordinator.deps,
+        post_response_effects=_InertPostResponseEffects(
+            runtime=support.runtime,
+            logger=support.logger,
+            runtime_paths=support.runtime_paths,
+            delivery_gateway=support.delivery_gateway,
+            conversation_cache=support.conversation_cache,
+        ),
     )
