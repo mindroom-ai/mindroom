@@ -18,6 +18,80 @@ You can also validate a specific file directly:
 mindroom config validate --path /path/to/config.yaml
 ```
 
+## Splitting the Configuration Into Multiple Files
+
+Large configs can be split across multiple files with Home-Assistant-style include tags instead of keeping one monolithic `config.yaml`.
+
+| Tag | Result |
+|-----|--------|
+| `!include rel/path.yaml` | The parsed content of that YAML file, with nested include tags resolved recursively |
+| `!include_text rel/path.md` | The file's raw text as a string (UTF-8, one trailing newline stripped); a MindRoom extension for long prompt or instruction blocks |
+| `!include_dir_list rel/dir` | A list with one item per YAML file in the directory |
+| `!include_dir_named rel/dir` | A mapping of filename-without-extension to each file's parsed content |
+| `!include_dir_merge_list rel/dir` | The concatenation of the lists contained in each file |
+| `!include_dir_merge_named rel/dir` | The merge of the mappings contained in each file |
+
+A realistic split keeps each agent in its own file and long prompts in Markdown:
+
+```yaml
+# config.yaml
+agents: !include_dir_merge_named agents/
+models: !include models.yaml
+
+defaults:
+  tools: [scheduler]
+  markdown: true
+```
+
+```yaml
+# agents/researcher.yaml
+researcher:
+  display_name: Researcher
+  role: Deep research and analysis
+  model: default
+  tools: !include _shared/web_tools.yaml
+  instructions:
+    - !include_text ../prompts/researcher.md
+```
+
+```yaml
+# agents/_shared/web_tools.yaml
+- duckduckgo
+- website
+- browser
+```
+
+Relative paths resolve against the directory of the file containing the tag, so nested include trees compose naturally.
+Absolute paths are rejected, and every include must stay inside the top-level config file's directory (symlinks and `..` are resolved before the check), so config edits can never read arbitrary host files.
+Directory includes recurse into subdirectories, take only `.yaml`/`.yml` files, and process them in lexicographic order of their relative path.
+Files and directories whose name starts with `.` or `_` are skipped by directory includes.
+The `_` convention gives shared snippet files a home inside included trees, such as `agents/_shared/web_tools.yaml` above, which is pulled in via an explicit `!include`.
+Use such snippets instead of YAML anchors when sharing values between files, because YAML anchors are scoped to a single file and cannot cross an include boundary.
+
+Error handling is strict so a broken split fails loudly:
+
+- Include cycles are rejected with the full chain (`config.yaml -> agents/a.yaml -> config.yaml`).
+- Missing files and directories are reported with the including file and line.
+- `!include_dir_merge_named` raises on duplicate keys across files, naming both files, instead of silently letting the later file win as Home Assistant does.
+- `!include_dir_named` likewise raises on duplicate filename stems across subdirectories.
+- An empty included file resolves to `null` under `!include`, and contributes nothing to directory includes.
+
+Hot reload watches every included file, so editing any file in the include tree triggers the same config reload as editing `config.yaml`.
+
+When migrating an existing monolith, use `mindroom config resolve` to print the fully merged config with sorted keys, and diff the output before and after the split to prove equivalence:
+
+```bash
+mindroom config resolve > before.yaml
+# split config.yaml into include files
+mindroom config resolve > after.yaml
+diff before.yaml after.yaml
+```
+
+The dashboard config editor operates on whole-config structured saves, which cannot be mapped back to individual include files.
+When the loaded config resolved at least one include tag, structured saves from the dashboard and self-config tools are rejected with an error asking you to edit the source files instead.
+The raw config editor (`GET`/`PUT /api/config/raw`) keeps operating on the top-level file's literal text, and its response flags when includes are in use.
+`MINDROOM_CONFIG_TEMPLATE` seeding copies only the single template file, so bundled templates that use includes must ship the whole directory.
+
 ## MCP Servers
 
 MindRoom can connect to external Model Context Protocol servers through the top-level `mcp_servers` block.

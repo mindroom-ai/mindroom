@@ -322,6 +322,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         source_fingerprint = (
             current_snapshot.source_fingerprint if current_snapshot.runtime_paths == runtime_paths else None
         )
+        source_files = current_snapshot.source_files if current_snapshot.runtime_paths == runtime_paths else None
         if current_snapshot.runtime_paths != runtime_paths:
             app_state.external_trigger_runtime = None
         previous_state.snapshot = config_lifecycle._published_snapshot(
@@ -332,6 +333,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             auth_state=auth_state,
             config_load_result=config_load_result,
             source_fingerprint=source_fingerprint,
+            source_files=source_files,
         )
     config_lifecycle.register_api_app(api_app)
 
@@ -391,26 +393,30 @@ async def _reload_config_after_file_change(
     await _reload_config_into_app(api_app, runtime_paths)
 
 
+def _watched_config_mtimes(api_app: FastAPI) -> tuple[constants.RuntimePaths, dict[Path, float]]:
+    """Return the runtime paths and mtimes of the config file plus its !include files."""
+    snapshot = _app_context(api_app)
+    paths = snapshot.source_files or frozenset({snapshot.runtime_paths.config_path})
+    mtimes: dict[Path, float] = {}
+    for path in paths:
+        try:
+            mtimes[path] = path.stat().st_mtime if path.exists() else 0.0
+        except (OSError, PermissionError):
+            mtimes[path] = 0.0
+    return snapshot.runtime_paths, mtimes
+
+
 async def _watch_config(
     stop_event: asyncio.Event,
     api_app: FastAPI,
     *,
     poll_interval_seconds: float = 1.0,
 ) -> None:
-    """Watch the current config file, rebinding automatically when runtime paths change."""
-    watched_config_path: Path | None = None
-    last_mtime = 0.0
+    """Watch the config source files, rebinding automatically when runtime paths change."""
+    runtime_paths, last_mtimes = _watched_config_mtimes(api_app)
+    watched_config_path: Path = runtime_paths.config_path
 
     while not stop_event.is_set():
-        runtime_paths = _app_runtime_paths(api_app)
-        config_path = runtime_paths.config_path
-        if config_path != watched_config_path:
-            watched_config_path = config_path
-            try:
-                last_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
-            except (OSError, PermissionError):
-                last_mtime = 0.0
-
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=poll_interval_seconds)
             break
@@ -418,22 +424,24 @@ async def _watch_config(
             pass
 
         try:
-            runtime_paths = _app_runtime_paths(api_app)
-            config_path = runtime_paths.config_path
-            if config_path != watched_config_path:
-                watched_config_path = config_path
-                try:
-                    last_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
-                except (OSError, PermissionError):
-                    last_mtime = 0.0
+            runtime_paths, current_mtimes = _watched_config_mtimes(api_app)
+            if runtime_paths.config_path != watched_config_path:
+                # Runtime swap: rebaseline the new source set without reloading.
+                watched_config_path = runtime_paths.config_path
+                last_mtimes = current_mtimes
+                continue
 
-            current_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
-            if current_mtime != last_mtime:
-                last_mtime = current_mtime
-                logger.info("Config file changed", path=str(config_path))
+            # Paths that entered the set (a reload re-derived the includes) are
+            # baselined silently; missing files wait until they reappear.
+            changed = any(
+                mtime != 0.0 and last_mtimes.get(path, mtime) != mtime for path, mtime in current_mtimes.items()
+            )
+            last_mtimes = current_mtimes
+            if changed:
+                logger.info("Config file changed", path=str(runtime_paths.config_path))
                 await _reload_config_after_file_change(api_app, runtime_paths)
         except (OSError, PermissionError):
-            last_mtime = 0.0
+            last_mtimes = dict.fromkeys(last_mtimes, 0.0)
         except Exception:
             logger.exception("Exception during file watcher callback - continuing to watch")
 
@@ -765,10 +773,13 @@ async def get_raw_config_source(
     request: Request,
     response: Response,
     _user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Return the raw config source text for recovery editing."""
     generation = config_lifecycle.committed_generation(request)
-    payload = {"source": config_lifecycle.read_raw_config_source(request)}
+    payload: dict[str, Any] = {
+        "source": config_lifecycle.read_raw_config_source(request),
+        "uses_includes": config_lifecycle.config_uses_includes(request),
+    }
     _set_config_generation_header(response, generation)
     return payload
 

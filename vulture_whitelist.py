@@ -243,6 +243,7 @@ emit_custom_event  # unused function (src/mindroom/tool_system/runtime_context.p
 config_edit  # unused function (src/mindroom/cli/config.py)
 _.search_files  # unused method (src/mindroom/tools/file.py)
 config_validate  # unused function (src/mindroom/cli/config.py)
+config_resolve  # unused function (src/mindroom/cli/config.py)
 _.validate_culture_assignments  # unused method (src/mindroom/config/main.py)
 update_schedule  # unused function (src/mindroom/api/schedules.py)
 get_registered_tools  # unused function (src/mindroom/api/tools.py)
