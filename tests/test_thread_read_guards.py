@@ -518,6 +518,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             )
             await _wait_for_room_cache_idle(coordinator)
 
+    # UNKNOWN-impact live mutation optimization is deferred to ISSUE-189.
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("timing_enabled_for_test", [False, True], ids=["timing_disabled", "timing_enabled"])
     async def test_live_threaded_event_uses_per_thread_barrier_with_and_without_timing(

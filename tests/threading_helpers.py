@@ -599,6 +599,8 @@ class ThreadingBehaviorTestBase:
         with patch("mindroom.bot.create_agent", return_value=mock_agent):
             yield bot
 
+        # No cleanup needed since we're using mocks
+
     @staticmethod
     def _sync_response(joined_rooms: object) -> MagicMock:
         sync_response = MagicMock()
