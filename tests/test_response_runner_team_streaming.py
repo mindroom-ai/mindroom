@@ -1595,3 +1595,118 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
         )
 
     assert resolution is None
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_persists_interrupted_history_after_errored_stream(
+    tmp_path: Path,
+) -> None:
+    """A stream ending normally with the recorder marked interrupted persists the replay snapshot.
+
+    Mirrors the agent path's post-transport persist arm: a mid-stream errored
+    run yields the friendly error and completes delivery, so only the
+    recorder outcome says the turn was interrupted.
+    """
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.empty(),
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        async def consume_delivery(request: object) -> StreamTransportOutcome:
+            async for _chunk in request.response_stream:
+                pass
+            return _stream_outcome("$team-final", "Team partial")
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
+
+        def fake_team_response_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Team partial"
+                recorder = kwargs["turn_recorder"]
+                assert isinstance(recorder, TurnRecorder)
+                recorder.record_interrupted(
+                    run_metadata=None,
+                    assistant_text="Team partial",
+                    completed_tools=[],
+                    interrupted_tools=[],
+                )
+
+            return fake_stream()
+
+        mock_team_stream.side_effect = fake_team_response_stream
+
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        ("assistant", "Team partial\n\n(turn interrupted by the user before completion)"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_persist_interrupted_recorder_off_loop_swallows_persist_failure(tmp_path: Path) -> None:
+    """A snapshot-persist failure must not escape into the streaming error arms.
+
+    The generic except-Exception arm classifies the adopted placeholder as
+    pristine and would redact an already-delivered visible reply, so the
+    persist helper absorbs storage failures.
+    """
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+        message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        orchestrator=_team_orchestrator(config, runtime_paths),
+    )
+    recorder = TurnRecorder(user_message="Hello")
+    recorder.record_interrupted(
+        run_metadata=None,
+        assistant_text="partial",
+        completed_tools=[],
+        interrupted_tools=[],
+    )
+
+    with patch.object(
+        coordinator,
+        "_persist_interrupted_recorder",
+        side_effect=RuntimeError("database is locked"),
+    ):
+        await coordinator._persist_interrupted_recorder_off_loop(
+            recorder=recorder,
+            session_scope=coordinator.deps.state_writer.history_scope(),
+            session_id="session-1",
+            execution_identity=None,
+            run_id=None,
+            is_team=True,
+        )

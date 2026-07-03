@@ -587,7 +587,14 @@ class ResponseRunner:
             name="persist_interrupted_recorder",
             owner=self.deps.runtime,
         )
-        await asyncio.shield(offload)
+        try:
+            await asyncio.shield(offload)
+        except Exception:
+            # A snapshot-persist failure (e.g. sqlite locked) must not escape into
+            # the streaming error arms: they classify the adopted placeholder as
+            # pristine and would redact an already-delivered visible reply. Losing
+            # the replay snapshot is the lesser harm.
+            self.deps.logger.exception("Failed to persist interrupted replay state")
 
     def _record_stream_delivery_error(
         self,
@@ -1350,6 +1357,16 @@ class ResponseRunner:
                         await lifecycle.emit_session_started(session_started_watch)
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("streaming_complete")
+                if team_turn_recorder.outcome == "interrupted":
+                    await self._persist_interrupted_recorder_off_loop(
+                        recorder=team_turn_recorder,
+                        session_scope=session_scope,
+                        session_id=session_id,
+                        execution_identity=tool_dispatch.execution_identity,
+                        run_id=response_run_id,
+                        is_team=True,
+                        response_event_id=progress.tracked_event_id,
+                    )
                 delivery_kind: Literal["sent", "edited"] = "edited" if message_id else "sent"
                 finalize_request = FinalizeStreamedResponseRequest(
                     target=delivery_target,

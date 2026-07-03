@@ -13,6 +13,7 @@ from agno.run.agent import RunOutput
 from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
 from agno.run.team import TeamRunOutput
 
+from mindroom import teams as teams_module
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -344,3 +345,86 @@ def test_team_members_are_built_with_dynamic_tool_continuation() -> None:
         )
 
     assert mock_create.call_args.kwargs["dynamic_tool_continuation"] is True
+
+
+@pytest.mark.asyncio
+async def test_team_response_logs_continuation_prompt_in_request_log_context() -> None:
+    """Continuation attempts log the active continuation prompt, not the original message."""
+    orchestrator, _config = _make_orchestrator()
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(
+        side_effect=[
+            _dynamic_tool_team_output(),
+            TeamRunOutput(content="Used the loaded tool."),
+        ],
+    )
+    logged_prompts: list[object] = []
+    real_log_context = teams_module._team_request_log_context
+
+    def capture_log_context(ctx: object, **kwargs: object) -> dict[str, object]:
+        logged_prompts.append(kwargs.get("prompt"))
+        return real_log_context(ctx, **kwargs)
+
+    patches = _team_patches(mock_team)
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patch("mindroom.teams._team_request_log_context", side_effect=capture_log_context),
+    ):
+        await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Load the sleep tool and use it.",
+            turn_recorder=TurnRecorder(user_message="Load the sleep tool and use it."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(run_id="run-1", session_id=None),
+        )
+
+    assert logged_prompts[0] == "Load the sleep tool and use it."
+    assert "DYNAMIC TOOL CALL COMPLETED" in str(logged_prompts[1])
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_logs_continuation_prompt_in_request_log_context() -> None:
+    """Streamed continuation attempts log the active continuation prompt (agent-path parity)."""
+    orchestrator, config = _make_orchestrator()
+
+    async def first_stream() -> AsyncIterator[object]:
+        yield _dynamic_tool_team_output()
+
+    async def second_stream() -> AsyncIterator[object]:
+        yield TeamRunOutput(content="Used the loaded tool.")
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
+    logged_prompts: list[object] = []
+    real_log_context = teams_module._team_request_log_context
+
+    def capture_log_context(ctx: object, **kwargs: object) -> dict[str, object]:
+        logged_prompts.append(kwargs.get("prompt"))
+        return real_log_context(ctx, **kwargs)
+
+    patches = _team_patches(mock_team)
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patch("mindroom.teams._team_request_log_context", side_effect=capture_log_context),
+    ):
+        _ = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Load the sleep tool and use it.",
+                turn_recorder=TurnRecorder(user_message="Load the sleep tool and use it."),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+            )
+        ]
+
+    assert logged_prompts[0] == "Load the sleep tool and use it."
+    assert "DYNAMIC TOOL CALL COMPLETED" in str(logged_prompts[1])
