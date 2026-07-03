@@ -41,7 +41,6 @@ from tests.ai_user_id_helpers import (
     _config,
     _config_with_team,
     _config_with_team_matrix_message,
-    _handled_response_event_id,
     _install_inert_post_response_effects,
     _knowledge_access_support,
     _make_bot,
@@ -51,9 +50,12 @@ from tests.ai_user_id_helpers import (
     _runtime_paths,
     _SessionStorage,
     _set_gateway_method,
-    _stream_outcome,
     _team_orchestrator,
     bind_runtime_paths,
+)
+from tests.bot_helpers import (
+    _handled_response_event_id,
+    _stream_outcome,
 )
 from tests.identity_helpers import fixture_entity_matrix_id
 

@@ -95,8 +95,10 @@ from tests.ai_user_id_helpers import (
     _response_request,
     _runtime_paths,
     _SessionStorage,
-    _stream_outcome,
     bind_runtime_paths,
+)
+from tests.bot_helpers import (
+    _stream_outcome,
 )
 from tests.conftest import (
     make_turn_context,

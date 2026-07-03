@@ -77,9 +77,11 @@ from tests.ai_user_id_helpers import (
     _runtime_paths,
     _SessionStorage,
     _set_gateway_method,
+    bind_runtime_paths,
+)
+from tests.bot_helpers import (
     _stream_outcome,
     _visible_response_event_id,
-    bind_runtime_paths,
 )
 from tests.conftest import (
     message_origin,
