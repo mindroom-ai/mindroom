@@ -58,6 +58,7 @@ from mindroom.config.runtime_overlays import (
 )
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
+from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_source
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ROUTER_AGENT_NAME,
@@ -172,6 +173,8 @@ def iter_config_validation_messages(
     if isinstance(exc, ValidationError):
         return [(" → ".join(str(x) for x in error["loc"]), error["msg"]) for error in exc.errors(include_context=False)]
     if isinstance(exc, ConfigRuntimeValidationError):
+        return [("config", str(exc))]
+    if isinstance(exc, ConfigIncludeError):
         return [("config", str(exc))]
     if isinstance(exc, yaml.YAMLError):
         return [("config", f"Could not parse configuration YAML: {exc}")]
@@ -347,6 +350,7 @@ class Config(BaseModel):
     """Complete configuration from YAML."""
 
     model_config = ConfigDict(extra="forbid")
+    _source_files: frozenset[Path] = PrivateAttr(default=frozenset())
     _unavailable_plugin_tool_names: set[str] = PrivateAttr(default_factory=set)
     _runtime_approved_egress_injected_default_tool: bool = PrivateAttr(default=False)
     _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
@@ -986,6 +990,14 @@ class Config(BaseModel):
         """Extract the Matrix domain for one explicit runtime context."""
         homeserver = runtime_matrix_homeserver(runtime_paths)
         return extract_server_name_from_homeserver(homeserver, runtime_paths)
+
+    @property
+    def source_files(self) -> frozenset[Path]:
+        """Files this config was loaded from: the top-level file plus every include.
+
+        Empty when the config was not loaded from disk via :func:`load_config`.
+        """
+        return self._source_files
 
     @classmethod
     def validate_with_runtime(
@@ -1817,14 +1829,14 @@ def load_config(
         msg = f"Agent configuration file not found: {path}"
         raise FileNotFoundError(msg)
 
-    with path.open() as f:
-        data = yaml.safe_load(f) or {}
+    data, source_files = load_yaml_config_source(path)
 
     config = Config.validate_with_runtime(
         data,
         runtime_paths,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
+    config._source_files = source_files
     logger.info("loaded_agent_configuration", path=str(path))
     logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
     return config

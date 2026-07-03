@@ -591,6 +591,40 @@ def config_validate(
     check_env_keys(config, runtime_paths=runtime_paths)
 
 
+@config_app.command("resolve")
+def config_resolve(
+    path: Path | None = _CONFIG_PATH_OPTION,
+) -> None:
+    """Print the fully merged config YAML with all !include tags resolved.
+
+    Keys are sorted, so diffing the output before and after splitting a config
+    into include files proves the split is equivalent to the monolith.
+    """
+    runtime_paths = activate_cli_runtime(path)
+    config_path = runtime_paths.config_path
+
+    if not config_path.exists():
+        console.print(f"[red]Error:[/red] Configuration file not found: {config_path}")
+        console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
+        raise typer.Exit(1)
+
+    import yaml  # noqa: PLC0415
+
+    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
+    from mindroom.config.yaml_includes import load_yaml_config_source  # noqa: PLC0415
+
+    try:
+        data, _source_files = load_yaml_config_source(config_path)
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        format_validation_errors(exc, config_path)
+        raise typer.Exit(1) from None
+
+    print(
+        yaml.safe_dump(data, default_flow_style=False, sort_keys=True, allow_unicode=True),
+        end="",
+    )
+
+
 @config_app.command("path")
 def config_path_cmd(
     path: Path | None = _CONFIG_PATH_OPTION,

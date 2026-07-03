@@ -385,8 +385,8 @@ depends_on = []
 path = "mindroom.api.config_lifecycle"
 depends_on = [
     "mindroom.config.main",
+    "mindroom.config.yaml_includes",
     "mindroom.constants",
-    "mindroom.file_watcher",
     "mindroom.logging_config",
 ]
 
@@ -1281,6 +1281,10 @@ path = "mindroom.config.entity_view"
 depends_on = []
 
 [[modules]]
+path = "mindroom.config.yaml_includes"
+depends_on = []
+
+[[modules]]
 path = "mindroom.config.main"
 depends_on = [
     "mindroom.agent_policy",
@@ -1293,6 +1297,7 @@ depends_on = [
     "mindroom.config.models",
     "mindroom.config.plugin",
     "mindroom.config.voice",
+    "mindroom.config.yaml_includes",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.git_urls",
@@ -2053,6 +2058,7 @@ path = "mindroom.cli.config"
 depends_on = [
     "mindroom.cli.owner",
     "mindroom.config.main",
+    "mindroom.config.yaml_includes",
     "mindroom.constants",
     "mindroom.credentials_sync",
     "mindroom.tool_system.worker_routing",

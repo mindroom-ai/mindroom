@@ -2707,7 +2707,7 @@ def test_get_raw_config_source_returns_current_invalid_file(
     response = test_client.get("/api/config/raw")
 
     assert response.status_code == 200
-    assert response.json() == {"source": invalid_source}
+    assert response.json() == {"source": invalid_source, "uses_includes": False}
 
 
 def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_file(
@@ -2723,7 +2723,7 @@ def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_fil
     response = test_client.get("/api/config/raw")
 
     assert response.status_code == 200
-    assert response.json() == {"source": "agents:\n  broken: \ufffd\n"}
+    assert response.json() == {"source": "agents:\n  broken: \ufffd\n", "uses_includes": False}
 
 
 def test_save_raw_config_source_can_recover_from_invalid_reload(
@@ -2859,7 +2859,7 @@ def test_external_raw_config_reload_advances_generation_for_same_authored_config
     reloaded_raw_response = test_client.get("/api/config/raw")
     assert reloaded_raw_response.status_code == 200
     assert int(reloaded_raw_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) > initial_generation
-    assert reloaded_raw_response.json() == {"source": externally_edited_source}
+    assert reloaded_raw_response.json() == {"source": externally_edited_source, "uses_includes": False}
 
     stale_save_response = test_client.put(
         "/api/config/raw",
@@ -3136,7 +3136,7 @@ def test_api_key_raw_endpoints_recover_from_invalid_reload(
         headers={"Authorization": "Bearer test-key"},
     )
     assert raw_response.status_code == 200
-    assert raw_response.json() == {"source": invalid_source}
+    assert raw_response.json() == {"source": invalid_source, "uses_includes": False}
 
     valid_source = yaml.safe_dump(_authored_config_payload("recovered"), sort_keys=True)
     save_response = api_key_client.put(
@@ -4071,7 +4071,7 @@ def test_protected_raw_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path
         )
 
     assert response.status_code == 200
-    assert response.json() == {"source": source_a}
+    assert response.json() == {"source": source_a, "uses_includes": False}
 
 
 def test_protected_raw_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:

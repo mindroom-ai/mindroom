@@ -1726,12 +1726,18 @@ async def _handle_config_change(orchestrator: _MultiAgentOrchestrator) -> None:
 
 
 async def _watch_config_task(config_path: Path, orchestrator: _MultiAgentOrchestrator) -> None:
-    """Watch config file for changes."""
+    """Watch the config file plus every file it pulls in via !include."""
+
+    def config_source_paths() -> Iterable[Path]:
+        config = orchestrator.config
+        if config is not None and config.source_files:
+            return config.source_files
+        return (config_path,)
 
     async def on_config_change() -> None:
         await _handle_config_change(orchestrator)
 
-    await file_watcher.watch_file(config_path, on_config_change)
+    await file_watcher.watch_paths(config_source_paths, on_config_change)
 
 
 async def _watch_skills_task(orchestrator: _MultiAgentOrchestrator) -> None:

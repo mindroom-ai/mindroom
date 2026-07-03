@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
 
 logger = get_logger(__name__)
 _WATCH_SCAN_INTERVAL_SECONDS = 1.0
@@ -28,35 +28,45 @@ def _is_relevant_path(path: Path) -> bool:
     return not (name.endswith(_IGNORED_TREE_SUFFIXES) or name.startswith(".#"))
 
 
-async def watch_file(
-    file_path: Path | str,
+def _paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, float]:
+    """Return the current mtime snapshot for one dynamic set of files."""
+    snapshot: dict[Path, float] = {}
+    for raw_path in paths:
+        path = Path(raw_path)
+        try:
+            snapshot[path] = path.stat().st_mtime if path.exists() else 0.0
+        except (OSError, PermissionError):
+            snapshot[path] = 0.0
+    return snapshot
+
+
+async def watch_paths(
+    paths_provider: Callable[[], Iterable[Path | str]],
     callback: Callable[[], Awaitable[None]],
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    """Watch a file for changes and call callback when modified.
+    """Watch a dynamic set of files and call callback when any of them changes.
 
-    Args:
-        file_path: Path to the file to watch
-        callback: Async function to call when file changes
-        stop_event: Optional event to signal when to stop watching
-
+    ``paths_provider`` is re-evaluated every scan so the watched set can grow or
+    shrink between calls (e.g. config ``!include`` files after a reload). Paths
+    that enter the set are baselined silently, and a change fires only for a
+    file that existed in the previous scan with a different mtime, so a
+    momentarily missing file during an editor's delete-and-rename save cannot
+    fire a change until it reappears.
     """
-    file_path = Path(file_path)
-    last_mtime = file_path.stat().st_mtime if file_path.exists() else 0
+    last_snapshot = _paths_mtime_snapshot(paths_provider())
 
     while stop_event is None or not stop_event.is_set():
         await asyncio.sleep(_WATCH_SCAN_INTERVAL_SECONDS)
 
         try:
-            if file_path.exists():
-                current_mtime = file_path.stat().st_mtime
-                if current_mtime != last_mtime:
-                    last_mtime = current_mtime
-                    await callback()
-        except (OSError, PermissionError):
-            # File might have been deleted or become unreadable
-            # Reset mtime so we detect when it comes back
-            last_mtime = 0
+            current_snapshot = _paths_mtime_snapshot(paths_provider())
+            changed = any(
+                mtime != 0.0 and last_snapshot.get(path, mtime) != mtime for path, mtime in current_snapshot.items()
+            )
+            last_snapshot = current_snapshot
+            if changed:
+                await callback()
         except Exception:
             # Don't let callback errors stop the watcher
             # The callback should handle its own errors
