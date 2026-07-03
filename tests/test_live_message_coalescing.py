@@ -4853,10 +4853,10 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
     )
     dispatch = _prepared_dispatch(event_id="$m1", body="hello")
     dispatch.context.thread_history = []
-    bot._send_response = AsyncMock(return_value="$placeholder")
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
-    install_generate_response_mock(bot, bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     with (
         patch.object(
@@ -5159,10 +5159,10 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         latest_event_id="$m2",
     )
     _set_context_histories(dispatch, [newer_cmd])
-    bot._send_response = AsyncMock(return_value="$placeholder")
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
-    install_generate_response_mock(bot, bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
@@ -5209,10 +5209,10 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         latest_event_id="$m2",
     )
     _set_context_histories(dispatch, [newer_cmd])
-    bot._send_response = AsyncMock(return_value="$placeholder")
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
-    install_generate_response_mock(bot, bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
@@ -5267,10 +5267,10 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$s2",
     )
     _set_context_histories(dispatch, [newer_msg])
-    bot._send_response = AsyncMock(return_value="$placeholder")
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
-    install_generate_response_mock(bot, bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
@@ -5317,10 +5317,10 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$h2",
     )
     _set_context_histories(dispatch, [newer_msg])
-    bot._send_response = AsyncMock(return_value="$placeholder")
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
-    install_generate_response_mock(bot, bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
@@ -5369,10 +5369,10 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$s2",
     )
     _set_context_histories(dispatch, [second_fire_msg])
-    bot._send_response = AsyncMock(return_value="$placeholder")
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
-    install_generate_response_mock(bot, bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (

@@ -1377,8 +1377,8 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         runtime_paths=runtime_paths_for(config),
     )
     setup_test_bot(bot, AsyncMock())
-    bot._send_response = AsyncMock(return_value=None)
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock(return_value=None)
+    install_send_response_mock(bot, send_response)
 
     response_started = asyncio.Event()
     release_response = asyncio.Event()
@@ -1403,7 +1403,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
 
     try:
         await asyncio.wait_for(response_started.wait(), timeout=1)
-        bot._send_response.assert_awaited_once()
+        send_response.assert_awaited_once()
         assert bot.in_flight_response_count == 1
 
         orchestrator.config_reload.request_reload()
@@ -2377,7 +2377,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
     tmp_path: Path,
     mock_agent_users: dict[str, AgentMatrixUser],
 ) -> None:
-    """in_flight_response_count must be >0 even while _send_response is still awaiting."""
+    """in_flight_response_count must be >0 even while the visible send is still awaiting."""
     config = _runtime_bound_config(
         Config(
             agents={"agent1": AgentConfig(display_name="Agent 1")},
@@ -2401,8 +2401,8 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         await release_send.wait()
         return "$msg"
 
-    bot._send_response = AsyncMock(side_effect=slow_send)
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock(side_effect=slow_send)
+    install_send_response_mock(bot, send_response)
 
     async def response_function(message_id: str | None) -> None:
         pass
@@ -2417,7 +2417,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
 
     try:
         await asyncio.wait_for(send_entered.wait(), timeout=1)
-        # _send_response is blocked, but the pre-tracking sentinel must be visible
+        # The visible send is blocked, but the pre-tracking sentinel must be visible
         assert bot.in_flight_response_count >= 1
     finally:
         release_send.set()
@@ -2502,8 +2502,8 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
         captured_send["extra_content"] = extra_content
         return "$thinking"
 
-    bot._send_response = AsyncMock(side_effect=fake_send_response)
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock(side_effect=fake_send_response)
+    install_send_response_mock(bot, send_response)
 
     async def response_function(message_id: str | None) -> None:
         assert message_id == "$thinking"

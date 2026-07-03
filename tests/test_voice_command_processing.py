@@ -161,12 +161,12 @@ def _make_visible_router_echo_scenario(
     bot.client = AsyncMock()
     bot.client.rooms = {}
     _install_voice_thread_dispatch_mocks(bot)
-    bot._send_response = AsyncMock()
+    send_response = AsyncMock()
     if send_response_side_effect is not None:
-        bot._send_response.side_effect = send_response_side_effect
+        send_response.side_effect = send_response_side_effect
     else:
-        bot._send_response.return_value = send_response_return
-    install_send_response_mock(bot, bot._send_response)
+        send_response.return_value = send_response_return
+    install_send_response_mock(bot, send_response)
 
     room_user_ids = [
         "@mindroom_router:localhost",
@@ -301,8 +301,8 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
             ).encode("utf-8"),
         ),
     )
-    bot._send_response = AsyncMock(return_value="$reply")
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock(return_value="$reply")
+    install_send_response_mock(bot, send_response)
 
     room = _make_room("@mindroom_router:example.com", "@mindroom_home:localhost", "@alice:example.com")
     event = nio.Event.parse_event(
@@ -384,8 +384,8 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
             ).encode("utf-8"),
         ),
     )
-    bot._send_response = AsyncMock(return_value="$reply")
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock(return_value="$reply")
+    install_send_response_mock(bot, send_response)
 
     room = _make_room("@mindroom_router:example.com", "@mindroom_home:localhost", "@alice:example.com")
     event = nio.Event.parse_event(
@@ -472,8 +472,8 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
             ).encode("utf-8"),
         ),
     )
-    bot._send_response = AsyncMock(return_value="$fallback")
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock(return_value="$fallback")
+    install_send_response_mock(bot, send_response)
 
     room = _make_room(
         "@mindroom_router:example.com",
@@ -510,10 +510,8 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
         await bot._coalescing_gate.drain_all()
 
     mock_interactive.assert_awaited_once()
-    bot._send_response.assert_awaited_once()
-    assert bot._send_response.await_args.kwargs["response_text"] == (
-        "❌ Unknown command. Try !help for available commands."
-    )
+    send_response.assert_awaited_once()
+    assert send_response.await_args.kwargs["response_text"] == ("❌ Unknown command. Try !help for available commands.")
 
 
 @pytest.mark.asyncio
@@ -742,8 +740,8 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = MagicMock()
-    bot._send_response = AsyncMock()
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock()
+    install_send_response_mock(bot, send_response)
 
     room = _make_room(
         "@mindroom_router:example.com",
@@ -766,7 +764,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
 
     mock_voice.assert_not_called()
     mock_download_audio.assert_not_called()
-    bot._send_response.assert_not_called()
+    send_response.assert_not_called()
     turn_store.record_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id("$agent_audio_event"),
     )
@@ -800,8 +798,8 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_generate_response_mock(bot, bot._generate_response)
+    generate_response = AsyncMock(return_value="$response")
+    install_generate_response_mock(bot, generate_response)
     _install_voice_thread_dispatch_mocks(bot)
 
     room = _make_room("@mindroom_home:localhost", "@alice:example.com")
@@ -818,8 +816,8 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         await bot._on_media_message(room, event)
         await drain_coalescing(bot)
 
-    bot._generate_response.assert_called_once()
-    call_kwargs = bot._generate_response.call_args.kwargs
+    generate_response.assert_called_once()
+    call_kwargs = generate_response.call_args.kwargs
     expected_attachment_id = _attachment_id_for_event("$voice_event")
     assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}[Attached voice message]")
@@ -873,8 +871,8 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_generate_response_mock(bot, bot._generate_response)
+    generate_response = AsyncMock(return_value="$response")
+    install_generate_response_mock(bot, generate_response)
     _install_voice_thread_dispatch_mocks(bot)
 
     room = _make_room("@mindroom_router:localhost", "@mindroom_home:localhost", "@alice:example.com")
@@ -892,7 +890,7 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
         await drain_coalescing(bot)
 
     mock_download_audio.assert_called_once()
-    bot._generate_response.assert_called_once()
+    generate_response.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -908,6 +906,8 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
     )
 
     bots: list[AgentBot] = []
+    send_response_mocks: list[AsyncMock] = []
+    generate_response_mocks: list[AsyncMock] = []
     for agent_name in (ROUTER_AGENT_NAME, "home"):
         agent_user = MagicMock()
         agent_user.user_id = f"@mindroom_{agent_name}:localhost"
@@ -926,12 +926,14 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = agent_user.user_id
-        bot._send_response = AsyncMock(return_value="$router_response")
-        bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
-        install_send_response_mock(bot, bot._send_response)
-        install_generate_response_mock(bot, bot._generate_response)
+        send_response = AsyncMock(return_value="$router_response")
+        generate_response = AsyncMock(return_value=f"${agent_name}_response")
+        install_send_response_mock(bot, send_response)
+        install_generate_response_mock(bot, generate_response)
         _install_voice_thread_dispatch_mocks(bot)
         bots.append(bot)
+        send_response_mocks.append(send_response)
+        generate_response_mocks.append(generate_response)
 
     room = _make_room("@mindroom_router:localhost", "@mindroom_home:localhost", "@alice:example.com")
     event = _make_voice_event(sender="@alice:example.com")
@@ -950,8 +952,8 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
 
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
-    bots[0]._send_response.assert_not_called()
-    assert bots[1]._generate_response.await_count == 1
+    send_response_mocks[0].assert_not_called()
+    assert generate_response_mocks[1].await_count == 1
 
 
 @pytest.mark.asyncio
@@ -1224,8 +1226,8 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
-    bot._send_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
     _install_voice_thread_dispatch_mocks(bot)
 
     room = _make_room(
@@ -1296,6 +1298,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
     event = _make_voice_event(sender="@alice:example.com")
 
     bots: list[AgentBot] = []
+    generate_response_mocks: list[AsyncMock] = []
     for agent_name in ("home", "research"):
         agent_user = MagicMock()
         agent_user.user_id = f"@mindroom_{agent_name}:localhost"
@@ -1314,10 +1317,11 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"
-        bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock(return_value=f"${agent_name}_response")
+        install_generate_response_mock(bot, generate_response)
         _install_voice_thread_dispatch_mocks(bot)
         bots.append(bot)
+        generate_response_mocks.append(generate_response)
 
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
@@ -1333,9 +1337,9 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
 
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
-    assert bots[0]._generate_response.await_count == 0
-    assert bots[1]._generate_response.await_count == 1
-    call_kwargs = bots[1]._generate_response.call_args.kwargs
+    assert generate_response_mocks[0].await_count == 0
+    assert generate_response_mocks[1].await_count == 1
+    call_kwargs = generate_response_mocks[1].call_args.kwargs
     assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}@research summarize this audio")
     assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]
@@ -1370,6 +1374,7 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
     )
 
     bots: list[AgentBot] = []
+    generate_response_mocks: list[AsyncMock] = []
     for agent_name in ("home", "research"):
         agent_user = MagicMock()
         agent_user.user_id = f"@mindroom_{agent_name}:localhost"
@@ -1388,10 +1393,11 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"
-        bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock(return_value=f"${agent_name}_response")
+        install_generate_response_mock(bot, generate_response)
         _install_voice_thread_dispatch_mocks(bot)
         bots.append(bot)
+        generate_response_mocks.append(generate_response)
 
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
@@ -1407,9 +1413,9 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
 
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
-    assert bots[0]._generate_response.await_count == 0
-    assert bots[1]._generate_response.await_count == 1
-    call_kwargs = bots[1]._generate_response.call_args.kwargs
+    assert generate_response_mocks[0].await_count == 0
+    assert generate_response_mocks[1].await_count == 1
+    call_kwargs = generate_response_mocks[1].call_args.kwargs
     assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}summarize this audio")
     assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
@@ -12,19 +12,18 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
+from mindroom.response_runner import ResponseRequest
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
 
     import nio
     import structlog
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
-    from mindroom.hooks import MessageEnvelope
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
     from mindroom.turn_policy import IngressHookRunner
@@ -34,21 +33,7 @@ if TYPE_CHECKING:
 class _GenerateResponse(Protocol):
     """Minimal response-generation surface needed for edit regeneration."""
 
-    async def __call__(
-        self,
-        *,
-        prompt: str,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        existing_event_id: str | None = None,
-        existing_event_is_placeholder: bool = False,
-        user_id: str | None = None,
-        response_envelope: MessageEnvelope,
-        correlation_id: str | None = None,
-        matrix_run_metadata: dict[str, Any] | None = None,
-        current_timestamp_ms: float | None = None,
-        current_prompt_is_structured: bool = False,
-        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> str | None:
+    async def __call__(self, request: ResponseRequest) -> str | None:
         """Generate or regenerate a response for one handled turn."""
 
 
@@ -291,22 +276,23 @@ class EditRegenerator:
             return
 
         regenerated_event_id = await self.deps.generate_response(
-            prompt=regeneration_prompt,
-            thread_history=context.thread_history,
-            existing_event_id=response_event_id,
-            existing_event_is_placeholder=False,
-            user_id=requester_user_id,
-            response_envelope=envelope,
-            correlation_id=event.event_id,
-            matrix_run_metadata=regeneration_matrix_run_metadata,
-            current_timestamp_ms=normalize_timestamp_ms(event.server_timestamp),
-            current_prompt_is_structured=current_prompt_is_structured,
-            on_lifecycle_lock_acquired=lambda: self.deps.turn_store.remove_stale_runs_for_edit(
-                loaded_turn=replace(
-                    loaded_turn,
-                    record=regeneration_turn_record,
+            ResponseRequest(
+                thread_history=context.thread_history,
+                prompt=regeneration_prompt,
+                response_envelope=envelope,
+                existing_event_id=response_event_id,
+                user_id=requester_user_id,
+                correlation_id=event.event_id,
+                matrix_run_metadata=regeneration_matrix_run_metadata,
+                current_timestamp_ms=normalize_timestamp_ms(event.server_timestamp),
+                current_prompt_is_structured=current_prompt_is_structured,
+                on_lifecycle_lock_acquired=lambda: self.deps.turn_store.remove_stale_runs_for_edit(
+                    loaded_turn=replace(
+                        loaded_turn,
+                        record=regeneration_turn_record,
+                    ),
+                    requester_user_id=requester_user_id,
                 ),
-                requester_user_id=requester_user_id,
             ),
         )
 

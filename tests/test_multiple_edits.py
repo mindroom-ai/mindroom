@@ -21,6 +21,7 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    replace_edit_regenerator_deps,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -159,13 +160,10 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     edit1_event.source = edit1_event.__dict__["source"]
 
     # Process first edit and verify regeneration happens through the shared response helper.
-    with patch.object(
-        bot,
-        "_generate_response",
-        new=AsyncMock(return_value=_delivery_resolution("$response123")),
-    ) as mock_generate_response:
-        await bot._on_message(room, edit1_event)
-        await drain_coalescing(bot)
+    mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    await bot._on_message(room, edit1_event)
+    await drain_coalescing(bot)
 
     assert mock_generate_response.await_count == 1
 
@@ -199,13 +197,10 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     edit2_event.source = edit2_event.__dict__["source"]
 
     # Process second edit and verify regeneration happens again.
-    with patch.object(
-        bot,
-        "_generate_response",
-        new=AsyncMock(return_value=_delivery_resolution("$response123")),
-    ) as mock_generate_response:
-        await bot._on_message(room, edit2_event)
-        await drain_coalescing(bot)
+    mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    await bot._on_message(room, edit2_event)
+    await drain_coalescing(bot)
 
     assert mock_generate_response.await_count == 1
 
@@ -239,12 +234,9 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     bot.client.room_send.reset_mock()
 
     # Process third edit and verify regeneration still happens.
-    with patch.object(
-        bot,
-        "_generate_response",
-        new=AsyncMock(return_value=_delivery_resolution("$response123")),
-    ) as mock_generate_response:
-        await bot._on_message(room, edit3_event)
-        await drain_coalescing(bot)
+    mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    await bot._on_message(room, edit3_event)
+    await drain_coalescing(bot)
 
     assert mock_generate_response.await_count == 1

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -27,11 +27,9 @@ from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
     EVENT_ROOM_MEMBER_JOINED,
     AgentLifecycleContext,
-    EnrichmentItem,
     HookContextSupport,
     HookRegistry,
     HookRegistryState,
-    MessageEnvelope,
     ReactionReceivedContext,
     RoomMemberJoinedContext,
     emit,
@@ -88,7 +86,7 @@ from .delivery_gateway import (
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
-from .inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, InboundTurnNormalizerDeps
+from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
 from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
@@ -118,7 +116,7 @@ from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable
     from datetime import datetime
     from pathlib import Path
 
@@ -128,7 +126,6 @@ if TYPE_CHECKING:
     from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.config.main import Config
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.runtime_protocols import OrchestratorRuntime
@@ -351,10 +348,12 @@ class AgentBot:
             response_text: str,
             skip_mentions: bool = False,
         ) -> str | None:
-            return await self._send_response(
-                target=target,
-                response_text=response_text,
-                skip_mentions=skip_mentions,
+            return await self._delivery_gateway.send_text(
+                SendTextRequest(
+                    target=target,
+                    response_text=response_text,
+                    skip_mentions=skip_mentions,
+                ),
             )
 
         self._room_lifecycle = BotRoomLifecycle(
@@ -507,7 +506,7 @@ class AgentBot:
                 resolver=self._conversation_resolver,
                 turn_store=self._turn_store,
                 ingress_hook_runner=self._ingress_hook_runner,
-                generate_response=lambda **kwargs: self._generate_response(**kwargs),
+                generate_response=lambda request: self._run_regenerated_response(request),
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
                     timezone=self.config.timezone,
@@ -1882,135 +1881,9 @@ class AgentBot:
             return False
         return "matrix_message" in tool_names
 
-    async def _generate_team_response_helper(
-        self,
-        team_agents: list[MatrixID],
-        team_mode: str,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        requester_user_id: str,
-        existing_event_id: str | None = None,
-        existing_event_is_placeholder: bool = False,
-        *,
-        payload: DispatchPayload,
-        response_envelope: MessageEnvelope,
-        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-        correlation_id: str | None = None,
-        reason_prefix: str = "Team request",
-        matrix_run_metadata: dict[str, Any] | None = None,
-        current_timestamp_ms: float | None = None,
-        current_prompt_is_structured: bool = False,
-        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> str | None:
-        """Generate a team response (shared between preformed teams and TeamBot)."""
-        return await self._response_runner.generate_team_response_helper(
-            ResponseRequest(
-                thread_history=thread_history,
-                prompt=payload.prompt,
-                model_prompt=payload.model_prompt,
-                existing_event_id=existing_event_id,
-                existing_event_is_placeholder=existing_event_is_placeholder,
-                user_id=requester_user_id,
-                media=payload.media,
-                attachment_ids=tuple(payload.attachment_ids) if payload.attachment_ids is not None else None,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                matrix_run_metadata=matrix_run_metadata,
-                system_enrichment_items=system_enrichment_items,
-                current_timestamp_ms=current_timestamp_ms,
-                current_prompt_is_structured=current_prompt_is_structured,
-                on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-            ),
-            team_agents=team_agents,
-            team_mode=team_mode,
-            reason_prefix=reason_prefix,
-        )
-
-    async def _generate_response(
-        self,
-        prompt: str,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        *,
-        response_envelope: MessageEnvelope,
-        existing_event_id: str | None = None,
-        existing_event_is_placeholder: bool = False,
-        user_id: str | None = None,
-        media: MediaInputs | None = None,
-        attachment_ids: list[str] | None = None,
-        model_prompt: str | None = None,
-        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-        correlation_id: str | None = None,
-        matrix_run_metadata: dict[str, Any] | None = None,
-        current_timestamp_ms: float | None = None,
-        current_prompt_is_structured: bool = False,
-        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> str | None:
-        """Generate and send/edit a response using AI.
-
-        Args:
-            prompt: The prompt to send to the AI
-            thread_history: Thread history for context
-            existing_event_id: If provided, edit this message instead of sending a new one
-                             (used for placeholders and interactive acknowledgments)
-            existing_event_is_placeholder: Whether `existing_event_id` points at a
-                             provisional visible event that may be cleaned up on suppression
-            user_id: User ID of the sender for identifying user messages in history
-            media: Optional multimodal inputs (audio/images/files/videos)
-            attachment_ids: Attachment IDs available for tool-side file processing
-            model_prompt: Optional model-facing prompt for the live request and persisted history.
-            system_enrichment_items: Hook-provided transient system prompt fragments to
-                apply for this response.
-            response_envelope: Normalized inbound envelope for response hooks.
-            correlation_id: Optional request correlation ID propagated to hook logging.
-            matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
-                for unseen-message tracking, coalesced edit regeneration, and cleanup.
-            current_timestamp_ms: Optional source Matrix event timestamp in milliseconds.
-            current_prompt_is_structured: Whether the current prompt already carries trusted message tags.
-            on_lifecycle_lock_acquired: Optional callback that runs after the response
-                lifecycle lock is acquired and before response generation starts.
-
-        Returns:
-            Event ID of the visible response, or None if no visible response landed.
-
-        """
-        return await self._response_runner.generate_response(
-            ResponseRequest(
-                thread_history=thread_history,
-                prompt=prompt,
-                model_prompt=model_prompt,
-                existing_event_id=existing_event_id,
-                existing_event_is_placeholder=existing_event_is_placeholder,
-                user_id=user_id,
-                media=media,
-                attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                matrix_run_metadata=matrix_run_metadata,
-                system_enrichment_items=system_enrichment_items,
-                current_timestamp_ms=current_timestamp_ms,
-                current_prompt_is_structured=current_prompt_is_structured,
-                on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-            ),
-        )
-
-    async def _send_response(
-        self,
-        *,
-        target: MessageTarget,
-        response_text: str,
-        skip_mentions: bool = False,
-        tool_trace: list[ToolTraceEntry] | None = None,
-        extra_content: dict[str, Any] | None = None,
-    ) -> _MatrixEventId | None:
-        """Send a response message to a room."""
-        return await self._delivery_gateway.send_text(
-            SendTextRequest(
-                target=target,
-                response_text=response_text,
-                skip_mentions=skip_mentions,
-                tool_trace=tool_trace,
-                extra_content=extra_content,
-            ),
-        )
+    async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
+        """Run one edit-regenerated turn through this bot's response path."""
+        return await self._response_runner.generate_response(request)
 
     async def _hook_send_message(
         self,
@@ -2161,56 +2034,22 @@ class TeamBot(AgentBot):
         registry = entity_identity_registry(self.config, self.runtime_paths)
         return [registry.current_id(agent_name) for agent_name in team_config.agents]
 
-    async def _generate_response(
-        self,
-        prompt: str,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        *,
-        response_envelope: MessageEnvelope,
-        existing_event_id: str | None = None,
-        existing_event_is_placeholder: bool = False,
-        user_id: str | None = None,
-        media: MediaInputs | None = None,
-        attachment_ids: list[str] | None = None,
-        model_prompt: str | None = None,
-        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-        correlation_id: str | None = None,
-        matrix_run_metadata: dict[str, Any] | None = None,
-        current_timestamp_ms: float | None = None,
-        current_prompt_is_structured: bool = False,
-        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> str | None:
-        """Generate a team response instead of individual agent response."""
-        target = response_envelope.target
-        if not prompt.strip():
+    async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
+        """Run one edit-regenerated turn through the configured team path."""
+        target = request.response_envelope.target
+        if not request.prompt.strip():
             return await self._response_runner.generate_response_for_empty_prompt(
-                ResponseRequest(
-                    thread_history=thread_history,
-                    prompt=prompt,
-                    model_prompt=model_prompt,
-                    existing_event_id=existing_event_id,
-                    existing_event_is_placeholder=existing_event_is_placeholder,
-                    user_id=user_id,
-                    media=media,
-                    attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
-                    response_envelope=response_envelope,
-                    correlation_id=correlation_id,
-                    matrix_run_metadata=matrix_run_metadata,
-                    system_enrichment_items=system_enrichment_items,
-                    current_timestamp_ms=current_timestamp_ms,
-                    current_prompt_is_structured=current_prompt_is_structured,
-                    on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-                ),
+                request,
                 response_kind="team",
             )
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
-                prompt,
-                thread_history,
+                request.prompt,
+                request.thread_history,
                 config=self.config,
                 runtime_paths=self.runtime_paths,
-                model_prompt=model_prompt,
+                model_prompt=request.model_prompt,
             )
         )
 
@@ -2227,18 +2066,20 @@ class TeamBot(AgentBot):
         if team_resolution.outcome is not TeamOutcome.TEAM:
             assert team_resolution.reason is not None
             response_event_id: str | None
-            if existing_event_id:
+            if request.existing_event_id:
                 edited = await self._edit_message(
                     room_id=target.room_id,
-                    event_id=existing_event_id,
+                    event_id=request.existing_event_id,
                     new_text=team_resolution.reason,
                     thread_id=target.resolved_thread_id,
                 )
-                response_event_id = existing_event_id if edited else None
+                response_event_id = request.existing_event_id if edited else None
             else:
-                response_event_id = await self._send_response(
-                    target=response_envelope.target,
-                    response_text=team_resolution.reason,
+                response_event_id = await self._delivery_gateway.send_text(
+                    SendTextRequest(
+                        target=target,
+                        response_text=team_resolution.reason,
+                    ),
                 )
             return response_event_id
         assert team_resolution.mode is not None
@@ -2251,7 +2092,7 @@ class TeamBot(AgentBot):
         session_id = target.session_id
         execution_identity = self._tool_runtime_support.build_execution_identity(
             target=target,
-            user_id=user_id,
+            user_id=request.user_id,
             session_id=session_id,
         )
         with tool_execution_identity(execution_identity):
@@ -2264,34 +2105,24 @@ class TeamBot(AgentBot):
                     self.config,
                     self.runtime_paths,
                     memory_thread_history,
-                    user_id,
+                    request.user_id,
                     execution_identity=execution_identity,
                 ),
                 name=f"memory_save_team_{session_id}",
                 owner=self._runtime_view,
             )
 
-        media_inputs = media or MediaInputs()
-
-        return await self._generate_team_response_helper(
-            payload=DispatchPayload(
+        return await self._response_runner.generate_team_response_helper(
+            replace(
+                request,
                 prompt=memory_prompt,
                 model_prompt=model_prompt_text,
-                media=media_inputs,
-                attachment_ids=attachment_ids,
+                thread_history=model_thread_history,
+                media=request.media or MediaInputs(),
+                user_id=request.user_id or "",
+                correlation_id=request.correlation_id or target.reply_to_event_id,
             ),
             team_agents=team_resolution.eligible_members,
             team_mode=team_resolution.mode.value,
-            thread_history=model_thread_history,
-            requester_user_id=user_id or "",
-            existing_event_id=existing_event_id,
-            existing_event_is_placeholder=existing_event_is_placeholder,
-            response_envelope=response_envelope,
-            system_enrichment_items=system_enrichment_items,
-            correlation_id=correlation_id or target.reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
-            matrix_run_metadata=matrix_run_metadata,
-            current_timestamp_ms=current_timestamp_ms,
-            current_prompt_is_structured=current_prompt_is_structured,
-            on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
         )

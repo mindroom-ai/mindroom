@@ -3588,14 +3588,16 @@ class TestAgentBot:
                 team_response=AsyncMock(return_value="Team reply"),
             ),
         ):
-            resolution = await bot._generate_team_response_helper(
+            resolution = await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                ),
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
-                thread_history=[],
-                requester_user_id="@user:localhost",
-                payload=DispatchPayload(prompt="team prompt"),
-                response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
-                correlation_id="corr-team",
             )
 
         assert _handled_response_event_id(resolution) == "$team"
@@ -3637,14 +3639,16 @@ class TestAgentBot:
                 team_response=AsyncMock(return_value="Team reply"),
             ),
         ):
-            resolution = await bot._generate_team_response_helper(
+            resolution = await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                ),
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
-                thread_history=[],
-                requester_user_id="@user:localhost",
-                payload=DispatchPayload(prompt="team prompt"),
-                response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
-                correlation_id="corr-team",
             )
 
         assert _handled_response_event_id(resolution) == "$team"
@@ -3684,20 +3688,20 @@ class TestAgentBot:
                 team_response=mock_team_response,
             ),
         ):
-            resolution = await bot._generate_team_response_helper(
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
-                team_mode="collaborate",
-                thread_history=[],
-                requester_user_id="@user:localhost",
-                payload=DispatchPayload(
+            resolution = await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    thread_history=[],
+                    user_id="@user:localhost",
                     prompt="Summarize the latest invoice.",
                     model_prompt="Available attachment IDs: att_invoice. Use tool calls to inspect or process them.",
+                    response_envelope=_hook_envelope(
+                        body="Summarize the latest invoice.",
+                        source_event_id="$team-root",
+                    ),
+                    correlation_id="corr-team",
                 ),
-                response_envelope=_hook_envelope(
-                    body="Summarize the latest invoice.",
-                    source_event_id="$team-root",
-                ),
-                correlation_id="corr-team",
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
             )
 
         assert _handled_response_event_id(resolution) == "$team"
@@ -3744,20 +3748,20 @@ class TestAgentBot:
                 team_response=mock_team_response,
             ),
         ):
-            resolution = await bot._generate_team_response_helper(
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
-                team_mode="collaborate",
-                thread_history=[],
-                requester_user_id="@user:localhost",
-                payload=DispatchPayload(
+            resolution = await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    thread_history=[],
+                    user_id="@user:localhost",
                     prompt="What time is it?",
                     model_prompt=timestamped_prompt,
+                    response_envelope=_hook_envelope(
+                        body="What time is it?",
+                        source_event_id="$team-root",
+                    ),
+                    correlation_id="corr-team",
                 ),
-                response_envelope=_hook_envelope(
-                    body="What time is it?",
-                    source_event_id="$team-root",
-                ),
-                correlation_id="corr-team",
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
             )
 
         assert _handled_response_event_id(resolution) == "$team"
@@ -3834,14 +3838,16 @@ class TestAgentBot:
                 team_response=AsyncMock(return_value="Team reply"),
             ),
         ):
-            resolution = await bot._generate_team_response_helper(
+            resolution = await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=envelope,
+                    correlation_id="corr-team",
+                ),
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
-                thread_history=[],
-                requester_user_id="@user:localhost",
-                payload=DispatchPayload(prompt="team prompt"),
-                response_envelope=envelope,
-                correlation_id="corr-team",
             )
 
         assert _handled_response_event_id(resolution) == "$team"
@@ -3905,14 +3911,16 @@ class TestAgentBot:
             ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
         ):
-            delivery_resolution = await bot._generate_response(
-                prompt="Team, summarize this thread",
-                thread_history=[],
-                existing_event_id="$existing",
-                existing_event_is_placeholder=True,
-                user_id="@alice:localhost",
-                response_envelope=_hook_envelope(body="hello", source_event_id="$event", thread_id="$thread"),
-                correlation_id="corr-nonteam-fallback",
+            delivery_resolution = await bot._run_regenerated_response(
+                ResponseRequest(
+                    prompt="Team, summarize this thread",
+                    thread_history=[],
+                    existing_event_id="$existing",
+                    existing_event_is_placeholder=True,
+                    user_id="@alice:localhost",
+                    response_envelope=_hook_envelope(body="hello", source_event_id="$event", thread_id="$thread"),
+                    correlation_id="corr-nonteam-fallback",
+                ),
             )
 
         bot._delivery_gateway.deliver_final.assert_not_awaited()
@@ -3990,7 +3998,8 @@ class TestAgentBot:
                 reason="not materializable",
             )
 
-        bot._send_response = AsyncMock(return_value="$reject")
+        send_response = AsyncMock(return_value="$reject")
+        install_send_response_mock(bot, send_response)
 
         with (
             patch.object(
@@ -4000,17 +4009,19 @@ class TestAgentBot:
             ),
             patch("mindroom.bot.resolve_configured_team", side_effect=capture_resolve_configured_team),
         ):
-            result = await bot._generate_response(
-                prompt="Team, summarize this thread",
-                thread_history=[],
-                user_id="@alice:localhost",
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
-                    thread_id="$thread",
+            result = await bot._run_regenerated_response(
+                ResponseRequest(
                     prompt="Team, summarize this thread",
+                    thread_history=[],
                     user_id="@alice:localhost",
-                    agent_name=bot.agent_name,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id="$thread",
+                        prompt="Team, summarize this thread",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 ),
             )
 
@@ -4525,19 +4536,21 @@ class TestAgentBot:
             patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
             patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock) as mock_add_buttons,
         ):
-            resolution = await bot._generate_team_response_helper(
+            resolution = await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$team-root",
+                        prompt="team prompt",
+                        user_id="@user:localhost",
+                        agent_name=bot.agent_name,
+                    ),
+                ),
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
-                thread_history=[],
-                requester_user_id="@user:localhost",
-                payload=DispatchPayload(prompt="team prompt"),
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$team-root",
-                    prompt="team prompt",
-                    user_id="@user:localhost",
-                    agent_name=bot.agent_name,
-                ),
             )
 
         assert _handled_response_event_id(resolution) == "$team"
@@ -5718,18 +5731,20 @@ class TestAgentBot:
                 new=AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
             ),
         ):
-            await bot._generate_response(
-                prompt="What time is it?",
-                thread_history=thread_history,
-                user_id="@alice:localhost",
-                current_timestamp_ms=int(current_turn_time.timestamp() * 1000),
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
-                    thread_id="$thread",
+            await bot._response_runner.generate_response(
+                ResponseRequest(
                     prompt="What time is it?",
+                    thread_history=thread_history,
                     user_id="@alice:localhost",
-                    agent_name=bot.agent_name,
+                    current_timestamp_ms=int(current_turn_time.timestamp() * 1000),
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id="$thread",
+                        prompt="What time is it?",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 ),
             )
 
@@ -5838,18 +5853,20 @@ class TestAgentBot:
                 new=AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
             ),
         ):
-            await bot._generate_response(
-                prompt="What time is it?",
-                thread_history=thread_history,
-                user_id="@alice:localhost",
-                current_timestamp_ms=int(current_turn_time.timestamp() * 1000),
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
-                    thread_id="$thread",
+            await bot._response_runner.generate_response(
+                ResponseRequest(
                     prompt="What time is it?",
+                    thread_history=thread_history,
                     user_id="@alice:localhost",
-                    agent_name=bot.agent_name,
+                    current_timestamp_ms=int(current_turn_time.timestamp() * 1000),
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id="$thread",
+                        prompt="What time is it?",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 ),
             )
 
@@ -5933,16 +5950,18 @@ class TestAgentBot:
                 store_conversation_memory=fake_store_conversation_memory,
             ),
         ):
-            await bot._generate_response(
-                prompt="Continue",
-                thread_history=[],
-                user_id="@alice:localhost",
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
+            await bot._response_runner.generate_response(
+                ResponseRequest(
                     prompt="Continue",
+                    thread_history=[],
                     user_id="@alice:localhost",
-                    agent_name=bot.agent_name,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Continue",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 ),
             )
 
@@ -6044,17 +6063,19 @@ class TestAgentBot:
             ),
         ):
             async with bot._conversation_resolver.turn_thread_cache_scope():
-                resolution = await bot._generate_response(
-                    prompt="Continue",
-                    thread_history=stale_history,
-                    user_id="@alice:localhost",
-                    response_envelope=request_envelope(
-                        room_id="!test:localhost",
-                        reply_to_event_id="$event",
-                        thread_id="$thread",
+                resolution = await bot._response_runner.generate_response(
+                    ResponseRequest(
                         prompt="Continue",
+                        thread_history=stale_history,
                         user_id="@alice:localhost",
-                        agent_name=bot.agent_name,
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event",
+                            thread_id="$thread",
+                            prompt="Continue",
+                            user_id="@alice:localhost",
+                            agent_name=bot.agent_name,
+                        ),
                     ),
                 )
 
@@ -6157,12 +6178,14 @@ class TestAgentBot:
             ),
             patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
         ):
-            await bot._generate_response(
-                prompt="Continue",
-                thread_history=[],
-                user_id="@alice:localhost",
-                response_envelope=envelope,
-                correlation_id="$request:localhost",
+            await bot._response_runner.generate_response(
+                ResponseRequest(
+                    prompt="Continue",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    response_envelope=envelope,
+                    correlation_id="$request:localhost",
+                ),
             )
 
         if scheduled_tasks:
@@ -6244,17 +6267,19 @@ class TestAgentBot:
                 new_callable=AsyncMock,
             ) as mock_thread_summary,
         ):
-            await bot._generate_response(
-                prompt="Summarize this thread",
-                thread_history=thread_history,
-                user_id="@alice:localhost",
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
-                    thread_id="$thread",
+            await bot._response_runner.generate_response(
+                ResponseRequest(
                     prompt="Summarize this thread",
+                    thread_history=thread_history,
                     user_id="@alice:localhost",
-                    agent_name=bot.agent_name,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id="$thread",
+                        prompt="Summarize this thread",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 ),
             )
 
@@ -6367,11 +6392,13 @@ class TestAgentBot:
                 new=AsyncMock(return_value="$notice"),
             ) as mock_send_compaction_lifecycle_start,
         ):
-            await bot._generate_response(
-                prompt="Start a thread here",
-                thread_history=[],
-                user_id="@alice:localhost",
-                response_envelope=response_envelope,
+            await bot._response_runner.generate_response(
+                ResponseRequest(
+                    prompt="Start a thread here",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    response_envelope=response_envelope,
+                ),
             )
 
         if scheduled_tasks:
@@ -6425,16 +6452,18 @@ class TestAgentBot:
             ai_response=AsyncMock(side_effect=fake_ai_response),
             apply_post_response_effects=AsyncMock(side_effect=fake_apply_post_response_effects),
         ):
-            await bot._generate_response(
-                prompt="Please answer",
-                thread_history=[],
-                user_id="@alice:localhost",
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
+            await bot._response_runner.generate_response(
+                ResponseRequest(
                     prompt="Please answer",
+                    thread_history=[],
                     user_id="@alice:localhost",
-                    agent_name=bot.agent_name,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Please answer",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 ),
             )
 
@@ -6483,16 +6512,18 @@ class TestAgentBot:
                 apply_post_response_effects=AsyncMock(side_effect=fake_apply_post_response_effects),
             ),
         ):
-            await bot._generate_response(
-                prompt="Please answer",
-                thread_history=[],
-                user_id="@alice:localhost",
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
+            await bot._response_runner.generate_response(
+                ResponseRequest(
                     prompt="Please answer",
+                    thread_history=[],
                     user_id="@alice:localhost",
-                    agent_name=bot.agent_name,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Please answer",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 ),
             )
 
@@ -6553,17 +6584,19 @@ class TestAgentBot:
             ),
         ):
             task = asyncio.create_task(
-                bot._generate_response(
-                    prompt="Summarize this thread",
-                    thread_history=[],
-                    user_id="@alice:localhost",
-                    response_envelope=request_envelope(
-                        room_id="!test:localhost",
-                        reply_to_event_id="$event",
-                        thread_id="$thread",
+                bot._response_runner.generate_response(
+                    ResponseRequest(
                         prompt="Summarize this thread",
+                        thread_history=[],
                         user_id="@alice:localhost",
-                        agent_name=bot.agent_name,
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event",
+                            thread_id="$thread",
+                            prompt="Summarize this thread",
+                            user_id="@alice:localhost",
+                            agent_name=bot.agent_name,
+                        ),
                     ),
                 ),
             )
@@ -6642,23 +6675,25 @@ class TestAgentBot:
                 return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
             ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
-            patch.object(bot, "_generate_team_response_helper", new=AsyncMock(side_effect=fail_helper)),
+            patch.object(bot._response_runner, "generate_team_response_helper", new=AsyncMock(side_effect=fail_helper)),
             patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             pytest.raises(RuntimeError, match="boom"),
         ):
-            await bot._generate_response(
-                prompt="Team, summarize this thread",
-                thread_history=[],
-                user_id="@alice:localhost",
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
-                    thread_id="$thread",
+            await bot._run_regenerated_response(
+                ResponseRequest(
                     prompt="Team, summarize this thread",
+                    thread_history=[],
                     user_id="@alice:localhost",
-                    agent_name=bot.agent_name,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id="$thread",
+                        prompt="Team, summarize this thread",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 ),
             )
 
@@ -6744,8 +6779,8 @@ class TestAgentBot:
             ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
             patch.object(
-                bot,
-                "_generate_team_response_helper",
+                bot._response_runner,
+                "generate_team_response_helper",
                 new=AsyncMock(return_value="$response"),
             ),
             patch.object(
@@ -6760,17 +6795,19 @@ class TestAgentBot:
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
         ):
-            await bot._generate_response(
-                prompt="Team, summarize this thread",
-                thread_history=thread_history,
-                user_id="@alice:localhost",
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
-                    thread_id="$thread",
+            await bot._run_regenerated_response(
+                ResponseRequest(
                     prompt="Team, summarize this thread",
+                    thread_history=thread_history,
                     user_id="@alice:localhost",
-                    agent_name=bot.agent_name,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id="$thread",
+                        prompt="Team, summarize this thread",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 ),
             )
 
@@ -6878,17 +6915,19 @@ class TestAgentBot:
                 new_callable=AsyncMock,
             ) as mock_thread_summary,
         ):
-            resolution = await bot._generate_response(
-                prompt="Team, summarize this thread",
-                thread_history=[],
-                user_id="@alice:localhost",
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
-                    thread_id="$thread",
+            resolution = await bot._run_regenerated_response(
+                ResponseRequest(
                     prompt="Team, summarize this thread",
+                    thread_history=[],
                     user_id="@alice:localhost",
-                    agent_name=bot.agent_name,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id="$thread",
+                        prompt="Team, summarize this thread",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 ),
             )
 
@@ -6985,16 +7024,22 @@ class TestAgentBot:
                 ),
             ) as mock_send_streaming_response,
         ):
-            resolution = await bot._generate_team_response_helper(
-                payload=DispatchPayload(prompt="Continue"),
+            resolution = await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    prompt="Continue",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    existing_event_id="$placeholder",
+                    existing_event_is_placeholder=True,
+                    response_envelope=_hook_envelope(
+                        body="Continue",
+                        source_event_id="$event",
+                        thread_id="$thread_root",
+                    ),
+                    correlation_id="corr-team-stream",
+                ),
                 team_agents=[bot.matrix_id],
                 team_mode="coordinate",
-                thread_history=[],
-                requester_user_id="@alice:localhost",
-                existing_event_id="$placeholder",
-                existing_event_is_placeholder=True,
-                response_envelope=_hook_envelope(body="Continue", source_event_id="$event", thread_id="$thread_root"),
-                correlation_id="corr-team-stream",
             )
 
         assert _handled_response_event_id(resolution) == "$placeholder"
@@ -7063,20 +7108,22 @@ class TestAgentBot:
                 team_response_stream=fake_team_response_stream,
             ),
         ):
-            resolution = await bot._generate_team_response_helper(
-                payload=DispatchPayload(prompt="Continue"),
+            resolution = await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    prompt="Continue",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    existing_event_id="$placeholder",
+                    existing_event_is_placeholder=True,
+                    response_envelope=_hook_envelope(
+                        body="Continue",
+                        source_event_id="$event",
+                        thread_id="$thread_root",
+                    ),
+                    correlation_id="corr-team-stream-suppress",
+                ),
                 team_agents=[bot.matrix_id],
                 team_mode="coordinate",
-                thread_history=[],
-                requester_user_id="@alice:localhost",
-                existing_event_id="$placeholder",
-                existing_event_is_placeholder=True,
-                response_envelope=_hook_envelope(
-                    body="Continue",
-                    source_event_id="$event",
-                    thread_id="$thread_root",
-                ),
-                correlation_id="corr-team-stream-suppress",
             )
 
         assert resolution == "$placeholder"
@@ -7112,20 +7159,22 @@ class TestAgentBot:
             ),
             patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
         ):
-            resolution = await bot._generate_team_response_helper(
-                payload=DispatchPayload(prompt="Continue"),
+            resolution = await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    prompt="Continue",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    existing_event_id="$placeholder",
+                    existing_event_is_placeholder=True,
+                    response_envelope=_hook_envelope(
+                        body="Continue",
+                        source_event_id="$event",
+                        thread_id="$thread_root",
+                    ),
+                    correlation_id="corr-team-suppress",
+                ),
                 team_agents=[bot.matrix_id],
                 team_mode="coordinate",
-                thread_history=[],
-                requester_user_id="@alice:localhost",
-                existing_event_id="$placeholder",
-                existing_event_is_placeholder=True,
-                response_envelope=_hook_envelope(
-                    body="Continue",
-                    source_event_id="$event",
-                    thread_id="$thread_root",
-                ),
-                correlation_id="corr-team-suppress",
             )
 
         assert resolution is None
@@ -7548,7 +7597,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Image messages should call _generate_response with images payload."""
+        """Image messages should reach response generation with an images payload."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -7568,8 +7617,8 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
             ),
         )
-        bot._generate_response = AsyncMock(return_value="$response")
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock(return_value="$response")
+        install_generate_response_mock(bot, generate_response)
 
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -7612,8 +7661,8 @@ class TestAgentBot:
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
-        bot._generate_response.assert_awaited_once()
-        generate_kwargs = bot._generate_response.await_args.kwargs
+        generate_response.assert_awaited_once()
+        generate_kwargs = generate_response.await_args.kwargs
         response_target = generate_kwargs["response_envelope"].target
         assert response_target.room_id == "!test:localhost"
         assert "Attachments sent with the current message" not in generate_kwargs["prompt"]
@@ -8099,8 +8148,8 @@ class TestAgentBot:
                 ),
             ),
         )
-        bot._generate_response = AsyncMock(return_value="$response")
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock(return_value="$response")
+        install_generate_response_mock(bot, generate_response)
         _replace_turn_policy_deps(bot, resolver=bot._conversation_resolver)
         _set_turn_store_tracker(bot, tracker)
 
@@ -8170,8 +8219,8 @@ class TestAgentBot:
         converted_records = mock_records_to_media.call_args.args[0]
         assert [record.attachment_id for record in converted_records] == [current_attachment_id]
 
-        bot._generate_response.assert_awaited_once()
-        generate_kwargs = bot._generate_response.await_args.kwargs
+        generate_response.assert_awaited_once()
+        generate_kwargs = generate_response.await_args.kwargs
         assert generate_kwargs["attachment_ids"] == [current_attachment_id, history_attachment_id]
         assert current_attachment_id not in generate_kwargs["prompt"]
         assert history_attachment_id not in generate_kwargs["prompt"]
@@ -8617,8 +8666,8 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
             ),
         )
-        bot._generate_response = AsyncMock()
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock()
+        install_generate_response_mock(bot, generate_response)
 
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -8641,7 +8690,7 @@ class TestAgentBot:
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
-        bot._generate_response.assert_not_called()
+        generate_response.assert_not_called()
         tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
@@ -8650,7 +8699,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """File messages should call _generate_response with a local media path in prompt."""
+        """File messages should reach response generation with a local media path in prompt."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
@@ -8669,8 +8718,8 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
             ),
         )
-        bot._generate_response = AsyncMock(return_value="$response")
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock(return_value="$response")
+        install_generate_response_mock(bot, generate_response)
 
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -8715,8 +8764,8 @@ class TestAgentBot:
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
-        bot._generate_response.assert_awaited_once()
-        generate_kwargs = bot._generate_response.await_args.kwargs
+        generate_response.assert_awaited_once()
+        generate_kwargs = generate_response.await_args.kwargs
         attachment_id = _attachment_id_for_event("$file_event")
         response_target = generate_kwargs["response_envelope"].target
         assert response_target.room_id == "!test:localhost"
@@ -8779,8 +8828,8 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
             ),
         )
-        bot._generate_response = AsyncMock()
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock()
+        install_generate_response_mock(bot, generate_response)
 
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -8808,7 +8857,7 @@ class TestAgentBot:
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
-        bot._generate_response.assert_not_called()
+        generate_response.assert_not_called()
         tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
@@ -8923,7 +8972,8 @@ class TestAgentBot:
             assert target.room_id in bot.client.rooms
             return "$welcome"
 
-        bot._send_response = AsyncMock(side_effect=fake_send_response)
+        send_response = AsyncMock(side_effect=fake_send_response)
+        install_send_response_mock(bot, send_response)
         with (
             patch(
                 "mindroom.bot_room_lifecycle.generate_welcome_message_for_room",
@@ -8937,7 +8987,7 @@ class TestAgentBot:
 
         assert "!welcome:localhost" in bot.client.rooms
         bot.client.join.assert_awaited_once_with("!welcome:localhost")
-        bot._send_response.assert_awaited_once()
+        send_response.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_router_routes_file_messages_with_sender_metadata(
@@ -9063,8 +9113,8 @@ class TestAgentBot:
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _set_turn_store_tracker(bot, MagicMock())
-        bot._send_response = AsyncMock(return_value="$route")
-        install_send_response_mock(bot, bot._send_response)
+        send_response = AsyncMock(return_value="$route")
+        install_send_response_mock(bot, send_response)
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         event = nio.RoomMessageFile.from_dict(
@@ -9121,7 +9171,7 @@ class TestAgentBot:
 
         mock_register_file.assert_awaited_once()
         assert mock_register_file.await_args.kwargs["thread_id"] is None
-        sent_extra_content = bot._send_response.await_args.kwargs["extra_content"]
+        sent_extra_content = send_response.await_args.kwargs["extra_content"]
         assert sent_extra_content[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
 
     @pytest.mark.asyncio
@@ -9153,8 +9203,8 @@ class TestAgentBot:
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _set_turn_store_tracker(bot, MagicMock())
-        bot._send_response = AsyncMock(return_value="$route")
-        install_send_response_mock(bot, bot._send_response)
+        send_response = AsyncMock(return_value="$route")
+        install_send_response_mock(bot, send_response)
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         event = nio.RoomMessageImage.from_dict(
@@ -9198,7 +9248,7 @@ class TestAgentBot:
 
         mock_register_image.assert_awaited_once()
         assert mock_register_image.await_args.kwargs["thread_id"] is None
-        sent_extra_content = bot._send_response.await_args.kwargs["extra_content"]
+        sent_extra_content = send_response.await_args.kwargs["extra_content"]
         assert sent_extra_content[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
 
     @pytest.mark.asyncio
@@ -9245,10 +9295,10 @@ class TestAgentBot:
         router_tracker.has_responded.return_value = False
         general_tracker = _set_turn_store_tracker(general_bot, MagicMock())
         general_tracker.has_responded.return_value = False
-        router_bot._send_response = AsyncMock(return_value="$route")
-        install_send_response_mock(router_bot, router_bot._send_response)
-        general_bot._generate_response = AsyncMock()
-        install_generate_response_mock(general_bot, general_bot._generate_response)
+        router_send_response = AsyncMock(return_value="$route")
+        install_send_response_mock(router_bot, router_send_response)
+        general_generate_response = AsyncMock()
+        install_generate_response_mock(general_bot, general_generate_response)
 
         message_context = MessageContext(
             am_i_mentioned=False,
@@ -9330,7 +9380,7 @@ class TestAgentBot:
         mock_register.assert_awaited_once()
         assert mock_register.await_args.kwargs["room_id"] == "!test:localhost"
         assert mock_register.await_args.kwargs["thread_id"] == "$file_once"
-        general_bot._generate_response.assert_not_called()
+        general_generate_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_router_dispatch_parity_text_and_image_route_under_same_conditions(self, tmp_path: Path) -> None:
@@ -9566,8 +9616,8 @@ class TestAgentBot:
         tracker = MagicMock()
         tracker.has_responded.return_value = False
         _set_turn_store_tracker(bot, tracker)
-        bot._generate_response = AsyncMock(return_value="$response")
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock(return_value="$response")
+        install_generate_response_mock(bot, generate_response)
 
         # Simulate the routing mention event in a thread rooted at the image
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_calculator:localhost")
@@ -9629,8 +9679,8 @@ class TestAgentBot:
             await drain_coalescing(bot)
 
         mock_resolve_attachment_ids.assert_awaited_once()
-        bot._generate_response.assert_awaited_once()
-        call_kwargs = bot._generate_response.call_args.kwargs
+        generate_response.assert_awaited_once()
+        call_kwargs = generate_response.call_args.kwargs
         # The root image is a thread-history attachment now, so it is pinned to
         # its history message instead of riding the current-turn media inputs.
         assert list(call_kwargs["media"].images) == []
@@ -12443,8 +12493,8 @@ class TestAgentBot:
         bot.client = _make_matrix_client_mock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
         tracker.has_responded.return_value = False
-        bot._generate_response = AsyncMock(return_value="$response")
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock(return_value="$response")
+        install_generate_response_mock(bot, generate_response)
         room = _matrix_room(
             room_id="!room:localhost",
             own_user_id=mock_agent_user.user_id,
@@ -12488,8 +12538,8 @@ class TestAgentBot:
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
-        bot._generate_response.assert_awaited_once()
-        generate_kwargs = bot._generate_response.await_args.kwargs
+        generate_response.assert_awaited_once()
+        generate_kwargs = generate_response.await_args.kwargs
         assert generate_kwargs["user_id"] == "@owner:localhost"
         assert generate_kwargs["response_envelope"].requester_id == "@owner:localhost"
 
@@ -12526,8 +12576,8 @@ class TestAgentBot:
         bot.client = _make_matrix_client_mock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
         tracker.has_responded.return_value = False
-        bot._generate_response = AsyncMock(return_value="$response")
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock(return_value="$response")
+        install_generate_response_mock(bot, generate_response)
         room = _matrix_room(
             room_id="!room:localhost",
             own_user_id=mock_agent_user.user_id,
@@ -12565,8 +12615,8 @@ class TestAgentBot:
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
-        bot._generate_response.assert_awaited_once()
-        generate_kwargs = bot._generate_response.await_args.kwargs
+        generate_response.assert_awaited_once()
+        generate_kwargs = generate_response.await_args.kwargs
         assert generate_kwargs["user_id"] == "@mallory:localhost"
         assert generate_kwargs["response_envelope"].requester_id == "@mallory:localhost"
 
@@ -13442,8 +13492,8 @@ class TestAgentBot:
         )
         bot._edit_message = AsyncMock(return_value=True)
         install_edit_message_mock(bot, bot._edit_message)
-        bot._generate_response = AsyncMock()
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock()
+        install_generate_response_mock(bot, generate_response)
         bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_policy.plan_turn = AsyncMock(
@@ -13469,7 +13519,7 @@ class TestAgentBot:
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
-        bot._generate_response.assert_not_called()
+        generate_response.assert_not_called()
         bot._edit_message.assert_not_awaited()
         bot._delivery_gateway.send_text.assert_awaited_once()
         assert bot._delivery_gateway.send_text.await_args.args[0].response_text == (

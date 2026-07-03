@@ -21,6 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_resolver import MessageContext
+from mindroom.delivery_gateway import SendTextRequest
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
@@ -1071,7 +1072,7 @@ class TestExtractMessageContextRoomMode:
 
 
 class TestSendResponseRoomMode:
-    """Test _send_response skips thread relation in room mode."""
+    """Test the delivery gateway's send_text skips thread relation in room mode."""
 
     @pytest.mark.asyncio
     async def test_room_mode_no_thread_metadata(
@@ -1080,7 +1081,7 @@ class TestSendResponseRoomMode:
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """In room mode, _send_response should not add thread relation metadata."""
+        """In room mode, send_text should not add thread relation metadata."""
         bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
 
@@ -1096,9 +1097,11 @@ class TestSendResponseRoomMode:
                 thread_id=None,
                 reply_to_event_id="$event123",
             )
-            event_id = await bot._send_response(
-                target=target,
-                response_text="Hello!",
+            event_id = await bot._delivery_gateway.send_text(
+                SendTextRequest(
+                    target=target,
+                    response_text="Hello!",
+                ),
             )
 
         assert event_id == "$response_event"
@@ -1270,8 +1273,8 @@ class TestCommandThreadContextRoomMode:
         )
         bot = _agent_bot(config=config, agent_user=router_user, storage_path=tmp_path)
         bot.client = AsyncMock()
-        bot._send_response = AsyncMock(return_value="$reply")
-        install_send_response_mock(bot, bot._send_response)
+        send_response = AsyncMock(return_value="$reply")
+        install_send_response_mock(bot, send_response)
 
         room = _matrix_room("!room:localhost")
 
@@ -1306,7 +1309,7 @@ class TestCommandThreadContextRoomMode:
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None
-        assert bot._send_response.await_args.kwargs["target"].resolved_thread_id is None
+        assert send_response.await_args.kwargs["target"].resolved_thread_id is None
 
     @pytest.mark.asyncio
     async def test_router_command_uses_stable_dispatch_target_without_deriving_context(
@@ -1329,8 +1332,8 @@ class TestCommandThreadContextRoomMode:
         )
         bot = _agent_bot(config=config, agent_user=router_user, storage_path=tmp_path)
         bot.client = AsyncMock()
-        bot._send_response = AsyncMock(return_value="$reply")
-        install_send_response_mock(bot, bot._send_response)
+        send_response = AsyncMock(return_value="$reply")
+        install_send_response_mock(bot, send_response)
 
         room = _matrix_room("!room:localhost")
         event = nio.RoomMessageText.from_dict(
@@ -1365,7 +1368,7 @@ class TestCommandThreadContextRoomMode:
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] == "$stable_thread"
-        assert bot._send_response.await_args.kwargs["target"].resolved_thread_id == "$stable_thread"
+        assert send_response.await_args.kwargs["target"].resolved_thread_id == "$stable_thread"
 
 
 class TestExtractedModuleLoggerRebinding:

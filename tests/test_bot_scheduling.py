@@ -137,7 +137,13 @@ async def _execute_command(
 
 
 @pytest.fixture
-def mock_agent_bot() -> AgentBot:
+def send_response_mock() -> AsyncMock:
+    """Delivery seam mock installed on mock_agent_bot."""
+    return AsyncMock()
+
+
+@pytest.fixture
+def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     """Create a mock agent bot for testing."""
     agent_user = AgentMatrixUser(
         agent_name="general",
@@ -161,9 +167,8 @@ def mock_agent_bot() -> AgentBot:
     install_runtime_cache_support(bot)
     sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
-    bot._send_response = AsyncMock()
     _sync_turn_policy_runtime(bot)
-    install_send_response_mock(bot, bot._send_response)
+    install_send_response_mock(bot, send_response_mock)
     bot._conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
     bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
         return_value=thread_history_result([], is_full_history=True),
@@ -178,7 +183,7 @@ class TestBotScheduleCommands:
     """Test bot handling of schedule commands."""
 
     @pytest.mark.asyncio
-    async def test_handle_schedule_command(self, mock_agent_bot: AgentBot) -> None:
+    async def test_handle_schedule_command(self, mock_agent_bot: AgentBot, send_response_mock: AsyncMock) -> None:
         """Test bot handles schedule command correctly."""
         room = MagicMock()
         room.room_id = "!test:server"
@@ -218,8 +223,8 @@ class TestBotScheduleCommands:
             assert call_kwargs["mentioned_agents"] == []
 
             # Verify response was sent
-            mock_agent_bot._send_response.assert_called_once()
-            call_args = mock_agent_bot._send_response.call_args
+            send_response_mock.assert_called_once()
+            call_args = send_response_mock.call_args
             assert "✅ Scheduled: 5 minutes from now" in call_args.kwargs["response_text"]
 
     @pytest.mark.asyncio
@@ -247,7 +252,11 @@ class TestBotScheduleCommands:
             assert call_args[1]["full_text"] == "tomorrow"
 
     @pytest.mark.asyncio
-    async def test_handle_list_schedules_command(self, mock_agent_bot: AgentBot) -> None:
+    async def test_handle_list_schedules_command(
+        self,
+        mock_agent_bot: AgentBot,
+        send_response_mock: AsyncMock,
+    ) -> None:
         """Test bot handles list schedules command."""
         _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
@@ -272,7 +281,7 @@ class TestBotScheduleCommands:
                 config=mock_agent_bot.config,
             )
 
-            mock_agent_bot._send_response.assert_called_once()
+            send_response_mock.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_handle_cancel_schedule_command(self, mock_agent_bot: AgentBot) -> None:
@@ -301,7 +310,11 @@ class TestBotScheduleCommands:
             )
 
     @pytest.mark.asyncio
-    async def test_handle_cancel_all_scheduled_tasks(self, mock_agent_bot: AgentBot) -> None:
+    async def test_handle_cancel_all_scheduled_tasks(
+        self,
+        mock_agent_bot: AgentBot,
+        send_response_mock: AsyncMock,
+    ) -> None:
         """Test bot handles cancel all scheduled tasks command."""
         _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
@@ -329,12 +342,16 @@ class TestBotScheduleCommands:
                 matrix_admin=None,
             )
 
-        mock_agent_bot._send_response.assert_called_once()
-        call_args = mock_agent_bot._send_response.call_args
+        send_response_mock.assert_called_once()
+        call_args = send_response_mock.call_args
         assert "✅ Cancelled 3 scheduled task(s)" in call_args.kwargs["response_text"]
 
     @pytest.mark.asyncio
-    async def test_handle_edit_schedule_command(self, mock_agent_bot: AgentBot) -> None:
+    async def test_handle_edit_schedule_command(
+        self,
+        mock_agent_bot: AgentBot,
+        send_response_mock: AsyncMock,
+    ) -> None:
         """Test bot handles edit schedule command."""
         _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
@@ -369,12 +386,16 @@ class TestBotScheduleCommands:
             assert edit_kwargs["scheduled_by"] == "@user:server"
             assert edit_kwargs["thread_id"] == "$thread123"
 
-        mock_agent_bot._send_response.assert_called_once()
-        call_args = mock_agent_bot._send_response.call_args
+        send_response_mock.assert_called_once()
+        call_args = send_response_mock.call_args
         assert "✅ Updated task `task123`." in call_args.kwargs["response_text"]
 
     @pytest.mark.asyncio
-    async def test_schedule_command_auto_creates_thread(self, mock_agent_bot: AgentBot) -> None:
+    async def test_schedule_command_auto_creates_thread(
+        self,
+        mock_agent_bot: AgentBot,
+        send_response_mock: AsyncMock,
+    ) -> None:
         """Test that schedule commands auto-create threads when used in main room."""
         _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
@@ -395,8 +416,8 @@ class TestBotScheduleCommands:
             await _execute_command(mock_agent_bot, room, event, "@user:server", command)
 
         # Should successfully schedule the task (auto-creates thread)
-        mock_agent_bot._send_response.assert_called_once()
-        call_args = mock_agent_bot._send_response.call_args
+        send_response_mock.assert_called_once()
+        call_args = send_response_mock.call_args
         assert "✅" in call_args.kwargs["response_text"] or "Task ID" in call_args.kwargs["response_text"]
         target = call_args[1].get("target")
         assert target is not None
@@ -405,7 +426,11 @@ class TestBotScheduleCommands:
         assert target.resolved_thread_id == event.event_id
 
     @pytest.mark.asyncio
-    async def test_command_response_uses_provided_stable_target(self, mock_agent_bot: AgentBot) -> None:
+    async def test_command_response_uses_provided_stable_target(
+        self,
+        mock_agent_bot: AgentBot,
+        send_response_mock: AsyncMock,
+    ) -> None:
         """Command delivery should use the resolved command target instead of rebuilding from the command event."""
         _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
@@ -429,8 +454,8 @@ class TestBotScheduleCommands:
             target=stable_target,
         )
 
-        mock_agent_bot._send_response.assert_called_once()
-        delivered_target = mock_agent_bot._send_response.await_args.kwargs["target"]
+        send_response_mock.assert_called_once()
+        delivered_target = send_response_mock.await_args.kwargs["target"]
         assert delivered_target == stable_target
         assert delivered_target.resolved_thread_id is None
 
@@ -585,9 +610,9 @@ class TestCommandHandling:
         bot.client.user_id = bot.agent_user.user_id
         sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
+        generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
-        install_generate_response_mock(bot, bot._generate_response)
+        install_generate_response_mock(bot, generate_response)
         bot._conversation_resolver.extract_dispatch_context = AsyncMock()
 
         # Create a room and event
@@ -606,7 +631,7 @@ class TestCommandHandling:
         await drain_coalescing(bot)
 
         # Verify the agent didn't try to process the command
-        bot._generate_response.assert_not_called()
+        generate_response.assert_not_called()
         # Debug logging has been removed, so we just verify the behavior
 
     @pytest.mark.asyncio
@@ -837,9 +862,9 @@ class TestCommandHandling:
             bot.client.user_id = bot.agent_user.user_id
             sync_bot_runtime_state(bot)
             bot.logger = MagicMock()
-            bot._send_response = AsyncMock(return_value="$router_reply")
+            send_response = AsyncMock(return_value="$router_reply")
             _sync_turn_policy_runtime(bot)
-            install_send_response_mock(bot, bot._send_response)
+            install_send_response_mock(bot, send_response)
 
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
             room.users = {
@@ -871,8 +896,8 @@ class TestCommandHandling:
                 await bot._on_message(room, event)
                 await drain_coalescing(bot)
 
-            bot._send_response.assert_called_once()
-            assert bot._send_response.await_args.kwargs["response_text"] == (
+            send_response.assert_called_once()
+            assert send_response.await_args.kwargs["response_text"] == (
                 "❌ Unknown command. Try !help for available commands."
             )
 
@@ -910,11 +935,11 @@ class TestCommandHandling:
         bot.client.user_id = bot.agent_user.user_id
         sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
-        bot._send_response = AsyncMock(return_value="$placeholder")
-        bot._generate_response = AsyncMock(return_value="$response")
+        send_response = AsyncMock(return_value="$placeholder")
+        generate_response = AsyncMock(return_value="$response")
         _sync_turn_policy_runtime(bot)
-        install_send_response_mock(bot, bot._send_response)
-        install_generate_response_mock(bot, bot._generate_response)
+        install_send_response_mock(bot, send_response)
+        install_generate_response_mock(bot, generate_response)
         _sync_turn_policy_runtime(bot)
 
         # Mock context extraction to say agent is mentioned
@@ -949,7 +974,7 @@ class TestCommandHandling:
             await drain_coalescing(bot)
 
             # Verify the agent processed the message
-            bot._generate_response.assert_called_once()
+            generate_response.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_agents_ignore_error_messages_from_other_agents(self) -> None:
@@ -978,9 +1003,9 @@ class TestCommandHandling:
             bot.client.user_id = "@mindroom_general:localhost"  # Set the bot's user ID
             sync_bot_runtime_state(bot)
             bot.logger = MagicMock()
-            bot._generate_response = AsyncMock()
+            generate_response = AsyncMock()
             _sync_turn_policy_runtime(bot)
-            install_generate_response_mock(bot, bot._generate_response)
+            install_generate_response_mock(bot, generate_response)
 
             # Mock context extraction
             mock_context = _message_context(
@@ -1011,7 +1036,7 @@ class TestCommandHandling:
                 await drain_coalescing(bot)
 
             # Verify the agent didn't try to process the error message
-            bot._generate_response.assert_not_called()
+            generate_response.assert_not_called()
             # Check log calls - should be caught by the general agent message check
             debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
             assert "ignore_unmentioned_agent_event" in debug_calls
@@ -1104,9 +1129,9 @@ class TestCommandHandling:
         bot.client.user_id = "@mindroom_finance:localhost"
         sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
+        generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
-        install_generate_response_mock(bot, bot._generate_response)
+        install_generate_response_mock(bot, generate_response)
 
         # Mock context extraction for router's error message
         mock_context = _message_context(
@@ -1137,7 +1162,7 @@ class TestCommandHandling:
             await drain_coalescing(bot)
 
         # Verify finance agent did NOT process the message
-        bot._generate_response.assert_not_called()
+        generate_response.assert_not_called()
 
         # Verify it was caught early by the agent message check
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
@@ -1305,11 +1330,11 @@ class TestCommandHandling:
         bot.client.user_id = "@mindroom_news:localhost"
         sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
-        bot._send_response = AsyncMock()
+        generate_response = AsyncMock()
+        send_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
-        install_send_response_mock(bot, bot._send_response)
-        install_generate_response_mock(bot, bot._generate_response)
+        install_send_response_mock(bot, send_response)
+        install_generate_response_mock(bot, generate_response)
         bot.orchestrator = MagicMock()
         sync_bot_runtime_state(bot)
 
@@ -1384,8 +1409,8 @@ class TestCommandHandling:
         mock_interactive.assert_not_awaited()
 
         # Verify news agent did NOT form a team or respond
-        bot._generate_response.assert_not_called()
-        bot._send_response.assert_not_called()
+        generate_response.assert_not_called()
+        send_response.assert_not_called()
         mock_team.assert_not_called()
 
         # Verify it was logged as being ignored
@@ -1419,9 +1444,9 @@ class TestCommandHandling:
         bot.client.user_id = "@mindroom_finance:localhost"
         sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
+        generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
-        install_generate_response_mock(bot, bot._generate_response)
+        install_generate_response_mock(bot, generate_response)
 
         # Create thread history that mimics the real scenario
         thread_history = [
@@ -1512,7 +1537,7 @@ class TestCommandHandling:
         mock_interactive.assert_not_awaited()
 
         # Verify finance agent did NOT respond to router's error
-        bot._generate_response.assert_not_called()
+        generate_response.assert_not_called()
 
         # Verify it was logged as being ignored
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
@@ -1543,9 +1568,9 @@ class TestCommandHandling:
         bot.client.user_id = "@mindroom_general:localhost"
         sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
+        generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
-        install_generate_response_mock(bot, bot._generate_response)
+        install_generate_response_mock(bot, generate_response)
 
         # Mock context extraction - no agents mentioned
         mock_context = _message_context(
@@ -1573,7 +1598,7 @@ class TestCommandHandling:
             await drain_coalescing(bot)
 
         # Verify the agent didn't try to process the message
-        bot._generate_response.assert_not_called()
+        generate_response.assert_not_called()
         # Check debug calls for the new log message
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
         assert "ignore_unmentioned_agent_event" in debug_calls
@@ -2034,10 +2059,9 @@ class TestRouterSkipsSingleAgent:
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
-        bot._turn_controller._execute_command = AsyncMock()
         _sync_turn_policy_runtime(bot)
-        bot._send_response = AsyncMock()
-        _sync_turn_policy_runtime(bot)
+        send_response = AsyncMock()
+        install_send_response_mock(bot, send_response)
         bot._turn_controller._execute_command = AsyncMock()
 
         # Room with router + one agent + a human
@@ -2073,7 +2097,7 @@ class TestRouterSkipsSingleAgent:
         # This ensures commands work properly in single-responder rooms.
         bot._turn_controller._execute_command.assert_called_once()
         # Router should not send a response for unknown commands (handled by _handle_command)
-        bot._send_response.assert_not_called()
+        send_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_router_handles_schedule_command_in_single_agent_room(self) -> None:
@@ -2106,9 +2130,6 @@ class TestRouterSkipsSingleAgent:
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
-        bot._turn_controller._execute_command = AsyncMock()
-        _sync_turn_policy_runtime(bot)
-        bot._send_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._execute_command = AsyncMock()
 

@@ -35,6 +35,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
+from mindroom.delivery_gateway import SendTextRequest
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix import thread_bookkeeping
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
@@ -7643,16 +7644,16 @@ class TestThreadingBehavior:
         # Initialize the bot (to set up components it needs)
 
         # Mock interactive.handle_text_response to return None (not an interactive response)
-        # Mock _generate_response to capture the call and send a test response
-        bot._generate_response = AsyncMock()
-        install_generate_response_mock(bot, bot._generate_response)
+        # Mock response generation to capture the call and send a test response
+        generate_response = AsyncMock()
+        install_generate_response_mock(bot, generate_response)
         with patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)):
             # Process the message
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
-            # Check that _generate_response was called
-            bot._generate_response.assert_called_once()
+            # Check that response generation was called
+            generate_response.assert_called_once()
 
             # Now simulate the response being sent
             target = bot._conversation_resolver.build_message_target(
@@ -7661,9 +7662,11 @@ class TestThreadingBehavior:
                 reply_to_event_id=event.event_id,
                 event_source=event.source,
             )
-            await bot._send_response(
-                target=target,
-                response_text="I can help you with that!",
+            await bot._delivery_gateway.send_text(
+                SendTextRequest(
+                    target=target,
+                    response_text="I can help you with that!",
+                ),
             )
 
         # Check the final response content.
@@ -10071,8 +10074,8 @@ class TestThreadingBehavior:
         # Initialize response tracking
 
         # Mock interactive.handle_text_response and generate_response
-        bot._generate_response = AsyncMock()
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock()
+        install_generate_response_mock(bot, generate_response)
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)),
             patch(
@@ -10092,8 +10095,8 @@ class TestThreadingBehavior:
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
-            # Check that _generate_response was called
-            bot._generate_response.assert_called_once()
+            # Check that response generation was called
+            generate_response.assert_called_once()
 
             # Now simulate the response being sent
             target = bot._conversation_resolver.build_message_target(
@@ -10102,9 +10105,11 @@ class TestThreadingBehavior:
                 reply_to_event_id=event.event_id,
                 event_source=event.source,
             )
-            await bot._send_response(
-                target=target,
-                response_text="I can help with that complex question!",
+            await bot._delivery_gateway.send_text(
+                SendTextRequest(
+                    target=target,
+                    response_text="I can help with that complex question!",
+                ),
             )
 
         # Check the final response content.
