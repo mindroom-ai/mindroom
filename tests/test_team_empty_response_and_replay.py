@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.models.message import Message
+from agno.models.response import ToolExecution
+from agno.run.agent import RunContentEvent as AgentRunContentEvent
+from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
+from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom import ai_runtime
@@ -271,3 +275,184 @@ async def test_team_empty_retry_shares_budget_with_dynamic_continuations() -> No
     # plus LIMIT dynamic-tool runs, settling on the limit message.
     assert mock_team.arun.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
     assert "did not produce a final answer" in response
+
+
+@pytest.mark.asyncio
+async def test_team_response_records_empty_replayable_text_for_tool_only_run() -> None:
+    """A tool-only blocking run keeps the fallback placeholder out of the recorded turn."""
+    orchestrator, _config = _make_orchestrator()
+    mock_team = _make_test_team()
+    tool_only_run = TeamRunOutput(
+        content="",
+        run_id="team-run-1",
+        session_id="session-1",
+        member_responses=[
+            RunOutput(
+                agent_name="GeneralAgent",
+                content="",
+                tools=[
+                    ToolExecution(
+                        tool_call_id="call-1",
+                        tool_name="get_time",
+                        tool_args={},
+                        result="noon",
+                    ),
+                ],
+            ),
+        ],
+    )
+    tool_only_run.status = RunStatus.completed
+    mock_team.arun = AsyncMock(return_value=tool_only_run)
+    recorder = TurnRecorder(user_message="Run the tool.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Run the tool.",
+            turn_recorder=recorder,
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(session_id="session-1"),
+        )
+
+    # The visible response keeps the display chrome; the recorded turn does not
+    # replay it (matches the streaming path's event_has_visible guard).
+    assert "No team response generated." in response
+    assert recorder.outcome == "completed"
+    assert recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_records_interrupted_turn_when_stream_errors() -> None:
+    """A mid-stream team error with partial output marks the recorder interrupted."""
+    orchestrator, config = _make_orchestrator()
+
+    async def stream() -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        yield TeamRunErrorEvent(content="provider exploded")
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(return_value=stream())
+    recorder = TurnRecorder(user_message="Analyze this.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-1"),
+            )
+        ]
+
+    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+    assert "error" in rendered.lower()
+    assert recorder.outcome == "interrupted"
+    assert "Member answer" in recorder.assistant_text
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_records_interrupted_turn_on_errored_run_output() -> None:
+    """A terminal errored run output after partial output marks the recorder interrupted."""
+    orchestrator, config = _make_orchestrator()
+    errored_run = TeamRunOutput(content="", run_id="team-run-1", session_id="session-1")
+    errored_run.status = RunStatus.error
+
+    async def stream() -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        yield errored_run
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(return_value=stream())
+    recorder = TurnRecorder(user_message="Analyze this.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        _ = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-1"),
+            )
+        ]
+
+    assert recorder.outcome == "interrupted"
+    assert "Member answer" in recorder.assistant_text
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_leaves_recorder_pending_when_error_has_no_partial() -> None:
+    """A team error with no partial work records nothing for replay."""
+    orchestrator, config = _make_orchestrator()
+
+    async def stream() -> AsyncIterator[object]:
+        yield TeamRunErrorEvent(content="provider exploded")
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(return_value=stream())
+    recorder = TurnRecorder(user_message="Analyze this.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        _ = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-1"),
+            )
+        ]
+
+    assert recorder.outcome == "pending"
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_records_interrupted_turn_when_stream_raises() -> None:
+    """A raw exception from the model stream records partial work interrupted."""
+    orchestrator, config = _make_orchestrator()
+
+    stream_error = "transport died"
+
+    async def stream() -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        raise RuntimeError(stream_error)
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(return_value=stream())
+    recorder = TurnRecorder(user_message="Analyze this.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-1"),
+            )
+        ]
+
+    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+    assert "transport died" in rendered
+    assert recorder.outcome == "interrupted"
+    assert "Member answer" in recorder.assistant_text

@@ -2043,7 +2043,7 @@ async def team_response(  # noqa: C901, PLR0915
                 **_team_request_log_context(
                     ctx,
                     team_name=configured_team_name or team_name,
-                    prompt=message,
+                    prompt=continuation_state.active_prompt,
                     run_input=prepared_input,
                     metadata=run_metadata,
                 ),
@@ -2230,7 +2230,9 @@ async def team_response(  # noqa: C901, PLR0915
         )
         return CompletedAttempt(
             response_text=response_text,
-            replayable_text=response_text,
+            # Match the streaming path: the "No team response generated."
+            # fallback is display chrome, not replayable assistant text.
+            replayable_text=response_text if has_visible_output else "",
             has_visible_content=has_visible_output,
             is_empty=is_empty_run,
             session_id=response_session_id,
@@ -2574,6 +2576,25 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 interrupted_tools=[pending.trace_entry for pending in pending_tools],
             )
 
+        def _record_interrupted_team_turn() -> None:
+            """Mark partial team work interrupted on an errored run, mirroring the agent path."""
+            _sync_live_turn_recorder()
+            if turn_recorder.assistant_text or turn_recorder.completed_tools or turn_recorder.interrupted_tools:
+                run.turn_state.record_interrupted_from_recorder(turn_recorder, run_metadata=run_metadata)
+
+        async def _capture_stream_interrupt(stream: AsyncIterator[Any]) -> AsyncGenerator[Any, None]:
+            """Record partial work interrupted when the model stream itself raises.
+
+            Mirrors the agent path's ``state.stream_exception`` capture: the raw
+            exception still propagates to the shared driver's friendly-error arm.
+            """
+            try:
+                async for event in stream:
+                    yield event
+            except Exception:
+                _record_interrupted_team_turn()
+                raise
+
         def _start_tool(
             *,
             scope_key: str,
@@ -2713,14 +2734,16 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 if attempt_media_inputs.has_any()
                 else attempt_prompt
             )
-            raw_stream = stream_with_llm_request_log_context(
-                cast("AsyncGenerator[Any, None]", raw_stream),
-                request_context=_team_request_log_context(
-                    ctx,
-                    team_name=configured_team_name or team_label,
-                    prompt=message,
-                    run_input=stream_run_input,
-                    metadata=run_metadata,
+            raw_stream = _capture_stream_interrupt(
+                stream_with_llm_request_log_context(
+                    cast("AsyncGenerator[Any, None]", raw_stream),
+                    request_context=_team_request_log_context(
+                        ctx,
+                        team_name=configured_team_name or team_label,
+                        prompt=continuation_state.active_prompt,
+                        run_input=stream_run_input,
+                        metadata=run_metadata,
+                    ),
                 ),
             )
             async for event in raw_stream:
@@ -2793,6 +2816,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         # errored run's usage directly before ending the turn.
                         if run_metadata_collector is not None and event_metadata_content is not None:
                             run_metadata_collector.update(event_metadata_content)
+                        _record_interrupted_team_turn()
                         yield get_user_friendly_error_message(Exception(error_text), team_label)
                         yield AttemptResolved(HandledAttempt())
                         return
@@ -2880,6 +2904,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                                 tool_count=len(completed_tool_executions),
                             ),
                         )
+                    _record_interrupted_team_turn()
                     yield get_user_friendly_error_message(Exception(error_text), team_label)
                     yield AttemptResolved(HandledAttempt())
                     return
