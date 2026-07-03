@@ -55,7 +55,6 @@ from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
-from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -908,11 +907,13 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
             new=AsyncMock(return_value="$response"),
         ) as mock_locked:
             task = asyncio.create_task(
-                bot._generate_response(
-                    prompt="hello",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=response_envelope,
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        prompt="hello",
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope,
+                    ),
                 ),
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
@@ -969,11 +970,13 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
             new=AsyncMock(return_value="$response"),
         ):
             task = asyncio.create_task(
-                bot._generate_response(
-                    prompt="hello",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=response_envelope,
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        prompt="hello",
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope,
+                    ),
                 ),
             )
             with pytest.raises(asyncio.TimeoutError):
@@ -1039,11 +1042,13 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
             new=AsyncMock(return_value="$response"),
         ):
             task = asyncio.create_task(
-                bot._generate_response(
-                    prompt="hello",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=response_envelope,
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        prompt="hello",
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope,
+                    ),
                 ),
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
@@ -1079,21 +1084,25 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         patch.object(ResponseRunner, "generate_response_locked", new=fake_generate_response_locked),
     ):
         first_task = asyncio.create_task(
-            bot._generate_response(
-                prompt="hello",
-                thread_history=[],
-                user_id="first",
-                response_envelope=first_envelope,
+            bot._response_runner.generate_response(
+                ResponseRequest(
+                    prompt="hello",
+                    thread_history=[],
+                    user_id="first",
+                    response_envelope=first_envelope,
+                ),
             ),
         )
         await lock.first_waiting.wait()
 
         second_task = asyncio.create_task(
-            bot._generate_response(
-                prompt="stop",
-                thread_history=[],
-                user_id="second",
-                response_envelope=second_envelope,
+            bot._response_runner.generate_response(
+                ResponseRequest(
+                    prompt="stop",
+                    thread_history=[],
+                    user_id="second",
+                    response_envelope=second_envelope,
+                ),
             ),
         )
 
@@ -1150,11 +1159,13 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
             patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
         ):
             task = asyncio.create_task(
-                bot._generate_response(
-                    prompt="hello",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=response_envelope,
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        prompt="hello",
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope,
+                    ),
                 ),
             )
             await asyncio.sleep(0.05)
@@ -1601,13 +1612,15 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
             new=AsyncMock(return_value="$team-response"),
         ) as mock_locked:
             task = asyncio.create_task(
-                bot._generate_team_response_helper(
+                bot._response_runner.generate_team_response_helper(
+                    ResponseRequest(
+                        thread_history=[],
+                        prompt="hello",
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope,
+                    ),
                     team_agents=[],
                     team_mode="coordinate",
-                    thread_history=[],
-                    requester_user_id="@user:localhost",
-                    payload=DispatchPayload(prompt="hello"),
-                    response_envelope=response_envelope,
                 ),
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
@@ -1647,20 +1660,24 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
     try:
         with patch.object(ResponseRunner, "generate_response_locked", new=fake_locked):
             task_b = asyncio.create_task(
-                bot._generate_response(
-                    prompt="hello",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=response_envelope_b,
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        prompt="hello",
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope_b,
+                    ),
                 ),
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
             task_c = asyncio.create_task(
-                bot._generate_response(
-                    prompt="hello again",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=response_envelope_c,
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        prompt="hello again",
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope_c,
+                    ),
                 ),
             )
             for _ in range(20):
@@ -1710,24 +1727,28 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
     try:
         with patch.object(ResponseRunner, "generate_team_response_helper_locked", new=fake_locked):
             task_b = asyncio.create_task(
-                bot._generate_team_response_helper(
+                bot._response_runner.generate_team_response_helper(
+                    ResponseRequest(
+                        thread_history=[],
+                        prompt="hello",
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope_b,
+                    ),
                     team_agents=[],
                     team_mode="coordinate",
-                    thread_history=[],
-                    requester_user_id="@user:localhost",
-                    payload=DispatchPayload(prompt="hello"),
-                    response_envelope=response_envelope_b,
                 ),
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
             task_c = asyncio.create_task(
-                bot._generate_team_response_helper(
+                bot._response_runner.generate_team_response_helper(
+                    ResponseRequest(
+                        thread_history=[],
+                        prompt="hello again",
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope_c,
+                    ),
                     team_agents=[],
                     team_mode="coordinate",
-                    thread_history=[],
-                    requester_user_id="@user:localhost",
-                    payload=DispatchPayload(prompt="hello again"),
-                    response_envelope=response_envelope_c,
                 ),
             )
             for _ in range(20):

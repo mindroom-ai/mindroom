@@ -266,13 +266,12 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> st
 
 def _generate_response_with_locked_callback(
     response_event_id: str | None,
-) -> Callable[..., Awaitable[str | None]]:
+) -> Callable[[ResponseRequest], Awaitable[str | None]]:
     """Execute locked edit cleanup in mocked response generation paths."""
 
-    async def _generate_response(*_args: object, **kwargs: object) -> str | None:
-        locked_callback = kwargs.get("on_lifecycle_lock_acquired")
-        if locked_callback is not None:
-            locked_callback()
+    async def _generate_response(request: ResponseRequest) -> str | None:
+        if request.on_lifecycle_lock_acquired is not None:
+            request.on_lifecycle_lock_acquired()
         return response_event_id
 
     return _generate_response
@@ -715,6 +714,8 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         "sender": "@user:example.com",
     }
 
+    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -728,12 +729,6 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
             "_remove_stale_runs_for_turn_record",
             return_value=True,
         ) as mock_remove_stale_runs,
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            side_effect=_generate_response_with_locked_callback("$response:example.com"),
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
@@ -757,8 +752,8 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         caller_label="edit_regeneration_context",
     )
     mock_remove_stale_runs.assert_called_once()
-    call_kwargs = mock_generate_response.call_args.kwargs
-    response_target = call_kwargs["response_envelope"].target
+    request = mock_generate_response.call_args.args[0]
+    response_target = request.response_envelope.target
     assert response_target.reply_to_event_id == "$router-echo:example.com"
     assert response_target.resolved_thread_id == stored_target.resolved_thread_id
     assert response_target == stored_target
@@ -1057,9 +1052,10 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
     }
 
     # Mock the methods
+    mock_generate = AsyncMock()
+    install_generate_response_mock(bot, mock_generate)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock),
-        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate,
         patch.object(bot, "_edit_message", new_callable=AsyncMock) as mock_edit,
     ):
         # Process the edit event
@@ -1373,6 +1369,8 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
         "sender": "@user:example.com",
     }
 
+    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -1380,12 +1378,6 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             "create_storage",
         ) as mock_create_storage,
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True) as mock_remove_run,
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            side_effect=_generate_response_with_locked_callback("$response:example.com"),
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
@@ -1404,15 +1396,15 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
         )
 
         mock_generate_response.assert_awaited_once()
-        call_kwargs = mock_generate_response.call_args.kwargs
-        assert call_kwargs["prompt"] == (
+        request = mock_generate_response.call_args.args[0]
+        assert request.prompt == (
             "The user sent the following messages in quick succession. "
             "Treat them as one turn and respond once:\n\nupdated first\nprimary"
         )
-        response_target = call_kwargs["response_envelope"].target
+        response_target = request.response_envelope.target
         assert response_target.reply_to_event_id == "$primary:example.com"
         assert response_target == stored_target
-        assert call_kwargs["matrix_run_metadata"] == {
+        assert request.matrix_run_metadata == {
             "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
             "matrix_source_event_prompts": {
                 "$first:example.com": "updated first",
@@ -1524,6 +1516,8 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         "sender": "@user:example.com",
     }
 
+    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -1531,12 +1525,6 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
             "create_storage",
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=False) as mock_remove_run,
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            side_effect=_generate_response_with_locked_callback("$response:example.com"),
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
@@ -1555,11 +1543,11 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         )
 
         mock_generate_response.assert_awaited_once()
-        call_kwargs = mock_generate_response.call_args.kwargs
-        response_target = call_kwargs["response_envelope"].target
+        request = mock_generate_response.call_args.args[0]
+        response_target = request.response_envelope.target
         assert response_target.reply_to_event_id == "$original:example.com"
-        assert call_kwargs["existing_event_id"] == "$response:example.com"
-        assert call_kwargs["existing_event_is_placeholder"] is False
+        assert request.existing_event_id == "$response:example.com"
+        assert request.existing_event_is_placeholder is False
         assert response_target == stored_target
         assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
         mock_remove_run.assert_called_once()
@@ -1644,6 +1632,8 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
         "sender": "@user:example.com",
     }
 
+    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback(None))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -1651,12 +1641,6 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
             "create_storage",
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=False) as mock_remove_run,
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            side_effect=_generate_response_with_locked_callback(None),
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
@@ -1759,12 +1743,13 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         "sender": "@user:example.com",
     }
 
-    async def fail_visible_update(*_args: object, **kwargs: object) -> str | None:
-        locked_callback = kwargs.get("on_lifecycle_lock_acquired")
-        if locked_callback is not None:
-            locked_callback()
+    async def fail_visible_update(request: ResponseRequest) -> str | None:
+        if request.on_lifecycle_lock_acquired is not None:
+            request.on_lifecycle_lock_acquired()
         return "$response:example.com"
 
+    mock_generate_response = AsyncMock(side_effect=fail_visible_update)
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -1772,12 +1757,6 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
             "create_storage",
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=False) as mock_remove_run,
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            side_effect=fail_visible_update,
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
@@ -1897,6 +1876,8 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
         ],
     )
 
+    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -1910,12 +1891,6 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             return_value=storage,
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True) as mock_remove_run,
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            side_effect=_generate_response_with_locked_callback("$response:example.com"),
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
@@ -1934,15 +1909,15 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
         )
 
         mock_generate_response.assert_awaited_once()
-        call_kwargs = mock_generate_response.call_args.kwargs
-        assert call_kwargs["prompt"] == (
+        request = mock_generate_response.call_args.args[0]
+        assert request.prompt == (
             "The user sent the following messages in quick succession. "
             "Treat them as one turn and respond once:\n\nupdated first\nprimary"
         )
-        response_target = call_kwargs["response_envelope"].target
+        response_target = request.response_envelope.target
         assert response_target.reply_to_event_id == "$primary:example.com"
         assert response_target == stored_target
-        assert call_kwargs["matrix_run_metadata"] == {
+        assert request.matrix_run_metadata == {
             "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
             "matrix_source_event_prompts": {
                 "$first:example.com": "updated first",
@@ -2207,15 +2182,11 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
         "sender": "@user:example.com",
     }
 
+    mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(bot._conversation_state_writer, "create_storage", return_value=storage),
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            return_value=_delivery_resolution(None),
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
@@ -2235,9 +2206,9 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
         )
 
     mock_generate_response.assert_awaited_once()
-    call_kwargs = mock_generate_response.call_args.kwargs
-    assert call_kwargs["existing_event_id"] == "$partial-response:example.com"
-    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$original:example.com"
+    request = mock_generate_response.call_args.args[0]
+    assert request.existing_event_id == "$partial-response:example.com"
+    assert request.response_envelope.target.reply_to_event_id == "$original:example.com"
     assert _response_event_id(bot, "$original:example.com") == "$partial-response:example.com"
 
 
@@ -2345,15 +2316,11 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
         "sender": "@user:example.com",
     }
 
+    mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(bot._conversation_state_writer, "create_storage", return_value=storage),
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            return_value=_delivery_resolution(None),
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
@@ -2373,14 +2340,14 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
         )
 
     mock_generate_response.assert_awaited_once()
-    call_kwargs = mock_generate_response.call_args.kwargs
-    assert call_kwargs["existing_event_id"] == "$partial-response:example.com"
-    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$anchor:example.com"
-    assert call_kwargs["prompt"] == (
+    request = mock_generate_response.call_args.args[0]
+    assert request.existing_event_id == "$partial-response:example.com"
+    assert request.response_envelope.target.reply_to_event_id == "$anchor:example.com"
+    assert request.prompt == (
         "The user sent the following messages in quick succession. "
         "Treat them as one turn and respond once:\n\nupdated first\nanchor"
     )
-    assert call_kwargs["matrix_run_metadata"] == {
+    assert request.matrix_run_metadata == {
         MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first:example.com", "$anchor:example.com"],
         "matrix_source_event_prompts": {
             "$first:example.com": "updated first",
@@ -2504,15 +2471,11 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
         "sender": "@user:example.com",
     }
 
+    mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(bot._conversation_state_writer, "create_storage", return_value=storage),
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            return_value=_delivery_resolution(None),
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
@@ -2532,9 +2495,9 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
         )
 
     mock_generate_response.assert_awaited_once()
-    call_kwargs = mock_generate_response.call_args.kwargs
-    assert call_kwargs["existing_event_id"] == "$team-partial-response:example.com"
-    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$original:example.com"
+    request = mock_generate_response.call_args.args[0]
+    assert request.existing_event_id == "$team-partial-response:example.com"
+    assert request.response_envelope.target.reply_to_event_id == "$original:example.com"
     assert _response_event_id(bot, "$original:example.com") == "$team-partial-response:example.com"
 
 
@@ -2659,9 +2622,9 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
         )
 
     generate_response.assert_awaited_once()
-    call_kwargs = generate_response.call_args.kwargs
-    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$selection:example.com"
-    assert call_kwargs["matrix_run_metadata"] == {
+    request = generate_response.call_args.args[0]
+    assert request.response_envelope.target.reply_to_event_id == "$selection:example.com"
+    assert request.matrix_run_metadata == {
         MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
         **_run_response_context_metadata(
             response_owner="test_agent",
@@ -2960,26 +2923,21 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
     }
     cleanup_called = False
 
-    async def generate_response_with_locked_cleanup(*_args: object, **kwargs: object) -> str | None:
+    async def generate_response_with_locked_cleanup(request: ResponseRequest) -> str | None:
         nonlocal cleanup_called
-        locked_cleanup = kwargs["on_lifecycle_lock_acquired"]
-        assert locked_cleanup is not None
-        locked_cleanup()
+        assert request.on_lifecycle_lock_acquired is not None
+        request.on_lifecycle_lock_acquired()
         cleanup_called = True
         return _delivery_resolution("$response:example.com")
 
+    mock_generate_response = AsyncMock(side_effect=generate_response_with_locked_cleanup)
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
             bot._turn_store,
             "_remove_stale_runs_for_turn_record",
         ) as mock_recorded_cleanup,
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            side_effect=generate_response_with_locked_cleanup,
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
@@ -3113,30 +3071,32 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
             should_use_streaming=AsyncMock(return_value=False),
         ),
     ):
-        resolution = await bot._generate_response(
-            prompt="primary",
-            thread_history=[],
-            user_id="@user:example.com",
-            response_envelope=request_envelope(
-                room_id="!test:example.com",
-                reply_to_event_id="$primary:example.com",
+        resolution = await bot._response_runner.generate_response(
+            ResponseRequest(
                 prompt="primary",
+                thread_history=[],
                 user_id="@user:example.com",
-                target=conversation_target,
-                agent_name=bot.agent_name,
-            ),
-            matrix_run_metadata={
-                "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
-                "matrix_source_event_prompts": {
-                    "$first:example.com": "first",
-                    "$primary:example.com": "primary",
-                },
-                **_run_response_context_metadata(
-                    response_owner=bot.agent_name,
-                    history_scope=history_scope,
-                    conversation_target=conversation_target,
+                response_envelope=request_envelope(
+                    room_id="!test:example.com",
+                    reply_to_event_id="$primary:example.com",
+                    prompt="primary",
+                    user_id="@user:example.com",
+                    target=conversation_target,
+                    agent_name=bot.agent_name,
                 ),
-            },
+                matrix_run_metadata={
+                    "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
+                    "matrix_source_event_prompts": {
+                        "$first:example.com": "first",
+                        "$primary:example.com": "primary",
+                    },
+                    **_run_response_context_metadata(
+                        response_owner=bot.agent_name,
+                        history_scope=history_scope,
+                        conversation_target=conversation_target,
+                    ),
+                },
+            ),
         )
 
     assert _handled_response_event_id(resolution) == "$response:example.com"
@@ -3145,6 +3105,8 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     assert persisted_metadata is not None
     assert persisted_metadata["matrix_response_event_id"] == "$response:example.com"
 
+    mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -3153,12 +3115,6 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
             return_value=storage,
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            return_value=_delivery_resolution(None),
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
@@ -3177,13 +3133,13 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
         )
 
         mock_generate_response.assert_awaited_once()
-        call_kwargs = mock_generate_response.call_args.kwargs
-        assert call_kwargs["prompt"] == (
+        request = mock_generate_response.call_args.args[0]
+        assert request.prompt == (
             "The user sent the following messages in quick succession. "
             "Treat them as one turn and respond once:\n\nupdated first\nprimary"
         )
-        assert call_kwargs["response_envelope"].target == conversation_target
-        assert call_kwargs["matrix_run_metadata"] == {
+        assert request.response_envelope.target == conversation_target
+        assert request.matrix_run_metadata == {
             "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
             "matrix_source_event_prompts": {
                 "$first:example.com": "updated first",
@@ -3306,6 +3262,8 @@ async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context
         ),
     )
 
+    mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(
             bot._conversation_resolver,
@@ -3327,12 +3285,6 @@ async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context
             side_effect=[threaded_storage, room_storage],
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            return_value=_delivery_resolution(None),
-        ) as mock_generate_response,
     ):
         await bot._edit_regenerator.handle_message_edit(
             room,
@@ -3342,10 +3294,10 @@ async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context
         )
 
     mock_generate_response.assert_awaited_once()
-    call_kwargs = mock_generate_response.call_args.kwargs
-    response_target = call_kwargs["response_envelope"].target
+    request = mock_generate_response.call_args.args[0]
+    response_target = request.response_envelope.target
     assert response_target.resolved_thread_id == "$thread_root:example.com"
-    assert call_kwargs["existing_event_id"] == "$response:example.com"
+    assert request.existing_event_id == "$response:example.com"
     assert response_target.reply_to_event_id == "$primary:example.com"
 
 
@@ -3449,6 +3401,8 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
         ],
     )
 
+    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -3457,12 +3411,6 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
             return_value=storage,
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
-        patch.object(
-            bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            side_effect=_generate_response_with_locked_callback("$response:example.com"),
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
@@ -3481,10 +3429,10 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
         )
 
     mock_generate_response.assert_awaited_once()
-    call_kwargs = mock_generate_response.call_args.kwargs
-    assert call_kwargs["existing_event_id"] == "$response:example.com"
-    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$original:example.com"
-    assert call_kwargs["prompt"] == "updated question"
+    request = mock_generate_response.call_args.args[0]
+    assert request.existing_event_id == "$response:example.com"
+    assert request.response_envelope.target.reply_to_event_id == "$original:example.com"
+    assert request.prompt == "updated question"
     assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
 
 
@@ -3580,23 +3528,25 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         patch("mindroom.response_runner.mark_auto_flush_dirty_session"),
         patch.object(Config, "_agent_memory_backend", return_value="none"),
     ):
-        resolution = await bot._generate_response(
-            prompt="original",
-            thread_history=[],
-            user_id="@user:example.com",
-            response_envelope=request_envelope(
-                room_id="!test:example.com",
-                reply_to_event_id="$original:example.com",
+        resolution = await bot._response_runner.generate_response(
+            ResponseRequest(
                 prompt="original",
+                thread_history=[],
                 user_id="@user:example.com",
-                agent_name=bot.agent_name,
-            ),
-            matrix_run_metadata={
-                "matrix_source_event_ids": ["$original:example.com"],
-                "matrix_source_event_prompts": {
-                    "$original:example.com": "original",
+                response_envelope=request_envelope(
+                    room_id="!test:example.com",
+                    reply_to_event_id="$original:example.com",
+                    prompt="original",
+                    user_id="@user:example.com",
+                    agent_name=bot.agent_name,
+                ),
+                matrix_run_metadata={
+                    "matrix_source_event_ids": ["$original:example.com"],
+                    "matrix_source_event_prompts": {
+                        "$original:example.com": "original",
+                    },
                 },
-            },
+            ),
         )
 
     assert _handled_response_event_id(resolution) == "$response-new:example.com"
@@ -3660,6 +3610,8 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         "sender": "@user:example.com",
     }
 
+    mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
+    replace_edit_regenerator_deps(restarted_bot, generate_response=mock_generate_response)
     with (
         patch.object(
             restarted_bot._conversation_resolver,
@@ -3667,12 +3619,6 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
             new_callable=AsyncMock,
         ) as mock_context,
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
-        patch.object(
-            restarted_bot,
-            "_generate_response",
-            new_callable=AsyncMock,
-            return_value=_delivery_resolution(None),
-        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
@@ -3691,9 +3637,9 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         )
 
     mock_generate_response.assert_awaited_once()
-    call_kwargs = mock_generate_response.call_args.kwargs
-    assert call_kwargs["existing_event_id"] == "$response-new:example.com"
-    assert call_kwargs["response_envelope"].target.session_id == "!test:example.com"
+    request = mock_generate_response.call_args.args[0]
+    assert request.existing_event_id == "$response-new:example.com"
+    assert request.response_envelope.target.session_id == "!test:example.com"
     assert _response_event_id(restarted_bot, "$original:example.com") == "$response-new:example.com"
 
 

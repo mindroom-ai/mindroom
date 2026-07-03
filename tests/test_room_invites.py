@@ -28,6 +28,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_send_response_mock,
     make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
@@ -311,7 +312,8 @@ async def test_router_deduplicates_concurrent_invite_callbacks(
             end=None,
         ),
     )
-    bot._send_response = AsyncMock(return_value="$welcome")
+    send_response = AsyncMock(return_value="$welcome")
+    install_send_response_mock(bot, send_response)
 
     room = MagicMock(room_id="!router-invited:localhost")
     room.canonical_alias = None
@@ -326,7 +328,7 @@ async def test_router_deduplicates_concurrent_invite_callbacks(
 
     join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
     bot.client.room_messages.assert_awaited_once()
-    bot._send_response.assert_awaited_once()
+    send_response.assert_awaited_once()
     assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
 
 
@@ -356,7 +358,8 @@ async def test_router_duplicate_invite_retries_failed_welcome_delivery(
             end=None,
         ),
     )
-    bot._send_response = AsyncMock(side_effect=[None, "$welcome"])
+    send_response = AsyncMock(side_effect=[None, "$welcome"])
+    install_send_response_mock(bot, send_response)
 
     join_room = AsyncMock(return_value=True)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
@@ -371,7 +374,7 @@ async def test_router_duplicate_invite_retries_failed_welcome_delivery(
 
     join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
     assert bot.client.room_messages.await_count == 2
-    assert bot._send_response.await_count == 2
+    assert send_response.await_count == 2
     assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
 
 
@@ -399,7 +402,8 @@ async def test_router_welcome_send_is_idempotent_for_concurrent_empty_room_check
             end=None,
         ),
     )
-    bot._send_response = AsyncMock(return_value="$welcome")
+    send_response = AsyncMock(return_value="$welcome")
+    install_send_response_mock(bot, send_response)
 
     await asyncio.gather(
         bot._send_welcome_message_if_empty("!empty:localhost"),
@@ -408,7 +412,7 @@ async def test_router_welcome_send_is_idempotent_for_concurrent_empty_room_check
     )
 
     bot.client.room_messages.assert_awaited_once()
-    bot._send_response.assert_awaited_once()
+    send_response.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -435,13 +439,14 @@ async def test_router_welcome_send_retries_after_delivery_failure(
             end=None,
         ),
     )
-    bot._send_response = AsyncMock(side_effect=[None, "$welcome"])
+    send_response = AsyncMock(side_effect=[None, "$welcome"])
+    install_send_response_mock(bot, send_response)
 
     await bot._send_welcome_message_if_empty("!empty:localhost")
     await bot._send_welcome_message_if_empty("!empty:localhost")
 
     assert bot.client.room_messages.await_count == 2
-    assert bot._send_response.await_count == 2
+    assert send_response.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -483,11 +488,12 @@ async def test_router_auto_welcome_lists_ad_hoc_present_responder(tmp_path: Path
             end=None,
         ),
     )
-    bot._send_response = AsyncMock(return_value="$welcome")
+    send_response = AsyncMock(return_value="$welcome")
+    install_send_response_mock(bot, send_response)
 
     await bot._send_welcome_message_if_empty("!adhoc:localhost", "@alice:localhost")
 
-    response_text = bot._send_response.await_args.kwargs["response_text"]
+    response_text = send_response.await_args.kwargs["response_text"]
     assert "\u2022 **@code**: Writes code" in response_text
     bot.client.joined_members.assert_awaited_once_with("!adhoc:localhost")
 
@@ -526,11 +532,12 @@ async def test_router_startup_welcome_without_requester_omits_responder_list(tmp
             end=None,
         ),
     )
-    bot._send_response = AsyncMock(return_value="$welcome")
+    send_response = AsyncMock(return_value="$welcome")
+    install_send_response_mock(bot, send_response)
 
     await bot._send_welcome_message_if_empty("!startup:localhost")
 
-    response_text = bot._send_response.await_args.kwargs["response_text"]
+    response_text = send_response.await_args.kwargs["response_text"]
     assert "\U0001f9e0 **Available agents and teams in this room:**" not in response_text
     assert "@mindroom_code" not in response_text
 
@@ -589,7 +596,8 @@ async def test_router_invite_welcome_filters_ad_hoc_responders_for_inviter(
             end=None,
         ),
     )
-    bot._send_response = AsyncMock(return_value="$welcome")
+    send_response = AsyncMock(return_value="$welcome")
+    install_send_response_mock(bot, send_response)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", AsyncMock(return_value=True))
 
     room = MagicMock(room_id="!adhoc:localhost")
@@ -598,7 +606,7 @@ async def test_router_invite_welcome_filters_ad_hoc_responders_for_inviter(
 
     await bot._on_invite(room, event)
 
-    response_text = bot._send_response.await_args.kwargs["response_text"]
+    response_text = send_response.await_args.kwargs["response_text"]
     assert "\u2022 **@code**: Writes code" in response_text
     assert "@mindroom_research" not in response_text
 

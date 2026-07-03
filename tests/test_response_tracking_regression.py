@@ -215,8 +215,8 @@ class TestResponseTrackingRegression:
             return_value=dispatch_context_result(mock_context),
         )
 
-        bot._send_response = AsyncMock(return_value="$response_456")
-        install_send_response_mock(bot, bot._send_response)
+        send_response = AsyncMock(return_value="$response_456")
+        install_send_response_mock(bot, send_response)
 
         # Mock constants to make router handle commands
         with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
@@ -224,8 +224,8 @@ class TestResponseTrackingRegression:
             await bot._on_message(mock_room, unknown_command_event)
             await drain_coalescing(bot)
 
-        bot._send_response.assert_awaited_once()
-        assert "❌ Unknown command" in bot._send_response.await_args.kwargs["response_text"]
+        send_response.assert_awaited_once()
+        assert "❌ Unknown command" in send_response.await_args.kwargs["response_text"]
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix in bot.py at line 371

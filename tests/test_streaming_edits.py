@@ -21,6 +21,7 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    replace_edit_regenerator_deps,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -192,13 +193,10 @@ class TestStreamingEdits:
         }
 
         # Process edit - bot SHOULD regenerate its response.
-        with patch.object(
-            bot,
-            "_generate_response",
-            new=AsyncMock(return_value=_delivery_resolution("$response123")),
-        ) as mock_generate_response:
-            await bot._on_message(mock_room, edit_event1)
-            await drain_coalescing(bot)
+        mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
+        replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+        await bot._on_message(mock_room, edit_event1)
+        await drain_coalescing(bot)
         assert mock_generate_response.await_count == 1
 
         # Edit event 2 - another streaming update
@@ -226,13 +224,10 @@ class TestStreamingEdits:
         mock_ai_response.reset_mock()
 
         # Process second edit - bot should regenerate again.
-        with patch.object(
-            bot,
-            "_generate_response",
-            new=AsyncMock(return_value=_delivery_resolution("$response123")),
-        ) as mock_generate_response:
-            await bot._on_message(mock_room, edit_event2)
-            await drain_coalescing(bot)
+        mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
+        replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+        await bot._on_message(mock_room, edit_event2)
+        await drain_coalescing(bot)
         assert mock_generate_response.await_count == 1
 
     @pytest.mark.asyncio
