@@ -121,6 +121,34 @@ class _AdditionalContextChunk:
     body: str
 
 
+@dataclass(frozen=True)
+class _AgentToolAssembly:
+    """Toolkits and dynamic-tool visibility assembled for one agent instance."""
+
+    tools: list[Toolkit]
+    loaded_tools: tuple[str, ...]
+    hidden_toolkits: frozenset[str]
+    selected_dynamic_tools: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _AgentRoleContext:
+    """Resolved model name and fully rendered role prompt for one agent instance."""
+
+    model_name: str
+    role: str
+
+
+@dataclass(frozen=True)
+class _AgentCultureState:
+    """Culture manager and Agent constructor culture flags for one agent instance."""
+
+    manager: CultureManager | None
+    add_culture_to_context: bool | None
+    update_cultural_knowledge: bool
+    enable_agentic_culture: bool
+
+
 _CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
 _PRIVATE_CULTURE_MANAGER_CACHE: WeakValueDictionary[
     tuple[str, str, tuple[str, str]],
@@ -1157,8 +1185,331 @@ def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
     return agent
 
 
+def _agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
+    return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
+
+
+def _assemble_agent_toolkits(
+    agent_name: str,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    agent_runtime: ResolvedAgentRuntime,
+    *,
+    execution_identity: ToolExecutionIdentity | None,
+    session_id: str | None,
+    hook_registry: HookRegistry | None,
+    disable_runtime_capabilities: bool,
+    disabled_tool_names: frozenset[str],
+    delegation_depth: int,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    dynamic_tool_continuation: bool,
+) -> _AgentToolAssembly:
+    """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
+    plugins = _load_agent_plugins(config, runtime_paths)
+    _sync_agent_tool_registry(config, runtime_paths)
+    tool_hook_bridge = _build_agent_tool_hook_bridge(
+        hook_registry=hook_registry,
+        plugins=plugins,
+        agent_name=agent_name,
+        dispatch_context=(
+            ToolDispatchContext(execution_identity=execution_identity) if execution_identity is not None else None
+        ),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    # Dynamic tool state is keyed by agent and session scope, so team members
+    # sharing one Matrix thread do not leak loaded tools across agents.
+    dynamic_tool_selection = _resolve_agent_dynamic_tool_selection(
+        agent_name=agent_name,
+        config=config,
+        session_id=session_id,
+        delegation_depth=delegation_depth,
+    )
+    hidden_toolkits = _context_hidden_toolkits(execution_identity)
+    resolved_tool_configs = {
+        entry.name: entry.tool_config_overrides for entry in dynamic_tool_selection.runtime_tool_configs
+    }
+    if disable_runtime_capabilities:
+        resolved_tool_configs = {}
+    elif disabled_tool_names:
+        resolved_tool_configs = {
+            tool_name: overrides
+            for tool_name, overrides in resolved_tool_configs.items()
+            if tool_name not in disabled_tool_names
+        }
+    if hidden_toolkits:
+        resolved_tool_configs = {
+            tool_name: overrides
+            for tool_name, overrides in resolved_tool_configs.items()
+            if tool_name not in hidden_toolkits
+        }
+    loaded_tools = (
+        ()
+        if disable_runtime_capabilities
+        else tuple(
+            tool_name
+            for tool_name in dynamic_tool_selection.loaded_tools
+            if tool_name not in disabled_tool_names and tool_name not in hidden_toolkits
+        )
+    )
+    with _agent_create_timing("resolve_worker_tools"):
+        worker_tools = resolve_runtime_worker_tools(
+            agent_name,
+            config,
+            runtime_paths,
+            list(resolved_tool_configs),
+            tool_registry_preloaded=True,
+        )
+    entity_view = config.resolve_entity(agent_name)
+    tools: list[Toolkit] = []
+    for tool_name in resolved_tool_configs:
+        try:
+            runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
+            with _agent_create_timing("toolkit_build.one", tool_name=tool_name):
+                toolkit = build_agent_toolkit(
+                    tool_name,
+                    agent_name=agent_name,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    worker_tools=worker_tools,
+                    runtime_overrides=runtime_overrides,
+                    agent_runtime=agent_runtime,
+                    tool_config_overrides=resolved_tool_configs.get(tool_name),
+                    session_id=session_id,
+                    execution_identity=execution_identity,
+                    delegation_depth=delegation_depth,
+                    refresh_scheduler=refresh_scheduler,
+                    dynamic_tool_continuation=dynamic_tool_continuation,
+                )
+            if toolkit:
+                toolkit = _prune_openai_incompatible_tools(
+                    toolkit,
+                    config=config,
+                    execution_identity=execution_identity,
+                )
+            if toolkit:
+                tools.append(prepend_tool_hook_bridge(toolkit, tool_hook_bridge))
+        except (ValueError, ImportError) as exc:
+            logger.warning(
+                "Could not load tool for agent construction",
+                tool=tool_name,
+                agent=agent_name,
+                error=str(exc),
+            )
+    return _AgentToolAssembly(
+        tools=tools,
+        loaded_tools=loaded_tools,
+        hidden_toolkits=hidden_toolkits,
+        selected_dynamic_tools=dynamic_tool_selection.loaded_tools,
+    )
+
+
+def _open_agent_session_storage(
+    agent_name: str,
+    agent_runtime: ResolvedAgentRuntime,
+    *,
+    history_storage: BaseDb | None,
+    persist_runtime_state: bool,
+) -> BaseDb | None:
+    """Open (or reuse) durable Agno session storage for one agent instance."""
+    with _agent_create_timing("storage_open"):
+        if not persist_runtime_state:
+            return None
+        if history_storage is not None:
+            return history_storage
+        return agent_storage.create_state_storage(
+            agent_name,
+            agent_runtime.state_root,
+            subdir="sessions",
+            session_table=f"{agent_name}_sessions",
+        )
+
+
+def _build_agent_role_context(
+    agent_name: str,
+    agent_config: AgentConfig,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    agent_runtime: ResolvedAgentRuntime,
+    *,
+    active_model_name: str | None,
+    include_openai_compat_guidance: bool,
+    disable_runtime_capabilities: bool,
+) -> _AgentRoleContext:
+    """Resolve the model name and render identity, datetime, and preload context into the role."""
+    # Get model config for identity context
+    model_name = active_model_name or agent_config.model or "default"
+    if model_name in config.models:
+        model_config = config.models[model_name]
+        model_provider = model_config.provider.title()  # Capitalize provider name
+        model_id = model_config.id
+    else:
+        # Fallback if model not found
+        model_provider = "AI"
+        model_id = model_name
+
+    with _agent_create_timing("identity_context"):
+        identity_context = _render_agent_identity_context(
+            agent_name,
+            agent_config.display_name,
+            config,
+            runtime_paths,
+            model_provider=model_provider,
+            model_id=model_id,
+            include_openai_compat_guidance=include_openai_compat_guidance,
+        )
+
+    # Add current date context with the user's configured timezone
+    datetime_context = _get_datetime_context(
+        config.timezone,
+        datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
+    )
+
+    # Combine identity and datetime contexts
+    full_context = identity_context + datetime_context
+
+    if not disable_runtime_capabilities:
+        workspace = agent_runtime.workspace
+        full_context += _build_additional_context(
+            agent_name,
+            agent_config,
+            config.defaults.max_preload_chars,
+            personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
+            truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
+            workspace_context_files=workspace.context_files if workspace is not None else (),
+            storage_path=runtime_paths.storage_root,
+            runtime_paths=runtime_paths,
+        )
+
+    return _AgentRoleContext(model_name=model_name, role=full_context + agent_config.role)
+
+
+def _build_agent_instructions(
+    agent_name: str,
+    agent_config: AgentConfig,
+    config: Config,
+    agent_runtime: ResolvedAgentRuntime,
+    *,
+    skills: Skills | None,
+    session_id: str | None,
+    include_interactive_questions: bool,
+    disable_runtime_capabilities: bool,
+    hidden_toolkits: frozenset[str],
+    loaded_tools: tuple[str, ...],
+) -> list[str]:
+    """Accumulate the configured and runtime instruction blocks for one agent instance."""
+    instructions = list(agent_config.instructions)
+
+    if skills and skills.get_skill_names():
+        instructions.append(config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"))
+
+    dynamic_tooling_block = None
+    if not disable_runtime_capabilities:
+        dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
+            config,
+            agent_name,
+            enable_dynamic_tools_manager=session_id is not None,
+            hidden_tool_names=hidden_toolkits,
+        )
+    if dynamic_tooling_block is not None:
+        instructions.append(dynamic_tooling_block)
+
+    if agent_runtime.tool_base_dir is not None and not disable_runtime_capabilities:
+        instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
+        instructions.append(config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"))
+
+    file_mode_knowledge_instruction = (
+        None
+        if disable_runtime_capabilities
+        else _file_mode_knowledge_instruction_block(agent_name, config, agent_runtime)
+    )
+    if file_mode_knowledge_instruction is not None:
+        instructions.append(file_mode_knowledge_instruction)
+
+    show_tool_calls = show_tool_calls_for_agent(config, agent_name)
+    if not show_tool_calls:
+        instructions.append(config.get_prompt("HIDDEN_TOOL_CALLS_PROMPT"))
+
+    if include_interactive_questions:
+        instructions.append(config.get_prompt("INTERACTIVE_QUESTION_PROMPT"))
+
+    dynamic_tooling_state_suffix = None
+    if not disable_runtime_capabilities:
+        dynamic_tooling_state_suffix = _build_dynamic_tooling_state_suffix(
+            config,
+            agent_name,
+            loaded_tools=loaded_tools,
+            enable_dynamic_tools_manager=session_id is not None,
+            hidden_tool_names=hidden_toolkits,
+        )
+    if dynamic_tooling_state_suffix is not None:
+        instructions.append(dynamic_tooling_state_suffix)
+
+    return instructions
+
+
+def _resolve_agent_culture_state(
+    agent_name: str,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    agent_runtime: ResolvedAgentRuntime,
+    model: Model,
+    *,
+    persist_runtime_state: bool,
+) -> _AgentCultureState:
+    """Resolve the culture manager and Agent culture flags for one agent instance."""
+    if not persist_runtime_state:
+        return _AgentCultureState(
+            manager=None,
+            add_culture_to_context=None,
+            update_cultural_knowledge=False,
+            enable_agentic_culture=False,
+        )
+
+    culture_storage_root = runtime_paths.storage_root
+    cache_private_culture = False
+    if agent_runtime.execution.is_private:
+        worker_key = agent_runtime.execution.worker_key
+        if worker_key is None:
+            msg = f"Private agent '{agent_name}' requires a worker key to resolve culture state"
+            raise ValueError(msg)
+        execution_scope = agent_runtime.execution.execution_scope
+        execution_identity = agent_runtime.execution.execution_identity
+        if execution_scope is None or execution_identity is None:
+            msg = f"Private agent '{agent_name}' requires an execution scope and identity to resolve culture state"
+            raise ValueError(msg)
+        culture_storage_root = resolve_private_requester_scope_root(
+            runtime_paths=runtime_paths,
+            execution_scope=execution_scope,
+            execution_identity=execution_identity,
+            worker_key=worker_key,
+        )
+        cache_private_culture = True
+
+    culture_manager, culture_settings = _resolve_agent_culture(
+        agent_name,
+        config,
+        culture_storage_root,
+        model,
+        cache_private=cache_private_culture,
+    )
+    add_culture_to_context: bool | None = None
+    update_cultural_knowledge = False
+    enable_agentic_culture = False
+    if culture_settings is not None:
+        add_culture_to_context = culture_settings.add_culture_to_context
+        update_cultural_knowledge = culture_settings.update_cultural_knowledge
+        enable_agentic_culture = culture_settings.enable_agentic_culture
+    return _AgentCultureState(
+        manager=culture_manager,
+        add_culture_to_context=add_culture_to_context,
+        update_cultural_knowledge=update_cultural_knowledge,
+        enable_agentic_culture=enable_agentic_culture,
+    )
+
+
 @timed("system_prompt_assembly.agent_create")
-def create_agent(  # noqa: PLR0915, C901, PLR0912
+def create_agent(
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
@@ -1220,13 +1571,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         ValueError: If agent_name is not found in configuration
 
     """
-
-    def agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
-        return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
-
-    resolved_storage_path = runtime_paths.storage_root
     create_runtime_state = not disable_runtime_capabilities
-    with agent_create_timing("resolve_runtime"):
+    with _agent_create_timing("resolve_runtime"):
         agent_runtime = resolve_agent_runtime(
             agent_name,
             config,
@@ -1237,117 +1583,29 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     agent_config = config.get_agent(agent_name)
     if create_runtime_state:
-        ensure_default_agent_workspaces(config, resolved_storage_path)
+        ensure_default_agent_workspaces(config, runtime_paths.storage_root)
     defaults = config.defaults
 
-    plugins = _load_agent_plugins(config, runtime_paths)
-    _sync_agent_tool_registry(config, runtime_paths)
-    tool_hook_bridge = _build_agent_tool_hook_bridge(
-        hook_registry=hook_registry,
-        plugins=plugins,
-        agent_name=agent_name,
-        dispatch_context=(
-            ToolDispatchContext(execution_identity=execution_identity) if execution_identity is not None else None
-        ),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-
-    with agent_create_timing("storage_open"):
-        storage = (
-            None
-            if not persist_runtime_state
-            else (
-                history_storage
-                if history_storage is not None
-                else agent_storage.create_state_storage(
-                    agent_name,
-                    agent_runtime.state_root,
-                    subdir="sessions",
-                    session_table=f"{agent_name}_sessions",
-                )
-            )
-        )
-    # Dynamic tool state is keyed by agent and session scope, so team members
-    # sharing one Matrix thread do not leak loaded tools across agents.
-    dynamic_tool_selection = _resolve_agent_dynamic_tool_selection(
-        agent_name=agent_name,
-        config=config,
+    tool_assembly = _assemble_agent_toolkits(
+        agent_name,
+        config,
+        runtime_paths,
+        agent_runtime,
+        execution_identity=execution_identity,
         session_id=session_id,
+        hook_registry=hook_registry,
+        disable_runtime_capabilities=disable_runtime_capabilities,
+        disabled_tool_names=disabled_tool_names,
         delegation_depth=delegation_depth,
+        refresh_scheduler=refresh_scheduler,
+        dynamic_tool_continuation=dynamic_tool_continuation,
     )
-    context_hidden_toolkits = _context_hidden_toolkits(execution_identity)
-    resolved_tool_configs = {
-        entry.name: entry.tool_config_overrides for entry in dynamic_tool_selection.runtime_tool_configs
-    }
-    if disable_runtime_capabilities:
-        resolved_tool_configs = {}
-    elif disabled_tool_names:
-        resolved_tool_configs = {
-            tool_name: overrides
-            for tool_name, overrides in resolved_tool_configs.items()
-            if tool_name not in disabled_tool_names
-        }
-    if context_hidden_toolkits:
-        resolved_tool_configs = {
-            tool_name: overrides
-            for tool_name, overrides in resolved_tool_configs.items()
-            if tool_name not in context_hidden_toolkits
-        }
-    loaded_tools = (
-        ()
-        if disable_runtime_capabilities
-        else tuple(
-            tool_name
-            for tool_name in dynamic_tool_selection.loaded_tools
-            if tool_name not in disabled_tool_names and tool_name not in context_hidden_toolkits
-        )
+    storage = _open_agent_session_storage(
+        agent_name,
+        agent_runtime,
+        history_storage=history_storage,
+        persist_runtime_state=persist_runtime_state,
     )
-    with agent_create_timing("resolve_worker_tools"):
-        worker_tools = resolve_runtime_worker_tools(
-            agent_name,
-            config,
-            runtime_paths,
-            list(resolved_tool_configs),
-            tool_registry_preloaded=True,
-        )
-    workspace = agent_runtime.workspace
-    entity_view = config.resolve_entity(agent_name)
-    tools: list[Toolkit] = []
-    for tool_name in resolved_tool_configs:
-        try:
-            runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
-            with agent_create_timing("toolkit_build.one", tool_name=tool_name):
-                toolkit = build_agent_toolkit(
-                    tool_name,
-                    agent_name=agent_name,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    worker_tools=worker_tools,
-                    runtime_overrides=runtime_overrides,
-                    agent_runtime=agent_runtime,
-                    tool_config_overrides=resolved_tool_configs.get(tool_name),
-                    session_id=session_id,
-                    execution_identity=execution_identity,
-                    delegation_depth=delegation_depth,
-                    refresh_scheduler=refresh_scheduler,
-                    dynamic_tool_continuation=dynamic_tool_continuation,
-                )
-            if toolkit:
-                toolkit = _prune_openai_incompatible_tools(
-                    toolkit,
-                    config=config,
-                    execution_identity=execution_identity,
-                )
-            if toolkit:
-                tools.append(prepend_tool_hook_bridge(toolkit, tool_hook_bridge))
-        except (ValueError, ImportError) as exc:
-            logger.warning(
-                "Could not load tool for agent construction",
-                tool=tool_name,
-                agent=agent_name,
-                error=str(exc),
-            )
     learning_storage = (
         agent_storage.create_state_storage(
             storage_name=agent_name,
@@ -1359,54 +1617,19 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         else None
     )
 
-    # Get model config for identity context
-    model_name = active_model_name or agent_config.model or "default"
-    if model_name in config.models:
-        model_config = config.models[model_name]
-        model_provider = model_config.provider.title()  # Capitalize provider name
-        model_id = model_config.id
-    else:
-        # Fallback if model not found
-        model_provider = "AI"
-        model_id = model_name
-
-    with agent_create_timing("identity_context"):
-        identity_context = _render_agent_identity_context(
-            agent_name,
-            agent_config.display_name,
-            config,
-            runtime_paths,
-            model_provider=model_provider,
-            model_id=model_id,
-            include_openai_compat_guidance=include_openai_compat_guidance,
-        )
-
-    # Add current date context with the user's configured timezone
-    datetime_context = _get_datetime_context(
-        config.timezone,
-        datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
+    role_context = _build_agent_role_context(
+        agent_name,
+        agent_config,
+        config,
+        runtime_paths,
+        agent_runtime,
+        active_model_name=active_model_name,
+        include_openai_compat_guidance=include_openai_compat_guidance,
+        disable_runtime_capabilities=disable_runtime_capabilities,
     )
 
-    # Combine identity and datetime contexts
-    full_context = identity_context + datetime_context
-
-    if not disable_runtime_capabilities:
-        full_context += _build_additional_context(
-            agent_name,
-            agent_config,
-            config.defaults.max_preload_chars,
-            personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
-            truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
-            workspace_context_files=workspace.context_files if workspace is not None else (),
-            storage_path=resolved_storage_path,
-            runtime_paths=runtime_paths,
-        )
-
-    role = full_context + agent_config.role
-    instructions = list(agent_config.instructions)
-
     # Create agent with defaults applied
-    model = _load_agent_model_instance(config, runtime_paths, model_name, execution_identity)
+    model = _load_agent_model_instance(config, runtime_paths, role_context.model_name, execution_identity)
     logger.info(
         "create_agent",
         agent=agent_name,
@@ -1414,6 +1637,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         model_id=model.id,
     )
 
+    workspace = agent_runtime.workspace
     skills = (
         None
         if disable_runtime_capabilities
@@ -1424,99 +1648,36 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
         )
     )
-    if skills and skills.get_skill_names():
-        instructions.append(config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"))
-
-    dynamic_tooling_block = None
-    if not disable_runtime_capabilities:
-        dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
-            config,
-            agent_name,
-            enable_dynamic_tools_manager=session_id is not None,
-            hidden_tool_names=context_hidden_toolkits,
-        )
-    if dynamic_tooling_block is not None:
-        instructions.append(dynamic_tooling_block)
-
-    if agent_runtime.tool_base_dir is not None and not disable_runtime_capabilities:
-        instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
-        instructions.append(config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"))
-
-    file_mode_knowledge_instruction = (
-        None
-        if disable_runtime_capabilities
-        else _file_mode_knowledge_instruction_block(agent_name, config, agent_runtime)
+    instructions = _build_agent_instructions(
+        agent_name,
+        agent_config,
+        config,
+        agent_runtime,
+        skills=skills,
+        session_id=session_id,
+        include_interactive_questions=include_interactive_questions,
+        disable_runtime_capabilities=disable_runtime_capabilities,
+        hidden_toolkits=tool_assembly.hidden_toolkits,
+        loaded_tools=tool_assembly.loaded_tools,
     )
-    if file_mode_knowledge_instruction is not None:
-        instructions.append(file_mode_knowledge_instruction)
 
-    show_tool_calls = show_tool_calls_for_agent(config, agent_name)
-    if not show_tool_calls:
-        instructions.append(config.get_prompt("HIDDEN_TOOL_CALLS_PROMPT"))
+    _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
 
-    if include_interactive_questions:
-        instructions.append(config.get_prompt("INTERACTIVE_QUESTION_PROMPT"))
-
-    dynamic_tooling_state_suffix = None
-    if not disable_runtime_capabilities:
-        dynamic_tooling_state_suffix = _build_dynamic_tooling_state_suffix(
-            config,
-            agent_name,
-            loaded_tools=loaded_tools,
-            enable_dynamic_tools_manager=session_id is not None,
-            hidden_tool_names=context_hidden_toolkits,
-        )
-    if dynamic_tooling_state_suffix is not None:
-        instructions.append(dynamic_tooling_state_suffix)
-
-    _log_toolkits_without_unique_model_functions(tools, agent_name=agent_name)
-
+    entity_view = config.resolve_entity(agent_name)
     knowledge_enabled = (
-        not disable_runtime_capabilities
-        and bool(config.resolve_entity(agent_name).knowledge_base_ids)
-        and knowledge is not None
+        not disable_runtime_capabilities and bool(entity_view.knowledge_base_ids) and knowledge is not None
     )
     knowledge_sources = (
         knowledge_source_descriptions(knowledge) if knowledge_enabled and isinstance(knowledge, Knowledge) else ()
     )
-    culture_storage_root = resolved_storage_path
-    cache_private_culture = False
-    if agent_runtime.execution.is_private and persist_runtime_state:
-        worker_key = agent_runtime.execution.worker_key
-        if worker_key is None:
-            msg = f"Private agent '{agent_name}' requires a worker key to resolve culture state"
-            raise ValueError(msg)
-        execution_scope = agent_runtime.execution.execution_scope
-        execution_identity = agent_runtime.execution.execution_identity
-        if execution_scope is None or execution_identity is None:
-            msg = f"Private agent '{agent_name}' requires an execution scope and identity to resolve culture state"
-            raise ValueError(msg)
-        culture_storage_root = resolve_private_requester_scope_root(
-            runtime_paths=runtime_paths,
-            execution_scope=execution_scope,
-            execution_identity=execution_identity,
-            worker_key=worker_key,
-        )
-        cache_private_culture = True
-    culture_manager, culture_settings = (
-        _resolve_agent_culture(
-            agent_name,
-            config,
-            culture_storage_root,
-            model,
-            cache_private=cache_private_culture,
-        )
-        if persist_runtime_state
-        else (None, None)
+    culture = _resolve_agent_culture_state(
+        agent_name,
+        config,
+        runtime_paths,
+        agent_runtime,
+        model,
+        persist_runtime_state=persist_runtime_state,
     )
-
-    add_culture_to_context: bool | None = None
-    update_cultural_knowledge = False
-    enable_agentic_culture = False
-    if culture_settings is not None:
-        add_culture_to_context = culture_settings.add_culture_to_context
-        update_cultural_knowledge = culture_settings.update_cultural_knowledge
-        enable_agentic_culture = culture_settings.enable_agentic_culture
 
     # Shared history-policy source of truth with the team replay path.
     history_settings = entity_view.history_settings
@@ -1531,9 +1692,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent = _initialize_agent_instance(
         name=agent_config.display_name,
         id=agent_name,
-        role=role,
+        role=role_context.role,
         model=model,
-        tools=tools,
+        tools=tool_assembly.tools,
         skills=skills,
         instructions=instructions,
         db=storage,
@@ -1548,10 +1709,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         num_history_messages=history_policy.num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.
         store_history_messages=False,
-        culture_manager=culture_manager,
-        add_culture_to_context=add_culture_to_context,
-        update_cultural_knowledge=update_cultural_knowledge,
-        enable_agentic_culture=enable_agentic_culture,
+        culture_manager=culture.manager,
+        add_culture_to_context=culture.add_culture_to_context,
+        update_cultural_knowledge=culture.update_cultural_knowledge,
+        enable_agentic_culture=culture.enable_agentic_culture,
         compress_tool_results=compress_tool_results,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
         telemetry=False,
@@ -1563,8 +1724,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         "Created agent",
         agent=agent_name,
         display_name=agent_config.display_name,
-        tool_count=len(tools),
-        loaded_dynamic_tools=list(dynamic_tool_selection.loaded_tools),
+        tool_count=len(tool_assembly.tools),
+        loaded_dynamic_tools=list(tool_assembly.selected_dynamic_tools),
     )
 
     return agent
