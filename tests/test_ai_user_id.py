@@ -1200,9 +1200,10 @@ async def test_should_watch_session_started_returns_false_when_storage_probe_fai
         session_id=target.session_id,
     )
 
+    watch_request = _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root")
     lifecycle = coordinator._build_lifecycle(
-        response_kind="ai",
-        request=_response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        identity=coordinator._response_identity(watch_request, response_kind="ai"),
+        request=watch_request,
     )
     watch = lifecycle.setup_session_watch(
         tool_context=tool_context,

@@ -68,6 +68,7 @@ from .delivery_gateway import (
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     MatrixCompactionLifecycle,
+    ResponseIdentity,
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
@@ -859,6 +860,14 @@ class ResponseRunner:
         """Resolve the correlation id for one request."""
         return request.correlation_id or request.reply_to_event_id or request.response_envelope.source_event_id
 
+    def _response_identity(self, request: ResponseRequest, *, response_kind: str) -> ResponseIdentity:
+        """Build the per-turn identity carried by delivery requests and response hooks."""
+        return ResponseIdentity(
+            response_kind=response_kind,
+            response_envelope=request.response_envelope,
+            correlation_id=self._correlation_id_for_request(request),
+        )
+
     def _agent_turn_context(
         self,
         request: ResponseRequest,
@@ -929,9 +938,7 @@ class ResponseRunner:
         *,
         target: MessageTarget,
         request: ResponseRequest,
-        response_kind: str,
-        response_envelope: MessageEnvelope,
-        correlation_id: str,
+        identity: ResponseIdentity,
         progress: _DeliveryProgress,
         run_message_id: str | None,
         terminal_status: Literal["cancelled", "error"],
@@ -973,9 +980,7 @@ class ResponseRunner:
                     placeholder_body=PROGRESS_PLACEHOLDER,
                 ),
                 initial_delivery_kind="edited" if request.existing_event_id else "sent",
-                response_kind=response_kind,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
+                identity=identity,
                 tool_trace=None,
                 extra_content=None,
                 existing_event_id=request.existing_event_id,
@@ -1019,9 +1024,8 @@ class ResponseRunner:
     def _build_lifecycle(
         self,
         *,
-        response_kind: str,
+        identity: ResponseIdentity,
         request: ResponseRequest,
-        correlation_id: str | None = None,
     ) -> ResponseLifecycle:
         """Build one lifecycle helper with the resolved shared response context."""
         return ResponseLifecycle(
@@ -1029,10 +1033,8 @@ class ResponseRunner:
                 response_hooks=self.deps.delivery_gateway.deps.response_hooks,
                 logger=self.deps.logger,
             ),
-            response_kind=response_kind,
+            identity=identity,
             pipeline_timing=request.pipeline_timing,
-            response_envelope=request.response_envelope,
-            correlation_id=correlation_id or self._correlation_id_for_request(request),
         )
 
     async def _finalize_empty_prompt_locked(
@@ -1048,9 +1050,8 @@ class ResponseRunner:
         request = await self._prepare_request_after_lock(request)
         request = self._request_with_locked_target(request, resolved_target)
         lifecycle = self._build_lifecycle(
-            response_kind=response_kind,
+            identity=self._response_identity(request, response_kind=response_kind),
             request=request,
-            correlation_id=self._correlation_id_for_request(request),
         )
         final_outcome = await lifecycle.finalize(
             FinalDeliveryOutcome.cancelled_for_empty_prompt(),
@@ -1164,12 +1165,10 @@ class ResponseRunner:
             ),
             resolved_target,
         )
-        resolved_response_envelope = resolved_request.response_envelope
-        resolved_correlation_id = self._correlation_id_for_request(request)
+        response_identity = self._response_identity(resolved_request, response_kind="team")
         lifecycle = self._build_lifecycle(
-            response_kind="team",
+            identity=response_identity,
             request=resolved_request,
-            correlation_id=resolved_correlation_id,
         )
         delivery_target = (
             resolved_target
@@ -1184,7 +1183,7 @@ class ResponseRunner:
             active_model_name=model_name,
             session_id=session_id,
             attachment_ids=request.attachment_ids,
-            correlation_id=resolved_correlation_id,
+            correlation_id=response_identity.correlation_id,
             source_envelope=request.response_envelope,
         )
         execution_identity = tool_dispatch.execution_identity
@@ -1231,7 +1230,7 @@ class ResponseRunner:
             entity_label=self.deps.agent_name,
             session_id=session_id,
             run_id=response_run_id,
-            correlation_id=resolved_correlation_id,
+            correlation_id=response_identity.correlation_id,
             reply_to_event_id=request.reply_to_event_id,
             room_id=request.room_id,
             thread_id=resolved_target.resolved_thread_id,
@@ -1356,9 +1355,7 @@ class ResponseRunner:
                     target=delivery_target,
                     stream_transport_outcome=transport_outcome,
                     initial_delivery_kind=delivery_kind,
-                    response_kind="team",
-                    response_envelope=resolved_response_envelope,
-                    correlation_id=resolved_correlation_id,
+                    identity=response_identity,
                     tool_trace=None,
                     extra_content=_merge_response_extra_content(
                         team_run_metadata_content
@@ -1440,9 +1437,7 @@ class ResponseRunner:
                                 event_id=message_id,
                                 existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
                                 cancel_source=cancel_source,
-                                response_kind="team",
-                                response_envelope=resolved_response_envelope,
-                                correlation_id=resolved_correlation_id,
+                                identity=response_identity,
                             ),
                         )
                     else:
@@ -1462,9 +1457,7 @@ class ResponseRunner:
                             existing_event_id=message_id,
                             existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
                             response_text=response_text,
-                            response_kind="team",
-                            response_envelope=resolved_response_envelope,
-                            correlation_id=resolved_correlation_id,
+                            identity=response_identity,
                             tool_trace=None,
                             extra_content=_merge_response_extra_content(
                                 team_run_metadata_content
@@ -1546,9 +1539,7 @@ class ResponseRunner:
                     target=delivery_target,
                     stream_transport_outcome=stream_transport_outcome,
                     initial_delivery_kind="edited" if request.existing_event_id else "sent",
-                    response_kind="team",
-                    response_envelope=resolved_response_envelope,
-                    correlation_id=resolved_correlation_id,
+                    identity=response_identity,
                     tool_trace=error.tool_trace if show_tool_calls else None,
                     extra_content=_merge_response_extra_content(
                         team_run_metadata_content
@@ -1568,9 +1559,7 @@ class ResponseRunner:
             final_delivery_outcome = await self._finalize_pre_delivery_terminal(
                 target=delivery_target,
                 request=request,
-                response_kind="team",
-                response_envelope=resolved_response_envelope,
-                correlation_id=resolved_correlation_id,
+                identity=response_identity,
                 progress=progress,
                 run_message_id=run_message_id,
                 terminal_status="cancelled",
@@ -1591,9 +1580,7 @@ class ResponseRunner:
                 final_delivery_outcome = await self._finalize_pre_delivery_terminal(
                     target=delivery_target,
                     request=request,
-                    response_kind="team",
-                    response_envelope=resolved_response_envelope,
-                    correlation_id=resolved_correlation_id,
+                    identity=response_identity,
                     progress=progress,
                     run_message_id=run_message_id,
                     terminal_status="error",
@@ -1615,9 +1602,7 @@ class ResponseRunner:
                 final_delivery_outcome = await self._finalize_pre_delivery_terminal(
                     target=delivery_target,
                     request=request,
-                    response_kind="team",
-                    response_envelope=resolved_response_envelope,
-                    correlation_id=resolved_correlation_id,
+                    identity=response_identity,
                     progress=progress,
                     run_message_id=run_message_id,
                     terminal_status="cancelled" if progress.cancelled else "error",
@@ -2008,12 +1993,10 @@ class ResponseRunner:
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
         request = self._request_with_locked_target(request, runtime.resolved_target)
-        response_envelope = request.response_envelope
-        correlation_id = self._correlation_id_for_request(request)
+        response_identity = self._response_identity(request, response_kind=response_kind)
         lifecycle = self._build_lifecycle(
-            response_kind=response_kind,
+            identity=response_identity,
             request=request,
-            correlation_id=correlation_id,
         )
         session_scope = self.deps.state_writer.history_scope()
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
@@ -2074,9 +2057,7 @@ class ResponseRunner:
                             event_id=request.existing_event_id,
                             existing_event_is_placeholder=request.existing_event_is_placeholder,
                             cancel_source=cancel_source,
-                            response_kind=response_kind,
-                            response_envelope=response_envelope,
-                            correlation_id=correlation_id,
+                            identity=response_identity,
                         ),
                     ),
                 )
@@ -2105,9 +2086,7 @@ class ResponseRunner:
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                     response_text=generation.response_text,
-                    response_kind=response_kind,
-                    response_envelope=response_envelope,
-                    correlation_id=correlation_id,
+                    identity=response_identity,
                     tool_trace=generation.tool_trace if self._show_tool_calls() else None,
                     extra_content=response_extra_content or None,
                 ),
@@ -2144,12 +2123,10 @@ class ResponseRunner:
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
         request = self._request_with_locked_target(request, runtime.resolved_target)
-        response_envelope = request.response_envelope
-        correlation_id = self._correlation_id_for_request(request)
+        response_identity = self._response_identity(request, response_kind=response_kind)
         lifecycle = self._build_lifecycle(
-            response_kind=response_kind,
+            identity=response_identity,
             request=request,
-            correlation_id=correlation_id,
         )
         session_scope = self.deps.state_writer.history_scope()
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
@@ -2240,9 +2217,7 @@ class ResponseRunner:
                         target=runtime.resolved_target,
                         stream_transport_outcome=stream_transport_outcome,
                         initial_delivery_kind="edited" if request.existing_event_id else "sent",
-                        response_kind=response_kind,
-                        response_envelope=response_envelope,
-                        correlation_id=correlation_id,
+                        identity=response_identity,
                         tool_trace=error.tool_trace if self._show_tool_calls() else None,
                         extra_content=response_extra_content,
                         existing_event_id=request.existing_event_id,
@@ -2278,9 +2253,7 @@ class ResponseRunner:
                             placeholder_body=PROGRESS_PLACEHOLDER,
                         ),
                         initial_delivery_kind="edited" if request.existing_event_id else "sent",
-                        response_kind=response_kind,
-                        response_envelope=response_envelope,
-                        correlation_id=correlation_id,
+                        identity=response_identity,
                         tool_trace=list(tool_trace) if self._show_tool_calls() else None,
                         extra_content=_merge_response_extra_content(
                             run_metadata_content,
@@ -2303,9 +2276,7 @@ class ResponseRunner:
             target=runtime.resolved_target,
             stream_transport_outcome=transport_outcome,
             initial_delivery_kind=delivery_kind,
-            response_kind=response_kind,
-            response_envelope=response_envelope,
-            correlation_id=correlation_id,
+            identity=response_identity,
             tool_trace=tool_trace if self._show_tool_calls() else None,
             extra_content=response_extra_content,
             existing_event_id=request.existing_event_id,
@@ -2384,12 +2355,10 @@ class ResponseRunner:
         attempt_run_ids: list[str] = []
         response_run_id = str(uuid4())
         progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
-        resolved_correlation_id = self._correlation_id_for_request(request)
-        resolved_response_envelope = request.response_envelope
+        response_identity = self._response_identity(request, response_kind="ai")
         lifecycle = self._build_lifecycle(
-            response_kind="ai",
+            identity=response_identity,
             request=request,
-            correlation_id=resolved_correlation_id,
         )
 
         def queue_memory_persistence() -> None:
@@ -2472,9 +2441,7 @@ class ResponseRunner:
             final_delivery_outcome = await self._finalize_pre_delivery_terminal(
                 target=resolved_target,
                 request=request,
-                response_kind="ai",
-                response_envelope=resolved_response_envelope,
-                correlation_id=resolved_correlation_id,
+                identity=response_identity,
                 progress=progress,
                 run_message_id=run_message_id,
                 terminal_status="cancelled",
@@ -2495,9 +2462,7 @@ class ResponseRunner:
                 final_delivery_outcome = await self._finalize_pre_delivery_terminal(
                     target=resolved_target,
                     request=request,
-                    response_kind="ai",
-                    response_envelope=resolved_response_envelope,
-                    correlation_id=resolved_correlation_id,
+                    identity=response_identity,
                     progress=progress,
                     run_message_id=run_message_id,
                     terminal_status="error",
@@ -2519,9 +2484,7 @@ class ResponseRunner:
                 final_delivery_outcome = await self._finalize_pre_delivery_terminal(
                     target=resolved_target,
                     request=request,
-                    response_kind="ai",
-                    response_envelope=resolved_response_envelope,
-                    correlation_id=resolved_correlation_id,
+                    identity=response_identity,
                     progress=progress,
                     run_message_id=run_message_id,
                     terminal_status="cancelled" if progress.cancelled else "error",

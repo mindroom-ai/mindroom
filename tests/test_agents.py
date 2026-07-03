@@ -49,7 +49,11 @@ from mindroom.history import close_team_runtime_state_dbs
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.matrix.state import MatrixState
-from mindroom.prompts import HIDDEN_TOOL_CALLS_PROMPT, OPENAI_COMPAT_HISTORY_GUIDANCE
+from mindroom.prompts import (
+    HIDDEN_TOOL_CALLS_PROMPT,
+    OPENAI_COMPAT_HISTORY_GUIDANCE,
+    WORKSPACE_SKILL_AUTHORING_PROMPT,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
@@ -1053,8 +1057,8 @@ def test_resolve_agent_runtime_uses_shared_agent_roots_for_shared_agents(tmp_pat
 
     runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
 
-    assert runtime.is_private is False
-    assert runtime.worker_key is None
+    assert runtime.execution.is_private is False
+    assert runtime.execution.worker_key is None
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace is None
     assert runtime.tool_base_dir is None
@@ -1104,9 +1108,9 @@ def test_resolve_agent_runtime_keeps_user_scope_worker_key_for_shared_agents(tmp
         create=True,
     )
 
-    assert runtime.is_private is False
-    assert runtime.execution_scope == "user"
-    assert runtime.worker_key == resolve_worker_key("user", identity, agent_name="general")
+    assert runtime.execution.is_private is False
+    assert runtime.execution.execution_scope == "user"
+    assert runtime.execution.worker_key == resolve_worker_key("user", identity, agent_name="general")
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace is None
     assert runtime.tool_base_dir is None
@@ -1125,9 +1129,9 @@ def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_p
 
     runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
 
-    assert runtime.is_private is False
-    assert runtime.execution_scope == "shared"
-    assert runtime.worker_key is None
+    assert runtime.execution.is_private is False
+    assert runtime.execution.execution_scope == "shared"
+    assert runtime.execution.worker_key is None
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace is None
 
@@ -1167,8 +1171,8 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
     )
     expected_worker_key = resolve_worker_key("user", identity, agent_name="general")
     assert expected_worker_key is not None
-    assert runtime.is_private is True
-    assert runtime.worker_key == expected_worker_key
+    assert runtime.execution.is_private is True
+    assert runtime.execution.worker_key == expected_worker_key
     assert runtime.state_root == _private_instance_state_root_path(
         tmp_path,
         worker_key=expected_worker_key,
@@ -3220,6 +3224,28 @@ def test_file_mode_agent_instructions_list_workspace_knowledge_path(tmp_path: Pa
     assert "- research: `knowledge/research`" in rendered_instructions
     assert "Research notes and decision records." in rendered_instructions
     assert "search_knowledge_base" in rendered_instructions
+
+
+def test_workspace_agent_instructions_include_skill_authoring_guidance(tmp_path: Path) -> None:
+    """Agents with workspace-rooted tools should learn they can author skills in their workspace."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].memory_backend = "file"
+
+    agent = _create_agent_for_test("general", config)
+
+    assert WORKSPACE_SKILL_AUTHORING_PROMPT in agent.instructions
+
+
+def test_agent_without_workspace_omits_skill_authoring_guidance(tmp_path: Path) -> None:
+    """Agents without a workspace should not be told to write workspace skill files."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].memory_backend = "mem0"
+
+    agent = _create_agent_for_test("general", config)
+
+    assert WORKSPACE_SKILL_AUTHORING_PROMPT not in agent.instructions
 
 
 def test_agent_knowledge_search_tool_description_lists_configured_sources(

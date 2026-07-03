@@ -514,7 +514,7 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
     final_request = deliver_final.await_args.args[0]
     assert final_request.response_text == "final text"
     assert final_request.target.room_id == "!room:localhost"
-    assert final_request.response_kind == "ai"
+    assert final_request.identity.response_kind == "ai"
     assert final_request.existing_event_id is None
 
 
@@ -552,7 +552,7 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
     finalize_request = finalize.await_args.args[0]
     assert finalize_request.stream_transport_outcome is transport
     assert finalize_request.initial_delivery_kind == "sent"
-    assert finalize_request.response_kind == "ai"
+    assert finalize_request.identity.response_kind == "ai"
 
 
 @pytest.mark.asyncio
