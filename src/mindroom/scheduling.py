@@ -8,7 +8,7 @@ import typing
 import uuid
 from collections import deque
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, NamedTuple
 from zoneinfo import ZoneInfo
 
@@ -17,7 +17,7 @@ import nio
 from agno.agent import Agent
 from cron_descriptor import Options, get_description
 from croniter import CroniterError, croniter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from mindroom import model_loading, scheduling_executor
 from mindroom.authorization import responder_candidate_entities_for_room
@@ -109,6 +109,14 @@ class ScheduledWorkflow(BaseModel):
     thread_id: str | None = None
     room_id: str | None = None
     new_thread: bool = False
+
+    @field_validator("execute_at")
+    @classmethod
+    def _naive_execute_at_is_utc(cls, value: datetime | None) -> datetime | None:
+        """The parser is instructed to emit UTC, so treat a missing offset as UTC."""
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
 
 
 class _WorkflowParseError(BaseModel):
@@ -350,6 +358,21 @@ def _is_polling_cron_schedule(cron_schedule: CronSchedule) -> bool:
         return field == "*" or field.startswith("*/")
 
     return (is_interval(minute) and is_interval(hour)) or (minute.isdigit() and is_interval(hour))
+
+
+def _validate_parsed_workflow(workflow: ScheduledWorkflow) -> _WorkflowParseError | None:
+    """Reject parses whose schedule fields do not support the declared schedule type."""
+    if workflow.schedule_type == "once" and not workflow.execute_at:
+        return _WorkflowParseError(
+            error="Could not determine when to run the one-time task.",
+            suggestion='Include an explicit time like "today at 11:45 PM" or "in 10 minutes".',
+        )
+    if workflow.schedule_type == "cron" and not workflow.cron_schedule:
+        return _WorkflowParseError(
+            error="Could not determine the recurring schedule.",
+            suggestion='Include an explicit cadence like "daily at 9am".',
+        )
+    return _validate_conditional_workflow(workflow)
 
 
 def _validate_conditional_workflow(
@@ -797,6 +820,8 @@ async def _parse_workflow_schedule(
     prompt = config.render_prompt(
         "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
         current_time=current_time.isoformat(),
+        current_time_local=current_time.astimezone(ZoneInfo(config.timezone)).isoformat(),
+        user_timezone=config.timezone,
         request=request,
         agent_list=agent_list,
     )
@@ -816,15 +841,9 @@ async def _parse_workflow_schedule(
         result = response.content
 
         if isinstance(result, ScheduledWorkflow):
-            if result.schedule_type == "once" and not result.execute_at:
-                # Match previous behavior: default to 30 minutes from now
-                result.execute_at = current_time + timedelta(minutes=30)
-            elif result.schedule_type == "cron" and not result.cron_schedule:
-                result.cron_schedule = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
-
-            conditional_validation_error = _validate_conditional_workflow(result)
-            if conditional_validation_error is not None:
-                return conditional_validation_error
+            validation_error = _validate_parsed_workflow(result)
+            if validation_error is not None:
+                return validation_error
 
             logger.info("Successfully parsed workflow schedule", request=request, schedule_type=result.schedule_type)
             return result
@@ -1168,7 +1187,7 @@ def _extract_mentioned_agents_from_text(
     return mentioned_agents
 
 
-async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
+async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     runtime: SchedulingRuntime,
     room_id: str,
     thread_id: str | None,
@@ -1242,13 +1261,6 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if workflow_result.suggestion:
             error_msg += f"\n\n💡 {workflow_result.suggestion}"
         return (None, error_msg)
-
-    # Handle workflow task
-    # Validate workflow before proceeding
-    if workflow_result.schedule_type == "once" and not workflow_result.execute_at:
-        return (None, "❌ Failed to schedule: One-time task missing execution time")
-    if workflow_result.schedule_type == "cron" and not workflow_result.cron_schedule:
-        return (None, "❌ Failed to schedule: Recurring task missing cron schedule")
 
     # Validate that all mentioned agents or teams are accessible.
     validation_result = await _validate_agent_mentions(

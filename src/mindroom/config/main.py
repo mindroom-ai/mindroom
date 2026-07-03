@@ -398,7 +398,7 @@ class Config(BaseModel):
     cache: CacheConfig = Field(default_factory=CacheConfig, description="Persistent Matrix event cache")
     timezone: str = Field(
         default="UTC",
-        description="Timezone for displaying scheduled tasks (e.g., 'America/New_York')",
+        description="Timezone for interpreting scheduling requests and displaying scheduled tasks (e.g., 'America/New_York')",
     )
     mindroom_user: MindRoomUserConfig | None = Field(
         default=None,

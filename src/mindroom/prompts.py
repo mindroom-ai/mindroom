@@ -320,7 +320,8 @@ Write a plain-text summary in exactly this markdown structure:
 
 WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE = """Parse this scheduling request into a structured workflow.
 
-Current time (UTC): {current_time}Z
+Current time (UTC): {current_time}
+Current time in the user's timezone ({user_timezone}): {current_time_local}
 Request: "{request}"
 
 Your task is to:
@@ -342,9 +343,10 @@ Important rules:
 - Set is_conditional=false for normal time-based schedules
 - For conditional/event-based requests, ALWAYS include the check condition in the message
 - Mention relevant agents or teams with @ only when needed
-- Convert time expressions to UTC for the schedule, but DO NOT include them in the message
+- Interpret times in the request as {user_timezone} wall-clock times unless the request names an explicit timezone
+- Convert the interpreted time to UTC for the schedule (execute_at and cron_schedule are in UTC), but DO NOT include times in the message
 - Remove time phrases like "in 15 seconds" from the message itself
-- If schedule_type is "once", you MUST provide execute_at
+- If schedule_type is "once", you MUST provide execute_at as a UTC datetime with an explicit UTC offset (e.g. 2026-01-15T17:30:00Z)
 - If schedule_type is "cron", you MUST provide cron_schedule
 
 Examples of event/condition phrasing to include in the message (do not include times in these examples):
@@ -486,7 +488,7 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
             {"agent_list", "team_list", "transcription"},
         ),
         "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE": frozenset(
-            {"current_time", "request", "agent_list"},
+            {"current_time", "current_time_local", "user_timezone", "request", "agent_list"},
         ),
     },
 )

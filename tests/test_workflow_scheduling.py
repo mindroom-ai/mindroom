@@ -89,6 +89,17 @@ def mock_config() -> Config:
     return config
 
 
+def test_naive_execute_at_is_treated_as_utc() -> None:
+    """Naive parser output must be pinned to UTC so instants compare against datetime.now(UTC)."""
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2026, 7, 3, 23, 45),  # noqa: DTZ001
+        message="Reminder",
+        description="Reminder",
+    )
+    assert workflow.execute_at == datetime(2026, 7, 3, 23, 45, tzinfo=UTC)
+
+
 class TestCronSchedule:
     """Test CronSchedule model."""
 
@@ -258,6 +269,98 @@ class TestParseWorkflowSchedule:
 
     @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
+    async def test_parse_prompt_interprets_times_in_user_timezone(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
+        """The parse prompt must carry the user's timezone and local wall-clock time."""
+        mock_config.timezone = "America/Los_Angeles"
+        mock_agent = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=datetime(2026, 7, 4, 6, 45, tzinfo=UTC),
+            message="Reminder",
+            description="Reminder",
+        )
+        mock_agent.arun.return_value = mock_response
+        mock_agent_class.return_value = mock_agent
+
+        await _parse_workflow_schedule(
+            "Remind me today at 11:45 PM",
+            config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
+            available_responders=[_mid("general")],
+            current_time=datetime(2026, 7, 3, 16, 0, tzinfo=UTC),
+        )
+
+        prompt = mock_agent.arun.call_args.args[0]
+        assert "Current time (UTC): 2026-07-03T16:00:00+00:00" in prompt
+        assert "(America/Los_Angeles): 2026-07-03T09:00:00-07:00" in prompt
+        assert "Interpret times in the request as America/Los_Angeles wall-clock times" in prompt
+
+    @patch("mindroom.model_loading.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
+    async def test_parse_once_without_execute_at_returns_parse_error(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
+        """A one-time parse without execute_at must fail instead of silently defaulting."""
+        mock_agent = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = ScheduledWorkflow(
+            schedule_type="once",
+            message="Check deployment",
+            description="Deployment check",
+        )
+        mock_agent.arun.return_value = mock_response
+        mock_agent_class.return_value = mock_agent
+
+        result = await _parse_workflow_schedule(
+            "in 10 minutes check the deployment",
+            config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
+            available_responders=[_mid("general")],
+        )
+
+        assert isinstance(result, _WorkflowParseError)
+        assert "when to run" in result.error
+
+    @patch("mindroom.model_loading.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
+    async def test_parse_cron_without_schedule_returns_parse_error(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
+        """A recurring parse without cron_schedule must fail instead of silently defaulting."""
+        mock_agent = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = ScheduledWorkflow(
+            schedule_type="cron",
+            message="Market analysis",
+            description="Daily market analysis",
+        )
+        mock_agent.arun.return_value = mock_response
+        mock_agent_class.return_value = mock_agent
+
+        result = await _parse_workflow_schedule(
+            "give me a market analysis regularly",
+            config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
+            available_responders=[_mid("general")],
+        )
+
+        assert isinstance(result, _WorkflowParseError)
+        assert "recurring schedule" in result.error
+
+    @patch("mindroom.model_loading.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_parse_error_handling(
         self,
         mock_agent_class: Mock,
@@ -334,59 +437,6 @@ class TestParseWorkflowSchedule:
         prompt = mock_agent.arun.call_args.args[0]
         assert "Available agents and teams: @general, @research, @ops, @finance, @analyst" in prompt
         assert "@@" not in prompt
-
-    @patch("mindroom.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.Agent")
-    async def test_parse_missing_fields_fallbacks(
-        self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
-        mock_config: MagicMock,
-    ) -> None:
-        """Missing execute_at/cron_schedule fields get sensible defaults."""
-        mock_agent = AsyncMock()
-
-        # once without execute_at
-        resp_once = MagicMock()
-        resp_once.content = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=None,
-            message="Check",
-            description="Check later",
-        )
-
-        # cron without cron_schedule
-        resp_cron = MagicMock()
-        resp_cron.content = ScheduledWorkflow(
-            schedule_type="cron",
-            cron_schedule=None,
-            message="Daily",
-            description="Daily task",
-        )
-
-        # Alternate responses
-        mock_agent.arun.side_effect = [resp_once, resp_cron]
-        mock_agent_class.return_value = mock_agent
-
-        result_once = await _parse_workflow_schedule(
-            "remind me later",
-            mock_config,
-            runtime_paths_for(mock_config),
-            [_mid("general")],
-        )
-        assert isinstance(result_once, ScheduledWorkflow)
-        assert result_once.schedule_type == "once"
-        assert result_once.execute_at is not None
-
-        result_cron = await _parse_workflow_schedule(
-            "every day",
-            mock_config,
-            runtime_paths_for(mock_config),
-            [_mid("general")],
-        )
-        assert isinstance(result_cron, ScheduledWorkflow)
-        assert result_cron.schedule_type == "cron"
-        assert result_cron.cron_schedule is not None
 
     @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
