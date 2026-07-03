@@ -260,6 +260,58 @@ class TestDMPreservationDuringCleanup:
             client.room_leave.assert_called_once_with("!regular:server")
             client.room_kick.assert_not_called()
 
+    async def test_orphaned_bot_cleanup_kicks_other_orphans_before_self_leave(self, tmp_path: Path) -> None:
+        """Other orphans must be kicked before the client leaves, even when it is listed first."""
+        client = AsyncMock()
+        client.user_id = "@mindroom_self:server"
+        config = _config_with_runtime_paths(
+            tmp_path,
+            agents={
+                "configured_agent": AgentConfig(
+                    display_name="Configured Agent",
+                    role="Agent that should be in rooms",
+                ),
+            },
+        )
+        current_domain = config.get_domain(runtime_paths_for(config))
+        # The client's own account comes first so a naive sweep would leave before kicking
+        members = ["@mindroom_self:server", "@mindroom_orphaned:server"]
+
+        with (
+            patch(
+                "mindroom.matrix.room_cleanup.get_room_members",
+                return_value=members,
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup._get_all_known_bot_user_ids",
+                return_value={"@mindroom_self:server", "@mindroom_orphaned:server"},
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup.configured_bot_user_ids_for_room",
+                return_value={f"@mindroom_configured_agent:{current_domain}"},
+            ),
+        ):
+            client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())
+            client.room_leave = AsyncMock(return_value=nio.RoomLeaveResponse())
+
+            removed_bots = await _cleanup_orphaned_bots_in_room(
+                client,
+                "!regular:server",
+                config,
+                runtime_paths_for(config),
+            )
+
+            assert removed_bots == ["@mindroom_orphaned:server", "@mindroom_self:server"]
+            client.room_kick.assert_called_once_with(
+                "!regular:server",
+                "@mindroom_orphaned:server",
+                reason="Bot no longer configured for this room",
+            )
+            client.room_leave.assert_called_once_with("!regular:server")
+            # The kick must happen while the client is still in the room
+            removal_order = [name for name, _, _ in client.mock_calls if name in ("room_kick", "room_leave")]
+            assert removal_order == ["room_kick", "room_leave"]
+
     async def test_orphaned_bot_cleanup_preserves_drifted_current_bot_username(self, tmp_path: Path) -> None:
         """Current managed bots with persisted username drift must not be treated as orphaned."""
         client = AsyncMock()

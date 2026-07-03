@@ -113,7 +113,9 @@ async def _cleanup_orphaned_bots_in_room(
 
     removed_bots = []
 
-    for user_id in member_ids:
+    # Sweep the client's own account last — once it leaves the room it can no
+    # longer kick the remaining orphans.
+    for user_id in sorted(member_ids, key=lambda member_id: member_id == client.user_id):
         matrix_id = MatrixID.parse(user_id)
         agent_name = registry.current_entity_name_for_user_id(user_id)
         is_configured_current_bot = agent_name is not None and user_id in configured_bot_ids
