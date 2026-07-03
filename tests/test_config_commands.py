@@ -29,6 +29,7 @@ from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
+from mindroom.delivery_gateway import SendTextRequest
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
@@ -808,7 +809,7 @@ async def test_handle_confirmation_reaction_respects_disabled_config_command(tmp
         _conversation_resolver=SimpleNamespace(
             build_message_target=MagicMock(return_value=target),
         ),
-        _send_response=AsyncMock(),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$event")),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(sender="@admin:example.org", key="✅", reacts_to="$preview")
@@ -830,10 +831,12 @@ async def test_handle_confirmation_reaction_respects_disabled_config_command(tmp
         await handle_confirmation_reaction(bot, room, event, pending_change)
 
     mock_apply.assert_not_awaited()
-    bot._send_response.assert_awaited_once_with(
-        target=target,
-        response_text="❌ Config command disabled.",
-        skip_mentions=True,
+    bot._delivery_gateway.send_text.assert_awaited_once_with(
+        SendTextRequest(
+            target=target,
+            response_text="❌ Config command disabled.",
+            skip_mentions=True,
+        ),
     )
 
 
@@ -853,7 +856,7 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
         _conversation_resolver=SimpleNamespace(
             build_message_target=MagicMock(return_value=target),
         ),
-        _send_response=AsyncMock(),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$event")),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(sender="@admin:example.org", key="✅", reacts_to="$preview")
@@ -875,10 +878,12 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
         await handle_confirmation_reaction(bot, room, event, pending_change)
 
     mock_apply.assert_not_awaited()
-    bot._send_response.assert_awaited_once_with(
-        target=target,
-        response_text="❌ Admin only.",
-        skip_mentions=True,
+    bot._delivery_gateway.send_text.assert_awaited_once_with(
+        SendTextRequest(
+            target=target,
+            response_text="❌ Admin only.",
+            skip_mentions=True,
+        ),
     )
 
 
@@ -899,7 +904,7 @@ async def test_handle_confirmation_reaction_accepts_alias_backed_requester(tmp_p
         _conversation_resolver=SimpleNamespace(
             build_message_target=MagicMock(return_value=target),
         ),
-        _send_response=AsyncMock(),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$event")),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(sender="@telegram_admin:example.org", key="✅", reacts_to="$preview")
@@ -929,10 +934,12 @@ async def test_handle_confirmation_reaction_accepts_alias_backed_requester(tmp_p
         False,
         runtime_paths=bot.runtime_paths,
     )
-    bot._send_response.assert_awaited_once_with(
-        target=target,
-        response_text="✅ Configuration updated successfully.",
-        skip_mentions=True,
+    bot._delivery_gateway.send_text.assert_awaited_once_with(
+        SendTextRequest(
+            target=target,
+            response_text="✅ Configuration updated successfully.",
+            skip_mentions=True,
+        ),
     )
 
 

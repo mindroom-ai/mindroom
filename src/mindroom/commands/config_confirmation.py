@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.config.matrix import ignore_unverified_devices_for_config
+from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.message_builder import build_reaction_content
 
@@ -418,8 +419,10 @@ async def handle_confirmation_reaction(
         thread_id=pending_change.thread_id,
         reply_to_event_id=event.reacts_to,
     )
-    await bot._send_response(
-        target=target,
-        response_text=response_text,
-        skip_mentions=True,
+    await bot._delivery_gateway.send_text(
+        SendTextRequest(
+            target=target,
+            response_text=response_text,
+            skip_mentions=True,
+        ),
     )

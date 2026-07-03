@@ -23,11 +23,13 @@ from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.response_runner import ResponseRequest
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.conftest import (
     bind_runtime_paths,
     drain_coalescing,
     install_runtime_cache_support,
+    install_send_response_mock,
     make_matrix_client_mock,
     make_visible_message,
     patch_response_runner_module,
@@ -268,16 +270,18 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
             nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, "!room:localhost"),
             nio.RoomSendResponse.from_dict({"event_id": "$edit"}, "!room:localhost"),
         ]
-        await bot._generate_response(
-            prompt="@team remember this",
-            thread_history=thread_history,
-            user_id="@user:localhost",
-            response_envelope=request_envelope(
-                room_id="!room:localhost",
-                reply_to_event_id="$evt1",
+        await bot._run_regenerated_response(
+            ResponseRequest(
                 prompt="@team remember this",
+                thread_history=thread_history,
                 user_id="@user:localhost",
-                agent_name=bot.agent_name,
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$evt1",
+                    prompt="@team remember this",
+                    user_id="@user:localhost",
+                    agent_name=bot.agent_name,
+                ),
             ),
         )
 
@@ -316,7 +320,8 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     install_runtime_cache_support(bot)
     bot.orchestrator = MagicMock()
     bot.orchestrator.agent_bots = {"a1": MagicMock()}
-    bot._send_response = AsyncMock(return_value="$new_response")
+    send_response = AsyncMock(return_value="$new_response")
+    install_send_response_mock(bot, send_response)
 
     with patch(
         "mindroom.delivery_gateway.edit_message_result",
@@ -327,17 +332,19 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
             ),
         ),
     ) as mock_edit:
-        resolution = await bot._generate_response(
-            prompt="@t1 please retry",
-            thread_history=[],
-            existing_event_id="$existing_response",
-            user_id="@user:localhost",
-            response_envelope=request_envelope(
-                room_id="!room:localhost",
-                reply_to_event_id="$evt1",
+        resolution = await bot._run_regenerated_response(
+            ResponseRequest(
                 prompt="@t1 please retry",
+                thread_history=[],
+                existing_event_id="$existing_response",
                 user_id="@user:localhost",
-                agent_name=bot.agent_name,
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$evt1",
+                    prompt="@t1 please retry",
+                    user_id="@user:localhost",
+                    agent_name=bot.agent_name,
+                ),
             ),
         )
 
@@ -346,7 +353,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     assert (
         mock_edit.await_args.args[4] == "Team 't1' includes agent 'a2' that could not be materialized for this request."
     )
-    bot._send_response.assert_not_awaited()
+    send_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio

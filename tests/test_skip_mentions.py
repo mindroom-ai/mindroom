@@ -110,7 +110,7 @@ def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:
 
 @pytest.mark.asyncio
 async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
-    """Test that _send_response adds metadata when skip_mentions is True."""
+    """Test that the delivery gateway's send_text adds metadata when skip_mentions is True."""
     config = bind_runtime_paths(
         Config(agents={"email_agent": AgentConfig(display_name="Email Agent")}),
         test_runtime_paths(tmp_path),
@@ -144,18 +144,19 @@ async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
             "mindroom.delivery_gateway.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$response123")),
         ) as mock_send:
-            # Call the actual _send_response method with skip_mentions=True
+            # Call the actual delivery gateway send_text with skip_mentions=True
             target = bot._conversation_resolver.build_message_target(
                 room_id=room.room_id,
                 thread_id=None,
                 reply_to_event_id=event.event_id,
                 event_source=event.source,
             )
-            await AgentBot._send_response(
-                bot,
-                target=target,
-                response_text="✅ Scheduled. Will notify @email_agent",
-                skip_mentions=True,
+            await bot._delivery_gateway.send_text(
+                SendTextRequest(
+                    target=target,
+                    response_text="✅ Scheduled. Will notify @email_agent",
+                    skip_mentions=True,
+                ),
             )
 
             # Check that send_message was called with content that has skip_mentions

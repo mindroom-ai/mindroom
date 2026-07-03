@@ -854,6 +854,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
+    "mindroom.response_runner",
     "mindroom.runtime_protocols",
     "mindroom.timestamp_formatting",
 ]
@@ -2197,6 +2198,7 @@ path = "mindroom.commands.config_confirmation"
 depends_on = [
     "mindroom.commands.config_commands",
     "mindroom.config.matrix",
+    "mindroom.delivery_gateway",
     "mindroom.logging_config",
 ]
 

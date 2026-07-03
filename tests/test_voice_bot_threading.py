@@ -65,7 +65,13 @@ def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Confi
 
 
 @pytest.fixture
-def mock_home_bot() -> AgentBot:
+def generate_response_mock() -> AsyncMock:
+    """Generation seam mock installed on mock_home_bot."""
+    return AsyncMock(return_value="$response")
+
+
+@pytest.fixture
+def mock_home_bot(generate_response_mock: AsyncMock) -> AgentBot:
     """Create a single-agent bot for audio threading tests."""
     tmpdir = Path(tempfile.mkdtemp())
     agent_user = AgentMatrixUser(
@@ -89,8 +95,7 @@ def mock_home_bot() -> AgentBot:
     sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_generate_response_mock(bot, bot._generate_response)
+    install_generate_response_mock(bot, generate_response_mock)
     return bot
 
 
@@ -325,7 +330,10 @@ def _install_test_coalescing_gate(bot: AgentBot, *, debounce_seconds: float = 0.
 
 
 @pytest.mark.asyncio
-async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot) -> None:
+async def test_voice_message_in_main_room_creates_thread(
+    mock_home_bot: AgentBot,
+    generate_response_mock: AsyncMock,
+) -> None:
     """Audio in the main room should reply in a thread rooted at the audio event."""
     bot = mock_home_bot
     mock_context = MessageContext(
@@ -362,8 +370,8 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
         await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    bot._generate_response.assert_called_once()
-    call_kwargs = bot._generate_response.call_args.kwargs
+    generate_response_mock.assert_called_once()
+    call_kwargs = generate_response_mock.call_args.kwargs
     response_target = call_kwargs["response_envelope"].target
     assert response_target.reply_to_event_id == "$voice123"
     assert response_target.resolved_thread_id == "$voice123"
@@ -371,7 +379,10 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
 
 
 @pytest.mark.asyncio
-async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot) -> None:
+async def test_voice_message_in_thread_continues_thread(
+    mock_home_bot: AgentBot,
+    generate_response_mock: AsyncMock,
+) -> None:
     """Audio in an existing thread should keep using that thread root."""
     bot = mock_home_bot
     mock_context = MessageContext(
@@ -415,8 +426,8 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
         await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    bot._generate_response.assert_called_once()
-    call_kwargs = bot._generate_response.call_args.kwargs
+    generate_response_mock.assert_called_once()
+    call_kwargs = generate_response_mock.call_args.kwargs
     response_target = call_kwargs["response_envelope"].target
     assert response_target.reply_to_event_id == "$voice456"
     assert response_target.resolved_thread_id == "$thread_root"
@@ -429,6 +440,7 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
 @pytest.mark.asyncio
 async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
     mock_home_bot: AgentBot,
+    generate_response_mock: AsyncMock,
 ) -> None:
     """Plain-reply audio should inherit thread context transitively from the replied-to event."""
     bot = mock_home_bot
@@ -473,8 +485,8 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
         await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    bot._generate_response.assert_called_once()
-    call_kwargs = bot._generate_response.call_args.kwargs
+    generate_response_mock.assert_called_once()
+    call_kwargs = generate_response_mock.call_args.kwargs
     response_target = call_kwargs["response_envelope"].target
     assert response_target.reply_to_event_id == "$voice789"
     assert response_target.resolved_thread_id == "$thread_root"

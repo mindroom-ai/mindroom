@@ -209,15 +209,15 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     await _handle_edit(harness, event, event_info)
 
     harness.generate_response.assert_awaited_once()
-    call_kwargs = harness.generate_response.await_args.kwargs
-    assert call_kwargs["prompt"] == "what is 3+3?"
-    assert call_kwargs["existing_event_id"] == RESPONSE_EVENT_ID
-    assert call_kwargs["existing_event_is_placeholder"] is False
-    assert call_kwargs["user_id"] == USER_ID
-    assert call_kwargs["correlation_id"] == EDIT_EVENT_ID
-    assert call_kwargs["matrix_run_metadata"] == RUN_METADATA
-    assert call_kwargs["current_timestamp_ms"] == float(event.server_timestamp)
-    assert call_kwargs["thread_history"] == harness.context.thread_history
+    request = harness.generate_response.await_args.args[0]
+    assert request.prompt == "what is 3+3?"
+    assert request.existing_event_id == RESPONSE_EVENT_ID
+    assert request.existing_event_is_placeholder is False
+    assert request.user_id == USER_ID
+    assert request.correlation_id == EDIT_EVENT_ID
+    assert request.matrix_run_metadata == RUN_METADATA
+    assert request.current_timestamp_ms == float(event.server_timestamp)
+    assert request.thread_history == harness.context.thread_history
 
     envelope_kwargs = harness.resolver.build_message_envelope.call_args.kwargs
     assert envelope_kwargs["body"] == "what is 3+3?"
@@ -247,7 +247,7 @@ async def test_lifecycle_lock_callback_removes_stale_runs(tmp_path: Path) -> Non
 
     await _handle_edit(harness, event, event_info)
 
-    on_lock_acquired = harness.generate_response.await_args.kwargs["on_lifecycle_lock_acquired"]
+    on_lock_acquired = harness.generate_response.await_args.args[0].on_lifecycle_lock_acquired
     harness.turn_store.remove_stale_runs_for_edit.assert_not_called()
     on_lock_acquired()
     harness.turn_store.remove_stale_runs_for_edit.assert_called_once()
@@ -271,7 +271,7 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
     await _handle_edit(harness, event, event_info)
 
     expected_prompt = coalesced_prompt(["edited first message", "second message"])
-    assert harness.generate_response.await_args.kwargs["prompt"] == expected_prompt
+    assert harness.generate_response.await_args.args[0].prompt == expected_prompt
 
     metadata_call = harness.turn_store.build_run_metadata.call_args
     handled_turn = metadata_call.args[0]
@@ -309,7 +309,7 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
 
     await _handle_edit(harness, event, event_info)
 
-    assert harness.generate_response.await_args.kwargs["prompt"] == (
+    assert harness.generate_response.await_args.args[0].prompt == (
         "The user sent the following messages in quick succession. "
         "Treat them as one turn and respond once:\n\n"
         "<messages>\n"
@@ -319,7 +319,7 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
         "<![CDATA[second message]]></msg>\n"
         "</messages>"
     )
-    assert harness.generate_response.await_args.kwargs["current_prompt_is_structured"] is True
+    assert harness.generate_response.await_args.args[0].current_prompt_is_structured is True
 
     handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
     assert handled_turn.source_event_metadata == record.source_event_metadata
@@ -501,7 +501,7 @@ async def test_edit_context_realigned_to_recorded_thread_root(tmp_path: Path) ->
         THREAD_ID,
         caller_label="edit_regeneration_context",
     )
-    assert harness.generate_response.await_args.kwargs["thread_history"] == refetched_history
+    assert harness.generate_response.await_args.args[0].thread_history == refetched_history
 
 
 @pytest.mark.asyncio

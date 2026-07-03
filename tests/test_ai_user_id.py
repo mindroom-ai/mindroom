@@ -470,7 +470,6 @@ def _make_bot(
     bot.config = config
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
-    bot._send_response = AsyncMock(return_value="$response_id")
     bot._handle_interactive_question = AsyncMock()
     return bot
 
@@ -955,7 +954,6 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
     bot.config = config
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
-    bot._send_response = AsyncMock(return_value="$response_id")
 
     storage = _SessionStorage()
     sequence: list[tuple[str, str | None, str | None, str | None]] = []
@@ -1057,7 +1055,6 @@ async def test_process_and_respond_applies_session_started_agent_and_room_scopes
     bot.config = config
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
-    bot._send_response = AsyncMock(return_value="$response_id")
 
     storage = _SessionStorage()
     sequence: list[str] = []
@@ -1127,7 +1124,6 @@ async def test_process_and_respond_does_not_emit_session_started_without_persist
     bot.config = config
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
-    bot._send_response = AsyncMock(return_value="$response_id")
 
     storage = _SessionStorage()
     sequence: list[str] = []
@@ -1240,7 +1236,6 @@ async def test_session_started_hooks_continue_after_timeout(tmp_path: Path) -> N
     bot.config = config
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
-    bot._send_response = AsyncMock(return_value="$response_id")
 
     storage = _SessionStorage()
     sequence: list[str] = []
@@ -1694,7 +1689,6 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
     bot.config = config
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
-    bot._send_response = AsyncMock(return_value="$response_id")
 
     storage = _SessionStorage()
     sequence: list[str] = []
@@ -4648,7 +4642,6 @@ class TestUserIdPassthrough:
         bot.config = config
         bot.runtime_paths = runtime_paths
         bot._knowledge_access_support = _knowledge_access_support()
-        bot._send_response = AsyncMock(return_value="$response_id")
         with patch("mindroom.response_runner.ai_response") as mock_ai:
             coordinator = _build_response_runner(
                 bot,
