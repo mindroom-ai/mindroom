@@ -1617,7 +1617,6 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
         patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -1630,6 +1629,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
+        _install_inert_post_response_effects(coordinator)
 
         async def consume_delivery(request: object) -> StreamTransportOutcome:
             async for _chunk in request.response_stream:
