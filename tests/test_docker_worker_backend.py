@@ -522,6 +522,35 @@ router:
     assert projected_plugin_path.read_text(encoding="utf-8") == "PLUGIN_VERSION = 'mapped'\n"
 
 
+def test_docker_worker_projection_resolves_config_includes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A split host config projects as the fully merged config for the worker."""
+    (tmp_path / "agents.yaml").write_text(
+        "code:\n  display_name: Code\n  role: Writes code\n",
+        encoding="utf-8",
+    )
+    config_text = (
+        "agents: !include agents.yaml\n"
+        "models:\n  default:\n    provider: openai\n    id: test-model\n"
+        "router:\n  model: default\n"
+    )
+
+    backend, _fake_client, _credential_sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+    )
+    projection = backend._projection_manager.projected_config(
+        local_worker_state_paths_for_root(tmp_path / "workers" / "split-config"),
+        materialize=True,
+    )
+
+    projected = yaml.safe_load((projection.root / "config.yaml").read_text(encoding="utf-8"))
+    assert projected["agents"]["code"]["display_name"] == "Code"
+
+
 def _backend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

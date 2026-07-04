@@ -514,8 +514,9 @@ function AppContent() {
         {configUsesIncludes && (
           <div className="border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-100 sm:px-6">
             This configuration is composed from multiple files via{" "}
-            <code>!include</code>, so saving from the dashboard is disabled.
-            Edit the include source files directly.
+            <code>!include</code>. The backend rejects structured saves from the
+            dashboard editors — make changes by editing the include source files
+            directly.
           </div>
         )}
 

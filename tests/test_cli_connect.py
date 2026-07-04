@@ -116,6 +116,28 @@ def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path
     assert parsed["authorization"]["agent_reply_permissions"]["*"] == ["@alice:mindroom.chat:8448"]
 
 
+def test_replace_owner_placeholders_reaches_included_files(tmp_path: Path) -> None:
+    """Placeholders living in !include files are replaced too."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("authorization: !include auth.yaml\n", encoding="utf-8")
+    auth_path = tmp_path / "auth.yaml"
+    auth_path.write_text(
+        f"global_users:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        encoding="utf-8",
+    )
+
+    replaced = cli_connect.replace_owner_placeholders_in_config(
+        config_path=config_path,
+        owner_user_id="@alice:mindroom.chat",
+    )
+
+    assert replaced is True
+    assert config_path.read_text(encoding="utf-8") == "authorization: !include auth.yaml\n"
+    updated = auth_path.read_text(encoding="utf-8")
+    assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated
+    assert yaml.safe_load(updated)["global_users"] == ["@alice:mindroom.chat"]
+
+
 def test_complete_local_pairing_rejects_non_json_response() -> None:
     """Pair-complete should fail with a clear error when response JSON is invalid."""
 

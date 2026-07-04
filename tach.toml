@@ -555,6 +555,7 @@ depends_on = [
     "mindroom.api.workers",
     "mindroom.constants",
     "mindroom.credentials_sync",
+    "mindroom.file_watcher",
     "mindroom.knowledge",
     "mindroom.knowledge.watch",
     "mindroom.logging_config",
@@ -1098,6 +1099,7 @@ depends_on = [
 path = "mindroom.orchestration.config_lifecycle"
 depends_on = [
     "mindroom.config.main",
+    "mindroom.config.yaml_includes",
     "mindroom.logging_config",
     "mindroom.orchestration.config_updates",
     "mindroom.orchestration.runtime",
@@ -2071,6 +2073,7 @@ path = "mindroom.cli.connect"
 depends_on = [
     "mindroom.cli.env_file",
     "mindroom.cli.owner",
+    "mindroom.config.yaml_includes",
     "mindroom.constants",
 ]
 

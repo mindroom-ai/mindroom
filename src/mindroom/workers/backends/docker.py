@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
+import yaml
 
+from mindroom.config.yaml_includes import load_yaml_config_source_with_digests, source_files_fingerprint
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     RuntimePaths,
@@ -156,10 +158,19 @@ def _host_config_contents_hash(host_config_path: Path | None) -> str:
     if host_config_path is None:
         return ""
     try:
-        return hashlib.sha256(host_config_path.read_bytes()).hexdigest()
+        _, source_digests = load_yaml_config_source_with_digests(host_config_path)
     except OSError as exc:
         msg = f"Failed to read Docker worker config file '{host_config_path}': {exc}"
         raise WorkerBackendError(msg) from exc
+    except (yaml.YAMLError, UnicodeError):
+        # An unparseable config still hashes by its top-level bytes so worker
+        # staleness checks keep working while the user fixes the file.
+        try:
+            return hashlib.sha256(host_config_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            msg = f"Failed to read Docker worker config file '{host_config_path}': {exc}"
+            raise WorkerBackendError(msg) from exc
+    return source_files_fingerprint(host_config_path, source_digests)
 
 
 def _docker_image_identity_state(

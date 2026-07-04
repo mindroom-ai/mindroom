@@ -158,6 +158,20 @@ class TestIncludeAwareSnapshots:
         assert after.config_load_result.success is False
         assert after.source_files == snapshot.source_files
 
+    def test_failed_validation_reload_adopts_the_new_source_set(self, split_app: FastAPI) -> None:
+        """A parsed-but-invalid reload starts watching newly added include files."""
+        runtime_paths = _snapshot(split_app).runtime_paths
+        new_include = runtime_paths.config_path.parent / "agents" / "bad_agent.yaml"
+        new_include.write_text("bad_agent: [not, a, mapping]\n", encoding="utf-8")
+
+        assert config_lifecycle.load_config_into_app(runtime_paths, split_app) is False
+
+        after = _snapshot(split_app)
+        assert after.config_load_result is not None
+        assert after.config_load_result.success is False
+        assert after.source_files is not None
+        assert new_include.resolve() in after.source_files
+
     def test_publish_runtime_config_records_disk_source_files(
         self,
         split_runtime_paths: constants.RuntimePaths,

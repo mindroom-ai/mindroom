@@ -21,7 +21,11 @@ from mindroom.config.main import (
     ConfigRuntimeValidationError,
     iter_config_validation_messages,
 )
-from mindroom.config.yaml_includes import load_yaml_config_source, load_yaml_config_source_with_digests
+from mindroom.config.yaml_includes import (
+    load_yaml_config_source,
+    load_yaml_config_source_with_digests,
+    source_files_fingerprint,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -142,23 +146,6 @@ def _source_fingerprint(source: bytes | str) -> str:
     return hashlib.sha256(source_bytes).hexdigest()
 
 
-def _source_files_fingerprint(config_path: Path, source_digests: dict[Path, str]) -> str:
-    """Return the stable identity of one config from per-file digests captured at read time.
-
-    A single-file config keeps the plain content sha256 so the fingerprint still
-    matches what the structured and raw save paths compute from the written text.
-    """
-    if len(source_digests) == 1:
-        return next(iter(source_digests.values()))
-    root_dir = config_path.resolve().parent
-    digest = hashlib.sha256()
-    for file, file_digest in sorted(source_digests.items(), key=lambda item: item[0].as_posix()):
-        digest.update(file.relative_to(root_dir).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(bytes.fromhex(file_digest))
-    return digest.hexdigest()
-
-
 def _load_config_result(
     runtime_paths: constants.RuntimePaths,
 ) -> tuple[ConfigLoadResult, dict[str, Any] | None, Config | None, str | None, frozenset[Path] | None]:
@@ -172,7 +159,7 @@ def _load_config_result(
         # config under a fingerprint computed from different content.
         data, source_digests = load_yaml_config_source_with_digests(runtime_paths.config_path, source=source_bytes)
         source_files = frozenset(source_digests)
-        source_fingerprint = _source_files_fingerprint(runtime_paths.config_path, source_digests)
+        source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
         runtime_config = Config.validate_with_runtime(
             data,
             runtime_paths,
@@ -574,7 +561,7 @@ def _validate_raw_config_source(
         source=source.encode("utf-8"),
     )
     runtime_config = Config.validate_with_runtime(data, runtime_paths)
-    source_fingerprint = _source_files_fingerprint(runtime_paths.config_path, source_digests)
+    source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
     return runtime_config, runtime_config.authored_model_dump(), frozenset(source_digests), source_fingerprint
 
 
@@ -781,9 +768,11 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
             runtime_config=runtime_config if runtime_config is not None else current.runtime_config,
             config_load_result=result,
             source_fingerprint=source_fingerprint,
-            # A failed load keeps the last known source set so the watcher still
-            # covers the include file whose edit broke the config.
-            source_files=source_files if result.success else current.source_files,
+            # A load that failed before parsing keeps the last known source set
+            # so the watcher still covers the include file whose edit broke the
+            # config; a parsed-but-invalid load adopts the fresh set so newly
+            # added include files are watched while the user fixes them.
+            source_files=source_files if source_files is not None else current.source_files,
         )
     return result.success
 

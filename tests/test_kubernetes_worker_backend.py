@@ -3237,3 +3237,24 @@ def test_kubernetes_backend_config_from_runtime_reads_agent_vault(tmp_path: Path
     assert config.agent_vault.owner_email == "vault-owner@example.test"
     signature = kubernetes_backend_config_signature(runtime_paths, auth_token="token")  # noqa: S106
     assert config.agent_vault.signature() in signature
+
+
+def test_scoped_storage_policy_planning_resolves_config_includes(tmp_path: Path) -> None:
+    """Scoped-storage planning parses split configs instead of failing on include tags."""
+    config_dir = tmp_path / "conf"
+    config_dir.mkdir()
+    (config_dir / "agents.yaml").write_text(
+        "code:\n  display_name: Code\n  role: Writes code\n  worker_scope: user\n",
+        encoding="utf-8",
+    )
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("agents: !include agents.yaml\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    policies = kubernetes_resources_module._resolved_agent_policies_for_runtime_paths(runtime_paths)
+
+    assert policies["code"].effective_execution_scope == "user"

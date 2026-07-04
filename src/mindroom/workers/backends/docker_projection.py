@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, cast
 
 import yaml
 
+from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import config_relative_path, resolve_config_relative_path
 from mindroom.sensitivity import is_sensitive_config_key, is_sensitive_header_key, normalize_config_key
 from mindroom.tool_system.worker_routing import (
@@ -160,6 +161,21 @@ def _path_state_fingerprint(host_path: Path) -> str:
     return _file_state_fingerprint(resolved_host_path)
 
 
+def _config_sources_state_fingerprint(source_files: frozenset[Path]) -> str | None:
+    """Stat-based cache key over the config file plus every !include file.
+
+    ``None`` when any source file is unreadable, which callers treat as a cache
+    miss so the next load re-derives the source set.
+    """
+    entries = []
+    for path in sorted(source_files):
+        try:
+            entries.append(f"{path.as_posix()}:{_file_state_fingerprint(path)}")
+        except OSError:
+            return None
+    return hashlib.sha256("\0".join(entries).encode("utf-8")).hexdigest()
+
+
 def _compute_path_contents_hash(host_path: Path) -> str:
     resolved_host_path = _validated_asset_host_path(host_path)
     hasher = hashlib.sha256()
@@ -254,7 +270,7 @@ class DockerProjectionManager:
         self._projected_configs_root = projected_configs_root
         self._runtime_paths = runtime_paths
         self._asset_hash_cache: dict[Path, tuple[str, str]] = {}
-        self._config_data_cache: tuple[Path, str, dict[str, object]] | None = None
+        self._config_data_cache: tuple[Path, str | None, dict[str, object], frozenset[Path]] | None = None
 
     def config_mount_specs(
         self,
@@ -427,21 +443,31 @@ class DockerProjectionManager:
 
     def _load_host_config_data(self, host_config_path: Path) -> dict[str, object]:
         resolved_host_config_path = host_config_path.expanduser().resolve()
-        config_fingerprint = _path_state_fingerprint(resolved_host_config_path)
         cached = self._config_data_cache
-        if cached is not None and cached[0] == resolved_host_config_path and cached[1] == config_fingerprint:
+        if (
+            cached is not None
+            and cached[0] == resolved_host_config_path
+            and cached[1] is not None
+            and cached[1] == _config_sources_state_fingerprint(cached[3])
+        ):
             return copy.deepcopy(cached[2])
 
         try:
-            data = yaml.safe_load(resolved_host_config_path.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError) as exc:
+            data, source_digests = load_yaml_config_source_with_digests(resolved_host_config_path)
+        except (OSError, yaml.YAMLError, UnicodeError) as exc:
             msg = f"Failed to read Docker worker config file '{resolved_host_config_path}': {exc}"
             raise WorkerBackendError(msg) from exc
         if not isinstance(data, dict):
             msg = f"Docker worker config file '{resolved_host_config_path}' must contain a YAML object."
             raise WorkerBackendError(msg)
         normalized_data = cast("dict[str, object]", data)
-        self._config_data_cache = (resolved_host_config_path, config_fingerprint, copy.deepcopy(normalized_data))
+        source_files = frozenset(source_digests)
+        self._config_data_cache = (
+            resolved_host_config_path,
+            _config_sources_state_fingerprint(source_files),
+            copy.deepcopy(normalized_data),
+            source_files,
+        )
         return copy.deepcopy(normalized_data)
 
     def _asset_contents_hash(self, host_path: Path) -> str:

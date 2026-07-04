@@ -6,7 +6,10 @@ import asyncio
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+import yaml
+
 from mindroom.config.main import load_config
+from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.config_updates import (
     build_config_update_plan,
@@ -17,6 +20,7 @@ from mindroom.orchestration.runtime import cancel_logged_task, create_logged_tas
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
+    from pathlib import Path
 
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
@@ -24,6 +28,16 @@ if TYPE_CHECKING:
     from mindroom.orchestration.config_updates import ConfigUpdatePlan
 
 logger = get_logger(__name__)
+
+
+def _parse_only_source_files(config_path: Path) -> frozenset[Path] | None:
+    """Best-effort source set of a config that failed to load, for watching."""
+    try:
+        _, source_files = load_yaml_config_source(config_path)
+    except (OSError, yaml.YAMLError, UnicodeError):
+        return None
+    return source_files
+
 
 _CONFIG_RELOAD_DEBOUNCE_SECONDS = 2.0
 _CONFIG_RELOAD_IDLE_POLL_SECONDS = 0.5
@@ -106,6 +120,9 @@ class ConfigReloadLifecycle:
     apply_update_plan: Callable[[Config, ConfigUpdatePlan, tuple[str, ...]], Awaitable[bool]]
     _reload_task: asyncio.Task | None = field(default=None, init=False)
     _requested_at: float | None = field(default=None, init=False)
+    # Source files of the last reload attempt that failed to load, so the
+    # config watcher can cover include files the last good config never saw.
+    failed_reload_source_files: frozenset[Path] | None = field(default=None, init=False)
 
     def request_reload(self) -> None:
         """Queue a debounced config reload for the running orchestrator."""
@@ -217,7 +234,15 @@ class ConfigReloadLifecycle:
             updated = await self.update_config()
         except Exception:
             logger.exception("Configuration update failed; will retry if a new change is queued")
+            # Keep watching the broken config's own source set so fixing a
+            # newly added include file (not yet in the last good config) still
+            # triggers the retry reload.
+            self.failed_reload_source_files = await asyncio.to_thread(
+                _parse_only_source_files,
+                self.runtime_paths.config_path,
+            )
             return
+        self.failed_reload_source_files = None
         if updated:
             logger.info("Configuration update applied to affected agents")
         else:

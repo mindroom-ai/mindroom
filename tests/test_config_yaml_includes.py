@@ -14,9 +14,10 @@ from typer.testing import CliRunner
 
 from mindroom import file_watcher
 from mindroom.cli.main import app
-from mindroom.config.main import load_config
+from mindroom.config.main import Config, load_config
 from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_source
 from mindroom.constants import resolve_runtime_paths
+from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
 
 runner = CliRunner()
 
@@ -429,3 +430,45 @@ class TestWatchPaths:
         stop_event.set()
         await watch_task
         assert callbacks == []
+
+
+class TestFailedReloadWatchSet:
+    """A failed orchestrator reload keeps its own include files reachable by the watcher."""
+
+    @pytest.mark.asyncio
+    async def test_failed_reload_records_parse_only_source_files(self, tmp_path: Path) -> None:
+        """A parsed-but-invalid reload records its source set; a later success clears it."""
+        config_path = _write(
+            tmp_path / "config.yaml",
+            "agents: !include agents.yaml\nmodels:\n  default:\n    provider: ollama\n    id: test-model\n",
+        )
+        agents_path = _write(tmp_path / "agents.yaml", "broken: [not, a, mapping]\n")
+
+        async def _load_initial(config: Config) -> bool:
+            del config
+            return True
+
+        async def _apply_plan(config: Config, plan: object, plugin_changes: tuple[str, ...]) -> bool:
+            del config, plan, plugin_changes
+            raise AssertionError
+
+        lifecycle = ConfigReloadLifecycle(
+            runtime_paths=resolve_runtime_paths(config_path=config_path),
+            is_running=lambda: True,
+            current_config=lambda: None,
+            agent_bots=dict,
+            in_flight_response_count=lambda: 0,
+            load_initial_config=_load_initial,
+            apply_update_plan=_apply_plan,
+        )
+
+        await lifecycle._apply_queued_config_reload()
+
+        assert lifecycle.failed_reload_source_files == frozenset(
+            {config_path.resolve(), agents_path.resolve()},
+        )
+
+        _write(tmp_path / "agents.yaml", "code:\n  display_name: Code\n  role: Writes code\n")
+        await lifecycle._apply_queued_config_reload()
+
+        assert lifecycle.failed_reload_source_files is None

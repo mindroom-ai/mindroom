@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import yaml
 
 from mindroom import constants
+from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import RuntimePaths
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
@@ -445,13 +446,10 @@ def _list_selector(*, extra_labels: dict[str, str]) -> str:
 
 def _resolved_agent_policies_for_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, ResolvedAgentPolicy]:
     try:
-        raw_config = runtime_paths.config_path.read_text(encoding="utf-8")
+        config_data, _source_files = load_yaml_config_source(runtime_paths.config_path)
     except OSError:
         return {}
-
-    try:
-        config_data = yaml.safe_load(raw_config) or {}
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, UnicodeError) as exc:
         msg = f"Failed to parse Kubernetes worker config for scoped storage planning: {exc}"
         raise WorkerBackendError(msg) from exc
     if not isinstance(config_data, dict):

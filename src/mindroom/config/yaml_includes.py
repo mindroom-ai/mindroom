@@ -347,3 +347,20 @@ def load_yaml_config_source(path: Path) -> tuple[dict[str, Any], frozenset[Path]
     """
     data, files_read = load_yaml_config_source_with_digests(path)
     return data, frozenset(files_read)
+
+
+def source_files_fingerprint(config_path: Path, source_digests: dict[Path, str]) -> str:
+    """Return the stable identity of one config from per-file digests captured at read time.
+
+    A single-file config keeps the plain content sha256 so the fingerprint still
+    matches what callers compute from the written text alone.
+    """
+    if len(source_digests) == 1:
+        return next(iter(source_digests.values()))
+    root_dir = config_path.resolve().parent
+    digest = hashlib.sha256()
+    for file, file_digest in sorted(source_digests.items(), key=lambda item: item[0].as_posix()):
+        digest.update(file.relative_to(root_dir).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(bytes.fromhex(file_digest))
+    return digest.hexdigest()

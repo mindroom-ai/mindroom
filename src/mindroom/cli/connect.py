@@ -6,7 +6,10 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import yaml
+
 from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeholders_in_text
+from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 
 from .env_file import env_path_for_config, upsert_env_values
@@ -122,20 +125,31 @@ def persist_local_provisioning_env(
     return upsert_env_values(env_path_for_config(config_path), updates)
 
 
+def _owner_placeholder_config_files(config_path: Path) -> tuple[Path, ...]:
+    """Return every config source file: the top-level file plus each !include target."""
+    try:
+        _, source_files = load_yaml_config_source(config_path)
+    except (OSError, yaml.YAMLError, UnicodeError):
+        # A config that fails to parse still gets top-level replacement.
+        return (config_path,)
+    return tuple(sorted(source_files))
+
+
 def replace_owner_placeholders_in_config(*, config_path: Path, owner_user_id: str) -> bool:
-    """Replace owner placeholder tokens in config.yaml if they are still present."""
+    """Replace owner placeholder tokens in the config and its !include files."""
     if parse_owner_matrix_user_id(owner_user_id) is None:
         return False
     if not config_path.exists():
         return False
 
-    content = config_path.read_text(encoding="utf-8")
-    replaced = replace_owner_placeholders_in_text(content, owner_user_id)
-    if replaced == content:
-        return False
-
-    config_path.write_text(replaced, encoding="utf-8")
-    return True
+    replaced_any = False
+    for source_file in _owner_placeholder_config_files(config_path):
+        content = source_file.read_text(encoding="utf-8")
+        replaced = replace_owner_placeholders_in_text(content, owner_user_id)
+        if replaced != content:
+            source_file.write_text(replaced, encoding="utf-8")
+            replaced_any = True
+    return replaced_any
 
 
 def _required_non_empty_string(data: dict[str, object], key: str) -> str:

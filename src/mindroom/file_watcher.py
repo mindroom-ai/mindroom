@@ -28,8 +28,12 @@ def _is_relevant_path(path: Path) -> bool:
     return not (name.endswith(_IGNORED_TREE_SUFFIXES) or name.startswith(".#"))
 
 
-def _paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, int]:
-    """Return the current mtime snapshot for one dynamic set of files."""
+def paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, int]:
+    """Return the current mtime snapshot for one dynamic set of files.
+
+    Missing or unreadable files snapshot as ``0`` so
+    :func:`changed_watched_paths` can apply its missing-file policy.
+    """
     snapshot: dict[Path, int] = {}
     for raw_path in paths:
         path = Path(raw_path)
@@ -40,6 +44,16 @@ def _paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, int]:
     return snapshot
 
 
+def changed_watched_paths(previous: dict[Path, int], current: dict[Path, int]) -> list[Path]:
+    """Return the watched files that changed between two mtime snapshots, sorted.
+
+    Paths that entered the set are baselined silently, and missing files
+    (mtime ``0``) wait until they reappear, so a momentarily absent file during
+    an editor's delete-and-rename save cannot fire a change.
+    """
+    return sorted(path for path, mtime in current.items() if mtime != 0 and previous.get(path, mtime) != mtime)
+
+
 async def watch_paths(
     paths_provider: Callable[[], Iterable[Path | str]],
     callback: Callable[[], Awaitable[None]],
@@ -48,22 +62,17 @@ async def watch_paths(
     """Watch a dynamic set of files and call callback when any of them changes.
 
     ``paths_provider`` is re-evaluated every scan so the watched set can grow or
-    shrink between calls (e.g. config ``!include`` files after a reload). Paths
-    that enter the set are baselined silently, and a change fires only for a
-    file that existed in the previous scan with a different mtime, so a
-    momentarily missing file during an editor's delete-and-rename save cannot
-    fire a change until it reappears.
+    shrink between calls (e.g. config ``!include`` files after a reload). Change
+    detection follows :func:`changed_watched_paths`.
     """
-    last_snapshot = _paths_mtime_snapshot(paths_provider())
+    last_snapshot = paths_mtime_snapshot(paths_provider())
 
     while stop_event is None or not stop_event.is_set():
         await asyncio.sleep(_WATCH_SCAN_INTERVAL_SECONDS)
 
         try:
-            current_snapshot = _paths_mtime_snapshot(paths_provider())
-            changed = any(
-                mtime != 0 and last_snapshot.get(path, mtime) != mtime for path, mtime in current_snapshot.items()
-            )
+            current_snapshot = paths_mtime_snapshot(paths_provider())
+            changed = bool(changed_watched_paths(last_snapshot, current_snapshot))
             last_snapshot = current_snapshot
             if changed:
                 await callback()
