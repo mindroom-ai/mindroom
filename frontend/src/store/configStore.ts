@@ -592,6 +592,9 @@ interface ConfigState {
   isLoading: boolean;
   diagnostics: ConfigDiagnostic[];
   syncStatus: "synced" | "syncing" | "error" | "disconnected";
+  // Whether the committed config is composed from multiple files via !include,
+  // in which case structured saves are rejected by the backend.
+  configUsesIncludes: boolean;
   // UI-only backup so a draft private toggle can restore the prior explicit worker_scope
   // until the draft is either saved successfully or toggled back off.
   privateWorkerScopeBackups: Record<string, Agent["worker_scope"] | null>;
@@ -731,6 +734,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   isLoading: false,
   diagnostics: [],
   syncStatus: "disconnected",
+  configUsesIncludes: false,
   privateWorkerScopeBackups: {},
 
   // Load configuration from backend
@@ -746,8 +750,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       loadConfigRequestId,
     });
     try {
-      const { config: rawConfig, generation } =
-        await configService.loadConfig();
+      const {
+        config: rawConfig,
+        generation,
+        usesIncludes,
+      } = await configService.loadConfig();
       const {
         normalizedConfig: loadedConfig,
         rawEntriesByAgent,
@@ -798,6 +805,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           isLoading: false,
           syncStatus: latestState.syncStatus,
           diagnostics: retainedDraftDiagnostics(latestState.diagnostics),
+          configUsesIncludes: usesIncludes,
         });
         return;
       }
@@ -823,6 +831,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         isDirty: false,
         dirtyRoots: [],
         diagnostics,
+        configUsesIncludes: usesIncludes,
         privateWorkerScopeBackups: {},
       });
     } catch (error) {
@@ -1192,6 +1201,26 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           syncStatus: draftSyncStatus(currentState),
         });
         return { status: "stale" };
+      }
+      if (error instanceof configService.ConfigComposedFromIncludesError) {
+        const errorDiagnostics = [
+          {
+            kind: "global" as const,
+            message: error.message,
+            blocking: false,
+          },
+        ];
+        set({
+          diagnostics: errorDiagnostics,
+          isLoading: false,
+          syncStatus: "error",
+          configUsesIncludes: true,
+        });
+        return {
+          status: "error",
+          message: error.message,
+          diagnostics: errorDiagnostics,
+        };
       }
       if (error instanceof configService.ConfigValidationError) {
         const errorDiagnostics = validationDiagnostics(error.issues, {

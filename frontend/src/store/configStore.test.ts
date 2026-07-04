@@ -63,6 +63,7 @@ describe("configStore", () => {
       isLoading: false,
       diagnostics: [],
       syncStatus: "disconnected",
+      configUsesIncludes: false,
       privateWorkerScopeBackups: {},
     });
 
@@ -120,6 +121,30 @@ describe("configStore", () => {
         test: makeAgentPolicy("test"),
       });
       expect(state.syncStatus).toBe("synced");
+    });
+
+    it("records when the loaded config is composed from include files", async () => {
+      const mockConfig = {
+        agents: {},
+        models: { default: { provider: "ollama", id: "test-model" } },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+        headers: {
+          get: (name: string) =>
+            name === "x-mindroom-config-uses-includes" ? "true" : null,
+        },
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: {} }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+
+      expect(useConfigStore.getState().configUsesIncludes).toBe(true);
     });
 
     it("uses the room id fallback for blank authored room display names", async () => {
@@ -1654,6 +1679,50 @@ describe("configStore", () => {
   });
 
   describe("saveConfig", () => {
+    it("surfaces the includes rejection message instead of a stale retry", async () => {
+      const includesMessage =
+        "configuration is composed from multiple files via !include; edit the source files instead";
+      useConfigStore.setState({
+        config: {
+          agents: {},
+          models: { default: { provider: "ollama", id: "test-model" } },
+          memory: {
+            embedder: {
+              provider: "openai",
+              config: { model: "text-embedding-ada-002" },
+            },
+          },
+          defaults: { markdown: true },
+          router: { model: "default" },
+        } as Config,
+        isDirty: true,
+        syncStatus: "synced",
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          detail: {
+            code: "config_composed_from_includes",
+            message: includesMessage,
+          },
+        }),
+      });
+
+      const result = await useConfigStore.getState().saveConfig();
+
+      expect(result).toEqual({
+        status: "error",
+        message: includesMessage,
+        diagnostics: [
+          { kind: "global", message: includesMessage, blocking: false },
+        ],
+      });
+      const state = useConfigStore.getState();
+      expect(state.syncStatus).toBe("error");
+      expect(state.configUsesIncludes).toBe(true);
+    });
+
     it("should save configuration successfully", async () => {
       // Set up initial state with agents array
       const mockConfig: Config = {

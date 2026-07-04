@@ -3213,7 +3213,11 @@ def test_cors_exposes_config_generation_header_for_credentialed_origins(tmp_path
     response = test_client.get("/api/health", headers={"Origin": "http://localhost:5173"})
 
     assert response.status_code == 200
-    assert response.headers["access-control-expose-headers"] == config_lifecycle.CONFIG_GENERATION_HEADER
+    exposed = {header.strip() for header in response.headers["access-control-expose-headers"].split(",")}
+    assert exposed == {
+        config_lifecycle.CONFIG_GENERATION_HEADER,
+        config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
+    }
 
 
 def test_cors_wildcard_opt_in_disables_credentials(tmp_path: Path) -> None:

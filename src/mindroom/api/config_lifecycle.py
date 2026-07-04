@@ -36,6 +36,7 @@ logger = get_logger(__name__)
 _UNSET = object()
 _REQUEST_SNAPSHOT_SCOPE_KEY = "api_snapshot"
 CONFIG_GENERATION_HEADER = "x-mindroom-config-generation"
+CONFIG_USES_INCLUDES_HEADER = "x-mindroom-config-uses-includes"
 _REGISTERED_API_APPS: weakref.WeakSet[FastAPI] = weakref.WeakSet()
 _REGISTERED_API_APPS_LOCK = threading.Lock()
 
@@ -252,6 +253,19 @@ class _ConfigComposedFromIncludesError(ConfigRuntimeValidationError):
 _CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE = (
     "configuration is composed from multiple files via !include; edit the source files instead"
 )
+_CONFIG_COMPOSED_FROM_INCLUDES_ERROR_CODE = "config_composed_from_includes"
+
+
+def _composed_from_includes_http_error(exc: _ConfigComposedFromIncludesError) -> HTTPException:
+    """Return the includes-rejection 409 with a machine-readable code.
+
+    The code lets clients tell this permanent rejection apart from the
+    retryable stale-write 409, which carries a plain string detail.
+    """
+    return HTTPException(
+        status_code=409,
+        detail={"code": _CONFIG_COMPOSED_FROM_INCLUDES_ERROR_CODE, "message": str(exc)},
+    )
 
 
 def _raise_when_composed_from_includes(
@@ -659,7 +673,7 @@ def _build_and_commit_mutation[T](
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
     except _ConfigComposedFromIncludesError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
+        raise _composed_from_includes_http_error(e) from e
     except ConfigRuntimeValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors()) from e
     except Exception as e:
@@ -697,7 +711,7 @@ def _build_and_commit_replacement(
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
     except _ConfigComposedFromIncludesError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
+        raise _composed_from_includes_http_error(e) from e
     except ConfigRuntimeValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors()) from e
     except Exception as e:

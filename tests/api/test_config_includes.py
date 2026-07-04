@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 import yaml
 from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from mindroom import constants
@@ -175,6 +176,20 @@ class TestIncludeAwareSnapshots:
         assert snapshot.source_fingerprint == fingerprint
         assert snapshot.source_files == source_files
 
+    def test_load_endpoint_reports_uses_includes_header(
+        self,
+        split_runtime_paths: constants.RuntimePaths,
+    ) -> None:
+        """/api/config/load exposes the includes flag so clients can warn before a save."""
+        main.initialize_api_app(main.app, split_runtime_paths)
+        assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app) is True
+        client = TestClient(main.app)
+
+        response = client.post("/api/config/load")
+
+        assert response.status_code == 200
+        assert response.headers[config_lifecycle.CONFIG_USES_INCLUDES_HEADER] == "true"
+
 
 class TestStructuredWritesRejected:
     """Structured saves must not silently flatten a split config."""
@@ -195,7 +210,10 @@ class TestStructuredWritesRejected:
             )
 
         assert exc_info.value.status_code == 409
-        assert "!include" in str(exc_info.value.detail)
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail["code"] == config_lifecycle._CONFIG_COMPOSED_FROM_INCLUDES_ERROR_CODE
+        assert "!include" in detail["message"]
         assert runtime_paths.config_path.read_text(encoding="utf-8") == top_before
 
     def test_replace_committed_config_is_rejected_with_409(self, split_app: FastAPI) -> None:
