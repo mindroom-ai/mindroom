@@ -210,6 +210,10 @@ The dashboard communicates with the backend API at `/api/`:
 
 When `/api/config/load` returns validation errors, the dashboard fetches `/api/config/raw`, opens the recovery editor, and saves a full replacement through `PUT /api/config/raw` before retrying the structured reload.
 
+When the loaded configuration is composed from multiple files via `!include`, structured save endpoints reject writes with HTTP 409 and the machine-readable error code `config_composed_from_includes`, distinguishing this permanent rejection from a retryable stale-write conflict.
+`POST /api/config/load` reports the includes state in the `x-mindroom-config-uses-includes` response header, `GET /api/config/raw` includes a `uses_includes` field in its response body, and the dashboard shows a banner explaining that changes must be made by editing the include source files directly.
+The raw recovery editor keeps working on the top-level file's literal text; see the configuration guide's section on splitting the configuration into multiple files for the full semantics.
+
 ### Credentials
 
 | Method | Endpoint | Description |

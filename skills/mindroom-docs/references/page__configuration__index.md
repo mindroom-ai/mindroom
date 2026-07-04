@@ -77,6 +77,8 @@ Error handling is strict so a broken split fails loudly:
 - An empty included file resolves to `null` under `!include`, and contributes nothing to directory includes.
 
 Hot reload watches every included file, so editing any file in the include tree triggers the same config reload as editing `config.yaml`.
+Deleting an included file does not trigger a reload by itself: the watcher deliberately treats a missing file as an in-progress editor save and waits until it reappears or another watched file changes.
+To remove an include file, delete the `!include` reference from the including file too — that edit triggers the reload.
 
 When migrating an existing monolith, use `mindroom config resolve` to print the fully merged config with sorted keys, and diff the output before and after the split to prove equivalence:
 

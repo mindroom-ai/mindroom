@@ -447,7 +447,7 @@ uvx mindroom connect --pair-code ABCD-EFGH
 uvx mindroom run
 ```
 
-`mindroom connect` writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `~/.mindroom/.env` by default (unless `--no-persist-env` is used) and auto-replaces owner placeholder tokens in `config.yaml` when `owner_user_id` is returned.
+`mindroom connect` writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `~/.mindroom/.env` by default (unless `--no-persist-env` is used) and auto-replaces owner placeholder tokens in `config.yaml` and every file it pulls in via `!include` when `owner_user_id` is returned.
 
 ### SaaS Platform Commands
 
