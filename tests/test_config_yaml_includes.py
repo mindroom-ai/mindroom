@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -16,9 +17,6 @@ from mindroom.cli.main import app
 from mindroom.config.main import load_config
 from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_source
 from mindroom.constants import resolve_runtime_paths
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 runner = CliRunner()
 
@@ -188,6 +186,32 @@ class TestIncludeTags:
         assert data == {}
         assert files == frozenset({(tmp_path / "config.yaml").resolve()})
 
+    def test_diamond_include_reads_the_shared_file_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A file reachable via two include paths is read once so digest and content stay coherent."""
+        _write(tmp_path / "config.yaml", "a: !include a.yaml\nb: !include b.yaml\n")
+        _write(tmp_path / "a.yaml", "tools: !include shared/tools.yaml\n")
+        _write(tmp_path / "b.yaml", "tools: !include shared/tools.yaml\n")
+        _write(tmp_path / "shared" / "tools.yaml", "- calculator\n")
+
+        read_names: list[str] = []
+        original_read_bytes = Path.read_bytes
+
+        def _counting_read_bytes(self: Path) -> bytes:
+            read_names.append(self.name)
+            return original_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", _counting_read_bytes)
+
+        data, files = load_yaml_config_source(tmp_path / "config.yaml")
+
+        assert data == {"a": {"tools": ["calculator"]}, "b": {"tools": ["calculator"]}}
+        assert (tmp_path / "shared" / "tools.yaml").resolve() in files
+        assert read_names.count("tools.yaml") == 1
+
 
 class TestIncludeErrors:
     """Error reporting for broken include trees."""
@@ -230,6 +254,17 @@ class TestIncludeErrors:
         (config_dir / "link.yaml").symlink_to(tmp_path / "outside.yaml")
 
         with pytest.raises(ConfigIncludeError, match="resolves outside the configuration directory"):
+            load_yaml_config_source(config_dir / "config.yaml")
+
+    def test_symlinked_directory_escape_is_rejected(self, tmp_path: Path) -> None:
+        """A symlinked directory pointing outside the config directory is rejected before traversal."""
+        config_dir = tmp_path / "conf"
+        _write(config_dir / "config.yaml", "agents: !include_dir_merge_named agents/\n")
+        (config_dir / "agents").mkdir()
+        _write(tmp_path / "outside" / "external.yaml", "key: value\n")
+        (config_dir / "agents" / "ext").symlink_to(tmp_path / "outside", target_is_directory=True)
+
+        with pytest.raises(ConfigIncludeError, match="'ext' resolves outside the configuration directory"):
             load_yaml_config_source(config_dir / "config.yaml")
 
     def test_cycle_error_shows_the_include_chain(self, tmp_path: Path) -> None:

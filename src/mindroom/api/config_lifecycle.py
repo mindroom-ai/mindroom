@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import tempfile
 import threading
 import weakref
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import yaml
@@ -23,12 +21,12 @@ from mindroom.config.main import (
     ConfigRuntimeValidationError,
     iter_config_validation_messages,
 )
-from mindroom.config.main import load_config as load_runtime_config_model
 from mindroom.config.yaml_includes import load_yaml_config_source, load_yaml_config_source_with_digests
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -213,8 +211,12 @@ def _load_config_result(
 def _source_fingerprint_for_published_runtime_config(
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
-) -> str:
-    """Return the disk fingerprint when the file still matches the runtime config."""
+) -> tuple[str, frozenset[Path] | None]:
+    """Return the disk fingerprint and source set when the file still matches the runtime config.
+
+    The source set is ``None`` when the published config cannot be tied to the
+    on-disk files, so the caller keeps the snapshot's last known set.
+    """
     canonical_source = yaml.dump(
         validated_payload,
         default_flow_style=False,
@@ -222,10 +224,10 @@ def _source_fingerprint_for_published_runtime_config(
         allow_unicode=True,
     )
     canonical_fingerprint = _source_fingerprint(canonical_source)
-    result, disk_payload, _disk_config, disk_fingerprint, _disk_source_files = _load_config_result(runtime_paths)
+    result, disk_payload, _disk_config, disk_fingerprint, disk_source_files = _load_config_result(runtime_paths)
     if result.success and disk_payload == validated_payload and disk_fingerprint is not None:
-        return disk_fingerprint
-    return canonical_fingerprint
+        return disk_fingerprint, disk_source_files
+    return canonical_fingerprint, None
 
 
 def _raise_for_config_load_result(result: ConfigLoadResult | None) -> None:
@@ -252,13 +254,26 @@ _CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE = (
 )
 
 
-def _raise_when_composed_from_includes(runtime_paths: constants.RuntimePaths) -> None:
-    """Reject structured config writes that would silently flatten include files."""
+def _raise_when_composed_from_includes(
+    runtime_paths: constants.RuntimePaths,
+    committed_source_files: frozenset[Path] | None,
+) -> None:
+    """Reject structured config writes that would silently flatten include files.
+
+    The committed snapshot's source set is authoritative: it reflects the last
+    successful load even when an included file has since become unreadable, so a
+    split config cannot be flattened just because one include broke.
+    """
+    if committed_source_files is not None:
+        if len(committed_source_files) > 1:
+            raise _ConfigComposedFromIncludesError(_CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE)
+        return
     try:
         _, source_files = load_yaml_config_source(runtime_paths.config_path)
     except CONFIG_LOAD_USER_ERROR_TYPES:
-        # An unreadable or broken on-disk config stays recoverable through
-        # structured replacement, exactly like before includes existed.
+        # With no committed source metadata, an unreadable or broken on-disk
+        # config stays recoverable through structured replacement, exactly like
+        # before includes existed.
         return
     if len(source_files) > 1:
         raise _ConfigComposedFromIncludesError(_CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE)
@@ -267,9 +282,11 @@ def _raise_when_composed_from_includes(runtime_paths: constants.RuntimePaths) ->
 def _save_config_to_file(
     config: dict[str, Any],
     runtime_paths: constants.RuntimePaths,
+    *,
+    committed_source_files: frozenset[Path] | None,
 ) -> str:
     """Save config to YAML file with deterministic ordering."""
-    _raise_when_composed_from_includes(runtime_paths)
+    _raise_when_composed_from_includes(runtime_paths, committed_source_files)
     config_path = runtime_paths.config_path
     tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
     source = yaml.dump(
@@ -286,13 +303,12 @@ def _save_config_to_file(
 def _save_raw_config_source_to_file(
     source: str,
     runtime_paths: constants.RuntimePaths,
-) -> str:
+) -> None:
     """Save raw config source text to the active config path."""
     config_path = runtime_paths.config_path
     tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
     tmp_path.write_text(source, encoding="utf-8")
     constants.safe_replace(tmp_path, config_path)
-    return _source_fingerprint(source)
 
 
 def _persist_runtime_validated_config(
@@ -303,7 +319,7 @@ def _persist_runtime_validated_config(
     validated_payload = runtime_config.authored_model_dump()
     matching_states = [state for state in _registered_api_states() if state.snapshot.runtime_paths == runtime_paths]
     if not matching_states:
-        _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        _save_config_to_file(validated_payload, runtime_paths=runtime_paths, committed_source_files=None)
         return
 
     with ExitStack() as stack:
@@ -315,7 +331,15 @@ def _persist_runtime_validated_config(
                 continue
             locked_snapshots.append((state, snapshot))
 
-        source_fingerprint = _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        committed_source_files = next(
+            (snapshot.source_files for _, snapshot in locked_snapshots if snapshot.source_files is not None),
+            None,
+        )
+        source_fingerprint = _save_config_to_file(
+            validated_payload,
+            runtime_paths=runtime_paths,
+            committed_source_files=committed_source_files,
+        )
         for state, snapshot in locked_snapshots:
             state.snapshot = _published_snapshot(
                 snapshot,
@@ -496,7 +520,11 @@ def _commit_mutated_snapshot[T](
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             _raise_for_config_load_result(current.config_load_result)
             raise _stale_snapshot_error()
-        source_fingerprint = _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        source_fingerprint = _save_config_to_file(
+            validated_payload,
+            runtime_paths=runtime_paths,
+            committed_source_files=current.source_files,
+        )
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,
@@ -519,30 +547,21 @@ def _validate_replacement_payload(
 def _validate_raw_config_source(
     source: str,
     runtime_paths: constants.RuntimePaths,
-) -> tuple[Config, dict[str, Any], frozenset[Path]]:
-    """Validate raw YAML source against the current runtime without mutating the live file."""
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=runtime_paths.config_path.parent,
-        prefix=f"{runtime_paths.config_path.name}.validation.",
-        suffix=".tmp",
-        delete=False,
-    ) as tmp:
-        tmp.write(source)
-        validation_path = Path(tmp.name)
-    validation_runtime_paths = replace(runtime_paths, config_path=validation_path)
-    try:
-        runtime_config = load_runtime_config_model(validation_runtime_paths)
-        # The temp file stands in for the real config file, so report the real
-        # path in the source set the snapshot (and its watcher) will track.
-        source_files = frozenset(
-            runtime_paths.config_path.resolve() if file == validation_path.resolve() else file
-            for file in runtime_config.source_files
-        )
-        return runtime_config, runtime_config.authored_model_dump(), source_files
-    finally:
-        validation_path.unlink(missing_ok=True)
+) -> tuple[Config, dict[str, Any], frozenset[Path], str]:
+    """Validate raw YAML source against the current runtime without mutating the live file.
+
+    Parsing the source as the live config path keeps include semantics identical
+    to the post-save reload (relative paths, containment, self-include cycles)
+    and yields the same include-aware fingerprint the next disk load computes,
+    so a raw save of a split config does not trigger a spurious generation bump.
+    """
+    data, source_digests = load_yaml_config_source_with_digests(
+        runtime_paths.config_path,
+        source=source.encode("utf-8"),
+    )
+    runtime_config = Config.validate_with_runtime(data, runtime_paths)
+    source_fingerprint = _source_files_fingerprint(runtime_paths.config_path, source_digests)
+    return runtime_config, runtime_config.authored_model_dump(), frozenset(source_digests), source_fingerprint
 
 
 def _commit_replaced_snapshot(
@@ -560,7 +579,11 @@ def _commit_replaced_snapshot(
         current = current_state.snapshot
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
-        source_fingerprint = _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        source_fingerprint = _save_config_to_file(
+            validated_payload,
+            runtime_paths=runtime_paths,
+            committed_source_files=current.source_files,
+        )
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,
@@ -582,6 +605,7 @@ def _commit_raw_replaced_snapshot(
     validated_config: Config,
     source: str,
     source_files: frozenset[Path],
+    source_fingerprint: str,
 ) -> int:
     """Commit one raw replacement payload if the targeted snapshot is still current."""
     with initial_state.config_lock:
@@ -589,7 +613,7 @@ def _commit_raw_replaced_snapshot(
         current = current_state.snapshot
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
-        source_fingerprint = _save_raw_config_source_to_file(source, runtime_paths=runtime_paths)
+        _save_raw_config_source_to_file(source, runtime_paths=runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,
@@ -697,7 +721,7 @@ def _build_and_commit_raw_replacement(
         snapshot = initial_snapshot
     try:
         _raise_if_generation_mismatch(snapshot, expected_generation)
-        validated_config, validated_payload, source_files = _validate_raw_config_source(
+        validated_config, validated_payload, source_files, source_fingerprint = _validate_raw_config_source(
             source,
             snapshot.runtime_paths,
         )
@@ -710,6 +734,7 @@ def _build_and_commit_raw_replacement(
             validated_config=validated_config,
             source=source,
             source_files=source_files,
+            source_fingerprint=source_fingerprint,
         )
     except HTTPException:
         raise
@@ -758,7 +783,7 @@ def _publish_runtime_config_into_app(
     initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
     validated_payload = runtime_config.authored_model_dump()
-    source_fingerprint = _source_fingerprint_for_published_runtime_config(
+    source_fingerprint, source_files = _source_fingerprint_for_published_runtime_config(
         runtime_paths,
         validated_payload,
     )
@@ -787,6 +812,9 @@ def _publish_runtime_config_into_app(
             runtime_config=runtime_config,
             config_load_result=ConfigLoadResult(success=True),
             source_fingerprint=source_fingerprint,
+            # A publish that cannot be tied to disk keeps the last known source
+            # set so the watcher still covers the previous include files.
+            source_files=source_files if source_files is not None else current.source_files,
         )
     return True
 

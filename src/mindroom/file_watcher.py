@@ -28,15 +28,15 @@ def _is_relevant_path(path: Path) -> bool:
     return not (name.endswith(_IGNORED_TREE_SUFFIXES) or name.startswith(".#"))
 
 
-def _paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, float]:
+def _paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, int]:
     """Return the current mtime snapshot for one dynamic set of files."""
-    snapshot: dict[Path, float] = {}
+    snapshot: dict[Path, int] = {}
     for raw_path in paths:
         path = Path(raw_path)
         try:
-            snapshot[path] = path.stat().st_mtime if path.exists() else 0.0
-        except (OSError, PermissionError):
-            snapshot[path] = 0.0
+            snapshot[path] = path.stat().st_mtime_ns
+        except OSError:
+            snapshot[path] = 0
     return snapshot
 
 
@@ -62,7 +62,7 @@ async def watch_paths(
         try:
             current_snapshot = _paths_mtime_snapshot(paths_provider())
             changed = any(
-                mtime != 0.0 and last_snapshot.get(path, mtime) != mtime for path, mtime in current_snapshot.items()
+                mtime != 0 and last_snapshot.get(path, mtime) != mtime for path, mtime in current_snapshot.items()
             )
             last_snapshot = current_snapshot
             if changed:

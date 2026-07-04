@@ -393,16 +393,16 @@ async def _reload_config_after_file_change(
     await _reload_config_into_app(api_app, runtime_paths)
 
 
-def _watched_config_mtimes(api_app: FastAPI) -> tuple[constants.RuntimePaths, dict[Path, float]]:
+def _watched_config_mtimes(api_app: FastAPI) -> tuple[constants.RuntimePaths, dict[Path, int]]:
     """Return the runtime paths and mtimes of the config file plus its !include files."""
     snapshot = _app_context(api_app)
     paths = snapshot.source_files or frozenset({snapshot.runtime_paths.config_path})
-    mtimes: dict[Path, float] = {}
+    mtimes: dict[Path, int] = {}
     for path in paths:
         try:
-            mtimes[path] = path.stat().st_mtime if path.exists() else 0.0
-        except (OSError, PermissionError):
-            mtimes[path] = 0.0
+            mtimes[path] = path.stat().st_mtime_ns
+        except OSError:
+            mtimes[path] = 0
     return snapshot.runtime_paths, mtimes
 
 
@@ -433,15 +433,15 @@ async def _watch_config(
 
             # Paths that entered the set (a reload re-derived the includes) are
             # baselined silently; missing files wait until they reappear.
-            changed = any(
-                mtime != 0.0 and last_mtimes.get(path, mtime) != mtime for path, mtime in current_mtimes.items()
+            changed_paths = sorted(
+                path for path, mtime in current_mtimes.items() if mtime != 0 and last_mtimes.get(path, mtime) != mtime
             )
             last_mtimes = current_mtimes
-            if changed:
-                logger.info("Config file changed", path=str(runtime_paths.config_path))
+            if changed_paths:
+                logger.info("Config file changed", paths=[str(path) for path in changed_paths])
                 await _reload_config_after_file_change(api_app, runtime_paths)
         except (OSError, PermissionError):
-            last_mtimes = dict.fromkeys(last_mtimes, 0.0)
+            last_mtimes = dict.fromkeys(last_mtimes, 0)
         except Exception:
             logger.exception("Exception during file watcher callback - continuing to watch")
 

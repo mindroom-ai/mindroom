@@ -45,6 +45,7 @@ class _IncludeLoader(yaml.SafeLoader):
         source_path: Path,
         root_dir: Path,
         files_read: dict[Path, str],
+        file_texts: dict[Path, str],
         include_chain: tuple[Path, ...],
     ) -> None:
         super().__init__(stream)
@@ -54,6 +55,7 @@ class _IncludeLoader(yaml.SafeLoader):
         self.source_path = source_path
         self.root_dir = root_dir
         self.files_read = files_read
+        self.file_texts = file_texts
         self.include_chain = include_chain
 
 
@@ -103,21 +105,33 @@ def _check_include_cycle(loader: _IncludeLoader, path: Path, node: yaml.Node) ->
     raise _include_error(msg, node)
 
 
-def _read_file_recording_digest(path: Path, files_read: dict[Path, str], *, source: bytes | None = None) -> str:
-    """Read one file exactly once, recording the digest of the bytes actually read.
+def _read_file_recording_digest(
+    path: Path,
+    files_read: dict[Path, str],
+    file_texts: dict[Path, str],
+    *,
+    source: bytes | None = None,
+) -> str:
+    """Read one file at most once per load, recording the digest of the bytes actually read.
 
     Digests captured at read time keep multi-file fingerprints coherent with the
-    parsed content even when a file is edited mid-load.
+    parsed content even when a file is edited mid-load; the text cache guarantees
+    a file reachable through multiple include paths contributes one consistent
+    copy instead of re-reading (and re-digesting) possibly changed bytes.
     """
+    if path in file_texts:
+        return file_texts[path]
     raw = path.read_bytes() if source is None else source
     files_read[path] = hashlib.sha256(raw).hexdigest()
-    return raw.decode("utf-8")
+    text = raw.decode("utf-8")
+    file_texts[path] = text
+    return text
 
 
 def _read_included_text(loader: _IncludeLoader, path: Path, node: yaml.Node) -> str:
     """Read one included file as UTF-8 text, wrapping I/O failures as include errors."""
     try:
-        return _read_file_recording_digest(path, loader.files_read)
+        return _read_file_recording_digest(path, loader.files_read, loader.file_texts)
     except (OSError, UnicodeError) as exc:
         display = _display_path(path, loader.root_dir)
         msg = f"{node.tag}: could not read '{display}': {exc}"
@@ -129,16 +143,18 @@ def _parse_yaml_file(
     *,
     root_dir: Path,
     files_read: dict[Path, str],
+    file_texts: dict[Path, str],
     include_chain: tuple[Path, ...],
     source: bytes | None = None,
 ) -> object:
     """Parse one YAML file with include support, recording it in ``files_read``."""
-    text = _read_file_recording_digest(path, files_read, source=source)
+    text = _read_file_recording_digest(path, files_read, file_texts, source=source)
     loader = _IncludeLoader(
         text,
         source_path=path,
         root_dir=root_dir,
         files_read=files_read,
+        file_texts=file_texts,
         include_chain=include_chain,
     )
     try:
@@ -156,6 +172,7 @@ def _parse_included_yaml(loader: _IncludeLoader, path: Path, node: yaml.Node) ->
             path,
             root_dir=loader.root_dir,
             files_read=loader.files_read,
+            file_texts=loader.file_texts,
             include_chain=(*loader.include_chain, path),
         )
     except (OSError, UnicodeError) as exc:
@@ -184,6 +201,15 @@ def _included_dir_files(loader: _IncludeLoader, node: yaml.Node) -> list[Path]:
             if entry.name.startswith((".", "_")):
                 continue
             if entry.is_dir():
+                # Check containment before recursing so a symlinked directory
+                # pointing outside the config directory is rejected instead of
+                # silently traversed.
+                if not entry.resolve().is_relative_to(loader.root_dir):
+                    msg = (
+                        f"{node.tag}: '{entry.relative_to(directory).as_posix()}' resolves outside "
+                        "the configuration directory"
+                    )
+                    raise _include_error(msg, node)
                 _walk(entry)
                 continue
             if entry.suffix not in _YAML_SUFFIXES or not entry.is_file():
@@ -301,7 +327,15 @@ def load_yaml_config_source_with_digests(
     """
     top = path.resolve()
     files_read: dict[Path, str] = {}
-    data = _parse_yaml_file(top, root_dir=top.parent, files_read=files_read, include_chain=(top,), source=source)
+    file_texts: dict[Path, str] = {}
+    data = _parse_yaml_file(
+        top,
+        root_dir=top.parent,
+        files_read=files_read,
+        file_texts=file_texts,
+        include_chain=(top,),
+        source=source,
+    )
     return cast("dict[str, Any]", data or {}), files_read
 
 

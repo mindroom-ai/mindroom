@@ -157,6 +157,24 @@ class TestIncludeAwareSnapshots:
         assert after.config_load_result.success is False
         assert after.source_files == snapshot.source_files
 
+    def test_publish_runtime_config_records_disk_source_files(
+        self,
+        split_runtime_paths: constants.RuntimePaths,
+    ) -> None:
+        """Publishing an orchestrator-validated config records the include set with its fingerprint."""
+        api_app = _make_api_app(split_runtime_paths)
+        result, _payload, runtime_config, fingerprint, source_files = config_lifecycle._load_config_result(
+            split_runtime_paths,
+        )
+        assert result.success
+        assert runtime_config is not None
+
+        assert config_lifecycle._publish_runtime_config_into_app(runtime_config, split_runtime_paths, api_app) is True
+
+        snapshot = _snapshot(api_app)
+        assert snapshot.source_fingerprint == fingerprint
+        assert snapshot.source_files == source_files
+
 
 class TestStructuredWritesRejected:
     """Structured saves must not silently flatten a split config."""
@@ -193,6 +211,25 @@ class TestStructuredWritesRejected:
             )
 
         assert exc_info.value.status_code == 409
+
+    def test_structured_save_rejected_even_when_an_included_file_is_broken(self, split_app: FastAPI) -> None:
+        """A broken include file must not let a structured save flatten the split config."""
+        runtime_paths = _snapshot(split_app).runtime_paths
+        agents_file = runtime_paths.config_path.parent / "agents" / "test_agent.yaml"
+        agents_file.write_text("test_agent: [broken\n", encoding="utf-8")
+
+        def _mutate(config: dict[str, Any]) -> None:
+            config["defaults"]["markdown"] = False
+
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.write_committed_config(
+                _request_for(split_app),
+                _mutate,
+                error_prefix="Failed to save configuration",
+            )
+
+        assert exc_info.value.status_code == 409
+        assert runtime_paths.config_path.read_text(encoding="utf-8") == SPLIT_TOP_SOURCE
 
     def test_external_writer_persist_is_rejected(self, split_app: FastAPI) -> None:
         """validate_and_persist_config_payload raises the include-aware config error."""
@@ -235,6 +272,35 @@ class TestRawSourceWithIncludes:
         assert snapshot.source_files is not None
         assert runtime_paths.config_path.resolve() in snapshot.source_files
         assert agents_file.resolve() in snapshot.source_files
+
+    def test_raw_replace_publishes_include_aware_fingerprint(self, split_app: FastAPI) -> None:
+        """The follow-up watcher reload after a raw save of a split config is a no-op."""
+        runtime_paths = _snapshot(split_app).runtime_paths
+        new_source = SPLIT_TOP_SOURCE.replace("markdown: true", "markdown: false")
+
+        config_lifecycle.replace_raw_config_source(
+            _request_for(split_app),
+            new_source,
+            error_prefix="Failed to save raw configuration",
+        )
+
+        generation = _snapshot(split_app).generation
+        assert config_lifecycle.load_config_into_app(runtime_paths, split_app) is True
+        assert _snapshot(split_app).generation == generation
+
+    def test_raw_replace_rejects_a_self_include(self, split_app: FastAPI) -> None:
+        """Raw source including the live config file itself is a cycle at validation time."""
+        top_before = _snapshot(split_app).runtime_paths.config_path.read_text(encoding="utf-8")
+
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.replace_raw_config_source(
+                _request_for(split_app),
+                "agents: !include config.yaml\n",
+                error_prefix="Failed to save raw configuration",
+            )
+
+        assert exc_info.value.status_code == 422
+        assert _snapshot(split_app).runtime_paths.config_path.read_text(encoding="utf-8") == top_before
 
     def test_raw_replace_with_monolith_reenables_structured_saves(self, split_app: FastAPI) -> None:
         """Collapsing back to one file through the raw editor re-enables structured saves."""
