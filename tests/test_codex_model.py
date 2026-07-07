@@ -444,8 +444,11 @@ class _FakeCodexClient:
         ("openai_codex", "openai-codex/gpt-5.5", True),
         ("codex", "gpt-5.5-codex", True),
         ("codex", "gpt-5.4-mini", True),
-        # Unreleased GPT versions default to the native path (version gating).
+        # Unreleased GPT versions default to the native path (version gating),
+        # including major-only spellings, which parse as .0.
         ("codex", "gpt-6.0", True),
+        ("codex", "gpt-6", True),
+        ("codex", "gpt-6-codex", True),
         ("codex", "gpt-5-codex", False),
         ("codex", "gpt-4.1", False),
         ("codex", "codex-mini-latest", False),

@@ -42,7 +42,9 @@ _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 _NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"codex", "openai_codex"})
 # LLM-plugin-style `openai-codex/gpt-N.M` ids match the same way as bare or
 # `-codex`-suffixed ids, so no prefix normalization is needed before the search.
-_GPT_VERSION_PATTERN = re.compile(r"gpt-(\d+)\.(\d+)")
+# A missing minor version counts as .0, so a major-only future release gates
+# native while `gpt-5` stays homegrown.
+_GPT_VERSION_PATTERN = re.compile(r"gpt-(\d+)(?:\.(\d+))?")
 
 
 def openai_native_tool_search_supported(provider: str, model_id: str) -> bool:
@@ -59,7 +61,7 @@ def openai_native_tool_search_supported(provider: str, model_id: str) -> bool:
     version_match = _GPT_VERSION_PATTERN.search(model_id)
     if version_match is None:
         return False
-    version = (int(version_match.group(1)), int(version_match.group(2)))
+    version = (int(version_match.group(1)), int(version_match.group(2) or 0))
     return version >= OPENAI_TOOL_SEARCH_MIN_GPT_VERSION
 
 
