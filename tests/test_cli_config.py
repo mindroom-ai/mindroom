@@ -909,6 +909,38 @@ class TestConfigInit:
         assert content != "existing"
         assert "agents:" in content
 
+    def test_init_no_input_keeps_existing_config(self, tmp_path: Path) -> None:
+        """Config init --no-input leaves an existing config untouched and exits cleanly."""
+        target = tmp_path / "config.yaml"
+        target.write_text("existing")
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--no-input"])
+        assert result.exit_code == 0
+        assert target.read_text() == "existing"
+        assert "Left existing config unchanged" in normalize_console_output(result.output)
+
+    def test_init_no_input_keeps_existing_env_and_appends_hosted_defaults(self, tmp_path: Path) -> None:
+        """Config init --no-input preserves .env values and only appends missing hosted defaults."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n")
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--no-input"])
+        assert result.exit_code == 0
+        assert target.exists()
+        env_content = env_path.read_text()
+        assert "ANTHROPIC_API_KEY=sk-existing" in env_content
+        assert "MATRIX_HOMESERVER" in env_content
+
+    def test_init_no_input_self_hosted_defaults_to_openai_without_prompting(self, tmp_path: Path) -> None:
+        """Self-hosted config init --no-input skips the provider prompt and uses OpenAI."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--matrix-server", "self-hosted", "--no-input"],
+        )
+        assert result.exit_code == 0
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "openai"
+
     def test_init_openai_preset_uses_openai_models(self, tmp_path: Path) -> None:
         """Config init --provider openai prepopulates OpenAI defaults."""
         target = tmp_path / "config.yaml"

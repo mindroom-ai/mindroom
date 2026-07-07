@@ -217,11 +217,15 @@ def _append_missing_env_defaults(
     return True
 
 
-def _should_replace_env_file(env_path: Path, *, force: bool) -> bool:
+def _should_replace_env_file(env_path: Path, *, force: bool, no_input: bool) -> bool:
     """Return whether config init should create or overwrite the full env template."""
     if not env_path.exists():
         return True
-    return force or typer.confirm(f"Overwrite existing .env file ({env_path})?", default=False)
+    if force:
+        return True
+    if no_input:
+        return False
+    return typer.confirm(f"Overwrite existing .env file ({env_path})?", default=False)
 
 
 def _config_init_env_hint(matrix_server: _MatrixServerPreset, selected_preset: _ProviderPreset) -> str:
@@ -407,6 +411,11 @@ def config_init(
         "--print",
         help="Print generated config YAML with syntax highlighting instead of writing files.",
     ),
+    no_input: bool = typer.Option(
+        False,
+        "--no-input",
+        help="Never prompt: keep existing files unchanged and use the default provider preset.",
+    ),
 ) -> None:
     """Create a starter config.yaml with example agents and models.
 
@@ -417,6 +426,9 @@ def config_init(
 
     if target.exists() and not force and not print_config:
         console.print(f"[yellow]Config file already exists:[/yellow] {target}")
+        if no_input:
+            console.print("Left existing config unchanged. Use --force to overwrite.")
+            raise typer.Exit(0)
         if not typer.confirm("Overwrite existing config file?"):
             console.print("[dim]Aborted.[/dim]")
             raise typer.Exit(0)
@@ -424,10 +436,10 @@ def config_init(
     selected_matrix_server, selected_preset = _resolve_config_init_selection(
         matrix_server,
         provider=provider,
-        interactive=not print_config,
+        interactive=not print_config and not no_input,
     )
 
-    replace_env_file = False if print_config else _should_replace_env_file(env_path, force=force)
+    replace_env_file = False if print_config else _should_replace_env_file(env_path, force=force, no_input=no_input)
     storage_root, use_storage_env_placeholder = _config_init_storage_plan(
         target.parent,
         env_path,
