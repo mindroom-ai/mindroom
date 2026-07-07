@@ -226,7 +226,7 @@ contentBundles: []
 # (for example OPENAI_API_KEY); at startup the runtime syncs that value into
 # its credential service as <storage.mountPath>/credentials/<provider>_credentials.json.
 # Supported providers mirror PROVIDER_ENV_KEYS in src/mindroom/constants.py:
-# anthropic, azure, openai, google, openrouter, deepseek, cerebras, groq, ollama.
+# anthropic, azure, openai, google, openrouter, deepseek, cerebras, groq, zai, ollama.
 providerCredentials: []
 # Example:
 # providerCredentials:

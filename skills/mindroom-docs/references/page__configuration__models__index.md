@@ -16,6 +16,7 @@ Models define the AI providers and model IDs used by agents.
 - `openrouter` - OpenRouter-hosted models (access to many providers)
 - `cerebras` - Cerebras-hosted models
 - `deepseek` - DeepSeek models
+- `zai` - Z.ai GLM models
 
 ## Model Config Fields
 
@@ -104,6 +105,12 @@ models:
   deepseek:
     provider: deepseek
     id: deepseek-chat
+
+  # Z.ai (GLM models)
+  glm:
+    provider: zai
+    id: glm-5.2
+    context_window: 1048576
 
   # Custom OpenAI-compatible endpoint (e.g., vLLM, llama.cpp server)
   custom:
@@ -236,6 +243,7 @@ GROQ_API_KEY=...
 OPENROUTER_API_KEY=...
 CEREBRAS_API_KEY=...
 DEEPSEEK_API_KEY=...
+ZAI_API_KEY=...
 ```
 
 For Amazon Bedrock Claude, use standard AWS credential resolution:

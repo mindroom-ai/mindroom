@@ -48,6 +48,7 @@ __all__ = (
     "SAAS_MODEL_PRESETS",
     "SENTENCE_TRANSFORMERS_DEFAULT",
     "TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES",
+    "ZAI_BASE_URL_DEFAULT",
     "ModelPreset",
     "llama_cpp_server_command",
 )
@@ -111,9 +112,11 @@ _OPENROUTER_GEMINI_LITE = "google/gemini-3.1-flash-lite-preview"
 _OPENROUTER_OPENAI_MINI = "openai/gpt-5.4-mini"
 _OPENROUTER_NEMOTRON = "nvidia/nemotron-3-super-120b-a12b:free"
 _OPENROUTER_DEEPSEEK_CHAT = "deepseek/deepseek-v4-pro"
-_OPENROUTER_GLM = "z-ai/glm-5.1"
+_OPENROUTER_GLM = "z-ai/glm-5.2"
 _OPENROUTER_KIMI = "moonshotai/kimi-k2.6"
 _OPENROUTER_TENCENT_HY3 = "tencent/hy3-preview"
+
+ZAI_BASE_URL_DEFAULT = "https://api.z.ai/api/paas/v4"
 
 OLLAMA_GEMMA = "gemma4"
 OLLAMA_QWEN = "qwen3.6:27b"
@@ -178,7 +181,7 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
             ("gemini_flash", ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_000_000)),
             ("gemini_lite", ModelPreset("openrouter", _OPENROUTER_GEMINI_LITE)),
             ("deepseek", ModelPreset("openrouter", _OPENROUTER_DEEPSEEK_CHAT, 1_048_576)),
-            ("glm", ModelPreset("openrouter", _OPENROUTER_GLM, 202_752)),
+            ("glm", ModelPreset("openrouter", _OPENROUTER_GLM, 1_048_576)),
             ("kimi", ModelPreset("openrouter", _OPENROUTER_KIMI, 262_144)),
             ("tencent_hy3", ModelPreset("openrouter", _OPENROUTER_TENCENT_HY3, 262_144)),
             ("nemotron", ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 262_144)),
@@ -201,7 +204,7 @@ SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "gemini_flash": ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_000_000),
         "gemini_lite": ModelPreset("openrouter", _OPENROUTER_GEMINI_LITE),
         "deepseek": ModelPreset("openrouter", _OPENROUTER_DEEPSEEK_CHAT, 1_048_576),
-        "glm": ModelPreset("openrouter", _OPENROUTER_GLM, 202_752),
+        "glm": ModelPreset("openrouter", _OPENROUTER_GLM, 1_048_576),
         "kimi": ModelPreset("openrouter", _OPENROUTER_KIMI, 262_144),
         "tencent_hy3": ModelPreset("openrouter", _OPENROUTER_TENCENT_HY3, 262_144),
         "nemotron": ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 262_144),

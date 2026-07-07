@@ -165,6 +165,7 @@ Set the API key for each provider you use in `config.yaml`:
 | `GOOGLE_API_KEY` | Google (Gemini) |
 | `OPENROUTER_API_KEY` | OpenRouter |
 | `DEEPSEEK_API_KEY` | DeepSeek |
+| `ZAI_API_KEY` | Z.ai (GLM models) |
 | `CEREBRAS_API_KEY` | Cerebras |
 | `GROQ_API_KEY` | Groq |
 | `OLLAMA_HOST` | Ollama (host URL, not a key) |

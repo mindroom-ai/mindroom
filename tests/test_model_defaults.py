@@ -81,6 +81,14 @@ def test_sonnet_presets_use_current_generation() -> None:
     }
 
 
+def test_glm_presets_use_current_generation() -> None:
+    """GLM presets should track the current GLM generation on OpenRouter."""
+    openrouter_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["openrouter"])
+
+    assert model_defaults.SAAS_MODEL_PRESETS["glm"].id == "z-ai/glm-5.2"
+    assert openrouter_alternatives["glm"].id == "z-ai/glm-5.2"
+
+
 def test_config_init_openrouter_alternatives_cover_saas_openrouter_models() -> None:
     """Config init should comment every non-default OpenRouter model alias we expose elsewhere."""
     openrouter_saas_aliases = {

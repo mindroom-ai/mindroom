@@ -78,6 +78,7 @@ Each model entry supports these fields:
 - **vertexai_claude** - Claude models via Vertex AI (requires GCP credentials)
 - **groq** - Groq-hosted models (requires `GROQ_API_KEY`)
 - **deepseek** - DeepSeek models (requires `DEEPSEEK_API_KEY`)
+- **zai** - Z.ai GLM models (requires `ZAI_API_KEY`)
 - **cerebras** - Cerebras-hosted models (requires `CEREBRAS_API_KEY`)
 
 ## Memory Configuration

@@ -535,6 +535,7 @@ openrouter: OPENROUTER_API_KEY
 deepseek: DEEPSEEK_API_KEY
 cerebras: CEREBRAS_API_KEY
 groq: GROQ_API_KEY
+zai: ZAI_API_KEY
 ollama: OLLAMA_HOST
 {{- end -}}
 

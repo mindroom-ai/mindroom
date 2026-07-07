@@ -422,8 +422,8 @@ models:
     context_window: 1048576
   glm:
     provider: openrouter
-    id: z-ai/glm-5.1
-    context_window: 202752
+    id: z-ai/glm-5.2
+    context_window: 1048576
   kimi:
     provider: openrouter
     id: moonshotai/kimi-k2.6

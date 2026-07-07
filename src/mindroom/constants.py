@@ -1068,6 +1068,7 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
     "deepseek": "DEEPSEEK_API_KEY",
     "cerebras": "CEREBRAS_API_KEY",
     "groq": "GROQ_API_KEY",
+    "zai": "ZAI_API_KEY",
     "ollama": "OLLAMA_HOST",
 }
 # Dedicated workers start with no mirrored/shared credentials by default.

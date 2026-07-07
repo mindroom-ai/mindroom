@@ -14,6 +14,7 @@ from agno.models.groq import Groq
 from agno.models.llama_cpp import LlamaCpp
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
+from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
 
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
@@ -24,7 +25,7 @@ from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host,
 from mindroom.google_adc import load_google_application_credentials
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, ZAI_BASE_URL_DEFAULT
 from mindroom.runtime_env_policy import (
     AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
     AZURE_OPENAI_ENV_BY_KEY,
@@ -210,6 +211,12 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
         return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
+
+    if canonical_provider == "zai":
+        extra_kwargs.setdefault("base_url", ZAI_BASE_URL_DEFAULT)
+        extra_kwargs.setdefault("name", "ZAI")
+        extra_kwargs.setdefault("provider", "ZAI")
+        return OpenAILike(id=model_id, **extra_kwargs)
 
     if canonical_provider in {"codex", "openai_codex"}:
         extra_kwargs.pop("api_key", None)

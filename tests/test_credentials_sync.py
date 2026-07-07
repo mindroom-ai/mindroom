@@ -859,6 +859,7 @@ class TestCredentialsSync:
             "DEEPSEEK_API_KEY": "deepseek",
             "CEREBRAS_API_KEY": "cerebras",
             "GROQ_API_KEY": "groq",
+            "ZAI_API_KEY": "zai",
             "OLLAMA_HOST": "ollama",
         }
 

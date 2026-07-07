@@ -13,6 +13,7 @@ from agno.models.azure import AzureOpenAI
 from agno.models.llama_cpp import LlamaCpp
 from agno.models.message import Message
 from agno.models.openai import OpenAIChat
+from agno.models.openai.like import OpenAILike
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
@@ -1330,3 +1331,41 @@ def test_vertexai_claude_loads_service_account_credentials_directly(
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_get_model_instance_supports_zai_provider() -> None:
+    """Z.ai should use Agno's OpenAI-compatible provider class with the Z.ai base URL."""
+    config_data = {
+        "models": {
+            "glm": {
+                "provider": "zai",
+                "id": "glm-5.2",
+                "extra_kwargs": {"api_key": "test-zai-key"},
+            },
+            "glm_custom": {
+                "provider": "zai",
+                "id": "glm-5.2",
+                "extra_kwargs": {
+                    "api_key": "test-zai-key",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                },
+            },
+        },
+        "router": {
+            "model": "glm",
+        },
+        "agents": {},
+    }
+
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+
+    model = get_model_instance(config, runtime_paths, "glm")
+    assert isinstance(model, OpenAILike)
+    assert model.id == "glm-5.2"
+    assert model.api_key == "test-zai-key"
+    assert model.base_url == "https://api.z.ai/api/paas/v4"
+    assert model.name == "ZAI"
+    assert model.provider == "ZAI"
+
+    custom_model = get_model_instance(config, runtime_paths, "glm_custom")
+    assert custom_model.base_url == "https://open.bigmodel.cn/api/paas/v4"
