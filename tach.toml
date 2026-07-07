@@ -669,6 +669,7 @@ depends_on = [
     "mindroom.api.sandbox_worker_prep",
     "mindroom.api.worker_responses",
     "mindroom.config.main",
+    "mindroom.config.yaml_includes",
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.logging_config",

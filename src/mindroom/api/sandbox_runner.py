@@ -18,7 +18,6 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
-import yaml
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
@@ -31,6 +30,7 @@ from mindroom.api.worker_responses import (
 )
 from mindroom.attachments import normalize_attachment_id
 from mindroom.config.main import Config, load_config, normalized_config_data
+from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
@@ -231,8 +231,9 @@ def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
 
 def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
     """Return dedicated-worker config, tolerating plugins unavailable in that worker image."""
-    with runtime_paths.config_path.open() as f:
-        data = yaml.safe_load(f) or {}
+    # The authored config may be split across !include files; a plain
+    # yaml.safe_load crashes the worker on the include tags.
+    data, _config_source_files = load_yaml_config_source(runtime_paths.config_path)
 
     tool_validation_snapshot = _upstream_tool_validation_snapshot(runtime_paths)
     if not tool_validation_snapshot:

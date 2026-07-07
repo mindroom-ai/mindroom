@@ -2350,6 +2350,36 @@ async def test_proxy_shell_path_prepend_survives_sandbox_runner_rebuild(
     assert result.endswith("/usr/local/bin:/usr/bin:/bin")
 
 
+def test_dedicated_worker_runtime_config_resolves_include_tags(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers must load configs split across !include files."""
+    (tmp_path / "models.yaml").write_text(
+        "default:\n  provider: openai\n  id: gpt-5.4\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models: !include models.yaml\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "storage",
+        process_env={},
+    )
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_upstream_tool_validation_snapshot",
+        lambda _runtime_paths: {"shell": object()},
+    )
+
+    config = sandbox_runner_module._dedicated_worker_runtime_config_or_empty(runtime_paths)
+
+    assert config.models["default"].id == "gpt-5.4"
+
+
 @pytest.mark.asyncio
 async def test_inprocess_runner_shell_uses_request_scoped_extra_env_snapshot(
     monkeypatch: pytest.MonkeyPatch,
