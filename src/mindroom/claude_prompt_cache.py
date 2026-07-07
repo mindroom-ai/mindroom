@@ -106,16 +106,18 @@ def _mark_message_cache_rungs(
 ) -> tuple[list[Any], int]:
     """Mark the newest cacheable block of up to ``rung_budget`` trailing messages.
 
-    Returns the (copied) message list and the number of rungs placed. At most
-    one block per message is marked, scanning from the end of the request, so
-    consecutive requests in a tool loop always share the previous request's
-    newest boundary. A block that already carries a marker counts as a rung.
-    The input structure is never mutated.
+    Returns the (copied) message list and the number of newly added markers.
+    At most one block per message is marked, scanning from the end of the
+    request, so consecutive requests in a tool loop always share the previous
+    request's newest boundary. A block that already carries a marker occupies
+    a rung but is not counted as newly added (its marker was already deducted
+    from the caller's overall budget). The input structure is never mutated.
     """
     marked_messages = list(messages)
-    rungs_placed = 0
+    rungs_occupied = 0
+    markers_added = 0
     for message_index in range(len(marked_messages) - 1, -1, -1):
-        if rungs_placed >= rung_budget:
+        if rungs_occupied >= rung_budget:
             break
         message_dict = _as_dict(marked_messages[message_index])
         content = message_dict.get("content") if message_dict is not None else None
@@ -124,7 +126,7 @@ def _mark_message_cache_rungs(
         for block_index in range(len(content) - 1, -1, -1):
             block = content[block_index]
             if _block_has_cache_marker(block):
-                rungs_placed += 1
+                rungs_occupied += 1
                 break
             if not _is_markable_block(block):
                 continue
@@ -135,9 +137,10 @@ def _mark_message_cache_rungs(
             marked_message = dict(message_dict)
             marked_message["content"] = marked_content
             marked_messages[message_index] = marked_message
-            rungs_placed += 1
+            rungs_occupied += 1
+            markers_added += 1
             break
-    return marked_messages, rungs_placed
+    return marked_messages, markers_added
 
 
 def _mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[object, int]:
@@ -167,9 +170,9 @@ def _request_kwargs_with_prompt_cache_ladder(
     messages = prepared_kwargs.get("messages")
     if isinstance(messages, list) and messages:
         rung_budget = min(_MESSAGE_RUNG_COUNT, marker_budget)
-        marked_messages, rungs_placed = _mark_message_cache_rungs(messages, cache_control, rung_budget)
+        marked_messages, markers_added = _mark_message_cache_rungs(messages, cache_control, rung_budget)
         prepared_kwargs["messages"] = marked_messages
-        marker_budget -= rungs_placed
+        marker_budget -= markers_added
 
     if marker_budget > 0:
         marked_tools, tools_marked = _mark_last_tool(prepared_kwargs.get("tools"), cache_control)
@@ -229,6 +232,24 @@ class _PromptCacheClientProxy:
     @property
     def beta(self) -> _PromptCacheBetaProxy:
         return _PromptCacheBetaProxy(self._client.beta, self._model)
+
+    # Python looks dunder methods up on the type, bypassing __getattr__, so
+    # context-manager use of the proxied client must be delegated explicitly.
+    def __enter__(self) -> _PromptCacheClientProxy:
+        self._client.__enter__()
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool | None:
+        result: bool | None = self._client.__exit__(exc_type, exc_value, traceback)
+        return result
+
+    async def __aenter__(self) -> _PromptCacheClientProxy:
+        await self._client.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type: object, exc_value: object, traceback: object) -> bool | None:
+        result: bool | None = await self._client.__aexit__(exc_type, exc_value, traceback)
+        return result
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._client, name)

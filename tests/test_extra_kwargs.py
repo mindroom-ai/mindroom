@@ -20,6 +20,7 @@ from mindroom.claude_prompt_cache import (
     _MAX_CACHE_MARKERS,
     _count_cache_markers,
     _prompt_cache_control,
+    _PromptCacheClientProxy,
     _request_kwargs_with_prompt_cache_ladder,
     install_claude_prompt_cache_hook,
 )
@@ -719,6 +720,49 @@ def test_prompt_cache_ladder_marks_newest_tool_result_prior_user_and_tools() -> 
     assert prepared["messages"][0]["content"][-1]["cache_control"] == expected_cache_control
     assert prepared["tools"][-1]["cache_control"] == expected_cache_control
     assert _count_cache_markers(prepared) == _MAX_CACHE_MARKERS
+
+
+def test_prompt_cache_ladder_does_not_double_count_existing_message_markers() -> None:
+    """A pre-existing message marker must consume budget once, not twice."""
+    request_kwargs = {
+        "system": [{"type": "text", "text": "S", "cache_control": {"type": "ephemeral"}}],
+        "tools": [{"name": "demo_tool", "input_schema": {"type": "object"}}],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "m1"}]},
+            {"role": "user", "content": [{"type": "text", "text": "m2", "cache_control": {"type": "ephemeral"}}]},
+            {"role": "user", "content": [{"type": "text", "text": "m3"}]},
+        ],
+    }
+
+    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+
+    # Budget: 4 total minus system marker minus the pre-existing message
+    # marker leaves room for one new rung (on m3) and the tools marker.
+    assert prepared["messages"][-1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in prepared["messages"][0]["content"][0]
+    assert prepared["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert _count_cache_markers(prepared) == _MAX_CACHE_MARKERS
+
+
+def test_prompt_cache_client_proxy_delegates_context_manager() -> None:
+    """Context-manager use of the proxied client must reach the real client."""
+    events: list[str] = []
+
+    class _FakeClient:
+        def __enter__(self) -> object:
+            events.append("enter")
+            return self
+
+        def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
+            events.append("exit")
+            return True
+
+    proxy = _PromptCacheClientProxy(_FakeClient(), _vertex_claude_model())
+    with proxy as entered:
+        assert entered is proxy
+    assert events == ["enter", "exit"]
+    # The delegate's __exit__ return value (exception suppression) is preserved.
+    assert proxy.__exit__(None, None, None) is True
 
 
 def test_prompt_cache_ladder_respects_marker_budget() -> None:
