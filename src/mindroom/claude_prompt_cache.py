@@ -29,6 +29,15 @@ from scratch on every request, so markers placed on Agno ``Message`` objects
 can never reach tool results. String-vs-block content shape is irrelevant at
 this layer: ``format_messages`` normalizes user strings into text blocks, and
 the API hashes both shapes identically.
+
+The same wire hook also carries Anthropic's server-side tool search for
+MindRoom's deferred tools: :func:`install_claude_deferred_tool_search` records
+the wire tool names that should stay out of the rendered prompt prefix, and
+``_prepared`` tags them with ``defer_loading: true``, injects the regex search
+tool, and orders the tools array deterministically (non-deferred first, then
+deferred sorted by name). Deferred tools may not carry ``cache_control`` (the
+API rejects the request), which is why the ladder's tools marker targets the
+last non-deferred tool.
 """
 
 from __future__ import annotations
@@ -37,12 +46,32 @@ from typing import Any, cast
 
 from agno.models.anthropic import Claude as AnthropicClaude
 
+from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
+
 _PROMPT_CACHE_HOOK_ATTR = "_mindroom_claude_prompt_cache_hook_installed"
+_DEFERRED_TOOL_NAMES_ATTR = "_mindroom_claude_deferred_tool_names"
 # The Anthropic API allows at most four cache_control markers per request.
 _MAX_CACHE_MARKERS = 4
 # Newest cacheable block plus one fallback boundary in an earlier message.
 _MESSAGE_RUNG_COUNT = 2
 _MARKABLE_BLOCK_TYPES = frozenset({"text", "tool_result", "document", "image"})
+
+_TOOL_SEARCH_TOOL_TYPE = "tool_search_tool_regex_20251119"
+_TOOL_SEARCH_TOOL_NAME = "tool_search_tool_regex"
+_NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic", "vertexai_claude"})
+
+
+def native_tool_search_supported(provider: str, model_id: str) -> bool:
+    """Return whether one authored provider/model pair supports server-side tool search.
+
+    Every Claude model since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 supports the
+    search tool, so gating denylists the closed pre-4.5 set and new model
+    releases take the native path without a code change.
+    """
+    canonical_provider = provider.strip().lower().replace("-", "_")
+    if canonical_provider not in _NATIVE_TOOL_SEARCH_PROVIDERS:
+        return False
+    return not model_id.startswith(TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES)
 
 
 def _prompt_cache_control(*, extended_cache_time: bool = False) -> dict[str, str]:
@@ -144,17 +173,76 @@ def _mark_message_cache_rungs(
 
 
 def _mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[object, int]:
-    """Mark the last tool definition so the tools prefix caches independently."""
+    """Mark the last non-deferred tool so the tools prefix caches independently.
+
+    Deferred tools may not carry ``cache_control`` (the API returns a 400) and
+    sort after all non-deferred tools, so the marker position is byte-stable.
+    The injected search tool is never marked either (whether the API accepts a
+    marker on that server-tool type is unverified), so an all-deferred tool
+    surface sends no tools marker; the tools prefix still caches under the
+    system-prompt breakpoint because tools render ahead of system.
+    """
     if not isinstance(tools, list) or not tools:
         return tools, 0
-    last_tool = _as_dict(tools[-1])
-    if last_tool is None or _block_has_cache_marker(last_tool):
-        return tools, 0
-    marked_tools = list(tools)
-    marked_tool = dict(last_tool)
-    marked_tool["cache_control"] = dict(cache_control)
-    marked_tools[-1] = marked_tool
-    return marked_tools, 1
+    for tool_index in range(len(tools) - 1, -1, -1):
+        tool_dict = _as_dict(tools[tool_index])
+        if tool_dict is not None and (
+            tool_dict.get("defer_loading") is True or tool_dict.get("type") == _TOOL_SEARCH_TOOL_TYPE
+        ):
+            continue
+        if tool_dict is None or _block_has_cache_marker(tool_dict):
+            return tools, 0
+        marked_tools = list(tools)
+        marked_tool = dict(tool_dict)
+        marked_tool["cache_control"] = dict(cache_control)
+        marked_tools[tool_index] = marked_tool
+        return marked_tools, 1
+    return tools, 0
+
+
+def _model_deferred_tool_names(model: AnthropicClaude) -> frozenset[str]:
+    """Return the wire tool names registered for deferred loading on one model."""
+    deferred_tool_names = vars(model).get(_DEFERRED_TOOL_NAMES_ATTR)
+    return deferred_tool_names if isinstance(deferred_tool_names, frozenset) else frozenset()
+
+
+def _request_kwargs_with_deferred_tool_search(
+    request_kwargs: dict[str, Any],
+    deferred_tool_names: frozenset[str],
+) -> dict[str, Any]:
+    """Tag deferred tools with defer_loading and inject the server-side search tool.
+
+    Every deferred tool's full definition still ships on every request; the API
+    keeps deferred schemas out of the rendered prompt prefix and expands them
+    inline when the model searches. The tools array is ordered deterministically
+    (search tool, then the remaining non-deferred tools, then deferred tools
+    sorted by name) so the cached prefix stays byte-stable across requests.
+    """
+    tools = request_kwargs.get("tools")
+    if not deferred_tool_names or not isinstance(tools, list):
+        return request_kwargs
+    non_deferred_tools: list[Any] = []
+    deferred_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        tool_dict = _as_dict(tool)
+        if tool_dict is not None and tool_dict.get("name") in deferred_tool_names:
+            deferred_tool = {**tool_dict, "defer_loading": True}
+            # A deferred tool may not carry cache_control (the API returns a
+            # 400), so drop any marker Agno added (e.g. via cache_tools).
+            deferred_tool.pop("cache_control", None)
+            deferred_tools.append(deferred_tool)
+        else:
+            non_deferred_tools.append(tool)
+    if not deferred_tools:
+        return request_kwargs
+    deferred_tools.sort(key=lambda tool: str(tool.get("name")))
+    prepared_kwargs = dict(request_kwargs)
+    prepared_kwargs["tools"] = [
+        {"type": _TOOL_SEARCH_TOOL_TYPE, "name": _TOOL_SEARCH_TOOL_NAME},
+        *non_deferred_tools,
+        *deferred_tools,
+    ]
+    return prepared_kwargs
 
 
 def _request_kwargs_with_prompt_cache_ladder(
@@ -190,8 +278,14 @@ class _PromptCacheMessagesProxy:
         self._model = model
 
     def _prepared(self, request_kwargs: dict[str, Any]) -> dict[str, Any]:
+        prepared_kwargs = _request_kwargs_with_deferred_tool_search(
+            request_kwargs,
+            _model_deferred_tool_names(self._model),
+        )
+        if not self._model.cache_system_prompt:
+            return prepared_kwargs
         cache_control = _prompt_cache_control(extended_cache_time=self._model.extended_cache_time is True)
-        return _request_kwargs_with_prompt_cache_ladder(request_kwargs, cache_control)
+        return _request_kwargs_with_prompt_cache_ladder(prepared_kwargs, cache_control)
 
     def create(self, **request_kwargs: object) -> object:
         return self._messages_namespace.create(**self._prepared(request_kwargs))
@@ -262,7 +356,9 @@ def install_claude_prompt_cache_hook(model: object) -> None:
     Bedrock all share the SDK client shape). The ladder is skipped per request
     while ``cache_system_prompt`` is falsy, so callers that deliberately
     disable caching (for example one-off summary calls) stay unmarked even
-    when they reuse a hooked model instance.
+    when they reuse a hooked model instance. The proxy still engages for such
+    models once deferred tool names are registered, because defer_loading
+    tagging is independent of the cache ladder.
     """
     if not isinstance(model, AnthropicClaude):
         return
@@ -275,15 +371,29 @@ def install_claude_prompt_cache_hook(model: object) -> None:
 
     def _get_client_with_prompt_cache() -> object:
         client = original_get_client()
-        if not model.cache_system_prompt:
+        if not model.cache_system_prompt and not _model_deferred_tool_names(model):
             return client
         return _PromptCacheClientProxy(client, model)
 
     def _get_async_client_with_prompt_cache() -> object:
         client = original_get_async_client()
-        if not model.cache_system_prompt:
+        if not model.cache_system_prompt and not _model_deferred_tool_names(model):
             return client
         return _PromptCacheClientProxy(client, model)
 
     model_dict["get_client"] = _get_client_with_prompt_cache
     model_dict["get_async_client"] = _get_async_client_with_prompt_cache
+
+
+def install_claude_deferred_tool_search(model: object, *, deferred_tool_names: frozenset[str]) -> None:
+    """Register wire tool names for Anthropic server-side tool search on one model.
+
+    Every request through the hooked client sends the named tools with
+    ``defer_loading: true`` plus the regex tool-search entry, so their schemas
+    stay out of the rendered prompt prefix and tool discovery never invalidates
+    the prompt cache. No-op for non-Claude models and empty name sets.
+    """
+    if not isinstance(model, AnthropicClaude) or not deferred_tool_names:
+        return
+    install_claude_prompt_cache_hook(model)
+    vars(model)[_DEFERRED_TOOL_NAMES_ATTR] = frozenset(deferred_tool_names)

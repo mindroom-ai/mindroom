@@ -121,6 +121,7 @@ depends_on = [
     "mindroom.agent_knowledge_descriptions",
     "mindroom.agent_descriptions",
     "mindroom.agent_storage",
+    "mindroom.claude_prompt_cache",
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.custom_tools.delegate",
@@ -228,7 +229,7 @@ depends_on = [
     "mindroom.llm_request_logging",
     "mindroom.logging_config",
     "mindroom.tool_system.dependencies",
-    "mindroom.vertex_claude_prompt_cache",
+    "mindroom.claude_prompt_cache",
 ]
 visibility = [
     "mindroom.ai",

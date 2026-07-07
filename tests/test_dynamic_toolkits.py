@@ -13,8 +13,10 @@ from mindroom.agents import (
     _build_dynamic_tooling_instruction_block,
     _build_dynamic_tooling_state_suffix,
     build_agent_toolkit,
+    create_agent,
     get_agent_toolkit_names,
 )
+from mindroom.claude_prompt_cache import _DEFERRED_TOOL_NAMES_ATTR
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -809,6 +811,58 @@ def test_openclaw_compat_implies_matrix_messaging_tool(tmp_path: Path) -> None:
     config = _validated_config(tmp_path, raw)
 
     assert _agent_has_matrix_messaging_tool(config, "code", None)
+
+
+def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(tmp_path: Path) -> None:
+    """Claude-native tool search attaches all deferred toolkits and drops the manager machinery."""
+    raw = _base_config_data()
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"sleep": {"defer": True}},
+        {"calculator": {"defer": True, "initial": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+
+    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    assert "sleep" in function_names
+    assert "add" in function_names
+    assert "load_tool" not in function_names
+    # Only defer&&!initial tools go on the wire deferred; initial stays plain.
+    assert vars(agent.model)[_DEFERRED_TOOL_NAMES_ATTR] == frozenset({"sleep"})
+    assert not any(block.startswith("## Dynamic Tools") for block in agent.instructions)
+    assert not any("Dynamic tools currently loaded" in block for block in agent.instructions)
+    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [
+        ("openai", "gpt-4o-mini"),
+        ("anthropic", "claude-opus-4-1"),
+    ],
+)
+def test_unsupported_models_keep_homegrown_dynamic_tools_path(tmp_path: Path, provider: str, model_id: str) -> None:
+    """Non-Claude providers and unsupported Claude models keep the load_tool machinery."""
+    raw = _base_config_data()
+    raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"sleep": {"defer": True}},
+        {"calculator": {"defer": True, "initial": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+
+    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    assert "load_tool" in function_names
+    assert "sleep" not in function_names
+    assert "add" in function_names
+    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
+    assert any(block.startswith("## Dynamic Tools") for block in agent.instructions)
+    assert any("Dynamic tools currently loaded" in block for block in agent.instructions)
 
 
 def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_path: Path) -> None:
