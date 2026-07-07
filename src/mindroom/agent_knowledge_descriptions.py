@@ -5,17 +5,24 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agno.agent import Agent
+from agno.tools import Toolkit
 from agno.tools.function import Function
 
 from mindroom.knowledge_source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
+    from agno.models.base import Model
     from agno.run import RunContext
     from agno.run.agent import RunOutput
     from agno.session import AgentSession
 
 _KNOWLEDGE_SEARCH_TOOL_NAME = "search_knowledge_base"
+_OPENAI_PROVIDER_VISIBLE_TOOL_LIMIT = 128
+_OPENAI_TOOL_LIMIT_PROVIDERS = frozenset({"azure", "azure chat", "openai", "openai chat"})
+
+logger = get_logger(__name__)
 
 
 def _normalize_description(value: str) -> str:
@@ -62,6 +69,121 @@ def _annotate_knowledge_search_tool(tools: list[Any], sources: tuple[KnowledgeSo
             tool.description = description
 
 
+def _uses_openai_tool_limit(model: Model | None) -> bool:
+    if model is None:
+        return False
+    return model.get_provider().casefold() in _OPENAI_TOOL_LIMIT_PROVIDERS
+
+
+def _dict_tool_name(tool: dict[Any, Any]) -> str:
+    function = tool.get("function")
+    if isinstance(function, dict):
+        name = function.get("name")
+        if isinstance(name, str):
+            return name
+    name = tool.get("name")
+    return name if isinstance(name, str) else ""
+
+
+def _toolkit_functions(toolkit: Toolkit, *, async_mode: bool) -> list[tuple[str, Function]]:
+    functions = toolkit.get_async_functions() if async_mode else toolkit.get_functions()
+    return list(functions.items())
+
+
+def _append_toolkit_with_cap(
+    limited_tools: list[Any],
+    omitted_function_names: list[str],
+    seen_function_names: set[str],
+    toolkit: Toolkit,
+    *,
+    async_mode: bool,
+) -> None:
+    functions = _toolkit_functions(toolkit, async_mode=async_mode)
+    has_duplicate_functions = any(name in seen_function_names for name, _function in functions)
+    if not has_duplicate_functions and len(seen_function_names) + len(functions) <= _OPENAI_PROVIDER_VISIBLE_TOOL_LIMIT:
+        limited_tools.append(toolkit)
+        seen_function_names.update(name for name, _function in functions)
+        return
+
+    for name, function in functions:
+        if name in seen_function_names:
+            omitted_function_names.append(name)
+            continue
+        if len(seen_function_names) < _OPENAI_PROVIDER_VISIBLE_TOOL_LIMIT:
+            limited_tools.append(function)
+            seen_function_names.add(name)
+            continue
+        omitted_function_names.append(name)
+
+
+def _standalone_tool_function_name(tool: object) -> str:
+    if isinstance(tool, Function):
+        return tool.name
+    if isinstance(tool, dict):
+        return _dict_tool_name(tool)
+    return ""
+
+
+def _append_standalone_tool_with_cap(
+    limited_tools: list[Any],
+    omitted_function_names: list[str],
+    seen_function_names: set[str],
+    tool: object,
+) -> None:
+    function_name = _standalone_tool_function_name(tool)
+    if function_name and function_name in seen_function_names:
+        omitted_function_names.append(function_name)
+        return
+    if len(seen_function_names) < _OPENAI_PROVIDER_VISIBLE_TOOL_LIMIT:
+        limited_tools.append(tool)
+        seen_function_names.add(function_name or f"<unnamed:{len(seen_function_names)}>")
+        return
+    omitted_function_names.append(function_name or "<unnamed>")
+
+
+def _limit_provider_visible_tools_for_model(
+    model: Model | None,
+    tools: list[Any],
+    *,
+    async_mode: bool,
+) -> list[Any]:
+    """Cap provider-visible tools before OpenAI rejects the request payload."""
+    if not _uses_openai_tool_limit(model):
+        return tools
+
+    limited_tools: list[Any] = []
+    seen_function_names: set[str] = set()
+    omitted_function_names: list[str] = []
+
+    for tool in tools:
+        if isinstance(tool, Toolkit):
+            _append_toolkit_with_cap(
+                limited_tools,
+                omitted_function_names,
+                seen_function_names,
+                tool,
+                async_mode=async_mode,
+            )
+            continue
+
+        _append_standalone_tool_with_cap(
+            limited_tools,
+            omitted_function_names,
+            seen_function_names,
+            tool,
+        )
+
+    if omitted_function_names:
+        logger.warning(
+            "Capped provider-visible tool list for OpenAI model",
+            model_id=model.id if model is not None else None,
+            kept_tool_count=len(seen_function_names),
+            omitted_tool_count=len(omitted_function_names),
+            omitted_tool_names=omitted_function_names[:20],
+        )
+    return limited_tools
+
+
 class KnowledgeToolDescribingAgent(Agent):
     """Agent subclass that owns MindRoom's model-facing knowledge-search metadata."""
 
@@ -77,7 +199,7 @@ class KnowledgeToolDescribingAgent(Agent):
         """Return Agno tools with MindRoom knowledge-source metadata attached."""
         tools = super().get_tools(run_response, run_context, session, user_id=user_id)
         _annotate_knowledge_search_tool(tools, self.knowledge_sources)
-        return tools
+        return _limit_provider_visible_tools_for_model(self.model, tools, async_mode=False)
 
     async def aget_tools(
         self,
@@ -96,4 +218,4 @@ class KnowledgeToolDescribingAgent(Agent):
             check_mcp_tools=check_mcp_tools,
         )
         _annotate_knowledge_search_tool(tools, self.knowledge_sources)
-        return tools
+        return _limit_provider_visible_tools_for_model(self.model, tools, async_mode=True)
