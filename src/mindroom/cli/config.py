@@ -424,12 +424,15 @@ def config_init(
     target = _resolve_config_path(path)
     env_path = target.parent / ".env"
 
+    # With --no-input an existing config.yaml is kept, but .env handling still
+    # runs so a missing .env is recreated and hosted defaults are appended.
+    keep_existing_config = False
     if target.exists() and not force and not print_config:
         console.print(f"[yellow]Config file already exists:[/yellow] {target}")
         if no_input:
-            console.print("Left existing config unchanged. Use --force to overwrite.")
-            raise typer.Exit(0)
-        if not typer.confirm("Overwrite existing config file?"):
+            console.print("Keeping existing config.yaml. Use --force to overwrite.")
+            keep_existing_config = True
+        elif not typer.confirm("Overwrite existing config file?"):
             console.print("[dim]Aborted.[/dim]")
             raise typer.Exit(0)
 
@@ -466,8 +469,9 @@ def config_init(
         console.print(_yaml_syntax(content, line_numbers=False, word_wrap=False), soft_wrap=True)
         return
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    if not keep_existing_config:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
 
     _ensure_mind_workspace(_default_mind_workspace(storage_root), force=force)
 
@@ -479,7 +483,10 @@ def config_init(
         replace_existing=replace_env_file,
     )
 
-    console.print(f"[green]Config created:[/green] {target}")
+    if keep_existing_config:
+        console.print(f"[green]Config unchanged:[/green] {target}")
+    else:
+        console.print(f"[green]Config created:[/green] {target}")
     _print_config_init_next_steps(
         env_path,
         env_changed=env_changed,

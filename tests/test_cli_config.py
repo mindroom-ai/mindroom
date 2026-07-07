@@ -909,14 +909,28 @@ class TestConfigInit:
         assert content != "existing"
         assert "agents:" in content
 
-    def test_init_no_input_keeps_existing_config(self, tmp_path: Path) -> None:
-        """Config init --no-input leaves an existing config untouched and exits cleanly."""
+    def test_init_no_input_keeps_existing_config_and_recreates_missing_env(self, tmp_path: Path) -> None:
+        """Config init --no-input keeps an existing config but still creates a missing .env."""
         target = tmp_path / "config.yaml"
         target.write_text("existing")
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--no-input"])
         assert result.exit_code == 0
         assert target.read_text() == "existing"
-        assert "Left existing config unchanged" in normalize_console_output(result.output)
+        assert "Keeping existing config.yaml" in normalize_console_output(result.output)
+        env_content = (tmp_path / ".env").read_text()
+        assert "MATRIX_HOMESERVER" in env_content
+
+    def test_init_no_input_rerun_leaves_config_and_env_untouched(self, tmp_path: Path) -> None:
+        """Config init --no-input is idempotent once config.yaml and a hosted .env exist."""
+        target = tmp_path / "config.yaml"
+        first = runner.invoke(app, ["config", "init", "--path", str(target), "--no-input"])
+        assert first.exit_code == 0
+        config_before = target.read_text()
+        env_before = (tmp_path / ".env").read_text()
+        second = runner.invoke(app, ["config", "init", "--path", str(target), "--no-input"])
+        assert second.exit_code == 0
+        assert target.read_text() == config_before
+        assert (tmp_path / ".env").read_text() == env_before
 
     def test_init_no_input_keeps_existing_env_and_appends_hosted_defaults(self, tmp_path: Path) -> None:
         """Config init --no-input preserves .env values and only appends missing hosted defaults."""
