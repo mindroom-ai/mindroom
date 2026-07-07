@@ -8,9 +8,10 @@ struct CommandResult: Equatable {
         exitCode == 0
     }
 
-    /// Output condensed for display in an alert: no blank lines, capped length.
+    /// Output condensed for display in a failure alert: no blank lines, capped length.
+    /// Keeps the tail because CLI errors appear at the end of long output.
     var condensedOutput: String {
-        let lines = output
+        let lines = output.suffix(2000)
             .split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -18,6 +19,6 @@ struct CommandResult: Equatable {
         if joined.count <= 800 {
             return joined
         }
-        return String(joined.prefix(797)) + "..."
+        return "..." + String(joined.suffix(797))
     }
 }

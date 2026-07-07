@@ -61,7 +61,7 @@ enum MindRoomCommand: Equatable {
         case .installService:
             return "The MindRoom background service is installed and running.\n\nNext: Open Dashboard."
         case .startService:
-            return "The MindRoom service was started."
+            return "The MindRoom service was started.\n\nNext: Open Dashboard."
         case .stopService:
             return "The MindRoom service was stopped."
         case .restartService:

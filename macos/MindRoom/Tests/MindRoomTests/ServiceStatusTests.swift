@@ -83,10 +83,11 @@ final class CommandResultTests: XCTestCase {
         XCTAssertEqual(result.condensedOutput, "Error: bad config\nsecond line")
     }
 
-    func testCondensedOutputTruncatesLongOutput() {
-        let result = CommandResult(exitCode: 1, output: String(repeating: "x", count: 2000))
+    func testCondensedOutputKeepsTailOfLongOutput() {
+        let result = CommandResult(exitCode: 1, output: String(repeating: "x", count: 2000) + "\nError: the part that matters")
 
         XCTAssertEqual(result.condensedOutput.count, 800)
-        XCTAssertTrue(result.condensedOutput.hasSuffix("..."))
+        XCTAssertTrue(result.condensedOutput.hasPrefix("..."))
+        XCTAssertTrue(result.condensedOutput.hasSuffix("Error: the part that matters"))
     }
 }

@@ -287,9 +287,36 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         runner.run(.pairHosted(pairCode: pairCode))
     }
 
+    /// Why the dashboard would not respond in this state, with the one-click fix; nil when opening is fine.
+    private func dashboardBlocker(
+        for state: MindRoomServiceState
+    ) -> (message: String, fixTitle: String, fix: MindRoomCommand)? {
+        switch state {
+        case .stopped:
+            return (
+                "The dashboard at http://localhost:8765 is served by the MindRoom service, which is installed but stopped.",
+                "Start Service",
+                .startService
+            )
+        case .notInstalled:
+            return (
+                "The dashboard at http://localhost:8765 is served by the MindRoom service, which is not installed yet. Follow the Set Up Hosted MindRoom steps in the menu.",
+                "Install Service",
+                .installService
+            )
+        case .runtimeMissing:
+            return (
+                "The dashboard at http://localhost:8765 is served by the MindRoom service, but the MindRoom runtime is not installed yet. Follow the Set Up Hosted MindRoom steps in the menu.",
+                "Install Runtime",
+                .installRuntime
+            )
+        case .running, .unknown:
+            return nil
+        }
+    }
+
     @objc private func openDashboard() {
-        let state = runner.serviceStatus.state
-        guard state == .stopped || state == .notInstalled || state == .runtimeMissing else {
+        guard let blocker = dashboardBlocker(for: runner.serviceStatus.state) else {
             runner.run(.openDashboard)
             return
         }
@@ -298,25 +325,14 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "MindRoom Is Not Running"
-        let fix: (title: String, command: MindRoomCommand)
-        switch state {
-        case .stopped:
-            alert.informativeText = "The dashboard at http://localhost:8765 is served by the MindRoom service, which is installed but stopped."
-            fix = ("Start Service", .startService)
-        case .notInstalled:
-            alert.informativeText = "The dashboard at http://localhost:8765 is served by the MindRoom service, which is not installed yet. Follow the Set Up Hosted MindRoom steps in the menu."
-            fix = ("Install Service", .installService)
-        default:
-            alert.informativeText = "The dashboard at http://localhost:8765 is served by the MindRoom service, but the MindRoom runtime is not installed yet. Follow the Set Up Hosted MindRoom steps in the menu."
-            fix = ("Install Runtime", .installRuntime)
-        }
-        alert.addButton(withTitle: fix.title)
+        alert.informativeText = blocker.message
+        alert.addButton(withTitle: blocker.fixTitle)
         alert.addButton(withTitle: "Open Anyway")
         alert.addButton(withTitle: "Cancel")
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
-            runner.run(fix.command)
+            runner.run(blocker.fix)
         case .alertSecondButtonReturn:
             runner.run(.openDashboard)
         default:
