@@ -11,9 +11,13 @@ hooks installed — against the live API and checks that:
 
 Usage:
     ANTHROPIC_API_KEY=... uv run python scripts/testing/tool_search_live_probe.py
-    uv run python scripts/testing/tool_search_live_probe.py --dry-run  # no key needed
+    uv run python scripts/testing/tool_search_live_probe.py --provider vertexai --project-id <gcp-project>
+    uv run python scripts/testing/tool_search_live_probe.py --dry-run  # no credentials needed
 
-Exit codes: 0 = pass, 1 = fail, 2 = no API key.
+The vertexai provider authenticates via GCP application-default credentials and
+requires the project to have Anthropic models enabled in Model Garden.
+
+Exit codes: 0 = pass, 1 = fail, 2 = missing credentials/arguments.
 """
 
 from __future__ import annotations
