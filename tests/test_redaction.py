@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from mindroom.redaction import REDACTED, redact_sensitive_data
 
 
@@ -67,6 +69,30 @@ def test_redact_sensitive_data_redacts_oauth_callback_query_values_in_urls() -> 
         "url": "https://example.test/api/oauth/google/callback?code=***redacted***&state=***redacted***&keep=1",
         "query_params": {"code": REDACTED, "state": REDACTED, "keep": "1"},
     }
+
+
+def test_redact_url_in_escaped_shell_command_keeps_json_arguments_valid() -> None:
+    """URL redaction must not eat the backslash escaping the quote after the URL.
+
+    Logged tool-call arguments are JSON-encoded strings; absorbing the trailing
+    backslash of an escaped quote into the URL query re-encodes it to %5C and
+    leaves a bare quote behind, corrupting the inner JSON.
+    """
+    command = 'curl -s \\"https://example.test/repos/demo/pulls?state=open&sort=updated&per_page=10\\" | head'
+    arguments = json.dumps({"args": command})
+    payload = {
+        "messages": [
+            {"role": "assistant", "tool_calls": [{"function": {"name": "run_shell_command", "arguments": arguments}}]},
+        ],
+    }
+
+    redacted = redact_sensitive_data(payload)
+
+    redacted_arguments = redacted["messages"][0]["tool_calls"][0]["function"]["arguments"]
+    assert REDACTED in redacted_arguments
+    parsed = json.loads(redacted_arguments)
+    assert parsed["args"].startswith('curl -s \\"https://example.test/repos/demo/pulls?state=***redacted***')
+    assert '\\" | head' in parsed["args"]
 
 
 def test_redact_sensitive_data_redacts_bare_query_fragments_under_query_keys() -> None:

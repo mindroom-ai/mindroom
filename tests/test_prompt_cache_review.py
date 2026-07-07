@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 from datetime import datetime
@@ -43,6 +44,45 @@ def test_load_request_rows_handles_concatenated_json_objects(tmp_path: Path) -> 
     assert len(rows) == 2
     assert stats.document_count == 2
     assert stats.concatenated_document_count == 1
+    assert stats.decode_error_count == 0
+
+
+def test_load_request_rows_skips_rows_with_corrupt_tool_call_arguments(tmp_path: Path) -> None:
+    """One logged row with invalid tool_call arguments must not kill the review."""
+    module = _load_prompt_cache_review_module()
+    jsonl_path = tmp_path / "requests.jsonl"
+    corrupt_arguments = '{"args": "curl \\\\"https://example.test?x=1%5C" | head"}'
+    corrupt_row = {
+        "timestamp": "2026-04-11T11:00:00-07:00",
+        "agent_name": "opus",
+        "model_id": "claude-opus-4-8",
+        "system_prompt": "S",
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "t1", "function": {"name": "run_shell_command", "arguments": corrupt_arguments}}],
+            },
+        ],
+        "message_count": 1,
+    }
+    healthy_row = {
+        "timestamp": "2026-04-11T11:00:01-07:00",
+        "agent_name": "opus",
+        "model_id": "claude-opus-4-8",
+        "system_prompt": "S",
+        "messages": [{"role": "user", "content": "hello"}],
+        "message_count": 1,
+    }
+    jsonl_path.write_text(
+        json.dumps(corrupt_row) + "\n" + json.dumps(healthy_row) + "\n",
+        encoding="utf-8",
+    )
+
+    rows, stats = module.load_request_rows(jsonl_path)
+
+    assert len(rows) == 1
+    assert rows[0].preview == "hello"
+    assert stats.unparseable_row_count == 1
     assert stats.decode_error_count == 0
 
 

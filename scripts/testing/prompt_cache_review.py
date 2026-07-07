@@ -56,6 +56,7 @@ class JsonlParseStats:
     document_count: int
     concatenated_document_count: int
     decode_error_count: int
+    unparseable_row_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -452,6 +453,7 @@ def load_request_rows(
     document_count = 0
     concatenated_document_count = 0
     decode_error_count = 0
+    unparseable_row_count = 0
 
     with jsonl_path.open(encoding="utf-8", errors="replace") as handle:
         for _line_count, raw_line in enumerate(handle, start=1):
@@ -474,14 +476,8 @@ def load_request_rows(
                 parsed_documents += 1
                 document_count += 1
                 position = end_position
-                payload_dict = object_dict(payload)
-                if session_id_filter is not None and (
-                    payload_dict is None or payload_dict.get("session_id") != session_id_filter
-                ):
-                    continue
-                row = parse_request_row(payload_dict if payload_dict is not None else payload)
-                if row is not None:
-                    rows.append(row)
+                if not _append_request_row(rows, payload, session_id_filter):
+                    unparseable_row_count += 1
             if parsed_documents > 1:
                 concatenated_document_count += parsed_documents - 1
 
@@ -491,7 +487,22 @@ def load_request_rows(
         document_count=document_count,
         concatenated_document_count=concatenated_document_count,
         decode_error_count=decode_error_count,
+        unparseable_row_count=unparseable_row_count,
     )
+
+
+def _append_request_row(rows: list[RequestRow], payload: object, session_id_filter: str | None) -> bool:
+    """Parse one logged payload into ``rows``; return False when it cannot be rebuilt."""
+    payload_dict = object_dict(payload)
+    if session_id_filter is not None and (payload_dict is None or payload_dict.get("session_id") != session_id_filter):
+        return True
+    try:
+        row = parse_request_row(payload_dict if payload_dict is not None else payload)
+    except Exception:
+        return False
+    if row is not None:
+        rows.append(row)
+    return True
 
 
 def parse_request_row(payload: object) -> RequestRow | None:
@@ -1347,6 +1358,8 @@ def print_overview(
         f"{parse_stats.document_count} JSON documents from {parse_stats.line_count} lines "
         f"(concatenated docs: {parse_stats.concatenated_document_count}, decode errors: {parse_stats.decode_error_count}).",
     )
+    if parse_stats.unparseable_row_count:
+        print(f"Skipped {parse_stats.unparseable_row_count} rows whose logged payload could not be rebuilt.")
     print(f"Rows with session_id: {len(rows) - missing_session_rows}; rows without session_id: {missing_session_rows}")
     print("Comparisons ignore moving `cache_control` markers and focus on the reusable content prefix.")
 
