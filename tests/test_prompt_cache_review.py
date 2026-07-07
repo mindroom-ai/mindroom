@@ -166,8 +166,8 @@ def test_raw_prefix_extension_detects_moving_cache_control_marker() -> None:
     assert module.current_extends_previous_raw(previous_row, current_row) is False
 
 
-def test_build_provider_message_blobs_from_messages_can_skip_vertex_breakpoint() -> None:
-    """Allow blob building without applying the Vertex cache breakpoint hook."""
+def test_build_provider_message_blobs_from_messages_can_skip_cache_ladder() -> None:
+    """Allow blob building without applying the prompt-cache ladder."""
     module = _load_prompt_cache_review_module()
     messages = [
         Message(role="system", content="System prompt"),
@@ -178,13 +178,13 @@ def test_build_provider_message_blobs_from_messages_can_skip_vertex_breakpoint()
         messages,
         "claude-sonnet-4-6",
         {"cache_system_prompt": True, "extended_cache_time": True},
-        apply_vertex_cache_breakpoint=False,
+        apply_cache_ladder=False,
     )
     raw_blobs_hooked, normalized_blobs_hooked, preview_hooked = module.build_provider_message_blobs_from_messages(
         messages,
         "claude-sonnet-4-6",
         {"cache_system_prompt": True, "extended_cache_time": True},
-        apply_vertex_cache_breakpoint=True,
+        apply_cache_ladder=True,
     )
 
     assert raw_blobs_plain == ('{"content":[{"text":"Current turn","type":"text"}],"role":"user"}',)
@@ -193,6 +193,130 @@ def test_build_provider_message_blobs_from_messages_can_skip_vertex_breakpoint()
     )
     assert normalized_blobs_plain == normalized_blobs_hooked
     assert preview_plain == preview_hooked == "Current turn"
+
+
+def _simulation_row(
+    module: ModuleType,
+    *,
+    timestamp: str,
+    blobs: tuple[str, ...],
+    marked: frozenset[int],
+    agent_name: str = "agent",
+    model_id: str = "claude-opus-4-8",
+    system_prompt: str = "S" * 40,
+    tools_blob: str = "T" * 40,
+    cache_enabled: bool = True,
+) -> object:
+    """Build a synthetic request row with cache markers on the given message indexes."""
+    raw_blobs = tuple(
+        (
+            f'{{"content":[{{"cache_control":{{"type":"ephemeral"}},"text":"{text}","type":"text"}}],"role":"user"}}'
+            if index in marked
+            else f'{{"content":[{{"text":"{text}","type":"text"}}],"role":"user"}}'
+        )
+        for index, text in enumerate(blobs)
+    )
+    normalized_blobs = tuple(f'{{"content":[{{"text":"{text}","type":"text"}}],"role":"user"}}' for text in blobs)
+    return module.RequestRow(
+        timestamp=datetime.fromisoformat(timestamp),
+        session_id=None,
+        room_id=None,
+        agent_name=agent_name,
+        model_id=model_id,
+        system_prompt=system_prompt,
+        message_count=len(blobs),
+        message_blobs=raw_blobs,
+        normalized_message_blobs=normalized_blobs,
+        preview="preview",
+        tools_blob=tools_blob,
+        cache_enabled=cache_enabled,
+    )
+
+
+def test_simulate_prompt_cache_full_hit_on_prefix_extension() -> None:
+    """A request extending the previous rung boundary reads the full prefix."""
+    module = _load_prompt_cache_review_module()
+    rows = [
+        _simulation_row(module, timestamp="2026-04-11T11:00:00-07:00", blobs=("m1",), marked=frozenset({0})),
+        _simulation_row(module, timestamp="2026-04-11T11:05:00-07:00", blobs=("m1", "m2"), marked=frozenset({1})),
+    ]
+
+    report = module.simulate_prompt_cache(rows)
+
+    assert [outcome.outcome for outcome in report.outcomes] == ["cold", "full_hit"]
+    second = report.outcomes[1]
+    expected_read = (
+        len(second.row.tools_blob) + len(second.row.system_prompt) + len(second.row.normalized_message_blobs[0])
+    )
+    assert second.read_chars == expected_read
+    assert second.divergence is None
+
+
+def test_simulate_prompt_cache_attributes_tool_and_system_changes() -> None:
+    """Tool-array changes miss entirely; system changes still read the tools entry."""
+    module = _load_prompt_cache_review_module()
+    rows = [
+        _simulation_row(module, timestamp="2026-04-11T11:00:00-07:00", blobs=("m1",), marked=frozenset({0})),
+        _simulation_row(
+            module,
+            timestamp="2026-04-11T11:00:30-07:00",
+            blobs=("m1", "m2"),
+            marked=frozenset({1}),
+            system_prompt="different system",
+        ),
+        _simulation_row(
+            module,
+            timestamp="2026-04-11T11:05:00-07:00",
+            blobs=("m1", "m2"),
+            marked=frozenset({1}),
+            tools_blob="different tools",
+        ),
+    ]
+
+    report = module.simulate_prompt_cache(rows)
+
+    by_timestamp = {outcome.row.timestamp.isoformat(): outcome for outcome in report.outcomes}
+    system_change = by_timestamp["2026-04-11T11:00:30-07:00"]
+    tool_change = by_timestamp["2026-04-11T11:05:00-07:00"]
+    assert system_change.outcome == "tools_hit"
+    assert system_change.divergence == "system"
+    assert system_change.read_chars == len(system_change.row.tools_blob)
+    assert tool_change.outcome == "miss"
+    assert tool_change.divergence == "tools"
+
+
+def test_simulate_prompt_cache_ttl_expiry_is_cold() -> None:
+    """Entries older than the TTL cannot be read."""
+    module = _load_prompt_cache_review_module()
+    rows = [
+        _simulation_row(module, timestamp="2026-04-11T11:00:00-07:00", blobs=("m1",), marked=frozenset({0})),
+        _simulation_row(module, timestamp="2026-04-11T13:00:00-07:00", blobs=("m1", "m2"), marked=frozenset({1})),
+    ]
+
+    report = module.simulate_prompt_cache(rows, ttl_seconds=3600)
+
+    assert [outcome.outcome for outcome in report.outcomes] == ["cold", "cold"]
+
+
+def test_simulate_prompt_cache_lookback_window_downgrades_deep_boundaries() -> None:
+    """A matched boundary beyond the lookback window only reads tools+system."""
+    module = _load_prompt_cache_review_module()
+    tail = tuple(f"m{index}" for index in range(2, 27))
+    rows = [
+        _simulation_row(module, timestamp="2026-04-11T11:00:00-07:00", blobs=("m1",), marked=frozenset({0})),
+        _simulation_row(
+            module,
+            timestamp="2026-04-11T11:05:00-07:00",
+            blobs=("m1", *tail),
+            marked=frozenset({len(tail)}),
+        ),
+    ]
+
+    report = module.simulate_prompt_cache(rows, lookback_blocks=20)
+
+    second = report.outcomes[1]
+    assert second.outcome == "system_hit"
+    assert second.read_chars == len(second.row.tools_blob) + len(second.row.system_prompt)
 
 
 def test_bootstrap_probe_environment_resolves_relative_adc_path(

@@ -30,11 +30,13 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_path  # noqa: E402
-from mindroom.vertex_claude_prompt_cache import (  # noqa: E402  # noqa: E402
-    _copy_messages_with_vertex_prompt_cache_breakpoint,
-    install_vertex_claude_prompt_cache_hook,
+from mindroom.claude_prompt_cache import (  # noqa: E402
+    _MESSAGE_RUNG_COUNT,
+    _mark_message_cache_rungs,
+    _prompt_cache_control,
+    install_claude_prompt_cache_hook,
 )
+from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_path  # noqa: E402
 
 DEFAULT_AGENT_DB = "mindroom_dev"
 SQLITE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -70,6 +72,13 @@ class RequestRow:
     message_blobs: tuple[str, ...]
     normalized_message_blobs: tuple[str, ...]
     preview: str
+    tools_blob: str = ""
+    cache_enabled: bool = False
+
+    @property
+    def total_prefix_chars(self) -> int:
+        """Character size of the reusable prefix (tools + system + messages)."""
+        return len(self.tools_blob) + len(self.system_prompt) + sum(len(blob) for blob in self.normalized_message_blobs)
 
 
 @dataclass(frozen=True)
@@ -131,6 +140,25 @@ class SessionReview:
     message_count_trace: tuple[int, ...]
     latest_timestamp: datetime
     latest_preview: str
+
+
+@dataclass(frozen=True)
+class CacheSimulationOutcome:
+    """Simulated provider-cache outcome for one logged request."""
+
+    row: RequestRow
+    outcome: str
+    divergence: str | None
+    read_chars: int
+
+
+@dataclass(frozen=True)
+class CacheSimulationReport:
+    """Aggregated provider-cache simulation over one set of logged requests."""
+
+    ttl_seconds: int
+    lookback_blocks: int
+    outcomes: tuple[CacheSimulationOutcome, ...]
 
 
 @dataclass(frozen=True)
@@ -208,6 +236,23 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=8,
         help="How many recent sessions to print when --session is not set. Default: 8",
+    )
+    parser.add_argument(
+        "--no-simulate",
+        action="store_true",
+        help="Skip the TTL-aware provider-cache simulation section.",
+    )
+    parser.add_argument(
+        "--ttl-minutes",
+        type=int,
+        default=60,
+        help="Cache entry TTL assumed by the simulation. Default: 60",
+    )
+    parser.add_argument(
+        "--lookback-blocks",
+        type=int,
+        default=20,
+        help="Provider cache-lookup window in content blocks. Default: 20",
     )
     parser.add_argument(
         "--probe-live",
@@ -294,6 +339,16 @@ def main() -> None:
         requested_session=args.session,
         top=args.top,
     )
+
+    if not args.no_simulate:
+        print()
+        print_cache_simulation(
+            simulate_prompt_cache(
+                rows,
+                ttl_seconds=args.ttl_minutes * 60,
+                lookback_blocks=args.lookback_blocks,
+            ),
+        )
 
 
 def resolve_storage_root(explicit_root: Path | None) -> Path:
@@ -467,7 +522,10 @@ def parse_request_row(payload: object) -> RequestRow | None:
     )
     session_id_raw = payload_dict.get("session_id")
     room_id_raw = payload_dict.get("room_id")
-    agent_name_raw = payload_dict.get("agent_name")
+    # The request logger writes "agent_id"; accept "agent_name" for older logs.
+    agent_name_raw = payload_dict.get("agent_id") or payload_dict.get("agent_name")
+    tools_raw = payload_dict.get("tools")
+    model_params_dict = object_dict(model_params)
     return RequestRow(
         timestamp=timestamp,
         session_id=session_id_raw if isinstance(session_id_raw, str) else None,
@@ -479,6 +537,8 @@ def parse_request_row(payload: object) -> RequestRow | None:
         message_blobs=message_blobs,
         normalized_message_blobs=normalized_message_blobs,
         preview=preview or "<no preview>",
+        tools_blob=stable_json(tools_raw) if isinstance(tools_raw, list) and tools_raw else "",
+        cache_enabled=model_params_dict is not None and model_params_dict.get("cache_system_prompt") is True,
     )
 
 
@@ -497,7 +557,7 @@ def build_provider_message_blobs_from_messages(
     model_id: str,
     model_params: object,
     *,
-    apply_vertex_cache_breakpoint: bool = True,
+    apply_cache_ladder: bool = True,
 ) -> tuple[tuple[str, ...], tuple[str, ...], str]:
     """Build raw and normalized provider message blobs from parsed messages."""
     preview = ""
@@ -507,11 +567,12 @@ def build_provider_message_blobs_from_messages(
             break
 
     if is_claude_request(model_id):
-        if apply_vertex_cache_breakpoint:
-            prompt_messages = apply_vertex_cache_breakpoint_if_needed(prompt_messages, model_id, model_params)
-        else:
-            prompt_messages = [message.model_copy(deep=True) for message in prompt_messages]
+        prompt_messages = [message.model_copy(deep=True) for message in prompt_messages]
         chat_messages, _ = format_messages(prompt_messages, compress_tool_results=True)
+        if apply_cache_ladder:
+            cache_control = ladder_cache_control(model_params)
+            if cache_control is not None:
+                chat_messages, _ = _mark_message_cache_rungs(chat_messages, cache_control, _MESSAGE_RUNG_COUNT)
         raw_blobs = tuple(stable_json(message) for message in chat_messages)
         normalized_blobs = tuple(stable_json(strip_cache_control(message)) for message in chat_messages)
         return raw_blobs, normalized_blobs, preview
@@ -545,21 +606,12 @@ def parse_logged_messages(messages_raw: object) -> list[Message]:
     return parsed_messages
 
 
-def apply_vertex_cache_breakpoint_if_needed(
-    messages: list[Message],
-    model_id: str,
-    model_params: object,
-) -> list[Message]:
-    """Apply the MindRoom Vertex cache breakpoint when the model settings require it."""
+def ladder_cache_control(model_params: object) -> dict[str, str] | None:
+    """Return the ladder cache_control for logged model params, or None when caching is off."""
     model_params_dict = object_dict(model_params)
     if model_params_dict is None or model_params_dict.get("cache_system_prompt") is not True:
-        return [message.model_copy(deep=True) for message in messages]
-    model = VertexAIClaude(
-        id=model_id,
-        cache_system_prompt=True,
-        extended_cache_time=model_params_dict.get("extended_cache_time") is True,
-    )
-    return _copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
+        return None
+    return _prompt_cache_control(extended_cache_time=model_params_dict.get("extended_cache_time") is True)
 
 
 def is_claude_request(model_id: str) -> bool:
@@ -702,6 +754,181 @@ def current_extends_previous_raw(previous_row: RequestRow, current_row: RequestR
     if len(previous_row.message_blobs) > len(current_row.message_blobs):
         return False
     return previous_row.message_blobs == current_row.message_blobs[: len(previous_row.message_blobs)]
+
+
+def parsed_blob(blob: str) -> object:
+    """Parse one serialized message blob back into JSON, or None on failure."""
+    with suppress(json.JSONDecodeError):
+        return json.loads(blob)
+    return None
+
+
+def message_rung_indexes(row: RequestRow) -> tuple[int, ...]:
+    """Return the message indexes whose raw blobs carry a cache_control marker."""
+    indexes: list[int] = []
+    for index, blob in enumerate(row.message_blobs):
+        if '"cache_control"' not in blob:
+            continue
+        parsed = object_dict(parsed_blob(blob))
+        content = parsed.get("content") if parsed is not None else None
+        if isinstance(content, list) and any(
+            block_dict is not None and block_dict.get("cache_control")
+            for block_dict in (object_dict(block) for block in content)
+        ):
+            indexes.append(index)
+    return tuple(indexes)
+
+
+def message_block_count(blob: str) -> int:
+    """Approximate the provider content-block count of one message blob."""
+    parsed = object_dict(parsed_blob(blob))
+    content = parsed.get("content") if parsed is not None else None
+    if isinstance(content, list):
+        return max(1, len(content))
+    return 1
+
+
+def simulate_prompt_cache(  # noqa: C901, PLR0912, PLR0915
+    rows: list[RequestRow],
+    *,
+    ttl_seconds: int = 3600,
+    lookback_blocks: int = 20,
+) -> CacheSimulationReport:
+    """Simulate provider prompt-cache behavior across all logged Claude requests.
+
+    Unlike the per-session adjacent-pair review, this models what the provider
+    cache actually does: every cache-enabled request writes entries at its
+    boundaries (tools array, system prompt, and the message rungs marked in
+    the raw blobs), and a later request in the same (agent, model) stream
+    reads the deepest entry whose prefix bytes match exactly, provided the
+    entry is younger than the TTL and, for message boundaries, within the
+    provider's content-block lookback window of the request's newest rung.
+    Character counts stand in for tokens; the reuse ratio is the signal, not
+    the absolute numbers.
+    """
+    streams: dict[tuple[str, str], list[RequestRow]] = defaultdict(list)
+    for row in rows:
+        if is_claude_request(row.model_id):
+            streams[(row.agent_name, row.model_id)].append(row)
+
+    rungs_cache: dict[int, tuple[int, ...]] = {}
+    blocks_cache: dict[int, tuple[int, ...]] = {}
+
+    def rungs(row: RequestRow) -> tuple[int, ...]:
+        key = id(row)
+        if key not in rungs_cache:
+            rungs_cache[key] = message_rung_indexes(row)
+        return rungs_cache[key]
+
+    def block_counts(row: RequestRow) -> tuple[int, ...]:
+        key = id(row)
+        if key not in blocks_cache:
+            blocks_cache[key] = tuple(message_block_count(blob) for blob in row.message_blobs)
+        return blocks_cache[key]
+
+    outcomes: list[CacheSimulationOutcome] = []
+    for stream_rows in streams.values():
+        stream_rows.sort(key=lambda row: row.timestamp)
+        for index, row in enumerate(stream_rows):
+            if not row.cache_enabled:
+                outcomes.append(CacheSimulationOutcome(row=row, outcome="uncached", divergence=None, read_chars=0))
+                continue
+            candidates = [
+                previous
+                for previous in stream_rows[:index]
+                if previous.cache_enabled and (row.timestamp - previous.timestamp).total_seconds() <= ttl_seconds
+            ]
+            if not candidates:
+                outcomes.append(CacheSimulationOutcome(row=row, outcome="cold", divergence=None, read_chars=0))
+                continue
+
+            row_rungs = rungs(row)
+            row_last_rung = row_rungs[-1] if row_rungs else None
+            head_chars = len(row.tools_blob) + len(row.system_prompt)
+            best_read = 0
+            best_outcome = "miss"
+            deepest_divergence: tuple[int, str] = (-1, "tools")
+            for previous in candidates:
+                if previous.tools_blob != row.tools_blob:
+                    deepest_divergence = max(deepest_divergence, (0, "tools"))
+                    continue
+                if previous.system_prompt != row.system_prompt:
+                    if row.tools_blob and len(row.tools_blob) > best_read:
+                        best_read, best_outcome = len(row.tools_blob), "tools_hit"
+                    deepest_divergence = max(deepest_divergence, (1, "system"))
+                    continue
+                if head_chars > best_read:
+                    best_read, best_outcome = head_chars, "system_hit"
+                usable_rung = None
+                for rung in rungs(previous):
+                    if rung >= len(row.normalized_message_blobs):
+                        break
+                    if previous.normalized_message_blobs[: rung + 1] == row.normalized_message_blobs[: rung + 1]:
+                        usable_rung = rung
+                shared = min(len(previous.normalized_message_blobs), len(row.normalized_message_blobs))
+                first_diff = next(
+                    (
+                        position
+                        for position in range(shared)
+                        if previous.normalized_message_blobs[position] != row.normalized_message_blobs[position]
+                    ),
+                    shared,
+                )
+                deepest_divergence = max(deepest_divergence, (2 + first_diff, f"history msg[{first_diff}]"))
+                if usable_rung is None:
+                    continue
+                if row_last_rung is not None and usable_rung < row_last_rung:
+                    gap_blocks = sum(block_counts(row)[usable_rung + 1 : row_last_rung + 1])
+                    if gap_blocks > lookback_blocks:
+                        continue
+                read = head_chars + sum(len(blob) for blob in row.normalized_message_blobs[: usable_rung + 1])
+                if read > best_read:
+                    best_read, best_outcome = read, "full_hit"
+            divergence = deepest_divergence[1] if best_outcome != "full_hit" else None
+            outcomes.append(
+                CacheSimulationOutcome(row=row, outcome=best_outcome, divergence=divergence, read_chars=best_read),
+            )
+
+    outcomes.sort(key=lambda outcome: outcome.row.timestamp)
+    return CacheSimulationReport(ttl_seconds=ttl_seconds, lookback_blocks=lookback_blocks, outcomes=tuple(outcomes))
+
+
+def print_cache_simulation(report: CacheSimulationReport) -> None:
+    """Print the provider-cache simulation summary."""
+    outcomes = report.outcomes
+    if not outcomes:
+        print("CACHE SIMULATION: no Claude requests found.")
+        return
+    counts = Counter(outcome.outcome for outcome in outcomes)
+    total_chars = sum(outcome.row.total_prefix_chars for outcome in outcomes)
+    read_chars = sum(outcome.read_chars for outcome in outcomes)
+    print(
+        f"CACHE SIMULATION (Claude requests, TTL={report.ttl_seconds // 60}m, "
+        f"lookback~{report.lookback_blocks} blocks)",
+    )
+    outcome_order = ("full_hit", "system_hit", "tools_hit", "miss", "cold", "uncached")
+    outcome_summary = " ".join(f"{name}={counts[name]}" for name in outcome_order if counts[name])
+    print(f"  requests={len(outcomes)} {outcome_summary}")
+    if total_chars:
+        print(f"  estimated prefix reuse: {read_chars / total_chars * 100:.1f}% of prompt chars")
+    divergences = Counter(outcome.divergence.split(" ")[0] for outcome in outcomes if outcome.divergence)
+    if divergences:
+        formatted = ", ".join(f"{name}={count}" for name, count in divergences.most_common())
+        print(f"  divergence causes (deepest-matching candidate): {formatted}")
+    worst = sorted(
+        (outcome for outcome in outcomes if outcome.outcome in ("miss", "system_hit", "tools_hit")),
+        key=lambda outcome: outcome.row.total_prefix_chars - outcome.read_chars,
+        reverse=True,
+    )[:5]
+    if worst:
+        print("  largest reprocessed prefixes:")
+    for outcome in worst:
+        wasted = outcome.row.total_prefix_chars - outcome.read_chars
+        print(
+            f"    {outcome.row.timestamp:%m-%d %H:%M:%S} agent={outcome.row.agent_name} "
+            f"model={outcome.row.model_id} {outcome.outcome} diverged at {outcome.divergence}: "
+            f"~{wasted:,} chars reprocessed",
+        )
 
 
 def run_live_probe(
@@ -858,7 +1085,7 @@ def run_live_probe_sequence(
             request_messages,
             model_id=spec.model_id,
             model_params=model_params,
-            apply_vertex_cache_breakpoint=install_hook,
+            apply_cache_ladder=install_hook,
         )
         response = model.invoke(messages=request_messages, assistant_message=Message(role="assistant"))
         response_text = extract_model_response_text(response)
@@ -907,7 +1134,7 @@ def build_probe_model(
         base_url=spec.base_url,
     )
     if install_hook:
-        install_vertex_claude_prompt_cache_hook(model)
+        install_claude_prompt_cache_hook(model)
     return model
 
 
@@ -940,14 +1167,14 @@ def build_probe_request_row(
     *,
     model_id: str,
     model_params: object,
-    apply_vertex_cache_breakpoint: bool,
+    apply_cache_ladder: bool,
 ) -> RequestRow:
     """Build a request row for a synthetic live probe turn."""
     message_blobs, normalized_message_blobs, preview = build_provider_message_blobs_from_messages(
         messages,
         model_id,
         model_params,
-        apply_vertex_cache_breakpoint=apply_vertex_cache_breakpoint,
+        apply_cache_ladder=apply_cache_ladder,
     )
     system_prompt = "\n".join(extract_text(message.content) for message in messages if message.role == "system")
     return RequestRow(

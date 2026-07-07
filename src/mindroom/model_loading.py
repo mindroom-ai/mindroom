@@ -16,6 +16,7 @@ from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
 
+from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.codex_model import CodexResponses, derive_codex_prompt_cache_key, normalize_codex_model_id
 from mindroom.constants import RuntimePaths, runtime_env_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
@@ -31,7 +32,6 @@ from mindroom.runtime_env_policy import (
 )
 from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
-from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
 
 if TYPE_CHECKING:
     from agno.models.base import Model
@@ -298,5 +298,5 @@ def get_model_instance(
             debug_config=config.debug,
             default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
         )
-    install_vertex_claude_prompt_cache_hook(model)
+    install_claude_prompt_cache_hook(model)
     return model

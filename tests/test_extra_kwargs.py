@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from agno.models.anthropic import Claude
 from agno.models.aws.claude import Claude as AwsBedrockClaude
 from agno.models.azure import AzureOpenAI
 from agno.models.llama_cpp import LlamaCpp
@@ -15,16 +16,19 @@ from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
 
+from mindroom.claude_prompt_cache import (
+    _MAX_CACHE_MARKERS,
+    _count_cache_markers,
+    _prompt_cache_control,
+    _request_kwargs_with_prompt_cache_ladder,
+    install_claude_prompt_cache_hook,
+)
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.model_loading import get_model_instance
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _strip_vertex_claude_tool_strict
-from mindroom.vertex_claude_prompt_cache import (
-    _copy_messages_with_vertex_prompt_cache_breakpoint,
-    install_vertex_claude_prompt_cache_hook,
-)
 
 
 def _config_with_runtime_paths(config_data: dict[str, object]) -> tuple[Config, RuntimePaths]:
@@ -600,28 +604,10 @@ def test_azure_openai_provider_uses_endpoint_file_and_canonical_runtime_env() ->
     assert model.api_version != "2023-01-01"
 
 
-def test_vertexai_prompt_cache_breakpoint_marks_last_user_block() -> None:
-    """Vertex Claude requests should cache through the latest user text block."""
-    model = VertexAIClaude(
-        id="claude-sonnet-4-6",
-        project_id="demo-project",
-        region="us-central1",
-        cache_system_prompt=True,
-        extended_cache_time=True,
-    )
-    messages = [
-        Message(role="system", content="System prompt"),
-        Message(role="assistant", content="Earlier reply"),
-        Message(role="user", content=[{"type": "text", "text": "Current turn"}, {"type": "image", "source": "x"}]),
-    ]
-
-    prepared = _copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
-
-    assert messages[-1].content == [{"type": "text", "text": "Current turn"}, {"type": "image", "source": "x"}]
-    assert prepared[-1].content == [
-        {"type": "text", "text": "Current turn"},
-        {"type": "image", "source": "x", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
-    ]
+def test_prompt_cache_control_ttl() -> None:
+    """Extended cache time selects the 1h TTL; the default omits the ttl field."""
+    assert _prompt_cache_control() == {"type": "ephemeral"}
+    assert _prompt_cache_control(extended_cache_time=True) == {"type": "ephemeral", "ttl": "1h"}
 
 
 def _strict_tool_definition() -> dict[str, object]:
@@ -712,68 +698,87 @@ def _tool_turn_messages(tool_content: str | list[dict[str, object]]) -> list[Mes
     ]
 
 
-def test_vertex_prompt_cache_does_not_poison_plain_string_tool_content() -> None:
-    """The hook must leave plain-string tool payloads untouched."""
-    model = _vertex_claude_model()
-    messages = _tool_turn_messages("ok")
+def test_prompt_cache_ladder_marks_newest_tool_result_prior_user_and_tools() -> None:
+    """The ladder should mark the newest tool result, a prior boundary, and the last tool."""
+    chat_messages, _system_message = format_messages(_tool_turn_messages("ok"), compress_tool_results=True)
+    request_kwargs = {
+        "system": [{"type": "text", "text": "System prompt", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+        "tools": [{"name": "demo_tool", "input_schema": {"type": "object"}}],
+        "messages": chat_messages,
+    }
 
-    prepared = _copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
-
-    assert prepared[-1].content == "ok"
-    assert messages[-1].content == "ok"
-    assert "cache_control" not in str(prepared[-1].content)
-
-
-def test_vertex_prompt_cache_does_not_mark_list_shaped_tool_content() -> None:
-    """The hook must not add cache markers inside tool-result blocks."""
-    model = _vertex_claude_model()
-    messages = _tool_turn_messages([{"type": "tool_result", "content": "ok"}])
-
-    prepared = _copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
-
-    assert isinstance(prepared[-1].content, list)
-    for block in prepared[-1].content:
-        assert "cache_control" not in block
-
-
-def test_vertex_prompt_cache_wire_format_has_no_cache_control_in_tool_results() -> None:
-    """Agno wire tool_result payloads must not contain cache-control text."""
-    model = _vertex_claude_model()
-    prepared = _copy_messages_with_vertex_prompt_cache_breakpoint(_tool_turn_messages("ok"), model)
-
-    chat_messages, _system_message = format_messages(prepared, compress_tool_results=True)
-
-    for message in chat_messages:
-        for block in message.get("content") or []:
-            if isinstance(block, dict) and block.get("type") == "tool_result":
-                assert "cache_control" not in str(block.get("content") or "")
-
-
-def test_vertex_prompt_cache_marks_prior_user_when_tail_is_tool() -> None:
-    """A trailing tool message should move the cache marker to the prior user turn."""
-    model = _vertex_claude_model()
-    prepared = _copy_messages_with_vertex_prompt_cache_breakpoint(_tool_turn_messages("ok"), model)
-
-    user_message = prepared[1]
-    assert isinstance(user_message.content, list)
-    assert user_message.content[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
-    count = sum(
-        1
-        for message in prepared
-        for block in (message.content if isinstance(message.content, list) else [])
-        if isinstance(block, dict) and "cache_control" in block
+    prepared = _request_kwargs_with_prompt_cache_ladder(
+        request_kwargs,
+        _prompt_cache_control(extended_cache_time=True),
     )
-    assert count == 1
+
+    expected_cache_control = {"type": "ephemeral", "ttl": "1h"}
+    tool_result_block = prepared["messages"][-1]["content"][0]
+    assert tool_result_block["type"] == "tool_result"
+    assert tool_result_block["cache_control"] == expected_cache_control
+    assert prepared["messages"][0]["content"][-1]["cache_control"] == expected_cache_control
+    assert prepared["tools"][-1]["cache_control"] == expected_cache_control
+    assert _count_cache_markers(prepared) == _MAX_CACHE_MARKERS
 
 
-def test_vertexai_prompt_cache_hook_preserves_tool_payloads_with_disabled_compression() -> None:
-    """The hooked Vertex Claude invoke path must cache the prior user block without rewriting tool results."""
-    model = _vertex_claude_model()
-    captured_requests: list[list[dict[str, object]]] = []
+def test_prompt_cache_ladder_respects_marker_budget() -> None:
+    """A request already at the marker limit must pass through unchanged."""
+    marked_block = {"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}}
+    request_kwargs = {
+        "system": [dict(marked_block)],
+        "tools": [dict(marked_block)],
+        "messages": [
+            {"role": "user", "content": [dict(marked_block)]},
+            {"role": "user", "content": [dict(marked_block), {"type": "text", "text": "tail"}]},
+        ],
+    }
+
+    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+
+    assert prepared is request_kwargs
+    assert _count_cache_markers(prepared) == _MAX_CACHE_MARKERS
+
+
+def test_prompt_cache_ladder_skips_unmarkable_blocks() -> None:
+    """Thinking blocks, SDK objects, and empty text must not carry cache markers."""
+    request_kwargs = {
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "earlier turn"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "reasoning", "signature": "sig"},
+                    {"type": "text", "text": ""},
+                ],
+            },
+        ],
+    }
+
+    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+
+    assert "cache_control" not in str(prepared["messages"][1])
+    assert prepared["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_prompt_cache_ladder_does_not_mutate_input() -> None:
+    """The ladder must copy structures rather than mutating the caller's request."""
+    messages = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+    tools = [{"name": "demo_tool", "input_schema": {"type": "object"}}]
+    request_kwargs = {"messages": messages, "tools": tools}
+
+    _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+
+    assert messages == [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+    assert tools == [{"name": "demo_tool", "input_schema": {"type": "object"}}]
+
+
+def _install_fake_sync_client(model: VertexAIClaude | Claude) -> list[dict[str, object]]:
+    """Install a capturing fake SDK client on a Claude model; return the capture list."""
+    captured_kwargs: list[dict[str, object]] = []
 
     class _FakeMessagesAPI:
-        def create(self, *, messages: list[dict[str, object]], **_kwargs: object) -> object:
-            captured_requests.append(messages)
+        def create(self, **kwargs: object) -> object:
+            captured_kwargs.append(kwargs)
             return object()
 
     class _FakeClient:
@@ -784,43 +789,83 @@ def test_vertexai_prompt_cache_hook_preserves_tool_payloads_with_disabled_compre
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {}
     vars(model)["_has_beta_features"] = lambda **_kwargs: False
     vars(model)["_parse_provider_response"] = lambda *_args, **_kwargs: ModelResponse(content="ok")
-    install_vertex_claude_prompt_cache_hook(model)
+    return captured_kwargs
+
+
+def test_prompt_cache_hook_applies_ladder_at_wire_level_without_rewriting_messages() -> None:
+    """The hooked client must add ladder markers without touching Agno messages or tool payloads."""
+    model = _vertex_claude_model()
+    captured_kwargs = _install_fake_sync_client(model)
+    install_claude_prompt_cache_hook(model)
 
     messages = _tool_turn_messages("ok")
-    tool_before = messages[-1].to_dict()
+    tool_before = messages[3].to_dict()
 
     response = model.response(messages=messages, compression_manager=None)
 
     assert response.content == "ok"
     assert messages[3].to_dict() == tool_before
-    assert messages[-1].role == "assistant"
-    assert len(captured_requests) == 1
-    assert captured_requests[0][0]["content"] == [
-        {"type": "text", "text": "Use the tool", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+    assert len(captured_kwargs) == 1
+    wire_messages = captured_kwargs[0]["messages"]
+    expected_cache_control = {"type": "ephemeral", "ttl": "1h"}
+    assert wire_messages[-1]["content"][0]["type"] == "tool_result"
+    assert wire_messages[-1]["content"][0]["cache_control"] == expected_cache_control
+    assert wire_messages[-1]["content"][0]["content"] == "ok"
+    assert wire_messages[0]["content"] == [
+        {"type": "text", "text": "Use the tool", "cache_control": expected_cache_control},
     ]
-    assert captured_requests[0][-1]["content"] == [
-        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+
+
+def test_prompt_cache_hook_inert_when_cache_disabled() -> None:
+    """Disabling cache_system_prompt must leave the wire request unmarked."""
+    model = _vertex_claude_model()
+    model.cache_system_prompt = False
+    captured_kwargs = _install_fake_sync_client(model)
+    install_claude_prompt_cache_hook(model)
+
+    model.response(messages=_tool_turn_messages("ok"), compression_manager=None)
+
+    wire_messages = captured_kwargs[0]["messages"]
+    assert _count_cache_markers({"messages": list(wire_messages)}) == 0
+
+
+def test_prompt_cache_hook_applies_to_direct_anthropic_claude() -> None:
+    """The hook must ladder direct Anthropic Claude models, not only Vertex."""
+    model = Claude(id="claude-sonnet-4-6", api_key="test-key", cache_system_prompt=True)
+    captured_kwargs = _install_fake_sync_client(model)
+    install_claude_prompt_cache_hook(model)
+
+    model.response(
+        messages=[Message(role="system", content="System prompt"), Message(role="user", content="Current turn")],
+        compression_manager=None,
+    )
+
+    wire_messages = captured_kwargs[0]["messages"]
+    assert wire_messages[0]["content"] == [
+        {"type": "text", "text": "Current turn", "cache_control": {"type": "ephemeral"}},
     ]
 
 
 @pytest.mark.asyncio
-async def test_vertexai_prompt_cache_hook_rewrites_messages_before_invoke() -> None:
-    """The Vertex Claude hook should pass cache-marked messages to Agno."""
-    model = VertexAIClaude(
-        id="claude-sonnet-4-6",
-        project_id="demo-project",
-        region="us-central1",
-        cache_system_prompt=True,
-    )
-    captured_messages: list[Message] = []
+async def test_prompt_cache_hook_wraps_async_client() -> None:
+    """The async client path must apply the ladder as well."""
+    model = _vertex_claude_model()
+    captured_kwargs: list[dict[str, object]] = []
 
-    async def fake_ainvoke(*args: object, **kwargs: object) -> object:
-        del args
-        captured_messages.extend(kwargs["messages"])
-        return object()
+    class _FakeAsyncMessagesAPI:
+        async def create(self, **kwargs: object) -> object:
+            captured_kwargs.append(kwargs)
+            return object()
 
-    vars(model)["ainvoke"] = fake_ainvoke
-    install_vertex_claude_prompt_cache_hook(model)
+    class _FakeAsyncClient:
+        def __init__(self) -> None:
+            self.messages = _FakeAsyncMessagesAPI()
+
+    vars(model)["get_async_client"] = lambda: _FakeAsyncClient()
+    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {}
+    vars(model)["_has_beta_features"] = lambda **_kwargs: False
+    vars(model)["_parse_provider_response"] = lambda *_args, **_kwargs: ModelResponse(content="ok")
+    install_claude_prompt_cache_hook(model)
 
     await model.ainvoke(
         messages=[
@@ -830,8 +875,8 @@ async def test_vertexai_prompt_cache_hook_rewrites_messages_before_invoke() -> N
         assistant_message=Message(role="assistant"),
     )
 
-    assert captured_messages[-1].content == [
-        {"type": "text", "text": "Current turn", "cache_control": {"type": "ephemeral"}},
+    assert captured_kwargs[0]["messages"][-1]["content"] == [
+        {"type": "text", "text": "Current turn", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
     ]
 
 
