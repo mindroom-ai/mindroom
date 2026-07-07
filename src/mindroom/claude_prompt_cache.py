@@ -177,12 +177,18 @@ def _mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[objec
 
     Deferred tools may not carry ``cache_control`` (the API returns a 400) and
     sort after all non-deferred tools, so the marker position is byte-stable.
+    The injected search tool is never marked either (whether the API accepts a
+    marker on that server-tool type is unverified), so an all-deferred tool
+    surface sends no tools marker; the tools prefix still caches under the
+    system-prompt breakpoint because tools render ahead of system.
     """
     if not isinstance(tools, list) or not tools:
         return tools, 0
     for tool_index in range(len(tools) - 1, -1, -1):
         tool_dict = _as_dict(tools[tool_index])
-        if tool_dict is not None and tool_dict.get("defer_loading") is True:
+        if tool_dict is not None and (
+            tool_dict.get("defer_loading") is True or tool_dict.get("type") == _TOOL_SEARCH_TOOL_TYPE
+        ):
             continue
         if tool_dict is None or _block_has_cache_marker(tool_dict):
             return tools, 0

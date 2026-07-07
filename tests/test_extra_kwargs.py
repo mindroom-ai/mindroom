@@ -988,8 +988,13 @@ def test_deferred_tool_search_tags_tools_and_injects_search_tool() -> None:
         assert "cache_control" not in deferred_tool
 
 
-def test_deferred_tool_search_marker_lands_on_search_tool_when_all_tools_deferred() -> None:
-    """With every authored tool deferred, the search tool is the only markable prefix tail."""
+def test_deferred_tool_search_skips_tools_marker_when_all_tools_deferred() -> None:
+    """With every authored tool deferred, no tools marker is emitted at all.
+
+    Whether the API accepts cache_control on the search-tool type is
+    unverified, and deferred tools may never carry one, so the ladder leaves
+    the tools array unmarked and relies on the system-prompt breakpoint.
+    """
     model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=True)
     captured_kwargs = _install_fake_sync_client(model)
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("alpha_tool")]}
@@ -999,9 +1004,8 @@ def test_deferred_tool_search_marker_lands_on_search_tool_when_all_tools_deferre
 
     wire_tools = captured_kwargs[0]["tools"]
     assert wire_tools[0]["name"] == "tool_search_tool_regex"
-    assert wire_tools[0]["cache_control"] == {"type": "ephemeral"}
     assert wire_tools[1]["defer_loading"] is True
-    assert "cache_control" not in wire_tools[1]
+    assert _count_cache_markers({"tools": list(wire_tools)}) == 0
 
 
 def test_deferred_tool_search_applies_without_cache_ladder_when_cache_disabled() -> None:
