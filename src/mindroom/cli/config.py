@@ -414,7 +414,7 @@ def config_init(
     no_input: bool = typer.Option(
         False,
         "--no-input",
-        help="Never prompt: keep existing files unchanged and use the default provider preset.",
+        help="Never prompt: keep an existing config.yaml unchanged, create anything missing, and use the default provider preset.",
     ),
 ) -> None:
     """Create a starter config.yaml with example agents and models.
@@ -449,27 +449,27 @@ def config_init(
         replace_env_file=replace_env_file,
     )
 
-    content = _full_template(
-        selected_preset,
-        target.parent,
-        storage_root=storage_root,
-        use_storage_env_placeholder=use_storage_env_placeholder,
-        matrix_server=selected_matrix_server,
-    )
-
-    # `connect` can run before `config init`, when no config exists to patch.
-    # In that order, connect persists the owner MXID in .env so init can render
-    # authorization defaults without leaving pairing placeholders behind.
-    if owner_user_id := _config_init_owner_user_id(target):
-        from mindroom.cli.owner import replace_owner_placeholders_in_text  # noqa: PLC0415
-
-        content = replace_owner_placeholders_in_text(content, owner_user_id)
-
-    if print_config:
-        console.print(_yaml_syntax(content, line_numbers=False, word_wrap=False), soft_wrap=True)
-        return
-
     if not keep_existing_config:
+        content = _full_template(
+            selected_preset,
+            target.parent,
+            storage_root=storage_root,
+            use_storage_env_placeholder=use_storage_env_placeholder,
+            matrix_server=selected_matrix_server,
+        )
+
+        # `connect` can run before `config init`, when no config exists to patch.
+        # In that order, connect persists the owner MXID in .env so init can render
+        # authorization defaults without leaving pairing placeholders behind.
+        if owner_user_id := _config_init_owner_user_id(target):
+            from mindroom.cli.owner import replace_owner_placeholders_in_text  # noqa: PLC0415
+
+            content = replace_owner_placeholders_in_text(content, owner_user_id)
+
+        if print_config:
+            console.print(_yaml_syntax(content, line_numbers=False, word_wrap=False), soft_wrap=True)
+            return
+
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 

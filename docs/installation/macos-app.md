@@ -26,8 +26,10 @@ The menu lists the setup steps in order under **Set Up Hosted MindRoom**.
 Each step shows a dialog when it finishes, confirming what happened and what to do next.
 
 1. **Install MindRoom Runtime** installs the `mindroom` CLI with the bundled `uv`.
-2. **Initialize Hosted Config** writes `config.yaml` and `.env` to `~/.mindroom`, preconfigured for the hosted `chat.mindroom.chat` Matrix server. Re-running this step keeps existing files unchanged and recreates any missing ones.
-3. **Open chat.mindroom.chat** opens the hosted MindRoom chat in your browser. Sign in to create your hosted account, then click the Local MindRoom icon in the left sidebar to generate a pair code.
+2. **Initialize Hosted Config** writes `config.yaml` and `.env` to `~/.mindroom`, preconfigured for the hosted `chat.mindroom.chat` Matrix server.
+   Re-running this step keeps existing files unchanged and recreates any missing ones.
+3. **Open chat.mindroom.chat** opens the hosted MindRoom chat in your browser.
+   Sign in to create your hosted account, then click the Local MindRoom icon in the left sidebar to generate a pair code.
 4. **Pair Hosted MindRoom...** links this Mac to your hosted account using the pair code.
 5. **Install/Ensure Service** installs and starts the MindRoom background service via launchd.
 
