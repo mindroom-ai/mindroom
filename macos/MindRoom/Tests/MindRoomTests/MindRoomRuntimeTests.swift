@@ -62,7 +62,10 @@ final class MindRoomRuntimeTests: XCTestCase {
         )
 
         let command = runtime.command(for: .initializeHostedConfig)
-        XCTAssertEqual(command.arguments, ["mindroom", "config", "init", "--matrix-server", "mindroom.chat", "--no-input"])
+        XCTAssertEqual(
+            command.arguments,
+            ["mindroom", "config", "init", "--path", "/Users/example/.mindroom/config.yaml", "--matrix-server", "mindroom.chat", "--no-input"]
+        )
     }
 
     func testSelfHostedConfigCommandRunsWithoutPrompts() {
@@ -73,6 +76,9 @@ final class MindRoomRuntimeTests: XCTestCase {
         )
 
         let command = runtime.command(for: .initializeSelfHostedConfig)
-        XCTAssertEqual(command.arguments, ["mindroom", "config", "init", "--matrix-server", "self-hosted", "--no-input"])
+        XCTAssertEqual(
+            command.arguments,
+            ["mindroom", "config", "init", "--path", "/Users/example/.mindroom/config.yaml", "--matrix-server", "self-hosted", "--no-input"]
+        )
     }
 }

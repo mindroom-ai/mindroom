@@ -215,7 +215,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         alert.alertStyle = .warning
         alert.messageText = "\(command.title) Failed"
         let output = result.condensedOutput
-        alert.informativeText = output.isEmpty ? "The command exited with code \(result.exitCode)." : output
+        var informativeText = output.isEmpty ? "The command exited with code \(result.exitCode)." : output
+        if output.contains("No such option") {
+            informativeText += "\n\nThe installed MindRoom runtime is older than this app. Use Update MindRoom Runtime, then try again."
+        }
+        alert.informativeText = informativeText
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Copy Output")
         if alert.runModal() == .alertSecondButtonReturn {

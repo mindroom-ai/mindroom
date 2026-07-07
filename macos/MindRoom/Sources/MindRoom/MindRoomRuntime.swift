@@ -76,9 +76,11 @@ struct MindRoomRuntime {
         case .serviceStatus:
             return mindroomCommand(arguments: ["service", "status", "--logs", "0"])
         case .initializeHostedConfig:
-            return mindroomCommand(arguments: ["config", "init", "--matrix-server", "mindroom.chat", "--no-input"])
+            // Pin --path so config init targets ~/.mindroom regardless of the app's
+            // working directory; without it, a CWD-local config.yaml wins the search.
+            return mindroomCommand(arguments: ["config", "init", "--path", configPathURL.path, "--matrix-server", "mindroom.chat", "--no-input"])
         case .initializeSelfHostedConfig:
-            return mindroomCommand(arguments: ["config", "init", "--matrix-server", "self-hosted", "--no-input"])
+            return mindroomCommand(arguments: ["config", "init", "--path", configPathURL.path, "--matrix-server", "self-hosted", "--no-input"])
         case .localStackSetup:
             return mindroomCommand(arguments: ["local-stack-setup"])
         case let .pairHosted(pairCode):
