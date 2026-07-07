@@ -57,6 +57,7 @@ class JsonlParseStats:
     concatenated_document_count: int
     decode_error_count: int
     unparseable_row_count: int = 0
+    unparseable_row_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -454,6 +455,7 @@ def load_request_rows(
     concatenated_document_count = 0
     decode_error_count = 0
     unparseable_row_count = 0
+    unparseable_row_errors: list[str] = []
 
     with jsonl_path.open(encoding="utf-8", errors="replace") as handle:
         for _line_count, raw_line in enumerate(handle, start=1):
@@ -476,8 +478,10 @@ def load_request_rows(
                 parsed_documents += 1
                 document_count += 1
                 position = end_position
-                if not _append_request_row(rows, payload, session_id_filter):
+                row_error = _append_request_row(rows, payload, session_id_filter)
+                if row_error is not None:
                     unparseable_row_count += 1
+                    unparseable_row_errors.append(row_error)
             if parsed_documents > 1:
                 concatenated_document_count += parsed_documents - 1
 
@@ -488,21 +492,28 @@ def load_request_rows(
         concatenated_document_count=concatenated_document_count,
         decode_error_count=decode_error_count,
         unparseable_row_count=unparseable_row_count,
+        unparseable_row_errors=tuple(dict.fromkeys(unparseable_row_errors))[:3],
     )
 
 
-def _append_request_row(rows: list[RequestRow], payload: object, session_id_filter: str | None) -> bool:
-    """Parse one logged payload into ``rows``; return False when it cannot be rebuilt."""
+def _append_request_row(rows: list[RequestRow], payload: object, session_id_filter: str | None) -> str | None:
+    """Parse one logged payload into ``rows``; return an error summary when it cannot be rebuilt.
+
+    Corrupt logged rows can fail anywhere in the provider-format rebuild (JSON
+    decoding, pydantic validation, Agno's message formatting), and one bad row
+    must never kill an offline review, so this deliberately catches everything
+    and reports the failure instead.
+    """
     payload_dict = object_dict(payload)
     if session_id_filter is not None and (payload_dict is None or payload_dict.get("session_id") != session_id_filter):
-        return True
+        return None
     try:
-        row = parse_request_row(payload_dict if payload_dict is not None else payload)
-    except Exception:
-        return False
+        row = parse_request_row(payload)
+    except Exception as error:
+        return f"{type(error).__name__}: {error}"
     if row is not None:
         rows.append(row)
-    return True
+    return None
 
 
 def parse_request_row(payload: object) -> RequestRow | None:
@@ -1360,6 +1371,8 @@ def print_overview(
     )
     if parse_stats.unparseable_row_count:
         print(f"Skipped {parse_stats.unparseable_row_count} rows whose logged payload could not be rebuilt.")
+        for row_error in parse_stats.unparseable_row_errors:
+            print(f"  {shorten_text(row_error, 140)}")
     print(f"Rows with session_id: {len(rows) - missing_session_rows}; rows without session_id: {missing_session_rows}")
     print("Comparisons ignore moving `cache_control` markers and focus on the reusable content prefix.")
 

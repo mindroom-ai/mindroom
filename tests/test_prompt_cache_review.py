@@ -84,6 +84,8 @@ def test_load_request_rows_skips_rows_with_corrupt_tool_call_arguments(tmp_path:
     assert rows[0].preview == "hello"
     assert stats.unparseable_row_count == 1
     assert stats.decode_error_count == 0
+    assert len(stats.unparseable_row_errors) == 1
+    assert "JSONDecodeError" in stats.unparseable_row_errors[0]
 
 
 def test_build_session_reviews_detects_prefix_extension_with_two_appended_messages() -> None:
