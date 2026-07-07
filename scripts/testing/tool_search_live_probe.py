@@ -90,6 +90,14 @@ def install_probe_hooks(model: Claude) -> None:
     install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({DEFERRED_TOOL_NAME}))
 
 
+class _DryRunStop(BaseException):
+    """Raised by the dry-run fake client once the wire request has been captured.
+
+    Derives from BaseException so Agno's invoke error handling (which wraps any
+    Exception in ModelProviderError and retries) lets it propagate untouched.
+    """
+
+
 def run_dry_run(model_id: str) -> int:
     """Print the prepared wire request via a capturing fake client; no network."""
     captured: list[dict[str, Any]] = []
@@ -97,8 +105,7 @@ def run_dry_run(model_id: str) -> int:
     class _FakeMessagesAPI:
         def create(self, **kwargs: Any) -> Any:  # noqa: ANN401
             captured.append(kwargs)
-            message = "dry-run: no live response"
-            raise SystemExit(message)
+            raise _DryRunStop
 
     class _FakeClient:
         def __init__(self) -> None:
@@ -109,9 +116,12 @@ def run_dry_run(model_id: str) -> int:
     install_probe_hooks(model)
 
     messages = [Message(role="system", content=_SYSTEM_PROMPT), Message(role="user", content="probe")]
-    with contextlib.suppress(SystemExit):
+    with contextlib.suppress(_DryRunStop):
         model.response(messages=messages, tools=_PROBE_TOOLS, compression_manager=None)
 
+    if not captured:
+        print("FAIL: the hooked client was never invoked; the request never reached the fake SDK client.")
+        return 1
     wire = captured[0]
     tool_summary = [
         {
@@ -125,13 +135,25 @@ def run_dry_run(model_id: str) -> int:
     print("Prepared wire request (dry run):")
     print(json.dumps(tool_summary, indent=2))
     system_blocks = wire.get("system") or []
-    print(f"system markers: {sum(1 for block in system_blocks if block.get('cache_control'))}")
+    system_markers = sum(1 for block in system_blocks if block.get("cache_control"))
+    print(f"system markers: {system_markers}")
+    tool_names = [tool.get("name") for tool in wire["tools"]]
     deferred = [tool["name"] for tool in wire["tools"] if tool.get("defer_loading") is True]
-    ok = (
-        wire["tools"][0].get("type") == "tool_search_tool_regex_20251119"
-        and deferred == [DEFERRED_TOOL_NAME]
-        and not any(tool.get("cache_control") for tool in wire["tools"] if tool.get("defer_loading"))
-    )
+    checks = {
+        "tool order (search tool, non-deferred, deferred)": tool_names
+        == ["tool_search_tool_regex", "echo", DEFERRED_TOOL_NAME],
+        "search tool type": wire["tools"][0].get("type") == "tool_search_tool_regex_20251119",
+        "only get_weather deferred": deferred == [DEFERRED_TOOL_NAME],
+        "no marker on deferred tools": not any(
+            tool.get("cache_control") for tool in wire["tools"] if tool.get("defer_loading")
+        ),
+        "ladder marker on last non-deferred tool": wire["tools"][1].get("cache_control") is not None,
+        "exactly one system marker": system_markers == 1,
+    }
+    for check_name, check_ok in checks.items():
+        if not check_ok:
+            print(f"UNEXPECTED: {check_name}")
+    ok = all(checks.values())
     print(f"dry-run wire shape: {'OK' if ok else 'UNEXPECTED'}")
     return 0 if ok else 1
 
@@ -191,7 +213,7 @@ def run_live(model_id: str, api_key: str) -> int:
 def main() -> int:
     """Parse arguments and run the requested probe mode."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-id", default="claude-sonnet-4-6", help="Claude model id to probe.")
+    parser.add_argument("--model-id", default="claude-sonnet-5", help="Claude model id to probe.")
     parser.add_argument("--dry-run", action="store_true", help="Print the prepared wire request without any API call.")
     args = parser.parse_args()
 
