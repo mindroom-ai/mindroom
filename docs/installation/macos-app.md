@@ -22,14 +22,27 @@ Open **MindRoom** from `/Applications` or Spotlight.
 
 ## First Launch
 
-Use **Install MindRoom Runtime** to install the CLI runtime with bundled `uv`.
-Use **Initialize Hosted Config** for the default `chat.mindroom.chat` profile.
-Open `https://chat.mindroom.chat`, click the Local MindRoom icon on the left to generate a local MindRoom pair code, and use **Pair Hosted MindRoom...** in the menu.
-Use **Install/Ensure Service** to run `mindroom service install --no-confirm`.
-Use **Open Dashboard** to open `http://localhost:8765`.
+The menu lists the setup steps in order under **Set Up Hosted MindRoom**.
+Each step shows a dialog when it finishes, confirming what happened and what to do next.
+
+1. **Install MindRoom Runtime** installs the `mindroom` CLI with the bundled `uv`.
+2. **Initialize Hosted Config** writes `config.yaml` and `.env` to `~/.mindroom`, preconfigured for the hosted `chat.mindroom.chat` Matrix server. Re-running this step keeps existing files unchanged.
+3. **Open chat.mindroom.chat** opens the hosted MindRoom chat in your browser. Sign in to create your hosted account, then click the Local MindRoom icon in the left sidebar to generate a pair code.
+4. **Pair Hosted MindRoom...** links this Mac to your hosted account using the pair code.
+5. **Install/Ensure Service** installs and starts the MindRoom background service via launchd.
+
+Then use **Open Dashboard** to open the local dashboard at `http://localhost:8765`.
+
+### Why sign in to chat.mindroom.chat?
+
+`chat.mindroom.chat` is MindRoom's hosted Matrix service.
+Signing in with Apple, Google, or GitHub creates a hosted Matrix account for you on the `mindroom.chat` homeserver, so you do not need to run or configure a homeserver yourself.
+Pairing connects the MindRoom runtime on your Mac to that account: your agents run locally, and the hosted server only relays your Matrix messages.
+If you want to use your own Matrix homeserver instead, use **Initialize Self-Hosted Config** under **Other Setup**.
 
 ## Other Setup Modes
 
+The **Other Setup** submenu holds the non-hosted flows.
 Use **Initialize Self-Hosted Config** when you want to connect to your own Matrix homeserver.
 Use **Run Local Stack Setup** when you want the local Matrix stack flow.
 These actions still write to `~/.mindroom`.
@@ -40,6 +53,20 @@ The menu exposes **Start Service**, **Stop Service**, **Restart Service**, and *
 The service is managed by launchd, so MindRoom keeps running after the menu bar app quits.
 Logs are available through **Open Logs Folder** at `~/Library/Logs/mindroom`.
 Configuration is available through **Open Config Folder** at `~/.mindroom`.
+
+## Troubleshooting
+
+**The dashboard at `http://localhost:8765` does not respond.**
+The dashboard is served by the MindRoom service, so check the status line at the top of the menu.
+If the service is stopped or not installed, **Open Dashboard** offers the matching fix (for example **Start Service**).
+If the service is running but the dashboard still fails, check **Open Logs Folder** for startup errors.
+A common cause is a missing model provider credential in `~/.mindroom/.env` (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`).
+
+**A setup step failed.**
+The failure dialog shows the command output, and **Copy Last Output** in the menu copies the full output for a bug report.
+
+**Pairing fails or the pair code expired.**
+Generate a fresh pair code in `chat.mindroom.chat` (Local MindRoom icon in the left sidebar) and run **Pair Hosted MindRoom...** again.
 
 ## Updates
 

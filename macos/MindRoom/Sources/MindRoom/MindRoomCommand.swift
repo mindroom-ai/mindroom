@@ -52,6 +52,33 @@ enum MindRoomCommand: Equatable {
         }
     }
 
+    var successMessage: String? {
+        switch self {
+        case .installRuntime:
+            return "The MindRoom runtime is installed.\n\nNext: Initialize Hosted Config."
+        case .updateRuntime:
+            return "The MindRoom runtime is up to date."
+        case .installService:
+            return "The MindRoom background service is installed and running.\n\nNext: Open Dashboard."
+        case .startService:
+            return "The MindRoom service was started."
+        case .stopService:
+            return "The MindRoom service was stopped."
+        case .restartService:
+            return "The MindRoom service was restarted."
+        case .initializeHostedConfig:
+            return "Config files are ready in ~/.mindroom.\n\nNext: use Open chat.mindroom.chat, sign in to create your hosted account, click the Local MindRoom icon in the sidebar to generate a pair code, then use Pair Hosted MindRoom..."
+        case .initializeSelfHostedConfig:
+            return "Config files are ready in ~/.mindroom.\n\nEdit config.yaml and .env to point at your Matrix homeserver and model provider, then use Install/Ensure Service."
+        case .localStackSetup:
+            return "Local stack setup finished."
+        case .pairHosted:
+            return "Paired with hosted MindRoom.\n\nNext: Install/Ensure Service, then Open Dashboard."
+        case .serviceStatus, .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
+            return nil
+        }
+    }
+
     var runtimeAction: MindRoomRuntimeAction? {
         switch self {
         case .installRuntime:

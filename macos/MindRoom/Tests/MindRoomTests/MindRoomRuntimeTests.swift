@@ -54,7 +54,7 @@ final class MindRoomRuntimeTests: XCTestCase {
         XCTAssertEqual(command.arguments, ["mindroom", "service", "install", "--no-confirm"])
     }
 
-    func testHostedConfigCommandUsesPublicProfile() {
+    func testHostedConfigCommandUsesPublicProfileWithoutPrompts() {
         let runtime = MindRoomRuntime(
             homeURL: URL(fileURLWithPath: "/Users/example", isDirectory: true),
             bundleURL: URL(fileURLWithPath: "/Applications/MindRoom.app", isDirectory: true),
@@ -62,6 +62,17 @@ final class MindRoomRuntimeTests: XCTestCase {
         )
 
         let command = runtime.command(for: .initializeHostedConfig)
-        XCTAssertEqual(command.arguments, ["mindroom", "config", "init", "--matrix-server", "mindroom.chat"])
+        XCTAssertEqual(command.arguments, ["mindroom", "config", "init", "--matrix-server", "mindroom.chat", "--no-input"])
+    }
+
+    func testSelfHostedConfigCommandRunsWithoutPrompts() {
+        let runtime = MindRoomRuntime(
+            homeURL: URL(fileURLWithPath: "/Users/example", isDirectory: true),
+            bundleURL: URL(fileURLWithPath: "/Applications/MindRoom.app", isDirectory: true),
+            environment: ["PATH": "/usr/bin:/bin"]
+        )
+
+        let command = runtime.command(for: .initializeSelfHostedConfig)
+        XCTAssertEqual(command.arguments, ["mindroom", "config", "init", "--matrix-server", "self-hosted", "--no-input"])
     }
 }
