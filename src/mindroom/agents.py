@@ -21,6 +21,7 @@ from mindroom import agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
+from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookRegistry
@@ -129,6 +130,9 @@ class _AgentToolAssembly:
     loaded_tools: tuple[str, ...]
     hidden_toolkits: frozenset[str]
     selected_dynamic_tools: tuple[str, ...]
+    # Wire-level function names to send with defer_loading on the native
+    # Anthropic tool-search path; empty on the homegrown dynamic-tools path.
+    deferred_wire_tool_names: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -1099,7 +1103,19 @@ def _resolve_agent_dynamic_tool_selection(
     config: Config,
     session_id: str | None,
     delegation_depth: int,
+    native_deferred_tools: bool,
 ) -> VisibleToolSurface:
+    if native_deferred_tools:
+        # Anthropic server-side tool search: attach every authored deferred
+        # tool so discovered calls execute, skip the dynamic-tools manager,
+        # and never touch session loaded-tool state.
+        return visible_tool_surface(
+            agent_name=agent_name,
+            config=config,
+            loaded_tools=_visible_deferred_tool_names(config, agent_name),
+            delegation_depth=delegation_depth,
+            enable_dynamic_tools_manager=False,
+        )
     return resolve_dynamic_tool_selection(
         agent_name=agent_name,
         config=config,
@@ -1199,6 +1215,7 @@ def _assemble_agent_toolkits(
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     dynamic_tool_continuation: bool,
+    native_deferred_tools: bool,
 ) -> _AgentToolAssembly:
     """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
     plugins = _load_agent_plugins(config, runtime_paths)
@@ -1220,24 +1237,21 @@ def _assemble_agent_toolkits(
         config=config,
         session_id=session_id,
         delegation_depth=delegation_depth,
+        native_deferred_tools=native_deferred_tools,
     )
     hidden_toolkits = _context_hidden_toolkits(execution_identity)
-    resolved_tool_configs = {
-        entry.name: entry.tool_config_overrides for entry in dynamic_tool_selection.runtime_tool_configs
-    }
+    resolved_tool_configs = {entry.name: entry for entry in dynamic_tool_selection.runtime_tool_configs}
     if disable_runtime_capabilities:
         resolved_tool_configs = {}
     elif disabled_tool_names:
         resolved_tool_configs = {
-            tool_name: overrides
-            for tool_name, overrides in resolved_tool_configs.items()
+            tool_name: entry
+            for tool_name, entry in resolved_tool_configs.items()
             if tool_name not in disabled_tool_names
         }
     if hidden_toolkits:
         resolved_tool_configs = {
-            tool_name: overrides
-            for tool_name, overrides in resolved_tool_configs.items()
-            if tool_name not in hidden_toolkits
+            tool_name: entry for tool_name, entry in resolved_tool_configs.items() if tool_name not in hidden_toolkits
         }
     loaded_tools = (
         ()
@@ -1258,7 +1272,8 @@ def _assemble_agent_toolkits(
         )
     entity_view = config.resolve_entity(agent_name)
     tools: list[Toolkit] = []
-    for tool_name in resolved_tool_configs:
+    deferred_wire_tool_names: set[str] = set()
+    for tool_name, tool_entry in resolved_tool_configs.items():
         try:
             runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
             with _agent_create_timing("toolkit_build.one", tool_name=tool_name):
@@ -1270,7 +1285,7 @@ def _assemble_agent_toolkits(
                     worker_tools=worker_tools,
                     runtime_overrides=runtime_overrides,
                     agent_runtime=agent_runtime,
-                    tool_config_overrides=resolved_tool_configs.get(tool_name),
+                    tool_config_overrides=tool_entry.tool_config_overrides,
                     session_id=session_id,
                     execution_identity=execution_identity,
                     delegation_depth=delegation_depth,
@@ -1284,7 +1299,13 @@ def _assemble_agent_toolkits(
                     execution_identity=execution_identity,
                 )
             if toolkit:
-                tools.append(prepend_tool_hook_bridge(toolkit, tool_hook_bridge))
+                toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
+                tools.append(toolkit)
+                # initial deferred tools were always loaded, so they stay in
+                # the rendered prompt prefix as plain non-deferred tools.
+                if native_deferred_tools and tool_entry.defer and not tool_entry.initial:
+                    deferred_wire_tool_names.update(toolkit.get_functions())
+                    deferred_wire_tool_names.update(toolkit.get_async_functions())
         except (ValueError, ImportError) as exc:
             logger.warning(
                 "Could not load tool for agent construction",
@@ -1297,6 +1318,7 @@ def _assemble_agent_toolkits(
         loaded_tools=loaded_tools,
         hidden_toolkits=hidden_toolkits,
         selected_dynamic_tools=dynamic_tool_selection.loaded_tools,
+        deferred_wire_tool_names=frozenset(deferred_wire_tool_names),
     )
 
 
@@ -1392,6 +1414,7 @@ def _build_agent_instructions(
     disable_runtime_capabilities: bool,
     hidden_toolkits: frozenset[str],
     loaded_tools: tuple[str, ...],
+    native_deferred_tools: bool,
 ) -> list[str]:
     """Accumulate the configured and runtime instruction blocks for one agent instance."""
     instructions = list(agent_config.instructions)
@@ -1399,12 +1422,15 @@ def _build_agent_instructions(
     if skills and skills.get_skill_names():
         instructions.append(config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"))
 
+    # Anthropic's server-side tool search replaces the load_tool catalog and
+    # loaded-state prompt blocks, so the native path emits neither.
+    enable_dynamic_tools_manager = session_id is not None and not native_deferred_tools
     dynamic_tooling_block = None
     if not disable_runtime_capabilities:
         dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
             config,
             agent_name,
-            enable_dynamic_tools_manager=session_id is not None,
+            enable_dynamic_tools_manager=enable_dynamic_tools_manager,
             hidden_tool_names=hidden_toolkits,
         )
     if dynamic_tooling_block is not None:
@@ -1435,7 +1461,7 @@ def _build_agent_instructions(
             config,
             agent_name,
             loaded_tools=loaded_tools,
-            enable_dynamic_tools_manager=session_id is not None,
+            enable_dynamic_tools_manager=enable_dynamic_tools_manager,
             hidden_tool_names=hidden_toolkits,
         )
     if dynamic_tooling_state_suffix is not None:
@@ -1582,6 +1608,14 @@ def create_agent(
         ensure_default_agent_workspaces(config, runtime_paths.storage_root)
     defaults = config.defaults
 
+    # Gate on this agent's resolved runtime model (thread overrides and team
+    # members resolve per agent), not on any surrounding team's model.
+    runtime_model_config = config.models.get(active_model_name or agent_config.model or "default")
+    native_deferred_tools = runtime_model_config is not None and native_tool_search_supported(
+        runtime_model_config.provider,
+        runtime_model_config.id,
+    )
+
     tool_assembly = _assemble_agent_toolkits(
         agent_name,
         config,
@@ -1595,6 +1629,7 @@ def create_agent(
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
         dynamic_tool_continuation=dynamic_tool_continuation,
+        native_deferred_tools=native_deferred_tools,
     )
     storage = _open_agent_session_storage(
         agent_name,
@@ -1626,11 +1661,14 @@ def create_agent(
 
     # Create agent with defaults applied
     model = _load_agent_model_instance(config, runtime_paths, role_context.model_name, execution_identity)
+    if tool_assembly.deferred_wire_tool_names:
+        install_claude_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
     logger.info(
         "create_agent",
         agent=agent_name,
         model_class=model.__class__.__name__,
         model_id=model.id,
+        native_deferred_tools=sorted(tool_assembly.deferred_wire_tool_names),
     )
 
     workspace = agent_runtime.workspace
@@ -1655,6 +1693,7 @@ def create_agent(
         disable_runtime_capabilities=disable_runtime_capabilities,
         hidden_toolkits=tool_assembly.hidden_toolkits,
         loaded_tools=tool_assembly.loaded_tools,
+        native_deferred_tools=native_deferred_tools,
     )
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)

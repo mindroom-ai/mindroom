@@ -12,17 +12,22 @@ from agno.models.aws.claude import Claude as AwsBedrockClaude
 from agno.models.azure import AzureOpenAI
 from agno.models.llama_cpp import LlamaCpp
 from agno.models.message import Message
+from agno.models.openai import OpenAIChat
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
+from anthropic.types import Message as AnthropicMessage
 
 from mindroom.claude_prompt_cache import (
+    _DEFERRED_TOOL_NAMES_ATTR,
     _MAX_CACHE_MARKERS,
     _count_cache_markers,
     _prompt_cache_control,
     _PromptCacheClientProxy,
     _request_kwargs_with_prompt_cache_ladder,
+    install_claude_deferred_tool_search,
     install_claude_prompt_cache_hook,
+    native_tool_search_supported,
 )
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -922,6 +927,190 @@ async def test_prompt_cache_hook_wraps_async_client() -> None:
     assert captured_kwargs[0]["messages"][-1]["content"] == [
         {"type": "text", "text": "Current turn", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
     ]
+
+
+def _wire_tool(name: str) -> dict[str, object]:
+    return {"name": name, "description": f"{name} description", "input_schema": {"type": "object"}}
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "expected"),
+    [
+        ("anthropic", "claude-opus-4-8", True),
+        ("anthropic", "claude-sonnet-5", True),
+        ("Anthropic", "claude-sonnet-4-5-20250929", True),
+        ("vertexai_claude", "claude-haiku-4-5@20251001", True),
+        ("anthropic", "claude-opus-4-1", False),
+        ("openai", "gpt-5.5", False),
+        ("bedrock_claude", "anthropic.claude-opus-4-8", False),
+    ],
+)
+def test_native_tool_search_supported_gating(provider: str, model_id: str, *, expected: bool) -> None:
+    """Only Claude-family providers with tool-search-capable model ids qualify."""
+    assert native_tool_search_supported(provider, model_id) is expected
+
+
+def test_deferred_tool_search_tags_tools_and_injects_search_tool() -> None:
+    """Deferred tools ship tagged and name-sorted after the search tool and non-deferred tools."""
+    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=True)
+    captured_kwargs = _install_fake_sync_client(model)
+    tools = [_wire_tool("always_tool"), _wire_tool("zeta_tool"), _wire_tool("alpha_tool")]
+    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [dict(tool) for tool in tools]}
+    install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"zeta_tool", "alpha_tool"}))
+
+    model.response(messages=[Message(role="user", content="hi")], compression_manager=None)
+
+    wire_tools = captured_kwargs[0]["tools"]
+    assert [tool.get("name") for tool in wire_tools] == [
+        "tool_search_tool_regex",
+        "always_tool",
+        "alpha_tool",
+        "zeta_tool",
+    ]
+    assert wire_tools[0] == {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"}
+    # The cache-ladder marker must land on the last non-deferred tool: deferred
+    # tools may not carry cache_control (the API rejects the request).
+    assert wire_tools[1]["cache_control"] == {"type": "ephemeral"}
+    for deferred_tool in wire_tools[2:]:
+        assert deferred_tool["defer_loading"] is True
+        assert "cache_control" not in deferred_tool
+
+
+def test_deferred_tool_search_marker_lands_on_search_tool_when_all_tools_deferred() -> None:
+    """With every authored tool deferred, the search tool is the only markable prefix tail."""
+    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=True)
+    captured_kwargs = _install_fake_sync_client(model)
+    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("alpha_tool")]}
+    install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"alpha_tool"}))
+
+    model.response(messages=[Message(role="user", content="hi")], compression_manager=None)
+
+    wire_tools = captured_kwargs[0]["tools"]
+    assert wire_tools[0]["name"] == "tool_search_tool_regex"
+    assert wire_tools[0]["cache_control"] == {"type": "ephemeral"}
+    assert wire_tools[1]["defer_loading"] is True
+    assert "cache_control" not in wire_tools[1]
+
+
+def test_deferred_tool_search_applies_without_cache_ladder_when_cache_disabled() -> None:
+    """Deferred tagging is independent of the cache ladder gate."""
+    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    captured_kwargs = _install_fake_sync_client(model)
+    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("alpha_tool")]}
+    install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"alpha_tool"}))
+
+    model.response(messages=[Message(role="user", content="hi")], compression_manager=None)
+
+    request = captured_kwargs[0]
+    wire_tools = request["tools"]
+    assert wire_tools[0]["name"] == "tool_search_tool_regex"
+    assert wire_tools[1]["defer_loading"] is True
+    assert _count_cache_markers({"tools": list(wire_tools), "messages": list(request["messages"])}) == 0
+
+
+def test_deferred_tool_search_leaves_requests_without_matching_tools_unchanged() -> None:
+    """The search tool is injected only when a deferred tool is present in the request."""
+    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=True)
+    captured_kwargs = _install_fake_sync_client(model)
+    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("always_tool")]}
+    install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"other_tool"}))
+
+    model.response(messages=[Message(role="user", content="hi")], compression_manager=None)
+
+    assert [tool["name"] for tool in captured_kwargs[0]["tools"]] == ["always_tool"]
+
+
+def test_install_claude_deferred_tool_search_ignores_non_claude_and_empty_sets() -> None:
+    """The installer is a no-op for non-Claude models and empty name sets."""
+    llama = LlamaCpp(id="gemma", api_key="test-key", base_url="http://llama.local/v1")
+    install_claude_deferred_tool_search(llama, deferred_tool_names=frozenset({"alpha_tool"}))
+    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(llama)
+
+    claude = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    install_claude_deferred_tool_search(claude, deferred_tool_names=frozenset())
+    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(claude)
+
+
+_SERVER_TOOL_USE_BLOCK = {
+    "type": "server_tool_use",
+    "id": "srvtoolu_01ABC",
+    "name": "tool_search_tool_regex",
+    "input": {"pattern": "weather"},
+}
+_TOOL_SEARCH_RESULT_BLOCK = {
+    "type": "tool_search_tool_result",
+    "tool_use_id": "srvtoolu_01ABC",
+    "content": {
+        "type": "tool_search_tool_search_result",
+        "tool_references": [{"type": "tool_reference", "tool_name": "get_weather"}],
+    },
+}
+
+
+def _anthropic_response(content: list[dict[str, object]]) -> AnthropicMessage:
+    return AnthropicMessage.model_validate(
+        {
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": content,
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    )
+
+
+def test_server_tool_search_blocks_round_trip_in_assistant_history() -> None:
+    """server_tool_use and tool_search_tool_result replay verbatim, in order, exactly once."""
+    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    first_response = _anthropic_response(
+        [
+            {"type": "text", "text": "I'll search for a weather tool."},
+            _SERVER_TOOL_USE_BLOCK,
+            _TOOL_SEARCH_RESULT_BLOCK,
+        ],
+    )
+    responses = iter([first_response, _anthropic_response([{"type": "text", "text": "Done."}])])
+    captured_kwargs: list[dict[str, object]] = []
+
+    class _FakeMessagesAPI:
+        def create(self, **kwargs: object) -> object:
+            captured_kwargs.append(kwargs)
+            return next(responses)
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.messages = _FakeMessagesAPI()
+
+    vars(model)["get_client"] = lambda: _FakeClient()
+
+    messages = [Message(role="user", content="What is the weather?")]
+    model.response(messages=messages, compression_manager=None)
+    model.response(messages=messages, compression_manager=None)
+
+    assistant_wires = [message for message in captured_kwargs[1]["messages"] if message["role"] == "assistant"]
+    assert len(assistant_wires) == 1
+    replayed_dict_blocks = [block for block in assistant_wires[0]["content"] if isinstance(block, dict)]
+    assert replayed_dict_blocks == [
+        first_response.content[1].model_dump(),
+        first_response.content[2].model_dump(),
+    ]
+
+
+def test_server_tool_blocks_replay_to_non_anthropic_provider_without_crashing() -> None:
+    """History stored on the native path must stay replayable after a `!model` provider switch."""
+    assistant = Message(
+        role="assistant",
+        content="I'll search for a weather tool.",
+        provider_data={"server_tool_blocks": [dict(_SERVER_TOOL_USE_BLOCK), dict(_TOOL_SEARCH_RESULT_BLOCK)]},
+    )
+
+    formatted = OpenAIChat(id="gpt-5.5", api_key="test-key")._format_message(assistant)
+
+    assert formatted["role"] == "assistant"
+    assert formatted["content"] == "I'll search for a weather tool."
 
 
 def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatch: pytest.MonkeyPatch) -> None:

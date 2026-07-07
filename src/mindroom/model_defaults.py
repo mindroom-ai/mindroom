@@ -31,6 +31,7 @@ __all__ = (
     "LOCAL_QWEN_CONTEXT_WINDOW",
     "LOCAL_QWEN_PRESET_NAME",
     "MEMORY_OLLAMA_LLM",
+    "NATIVE_TOOL_SEARCH_MODEL_ID_PREFIXES",
     "OLLAMA_GEMMA",
     "OLLAMA_HOST_DEFAULT",
     "OLLAMA_QWEN",
@@ -71,6 +72,20 @@ class ModelPreset:
 _ANTHROPIC_OPUS = "claude-opus-4-8"
 _ANTHROPIC_SONNET = "claude-sonnet-5"
 _ANTHROPIC_HAIKU = "claude-haiku-4-5"
+# Claude families that accept tool_search_tool_regex_20251119; prefix match so
+# dated snapshots (both `-YYYYMMDD` and Vertex `@YYYYMMDD` suffixes) qualify.
+NATIVE_TOOL_SEARCH_MODEL_ID_PREFIXES = (
+    "claude-fable-5",
+    "claude-haiku-4-5",
+    "claude-mythos-5",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-6",
+    "claude-sonnet-5",
+)
 AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-4-8"
 _AWS_BEDROCK_CLAUDE_SONNET = "global.anthropic.claude-sonnet-5"
 _AWS_BEDROCK_CLAUDE_HAIKU = "global.anthropic.claude-haiku-4-5"
