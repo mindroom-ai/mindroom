@@ -26,6 +26,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
+from mindroom.openai_tool_search import install_openai_deferred_tool_search, openai_native_tool_search_supported
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
@@ -131,7 +132,8 @@ class _AgentToolAssembly:
     hidden_toolkits: frozenset[str]
     selected_dynamic_tools: tuple[str, ...]
     # Wire-level function names to send with defer_loading on the native
-    # Anthropic tool-search path; empty on the homegrown dynamic-tools path.
+    # server-side tool-search path (Anthropic and OpenAI Responses); empty on
+    # the homegrown dynamic-tools path.
     deferred_wire_tool_names: frozenset[str]
 
 
@@ -1106,7 +1108,7 @@ def _resolve_agent_dynamic_tool_selection(
     native_deferred_tools: bool,
 ) -> VisibleToolSurface:
     if native_deferred_tools:
-        # Anthropic server-side tool search: attach every authored deferred
+        # Native server-side tool search: attach every authored deferred
         # tool so discovered calls execute, skip the dynamic-tools manager,
         # and never touch session loaded-tool state.
         return visible_tool_surface(
@@ -1422,7 +1424,7 @@ def _build_agent_instructions(
     if skills and skills.get_skill_names():
         instructions.append(config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"))
 
-    # Anthropic's server-side tool search replaces the load_tool catalog and
+    # Native server-side tool search replaces the load_tool catalog and
     # loaded-state prompt blocks, so the native path emits neither.
     enable_dynamic_tools_manager = session_id is not None and not native_deferred_tools
     dynamic_tooling_block = None
@@ -1611,9 +1613,9 @@ def create_agent(
     # Gate on this agent's resolved runtime model (thread overrides and team
     # members resolve per agent), not on any surrounding team's model.
     runtime_model_config = config.models.get(active_model_name or agent_config.model or "default")
-    native_deferred_tools = runtime_model_config is not None and native_tool_search_supported(
-        runtime_model_config.provider,
-        runtime_model_config.id,
+    native_deferred_tools = runtime_model_config is not None and (
+        native_tool_search_supported(runtime_model_config.provider, runtime_model_config.id)
+        or openai_native_tool_search_supported(runtime_model_config.provider, runtime_model_config.id)
     )
 
     tool_assembly = _assemble_agent_toolkits(
@@ -1662,7 +1664,9 @@ def create_agent(
     # Create agent with defaults applied
     model = _load_agent_model_instance(config, runtime_paths, role_context.model_name, execution_identity)
     if tool_assembly.deferred_wire_tool_names:
+        # Each installer no-ops on the other provider family's model class.
         install_claude_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
+        install_openai_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
     logger.info(
         "create_agent",
         agent=agent_name,

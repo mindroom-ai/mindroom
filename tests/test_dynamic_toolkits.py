@@ -22,6 +22,7 @@ from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.mcp.toolkit import bind_mcp_server_manager
+from mindroom.openai_tool_search import _DEFERRED_TOOL_NAMES_ATTR as _OPENAI_DEFERRED_TOOL_NAMES_ATTR
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import (
@@ -837,15 +838,44 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machi
     assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
 
 
+def test_codex_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(tmp_path: Path) -> None:
+    """OpenAI-native tool search attaches all deferred toolkits and drops the manager machinery."""
+    raw = _base_config_data()
+    raw["models"]["codex_gpt"] = {"provider": "codex", "id": "gpt-5.5"}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "codex_gpt"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"sleep": {"defer": True}},
+        {"calculator": {"defer": True, "initial": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+
+    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    assert "sleep" in function_names
+    assert "add" in function_names
+    assert "load_tool" not in function_names
+    # Only defer&&!initial tools go on the wire deferred; initial stays plain.
+    assert vars(agent.model)[_OPENAI_DEFERRED_TOOL_NAMES_ATTR] == frozenset({"sleep"})
+    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
+    assert not any(block.startswith("## Dynamic Tools") for block in agent.instructions)
+    assert not any("Dynamic tools currently loaded" in block for block in agent.instructions)
+    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+
+
 @pytest.mark.parametrize(
     ("provider", "model_id"),
     [
         ("openai", "gpt-4o-mini"),
+        # The plain openai provider speaks Chat Completions, where tool search
+        # is unavailable even on ids the Codex provider would gate native.
+        ("openai", "gpt-5.5"),
+        ("codex", "gpt-4.1"),
         ("anthropic", "claude-opus-4-1"),
     ],
 )
 def test_unsupported_models_keep_homegrown_dynamic_tools_path(tmp_path: Path, provider: str, model_id: str) -> None:
-    """Non-Claude providers and unsupported Claude models keep the load_tool machinery."""
+    """Unsupported providers and models keep the load_tool machinery."""
     raw = _base_config_data()
     raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
@@ -861,6 +891,7 @@ def test_unsupported_models_keep_homegrown_dynamic_tools_path(tmp_path: Path, pr
     assert "sleep" not in function_names
     assert "add" in function_names
     assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
+    assert _OPENAI_DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
     assert any(block.startswith("## Dynamic Tools") for block in agent.instructions)
     assert any("Dynamic tools currently loaded" in block for block in agent.instructions)
 

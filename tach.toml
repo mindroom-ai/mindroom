@@ -131,6 +131,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.identity",
     "mindroom.model_loading",
+    "mindroom.openai_tool_search",
     "mindroom.prompt_templates",
     "mindroom.runtime_resolution",
     "mindroom.timing",

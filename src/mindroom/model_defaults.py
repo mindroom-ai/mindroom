@@ -43,6 +43,7 @@ __all__ = (
     "OPENAI_IMAGE",
     "OPENAI_REALTIME",
     "OPENAI_REALTIME_TRANSCRIPTION",
+    "OPENAI_TOOL_SEARCH_MIN_GPT_VERSION",
     "OPENAI_TRANSCRIPTION",
     "OPENAI_TTS",
     "SAAS_MODEL_PRESETS",
@@ -92,6 +93,10 @@ _AWS_BEDROCK_CLAUDE_SONNET = "global.anthropic.claude-sonnet-5"
 _AWS_BEDROCK_CLAUDE_HAIKU = "global.anthropic.claude-haiku-4-5"
 CODEX_GPT = "gpt-5.5"
 _OPENAI_GPT = "gpt-5.5"
+# OpenAI's Responses-API tool_search tool requires gpt-5.4 or newer; gating
+# parses the gpt-N.M version from the model id so new releases take the
+# native tool-search path without a list update.
+OPENAI_TOOL_SEARCH_MIN_GPT_VERSION = (5, 4)
 OPENAI_GPT_MINI = "gpt-5.4-mini"
 OPENAI_GPT_NANO = "gpt-5.4-nano"
 AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"

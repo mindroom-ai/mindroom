@@ -12,9 +12,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import pytest
 from agno.metrics import MessageMetrics
+from agno.models.anthropic import Claude
 from agno.models.message import Message
+from agno.models.openai import OpenAIChat
 from agno.models.response import ModelResponse
+from agno.utils.models.claude import format_messages as claude_format_messages
+from openai.types.responses import Response, ResponseOutputItemDoneEvent, ResponseTextDeltaEvent
 
 from mindroom import codex_model
 from mindroom.codex_model import _CODEX_BASE_URL, CodexResponses, _borrow_codex_key
@@ -22,12 +27,15 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.model_loading import get_model_instance
+from mindroom.openai_tool_search import (
+    _DEFERRED_TOOL_NAMES_ATTR,
+    install_openai_deferred_tool_search,
+    openai_native_tool_search_supported,
+)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-
-    import pytest
 
 
 def _jwt_with_exp(exp: int) -> str:
@@ -381,3 +389,242 @@ def test_get_model_instance_supports_codex_provider(tmp_path: Path) -> None:
     assert model.store is False
     assert model.get_request_params()["instructions"] == "Custom Codex default instructions."
     assert str(model.base_url) == _CODEX_BASE_URL
+
+
+_TOOL_SEARCH_CALL_ITEM = {
+    "id": "ts_1",
+    "type": "tool_search_call",
+    "call_id": "tsc_1",
+    "arguments": {"queries": ["weather"]},
+    "execution": "server",
+    "status": "completed",
+}
+_TOOL_SEARCH_OUTPUT_ITEM = {
+    "id": "tso_1",
+    "type": "tool_search_output",
+    "call_id": "tsc_1",
+    "execution": "server",
+    "status": "completed",
+    "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}],
+}
+
+
+def _agno_tool(name: str) -> dict[str, object]:
+    return {
+        "type": "function",
+        "function": {"name": name, "description": f"{name} description", "parameters": {"type": "object"}},
+    }
+
+
+def _output_item_done_event(item: dict[str, object], index: int) -> ResponseOutputItemDoneEvent:
+    return ResponseOutputItemDoneEvent.model_validate(
+        {"type": "response.output_item.done", "item": item, "output_index": index, "sequence_number": index},
+    )
+
+
+class _FakeResponsesAPI:
+    def __init__(self, event_batches: list[list[object]]) -> None:
+        self._event_batches = iter(event_batches)
+        self.captured_kwargs: list[dict[str, object]] = []
+
+    def create(self, **kwargs: object) -> Iterator[object]:
+        self.captured_kwargs.append(kwargs)
+        return iter(next(self._event_batches))
+
+
+class _FakeCodexClient:
+    def __init__(self, event_batches: list[list[object]]) -> None:
+        self.responses = _FakeResponsesAPI(event_batches)
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "expected"),
+    [
+        ("codex", "gpt-5.5", True),
+        ("openai_codex", "openai-codex/gpt-5.5", True),
+        ("codex", "gpt-5.5-codex", True),
+        ("codex", "gpt-5.4-mini", True),
+        # Unreleased GPT versions default to the native path (version gating).
+        ("codex", "gpt-6.0", True),
+        ("codex", "gpt-5-codex", False),
+        ("codex", "gpt-4.1", False),
+        ("codex", "codex-mini-latest", False),
+        # The plain openai provider speaks Chat Completions; tool search is Responses-only.
+        ("openai", "gpt-5.5", False),
+        ("anthropic", "claude-opus-4-8", False),
+    ],
+)
+def test_openai_native_tool_search_supported_gating(provider: str, model_id: str, *, expected: bool) -> None:
+    """Codex-family providers qualify when the model id parses to gpt-5.4 or newer."""
+    assert openai_native_tool_search_supported(provider, model_id) is expected
+
+
+def test_install_openai_deferred_tool_search_ignores_non_responses_models_and_empty_sets() -> None:
+    """The installer is a no-op for non-Responses models and empty name sets."""
+    claude = Claude(id="claude-opus-4-8", api_key="test-key")
+    install_openai_deferred_tool_search(claude, deferred_tool_names=frozenset({"alpha_tool"}))
+    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(claude)
+
+    codex = CodexResponses(id="gpt-5.5")
+    install_openai_deferred_tool_search(codex, deferred_tool_names=frozenset())
+    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(codex)
+
+
+def test_codex_deferred_tool_search_tags_tools_and_injects_search_tool() -> None:
+    """Deferred tools ship tagged and name-sorted after the search tool and non-deferred tools."""
+    model = CodexResponses(id="gpt-5.5")
+    install_openai_deferred_tool_search(model, deferred_tool_names=frozenset({"zeta_tool", "alpha_tool"}))
+
+    request_params = model.get_request_params(
+        tools=[_agno_tool("always_tool"), _agno_tool("zeta_tool"), _agno_tool("alpha_tool")],
+    )
+
+    wire_tools = request_params["tools"]
+    assert wire_tools[0] == {"type": "tool_search"}
+    assert [tool.get("name") for tool in wire_tools] == [None, "always_tool", "alpha_tool", "zeta_tool"]
+    assert "defer_loading" not in wire_tools[1]
+    for deferred_tool in wire_tools[2:]:
+        assert deferred_tool["defer_loading"] is True
+
+
+def test_codex_deferred_tool_search_leaves_requests_without_matching_tools_unchanged() -> None:
+    """The search tool is injected only when a deferred tool is present in the request."""
+    model = CodexResponses(id="gpt-5.5")
+    install_openai_deferred_tool_search(model, deferred_tool_names=frozenset({"other_tool"}))
+
+    request_params = model.get_request_params(tools=[_agno_tool("always_tool")])
+
+    assert [tool["name"] for tool in request_params["tools"]] == ["always_tool"]
+
+
+def test_codex_tool_search_items_round_trip_through_streaming_history() -> None:
+    """tool_search_call and tool_search_output replay verbatim, in order, exactly once."""
+    text_event = ResponseTextDeltaEvent.model_validate(
+        {
+            "type": "response.output_text.delta",
+            "delta": "I found a weather tool.",
+            "content_index": 0,
+            "item_id": "msg_1",
+            "output_index": 2,
+            "sequence_number": 2,
+            "logprobs": [],
+        },
+    )
+    first_batch = [
+        _output_item_done_event(_TOOL_SEARCH_CALL_ITEM, 0),
+        _output_item_done_event(_TOOL_SEARCH_OUTPUT_ITEM, 1),
+        text_event,
+    ]
+    client = _FakeCodexClient([first_batch, []])
+    model = CodexResponses(id="gpt-5.5")
+    vars(model)["get_client"] = lambda: client
+
+    messages = [Message(role="user", content="What is the weather?")]
+    model.response(messages=messages, compression_manager=None)
+    model.response(messages=messages, compression_manager=None)
+
+    expected_items = [
+        _output_item_done_event(_TOOL_SEARCH_CALL_ITEM, 0).item.model_dump(exclude_none=True),
+        _output_item_done_event(_TOOL_SEARCH_OUTPUT_ITEM, 1).item.model_dump(exclude_none=True),
+    ]
+    assert messages[1].provider_data == {"tool_search_items": expected_items}
+    assert client.responses.captured_kwargs[1]["input"] == [
+        {"role": "user", "content": "What is the weather?"},
+        *expected_items,
+        {"role": "assistant", "content": "I found a weather tool."},
+    ]
+
+
+def test_codex_tool_search_items_replay_ahead_of_the_discovered_function_call() -> None:
+    """Captured items are reinserted immediately ahead of the message's replayed function calls."""
+    model = CodexResponses(id="gpt-5.5")
+    assistant = Message(
+        role="assistant",
+        content="",
+        tool_calls=[
+            {
+                "id": "fc_1",
+                "call_id": "call_1",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": "{}"},
+            },
+        ],
+        provider_data={"tool_search_items": [dict(_TOOL_SEARCH_CALL_ITEM), dict(_TOOL_SEARCH_OUTPUT_ITEM)]},
+    )
+    tool_result = Message(role="tool", content="sunny", tool_call_id="fc_1")
+
+    formatted_input = model._format_messages([Message(role="user", content="weather?"), assistant, tool_result])
+
+    assert formatted_input == [
+        {"role": "user", "content": "weather?"},
+        dict(_TOOL_SEARCH_CALL_ITEM),
+        dict(_TOOL_SEARCH_OUTPUT_ITEM),
+        {
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "get_weather",
+            "arguments": "{}",
+            "status": "completed",
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "sunny"},
+    ]
+
+
+def test_codex_parse_provider_response_captures_tool_search_items() -> None:
+    """The non-streaming Response parse stores the search items Agno drops."""
+    model = CodexResponses(id="gpt-5.5")
+    response = Response.model_validate(
+        {
+            "id": "resp_1",
+            "created_at": 1,
+            "model": "gpt-5.5",
+            "object": "response",
+            "output": [dict(_TOOL_SEARCH_CALL_ITEM), dict(_TOOL_SEARCH_OUTPUT_ITEM)],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "error": None,
+            "incomplete_details": None,
+            "instructions": None,
+            "metadata": None,
+            "temperature": None,
+            "top_p": None,
+        },
+    )
+
+    model_response = model._parse_provider_response(response)
+
+    assert model_response.provider_data["tool_search_items"] == [
+        response.output[0].model_dump(exclude_none=True),
+        response.output[1].model_dump(exclude_none=True),
+    ]
+
+
+def test_tool_search_items_replay_to_non_openai_provider_without_crashing() -> None:
+    """History stored on the native path must stay replayable after a `!model` provider switch."""
+    assistant = Message(
+        role="assistant",
+        content="I found a weather tool.",
+        provider_data={"tool_search_items": [dict(_TOOL_SEARCH_CALL_ITEM), dict(_TOOL_SEARCH_OUTPUT_ITEM)]},
+    )
+
+    chat_wire = OpenAIChat(id="gpt-5.5", api_key="test-key")._format_message(assistant)
+    assert chat_wire["role"] == "assistant"
+    assert chat_wire["content"] == "I found a weather tool."
+
+    claude_wire, _system = claude_format_messages([assistant])
+    assert claude_wire[0]["role"] == "assistant"
+
+
+def test_claude_server_tool_history_replays_to_codex_without_injection() -> None:
+    """Anthropic-native server tool blocks are ignored when a thread switches to Codex."""
+    assistant = Message(
+        role="assistant",
+        content="Claude searched here.",
+        provider_data={"server_tool_blocks": [{"type": "server_tool_use", "id": "srv_1"}]},
+    )
+
+    formatted_input = CodexResponses(id="gpt-5.5")._format_messages([assistant])
+
+    assert formatted_input == [{"role": "assistant", "content": "Claude searched here."}]
