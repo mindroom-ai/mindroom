@@ -147,31 +147,34 @@ def formatted_input_with_tool_search_items(
 
     Each assistant message's items are inserted once, immediately ahead of the
     message's replayed function calls (matched by call id) or its replayed
-    content — the position they held in the original response output. Anchors
-    are searched left to right past earlier insertions, and a message whose
-    anchor is missing (for example rewritten foreign history) is skipped, so
-    items replay verbatim, in order, at most once. The input list is never
-    mutated.
+    content — the position they held in the original response output. The
+    cursor advances past every anchored assistant message, so an earlier turn
+    with identical content can never claim a later message's anchor. A message
+    whose anchor is missing (for example rewritten foreign history) is
+    skipped, so items replay verbatim, in order, at most once. The input list
+    is never mutated.
     """
     prepared_input = formatted_input
     cursor = 0
     for message in messages:
-        items = _message_tool_search_items(message)
-        if not items:
+        if message.role != "assistant":
             continue
         anchor = _anchor_index(prepared_input, cursor, message)
         if anchor is None:
             continue
-        if prepared_input is formatted_input:
-            prepared_input = list(formatted_input)
-        prepared_input[anchor:anchor] = [dict(item) for item in items]
-        cursor = anchor + len(items) + 1
+        items = _message_tool_search_items(message)
+        if items:
+            if prepared_input is formatted_input:
+                prepared_input = list(formatted_input)
+            prepared_input[anchor:anchor] = [dict(item) for item in items]
+            anchor += len(items)
+        cursor = anchor + 1
     return prepared_input
 
 
 def _message_tool_search_items(message: Message) -> list[dict[str, Any]]:
     """Return the tool_search items captured on one assistant message."""
-    if message.role != "assistant" or not isinstance(message.provider_data, dict):
+    if not isinstance(message.provider_data, dict):
         return []
     items = message.provider_data.get(_TOOL_SEARCH_ITEMS_KEY)
     if not isinstance(items, list):

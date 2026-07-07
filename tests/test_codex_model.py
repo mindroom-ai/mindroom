@@ -631,3 +631,30 @@ def test_claude_server_tool_history_replays_to_codex_without_injection() -> None
     formatted_input = CodexResponses(id="gpt-5.5")._format_messages([assistant])
 
     assert formatted_input == [{"role": "assistant", "content": "Claude searched here."}]
+
+
+def test_codex_tool_search_replay_skips_identical_earlier_assistant_content() -> None:
+    """An earlier identical-content assistant turn cannot claim a later message's anchor."""
+    model = CodexResponses(id="gpt-5.5")
+    later = Message(
+        role="assistant",
+        content="same text",
+        provider_data={"tool_search_items": [dict(_TOOL_SEARCH_CALL_ITEM)]},
+    )
+
+    formatted_input = model._format_messages(
+        [
+            Message(role="user", content="q1"),
+            Message(role="assistant", content="same text"),
+            Message(role="user", content="q2"),
+            later,
+        ],
+    )
+
+    assert formatted_input == [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "same text"},
+        {"role": "user", "content": "q2"},
+        dict(_TOOL_SEARCH_CALL_ITEM),
+        {"role": "assistant", "content": "same text"},
+    ]
