@@ -19,7 +19,7 @@ from agno.models.openrouter import OpenRouter
 
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.codex_model import CodexResponses, derive_codex_prompt_cache_key, normalize_codex_model_id
-from mindroom.constants import RuntimePaths, runtime_env_path
+from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host, get_secret_from_env
 from mindroom.google_adc import load_google_application_credentials
@@ -213,6 +213,17 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
         return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
 
     if canonical_provider == "zai":
+        # OpenAILike neither reads a provider env var nor rejects a missing key,
+        # so resolve the env fallback here and keep falsy keys out of the kwargs
+        # (a falsy api_key would make agno's OpenAI client fall back to
+        # OPENAI_API_KEY and send it to Z.ai).
+        if not extra_kwargs.get("api_key"):
+            extra_kwargs.pop("api_key", None)
+            env_api_key = get_secret_from_env(PROVIDER_ENV_KEYS["zai"], runtime_paths=runtime_paths)
+            if env_api_key:
+                extra_kwargs["api_key"] = env_api_key
+            else:
+                logger.warning("No Z.ai API key found in environment or CredentialsManager")
         extra_kwargs.setdefault("base_url", ZAI_BASE_URL_DEFAULT)
         extra_kwargs.setdefault("name", "ZAI")
         extra_kwargs.setdefault("provider", "ZAI")

@@ -20,7 +20,7 @@ from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_p
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.google_adc import load_google_application_credentials
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, ZAI_BASE_URL_DEFAULT
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
@@ -149,7 +149,8 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
     "deepseek": "https://api.deepseek.com/v1/models",
     "cerebras": "https://api.cerebras.ai/v1/models",
     "groq": "https://api.groq.com/openai/v1/models",
-    "zai": f"{ZAI_BASE_URL_DEFAULT}/models",
+    # No "zai" entry: Z.ai's paas/v4 OpenAPI spec exposes no GET /models
+    # listing endpoint, so a URL probe would misreport valid keys as broken.
 }
 
 
