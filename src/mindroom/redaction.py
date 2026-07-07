@@ -325,10 +325,24 @@ def _bounded_redaction_input(value: str, *, max_length: int | None) -> str:
     return value[:scan_length]
 
 
+def _redact_url_match(match: re.Match[str]) -> str:
+    r"""Redact one matched URL, leaving trailing backslashes untouched.
+
+    In logged shell commands and JSON-encoded strings, a backslash right after
+    the URL is escaping the next character (for example ``\\"``), not URL
+    content. Absorbing it into the query re-encodes it to ``%5C`` and strips
+    the escape, which corrupts the surrounding encoding.
+    """
+    matched_url = match.group(0)
+    url = matched_url.rstrip("\\")
+    trailing_backslashes = matched_url[len(url) :]
+    return _redact_url(url) + trailing_backslashes
+
+
 def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     """Redact common credential and bearer-token patterns from free-form text."""
     bounded_value = _bounded_redaction_input(value, max_length=max_length)
-    redacted = _URL_PATTERN.sub(lambda match: _redact_url(match.group(0)), bounded_value)
+    redacted = _URL_PATTERN.sub(_redact_url_match, bounded_value)
     redacted = _BEARER_TOKEN_PATTERN.sub(_redact_matched_token, redacted)
     redacted = _API_KEY_MESSAGE_PATTERN.sub(_redact_matched_token, redacted)
     redacted = _TOKEN_LIKE_PATTERN.sub(_redact_matched_token, redacted)
