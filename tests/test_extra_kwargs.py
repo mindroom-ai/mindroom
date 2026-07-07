@@ -940,13 +940,19 @@ def _wire_tool(name: str) -> dict[str, object]:
         ("anthropic", "claude-sonnet-5", True),
         ("Anthropic", "claude-sonnet-4-5-20250929", True),
         ("vertexai_claude", "claude-haiku-4-5@20251001", True),
+        # Unreleased Claude models default to the native path (denylist gating).
+        ("anthropic", "claude-opus-4-9", True),
+        ("anthropic", "claude-fable-6", True),
         ("anthropic", "claude-opus-4-1", False),
+        ("anthropic", "claude-opus-4-20250514", False),
+        ("anthropic", "claude-3-5-sonnet-20241022", False),
+        ("vertexai_claude", "claude-sonnet-4@20250514", False),
         ("openai", "gpt-5.5", False),
         ("bedrock_claude", "anthropic.claude-opus-4-8", False),
     ],
 )
 def test_native_tool_search_supported_gating(provider: str, model_id: str, *, expected: bool) -> None:
-    """Only Claude-family providers with tool-search-capable model ids qualify."""
+    """Claude-family providers qualify unless the model predates tool search."""
     assert native_tool_search_supported(provider, model_id) is expected
 
 
@@ -954,7 +960,13 @@ def test_deferred_tool_search_tags_tools_and_injects_search_tool() -> None:
     """Deferred tools ship tagged and name-sorted after the search tool and non-deferred tools."""
     model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=True)
     captured_kwargs = _install_fake_sync_client(model)
-    tools = [_wire_tool("always_tool"), _wire_tool("zeta_tool"), _wire_tool("alpha_tool")]
+    # zeta_tool arrives pre-marked (as Agno's cache_tools flag would): the
+    # marker must be stripped because deferred tools may not carry one.
+    tools = [
+        _wire_tool("always_tool"),
+        {**_wire_tool("zeta_tool"), "cache_control": {"type": "ephemeral"}},
+        _wire_tool("alpha_tool"),
+    ]
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [dict(tool) for tool in tools]}
     install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"zeta_tool", "alpha_tool"}))
 

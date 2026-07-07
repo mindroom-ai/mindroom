@@ -46,7 +46,7 @@ from typing import Any, cast
 
 from agno.models.anthropic import Claude as AnthropicClaude
 
-from mindroom.model_defaults import NATIVE_TOOL_SEARCH_MODEL_ID_PREFIXES
+from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
 
 _PROMPT_CACHE_HOOK_ATTR = "_mindroom_claude_prompt_cache_hook_installed"
 _DEFERRED_TOOL_NAMES_ATTR = "_mindroom_claude_deferred_tool_names"
@@ -62,11 +62,16 @@ _NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic", "vertexai_claude"})
 
 
 def native_tool_search_supported(provider: str, model_id: str) -> bool:
-    """Return whether one authored provider/model pair supports server-side tool search."""
+    """Return whether one authored provider/model pair supports server-side tool search.
+
+    Every Claude model since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 supports the
+    search tool, so gating denylists the closed pre-4.5 set and new model
+    releases take the native path without a code change.
+    """
     canonical_provider = provider.strip().lower().replace("-", "_")
     if canonical_provider not in _NATIVE_TOOL_SEARCH_PROVIDERS:
         return False
-    return model_id.startswith(NATIVE_TOOL_SEARCH_MODEL_ID_PREFIXES)
+    return not model_id.startswith(TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES)
 
 
 def _prompt_cache_control(*, extended_cache_time: bool = False) -> dict[str, str]:
@@ -215,7 +220,11 @@ def _request_kwargs_with_deferred_tool_search(
     for tool in tools:
         tool_dict = _as_dict(tool)
         if tool_dict is not None and tool_dict.get("name") in deferred_tool_names:
-            deferred_tools.append({**tool_dict, "defer_loading": True})
+            deferred_tool = {**tool_dict, "defer_loading": True}
+            # A deferred tool may not carry cache_control (the API returns a
+            # 400), so drop any marker Agno added (e.g. via cache_tools).
+            deferred_tool.pop("cache_control", None)
+            deferred_tools.append(deferred_tool)
         else:
             non_deferred_tools.append(tool)
     if not deferred_tools:

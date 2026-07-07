@@ -31,7 +31,6 @@ __all__ = (
     "LOCAL_QWEN_CONTEXT_WINDOW",
     "LOCAL_QWEN_PRESET_NAME",
     "MEMORY_OLLAMA_LLM",
-    "NATIVE_TOOL_SEARCH_MODEL_ID_PREFIXES",
     "OLLAMA_GEMMA",
     "OLLAMA_HOST_DEFAULT",
     "OLLAMA_QWEN",
@@ -48,6 +47,7 @@ __all__ = (
     "OPENAI_TTS",
     "SAAS_MODEL_PRESETS",
     "SENTENCE_TRANSFORMERS_DEFAULT",
+    "TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES",
     "ModelPreset",
     "llama_cpp_server_command",
 )
@@ -72,19 +72,20 @@ class ModelPreset:
 _ANTHROPIC_OPUS = "claude-opus-4-8"
 _ANTHROPIC_SONNET = "claude-sonnet-5"
 _ANTHROPIC_HAIKU = "claude-haiku-4-5"
-# Claude families that accept tool_search_tool_regex_20251119; prefix match so
-# dated snapshots (both `-YYYYMMDD` and Vertex `@YYYYMMDD` suffixes) qualify.
-NATIVE_TOOL_SEARCH_MODEL_ID_PREFIXES = (
-    "claude-fable-5",
-    "claude-haiku-4-5",
-    "claude-mythos-5",
-    "claude-opus-4-5",
-    "claude-opus-4-6",
-    "claude-opus-4-7",
-    "claude-opus-4-8",
-    "claude-sonnet-4-5",
-    "claude-sonnet-4-6",
-    "claude-sonnet-5",
+# Claude models that predate tool_search_tool_regex_20251119 (Opus 4.1 and
+# earlier — a closed set, so new releases take the native tool-search path
+# without a list update). Prefixes cover the aliases plus the dated
+# `-YYYYMMDD` and Vertex `@YYYYMMDD` snapshot spellings.
+TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES = (
+    "claude-2",
+    "claude-3",
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+    "claude-opus-4-20250514",
+    "claude-opus-4@",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-20250514",
+    "claude-sonnet-4@",
 )
 AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-4-8"
 _AWS_BEDROCK_CLAUDE_SONNET = "global.anthropic.claude-sonnet-5"
