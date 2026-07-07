@@ -28,6 +28,7 @@ from typing import Any
 
 from agno.models.anthropic import Claude
 from agno.models.message import Message
+from agno.tools.function import Function
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
@@ -44,32 +45,30 @@ _SYSTEM_PROMPT = "You are a MindRoom tool-search live probe agent. " + (
     "This sentence is deterministic cache padding for the probe system prompt. " * 700
 )
 
-_PROBE_TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "echo",
-            "description": "Echo the provided text back to the user.",
-            "parameters": {
-                "type": "object",
-                "properties": {"text": {"type": "string", "description": "Text to echo."}},
-                "required": ["text"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": DEFERRED_TOOL_NAME,
-            "description": "Get the current weather for a location.",
-            "parameters": {
-                "type": "object",
-                "properties": {"location": {"type": "string", "description": "City name."}},
-                "required": ["location"],
-            },
-        },
-    },
-]
+
+def echo(text: str) -> str:
+    """Echo the provided text back to the user.
+
+    Args:
+        text: Text to echo.
+
+    """
+    return text
+
+
+def get_weather(location: str) -> str:
+    """Get the current weather for a location.
+
+    Args:
+        location: City name.
+
+    """
+    return f"The weather in {location} is 22 degrees Celsius and sunny."
+
+
+def build_probe_tools() -> list[Function]:
+    """Build executable probe tools so Agno's response loop can run them for real."""
+    return [Function.from_callable(echo), Function.from_callable(get_weather)]
 
 
 def build_probe_model(args: argparse.Namespace) -> Claude:
@@ -131,7 +130,7 @@ def run_dry_run(args: argparse.Namespace) -> int:
 
     messages = [Message(role="system", content=_SYSTEM_PROMPT), Message(role="user", content="probe")]
     with contextlib.suppress(_DryRunStop):
-        model.response(messages=messages, tools=_PROBE_TOOLS, compression_manager=None)
+        model.response(messages=messages, tools=build_probe_tools(), compression_manager=None)
 
     if not captured:
         print("FAIL: the hooked client was never invoked; the request never reached the fake SDK client.")
@@ -184,9 +183,17 @@ def run_live(args: argparse.Namespace) -> int:
         ),
     ]
 
-    first = model.response(messages=messages, tools=_PROBE_TOOLS, compression_manager=None)
-    server_blocks = (first.provider_data or {}).get("server_tool_blocks", [])
-    block_types = [block.get("type") for block in server_blocks]
+    tools = build_probe_tools()
+    # Agno's response() runs the full production loop: the model searches, the
+    # API expands the discovered schema, Agno executes the entrypoint, and the
+    # model finishes with the tool result.
+    first = model.response(messages=messages, tools=tools, compression_manager=None)
+    block_types = [
+        block.get("type")
+        for message in messages
+        if message.role == "assistant"
+        for block in (message.provider_data or {}).get("server_tool_blocks", [])
+    ]
     discovered = "tool_search_tool_result" in block_types
     tool_calls = first.tool_executions or []
     called_deferred = any(execution.tool_name == DEFERRED_TOOL_NAME for execution in tool_calls)
@@ -199,16 +206,8 @@ def run_live(args: argparse.Namespace) -> int:
         print(f"FAIL: model did not call the deferred tool '{DEFERRED_TOOL_NAME}'.")
         return 1
 
-    messages.extend(
-        Message(
-            role="tool",
-            tool_call_id=execution.tool_call_id,
-            tool_name=execution.tool_name,
-            content="22 degrees Celsius and sunny.",
-        )
-        for execution in tool_calls
-    )
-    second = model.response(messages=messages, tools=_PROBE_TOOLS, compression_manager=None)
+    messages.append(Message(role="user", content="Thanks — and what is the weather in London?"))
+    second = model.response(messages=messages, tools=tools, compression_manager=None)
     usage_second = second.response_usage
     cache_read = usage_second.cache_read_tokens if usage_second is not None else 0
     print(
