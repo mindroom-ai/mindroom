@@ -35,6 +35,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search  # noqa: E402
+from mindroom.vertex_claude_compat import MindroomVertexAIClaude  # noqa: E402
 
 DEFERRED_TOOL_NAME = "get_weather"
 # Deterministic padding so the system prompt clears every model's minimum
@@ -71,11 +72,24 @@ _PROBE_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-def build_probe_model(model_id: str, api_key: str) -> Claude:
-    """Build a Claude model mirroring the production Anthropic settings, hooks not yet installed."""
+def build_probe_model(args: argparse.Namespace) -> Claude:
+    """Build a Claude model mirroring the production settings, hooks not yet installed.
+
+    ``--provider vertexai`` builds the same ``MindroomVertexAIClaude`` class the
+    production model loader uses, authenticated via GCP application-default
+    credentials — no ``ANTHROPIC_API_KEY`` needed.
+    """
+    if args.provider == "vertexai":
+        return MindroomVertexAIClaude(
+            id=args.model_id,
+            project_id=args.project_id,
+            region=args.region,
+            cache_system_prompt=True,
+            extended_cache_time=True,
+        )
     return Claude(
-        id=model_id,
-        api_key=api_key,
+        id=args.model_id,
+        api_key=os.environ.get("ANTHROPIC_API_KEY", "dry-run-key"),
         cache_system_prompt=True,
         extended_cache_time=True,
     )
@@ -98,7 +112,7 @@ class _DryRunStop(BaseException):
     """
 
 
-def run_dry_run(model_id: str) -> int:
+def run_dry_run(args: argparse.Namespace) -> int:
     """Print the prepared wire request via a capturing fake client; no network."""
     captured: list[dict[str, Any]] = []
 
@@ -111,7 +125,7 @@ def run_dry_run(model_id: str) -> int:
         def __init__(self) -> None:
             self.messages = _FakeMessagesAPI()
 
-    model = build_probe_model(model_id, api_key="dry-run-key")
+    model = build_probe_model(args)
     vars(model)["get_client"] = lambda: _FakeClient()
     install_probe_hooks(model)
 
@@ -158,9 +172,9 @@ def run_dry_run(model_id: str) -> int:
     return 0 if ok else 1
 
 
-def run_live(model_id: str, api_key: str) -> int:
+def run_live(args: argparse.Namespace) -> int:
     """Run the two-turn live probe and report discovery and cache reuse."""
-    model = build_probe_model(model_id, api_key)
+    model = build_probe_model(args)
     install_probe_hooks(model)
     messages = [
         Message(role="system", content=_SYSTEM_PROMPT),
@@ -214,17 +228,28 @@ def main() -> int:
     """Parse arguments and run the requested probe mode."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-id", default="claude-sonnet-5", help="Claude model id to probe.")
+    parser.add_argument(
+        "--provider",
+        choices=("anthropic", "vertexai"),
+        default="anthropic",
+        help="anthropic uses ANTHROPIC_API_KEY; vertexai uses GCP application-default credentials.",
+    )
+    parser.add_argument("--project-id", default="", help="GCP project id (vertexai provider).")
+    parser.add_argument("--region", default="global", help="Vertex AI region (vertexai provider). Default: global")
     parser.add_argument("--dry-run", action="store_true", help="Print the prepared wire request without any API call.")
     args = parser.parse_args()
 
     if args.dry_run:
-        return run_dry_run(args.model_id)
+        return run_dry_run(args)
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        print("No ANTHROPIC_API_KEY set; nothing probed. Use --dry-run to inspect the wire request offline.")
+    if args.provider == "vertexai":
+        if not args.project_id:
+            print("Missing --project-id for the vertexai provider; nothing probed.")
+            return 2
+    elif not os.environ.get("ANTHROPIC_API_KEY"):
+        print("No ANTHROPIC_API_KEY set; nothing probed. Use --dry-run or --provider vertexai (GCP ADC).")
         return 2
-    return run_live(args.model_id, api_key)
+    return run_live(args)
 
 
 if __name__ == "__main__":
