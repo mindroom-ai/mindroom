@@ -23,8 +23,8 @@ import yaml
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
+    descriptive_worker_id_for_key,
     resolve_worker_target,
-    worker_id_for_key,
 )
 
 _DEFAULT_VAULT_NAME_PREFIX = "agent-vault"
@@ -312,7 +312,7 @@ def _resolve_grant_target(
     return ResolvedAgentVaultAccessGrantTarget(
         grant=grant,
         worker_key=target.worker_key,
-        vault=worker_id_for_key(target.worker_key, prefix=config.vault_name_prefix),
+        vault=descriptive_worker_id_for_key(target.worker_key, prefix=config.vault_name_prefix),
     )
 
 

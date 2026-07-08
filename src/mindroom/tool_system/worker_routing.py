@@ -23,6 +23,9 @@ _ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _DEFAULT_WORKER_NAME_PREFIX = "mindroom-worker"
+_DNS_LABEL_MAX_LENGTH = 63
+_WORKER_ID_DIGEST_LENGTH = 24
+_DESCRIPTIVE_WORKER_ID_DIGEST_LENGTH = 10
 _AGENT_WORKSPACE_DIRNAME = "workspace"
 _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
 _SHARED_ONLY_INTEGRATION_NAMES = frozenset(
@@ -228,15 +231,61 @@ def normalize_worker_key_part(value: str) -> str:
     return normalized or "default"
 
 
-def worker_id_for_key(worker_key: str, *, prefix: str) -> str:
-    """Return a DNS-safe resource name for one worker key (63-char label limit)."""
-    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:24]
+def _digest_and_safe_prefix(worker_key: str, prefix: str, *, digest_length: int) -> tuple[str, str]:
+    """Return the worker-key digest and a prefix normalized to fit a DNS label beside it."""
+    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:digest_length]
     normalized_prefix = prefix.strip().lower().strip("-") or _DEFAULT_WORKER_NAME_PREFIX
-    max_prefix_length = 63 - len(digest) - 1
+    max_prefix_length = _DNS_LABEL_MAX_LENGTH - len(digest) - 1
     safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
     if not safe_prefix:
         safe_prefix = _DEFAULT_WORKER_NAME_PREFIX[:max_prefix_length].rstrip("-") or "worker"
+    return digest, safe_prefix
+
+
+def worker_id_for_key(worker_key: str, *, prefix: str) -> str:
+    """Return a DNS-safe resource name for one worker key (63-char label limit)."""
+    digest, safe_prefix = _digest_and_safe_prefix(worker_key, prefix, digest_length=_WORKER_ID_DIGEST_LENGTH)
     return f"{safe_prefix}-{digest}"
+
+
+def descriptive_worker_id_for_key(worker_key: str, *, prefix: str) -> str:
+    """Return a DNS-safe resource name that keeps the worker key's scope readable.
+
+    Embeds the key's tenant/scope/requester/agent parts as a lowercase slug
+    (dropping the `v1` version tag and the `default` tenant, and reducing
+    Matrix requesters to their localpart) so listings stay human-readable,
+    with a short digest for uniqueness after truncation.
+    """
+    digest, safe_prefix = _digest_and_safe_prefix(
+        worker_key,
+        prefix,
+        digest_length=_DESCRIPTIVE_WORKER_ID_DIGEST_LENGTH,
+    )
+    max_slug_length = max(0, _DNS_LABEL_MAX_LENGTH - len(safe_prefix) - len(digest) - 2)
+    slug = _worker_key_slug(worker_key, max_length=max_slug_length)
+    if not slug:
+        return f"{safe_prefix}-{digest}"
+    return f"{safe_prefix}-{slug}-{digest}"
+
+
+def _worker_key_slug(worker_key: str, *, max_length: int) -> str:
+    parts = worker_key.split(":")
+    if len(parts) >= 4 and parts[0] == "v1":
+        tenant, scope, rest = parts[1], parts[2], parts[3:]
+        if scope == "user":
+            rest = [_requester_localpart(":".join(rest))]
+        elif scope == "user_agent" and len(rest) >= 2:
+            rest = [_requester_localpart(":".join(rest[:-1])), rest[-1]]
+        parts = ([] if tenant == "default" else [tenant]) + [scope, *rest]
+    slug = re.sub(r"[^a-z0-9]+", "-", ":".join(parts).lower()).strip("-")
+    return slug[:max_length].rstrip("-")
+
+
+def _requester_localpart(requester: str) -> str:
+    """Return the localpart of a Matrix-style requester; other requesters pass through."""
+    if requester.startswith("@"):
+        return requester[1:].split(":", 1)[0]
+    return requester
 
 
 def _normalize_worker_requester_part(value: str) -> str:

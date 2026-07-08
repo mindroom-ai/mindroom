@@ -42,7 +42,7 @@ from mindroom.runtime_env_policy import (
     credentials_encryption_key_value,
     worker_extra_env,
 )
-from mindroom.tool_system.worker_routing import worker_id_for_key
+from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_visible_state_roots,
@@ -641,7 +641,7 @@ class KubernetesResourceManager:
         cfg = self.config.agent_vault
         if cfg is None:
             return None
-        return worker_id_for_key(worker_key, prefix=cfg.vault_name_prefix)
+        return descriptive_worker_id_for_key(worker_key, prefix=cfg.vault_name_prefix)
 
     def _agent_vault_init_container(self, *, worker_key: str) -> dict[str, object]:
         cfg: KubernetesAgentVaultConfig | None = self.config.agent_vault

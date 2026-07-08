@@ -23,7 +23,7 @@ import httpx
 from agno.tools import Toolkit
 
 from mindroom.runtime_env_policy import AGENT_VAULT_ACCESS_ENV_BY_KEY
-from mindroom.tool_system.worker_routing import worker_id_for_key
+from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -100,7 +100,7 @@ class AgentVaultAccessTools(Toolkit):
                 "no worker identity is available for this agent, so it has no dedicated vault. "
                 "Agent Vault access requires a worker-scoped agent.",
             )
-        vault = worker_id_for_key(target.worker_key, prefix=self._vault_name_prefix)
+        vault = descriptive_worker_id_for_key(target.worker_key, prefix=self._vault_name_prefix)
         if target.worker_scope not in _REQUESTER_ISOLATED_SCOPES:
             # One shared vault backs this agent for every user, so self-service
             # admin grants would hand its credentials to any requester. Still
