@@ -69,6 +69,12 @@ The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` im
 
 If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
+### Alternative: NixOS LXC container (agent-controlled machine)
+
+Use this when you want to give a MindRoom agent full control over its own machine.
+A standalone NixOS flake provisions an Incus LXC container with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, Cinny, Element, Caddy) plus Docker and secrets wiring, so the agent can rebuild and manage the system it runs on.
+This path is more involved than the others; see [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) for the full setup.
+
 ### Manual Install (advanced)
 
 Use this if you already have a Matrix homeserver and want to run MindRoom directly.
