@@ -65,6 +65,14 @@ _INVALID_REQUEST_TEXT_PATTERN = re.compile(
     rf"error code: (?:{'|'.join(str(code) for code in sorted(_INVALID_REQUEST_STATUS_CODES))})\b"
     r"|\bbad request\b|\binvalid_request_error\b|\binvalid_argument\b",
 )
+# Z.ai reports content part types it cannot parse at all (e.g. OpenAI-style
+# "file" parts) as a bare "messages[N].content[M].type type error" (code 1214).
+# On the streaming path agno converts the 400 into a RunErrorEvent whose text
+# is only this bare message — the status code and "Error code: 400" marker are
+# gone — so the generic invalid-request gate cannot recognize it there.
+_CONTENT_PART_TYPE_ERROR_PATTERN = re.compile(
+    r"messages(?:\[\d+\])?\.content(?:\[\d+\])?\.type type error",
+)
 # Invalid-request errors that name credentials are not media failures; retrying
 # without media would fail identically.
 _AUTH_ERROR_TEXT_PATTERN = re.compile(r"api[\s_-]?key|unauthorized|forbidden|authentication")
@@ -211,9 +219,10 @@ def retry_media_inputs_after_failure(
     if validation_kinds:
         return _media_retry_decision_for_kinds(media_inputs, validation_kinds, present_kinds=present_kinds)
 
-    if _INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN.search(lowered_error_text) or _is_invalid_request_error(
-        error,
-        lowered_error_text,
+    if (
+        _INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN.search(lowered_error_text)
+        or _CONTENT_PART_TYPE_ERROR_PATTERN.search(lowered_error_text)
+        or _is_invalid_request_error(error, lowered_error_text)
     ):
         teaching_blocked = _capability_teaching_blocked(error, lowered_error_text)
         return MediaRetryDecision(

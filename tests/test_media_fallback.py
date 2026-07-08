@@ -193,6 +193,35 @@ def test_content_part_type_error_retries_via_generic_gate() -> None:
     reset_model_media_capability_cache()
 
 
+def test_bare_content_part_type_error_from_streamed_run_retries() -> None:
+    """Streamed RunErrorEvents carry only Z.ai's bare 1214 message, without the 400 marker.
+
+    Agno converts the provider 400 into a RunErrorEvent whose content is just
+    str(ModelProviderError) — the status code and "Error code: 400" prefix are
+    lost — so the bare message shape must be recognized on its own.
+    """
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+
+    decision = retry_media_inputs_after_failure(
+        route,
+        "messages[30].content[0].type type error",
+        media,
+    )
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"audio", "image", "file", "video"})
+    assert decision.media_inputs == MediaInputs()
+    assert decision.teach_route_on_success == route
+    # Nothing is taught until the without-media retry actually succeeds.
+    assert filter_media_inputs_for_route(route, media).media_inputs == media
+
+    decision.record_retry_success()
+    assert unsupported_media_kinds_for_route(route) == frozenset({"audio", "image", "file", "video"})
+    reset_model_media_capability_cache()
+
+
 def test_invalid_request_status_retries_and_teaches_only_on_success() -> None:
     """Any 400-class provider exception retries without media; the cache learns on retry success."""
     reset_model_media_capability_cache()
