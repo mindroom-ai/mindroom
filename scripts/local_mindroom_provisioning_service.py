@@ -21,8 +21,13 @@ namespaces use plain ``mindroom_<entity>`` usernames. To exempt such a trusted
 connection, an operator stops the service, sets ``"namespace": ""`` on that
 connection in the persisted state file (``MINDROOM_PROVISIONING_STATE_PATH``,
 default ``/var/lib/mindroom-local-provisioning/state.json``), and starts the
-service again. An exempt connection skips the namespace suffix check but may
-still only register valid Matrix localparts starting with ``mindroom_``.
+service again. The value must be exactly ``""``: ``null``, a removed key, or a
+whitespace-only string fails closed to a derived namespace that will not match
+the connection's original pairing namespace. An exempt connection skips only
+the namespace suffix check — usernames must still be valid Matrix localparts
+starting with ``mindroom_``. Exemption trusts that connection with the entire
+``mindroom_*`` username space, including usernames shaped like other
+connections' namespaced agents, so exempt only installs you fully control.
 """
 
 from __future__ import annotations
@@ -418,10 +423,17 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
 
     for item in payload.get("connections", []):
         connection_id = item["id"]
-        # An explicitly empty namespace is a namespace-exempt connection
-        # (operator-set, see module docstring) and must survive restarts.
-        namespace = item.get("namespace")
-        namespace = namespace.strip().lower() if isinstance(namespace, str) else _derive_namespace(connection_id)
+        raw_namespace = item.get("namespace")
+        # Only a literal "" (the operator-set exemption sentinel, see module
+        # docstring) may stay empty. Whitespace-only, null, and missing values
+        # fail closed to a derived namespace so a connection can never become
+        # namespace-exempt by accident.
+        if raw_namespace == "":
+            namespace = ""
+        elif isinstance(raw_namespace, str) and raw_namespace.strip():
+            namespace = raw_namespace.strip().lower()
+        else:
+            namespace = _derive_namespace(connection_id)
         connection = LocalConnection(
             id=connection_id,
             user_id=item["user_id"],
@@ -475,13 +487,11 @@ def _is_managed_agent_username_for_namespace(username: str, namespace: str) -> b
 def _is_username_permitted_for_connection(username: str, namespace: str) -> bool:
     """Return whether a connection may register the requested agent username.
 
-    Every username must be a valid Matrix localpart. An empty namespace marks
-    a namespace-exempt connection (operator-set, see module docstring): the
-    namespace suffix check is skipped, but the managed agent prefix is still
-    required.
+    An empty namespace marks a namespace-exempt connection (operator-set, see
+    module docstring): the namespace suffix check is skipped, but the managed
+    agent prefix is still required. Localpart syntax is validated separately
+    in register_agent so it surfaces as 400, not 403.
     """
-    if MATRIX_LOCALPART_RE.match(username) is None:
-        return False
     if not namespace:
         return username.startswith(MANAGED_AGENT_USERNAME_PREFIX) and len(username) > len(
             MANAGED_AGENT_USERNAME_PREFIX,
@@ -841,6 +851,14 @@ async def register_agent(
             f"Expected {configured_homeserver}, got {requested_homeserver}."
         )
         raise HTTPException(status_code=400, detail=msg)
+
+    # 400, not 403: clients treat 403 as an authorization problem, but a
+    # malformed localpart can only be fixed by changing the agent name.
+    if MATRIX_LOCALPART_RE.match(payload.username) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Requested username is not a valid Matrix localpart (allowed: a-z 0-9 . _ = / + -)",
+        )
 
     async with state.lock:
         connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)

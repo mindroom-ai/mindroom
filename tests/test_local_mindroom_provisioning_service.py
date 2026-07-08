@@ -84,12 +84,15 @@ def _pair_local_client(client: TestClient) -> dict[str, str]:
     return complete.json()
 
 
-def _set_connection_namespace(state_path: Path, connection_id: str, namespace: str) -> None:
+def _set_connection_namespace(state_path: Path, connection_id: str, namespace: str | None) -> None:
     """Edit the persisted state file the way an operator would (service stopped)."""
     payload = json.loads(state_path.read_text(encoding="utf-8"))
     for item in payload["connections"]:
         if item["id"] == connection_id:
-            item["namespace"] = namespace
+            if namespace is None:
+                item.pop("namespace", None)
+            else:
+                item["namespace"] = namespace
     state_path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -301,19 +304,20 @@ def test_pair_status_rejects_missing_session_header(
 
 
 @pytest.mark.parametrize(
-    "invalid_username_case",
+    ("invalid_username_case", "expected_status"),
     [
-        "missing_entity_between_prefix_and_namespace",
-        "wrong_namespace_suffix",
-        "wrong_prefix_for_namespace",
-        "plain_username_without_namespace",
-        "invalid_localpart_for_namespace",
+        ("missing_entity_between_prefix_and_namespace", 403),
+        ("wrong_namespace_suffix", 403),
+        ("wrong_prefix_for_namespace", 403),
+        ("plain_username_without_namespace", 403),
+        ("invalid_localpart_for_namespace", 400),
     ],
 )
 def test_register_agent_rejects_username_outside_connection_namespace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     invalid_username_case: str,
+    expected_status: int,
 ) -> None:
     """A local client must not register Matrix users outside its assigned namespace."""
     _patch_matrix_auth(monkeypatch)
@@ -362,8 +366,11 @@ def test_register_agent_rejects_username_outside_connection_namespace(
             },
         )
 
-        assert register.status_code == 403
-        assert register.json()["detail"] == "Requested username is outside this local connection namespace"
+        assert register.status_code == expected_status
+        if expected_status == 403:
+            assert register.json()["detail"] == "Requested username is outside this local connection namespace"
+        else:
+            assert "not a valid Matrix localpart" in register.json()["detail"]
         assert register_calls == []
 
 
@@ -392,17 +399,18 @@ def test_register_agent_allows_plain_username_for_namespace_exempt_connection(
 
 
 @pytest.mark.parametrize(
-    "username",
+    ("username", "expected_status"),
     [
-        "other_foo",  # missing managed prefix
-        "mindroom_",  # bare prefix without entity
-        "mindroom_Foo",  # invalid Matrix localpart (uppercase)
+        ("other_foo", 403),  # missing managed prefix
+        ("mindroom_", 403),  # bare prefix without entity
+        ("mindroom_Foo", 400),  # invalid Matrix localpart (uppercase)
     ],
 )
 def test_register_agent_namespace_exempt_connection_still_requires_managed_prefix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     username: str,
+    expected_status: int,
 ) -> None:
     """Namespace-exempt connections still only get mindroom_-prefixed valid localparts."""
     _patch_matrix_auth(monkeypatch)
@@ -418,8 +426,44 @@ def test_register_agent_namespace_exempt_connection_still_requires_managed_prefi
     with TestClient(provisioning.create_app(_service_config(state_path))) as client:
         register = _post_register_agent(client, complete, username)
 
+        assert register.status_code == expected_status
+        assert register_calls == []
+
+
+@pytest.mark.parametrize("corrupt_namespace", [None, "null", " "], ids=["missing_key", "json_null", "whitespace"])
+def test_state_load_fails_closed_for_missing_or_blank_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corrupt_namespace: str | None,
+) -> None:
+    """Only a literal "" exempts; missing, null, or whitespace namespaces must fail closed to a derived one."""
+    _patch_matrix_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    register_calls: list[str] = []
+    _install_fake_register(monkeypatch, register_calls)
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        complete = _pair_local_client(client)
+
+    if corrupt_namespace == "null":
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        payload["connections"][0]["namespace"] = None
+        state_path.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        _set_connection_namespace(state_path, complete["client_id"], corrupt_namespace)
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        register = _post_register_agent(client, complete, "mindroom_foo")
         assert register.status_code == 403
         assert register_calls == []
+
+        listed = client.get(
+            "/v1/local-mindroom/connections",
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        derived = listed.json()["connections"][0]["namespace"]
+        assert isinstance(derived, str)
+        assert derived.strip() != ""
 
 
 def test_state_round_trip_preserves_empty_namespace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
