@@ -71,6 +71,7 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import (
+    MediaRetryDecision,
     append_inline_media_fallback_prompt,
     build_model_media_route,
     filter_media_inputs_for_route,
@@ -2072,6 +2073,7 @@ async def team_response(  # noqa: C901, PLR0915
         )
         attempt_media_inputs = media_filter.media_inputs
         holder.attempt_started = True
+        pending_retry_decision: MediaRetryDecision | None = None
         for retried_after_media_fallback in (False, True):
             response = None
             holder.last_response = None
@@ -2101,6 +2103,7 @@ async def team_response(  # noqa: C901, PLR0915
                     attempt_media_inputs = retry_decision.media_inputs
                     attempt_run_id = ai_runtime.next_retry_run_id(continuation_state.active_run_id)
                     holder.attempt_run_id = attempt_run_id
+                    pending_retry_decision = retry_decision
                     continue
 
                 logger.exception("team_response_failed", agents=agent_list)
@@ -2139,6 +2142,7 @@ async def team_response(  # noqa: C901, PLR0915
                     attempt_media_inputs = retry_decision.media_inputs
                     attempt_run_id = ai_runtime.next_retry_run_id(continuation_state.active_run_id)
                     holder.attempt_run_id = attempt_run_id
+                    pending_retry_decision = retry_decision
                     continue
                 logger.warning("Team response returned errored run output", agents=agent_list, error=error_text)
 
@@ -2177,6 +2181,8 @@ async def team_response(  # noqa: C901, PLR0915
                 ),
                 metadata_content=metadata_content,
             )
+        if pending_retry_decision is not None:
+            pending_retry_decision.record_retry_success()
         if ctx.reply_to_event_id:
             _persist_bound_seen_event_ids(
                 scope_context=run.scope_context,
@@ -2700,6 +2706,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             )
 
         holder.attempt_started = True
+        pending_retry_decision: MediaRetryDecision | None = None
         for retried_after_media_fallback in (False, True):
             canonical_per_member = dict.fromkeys(display_names, "")
             visible_per_member = dict.fromkeys(display_names, "")
@@ -2810,6 +2817,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             attempt_media_inputs = retry_decision.media_inputs
                             attempt_run_id = ai_runtime.next_retry_run_id(continuation_state.active_run_id)
                             holder.attempt_run_id = attempt_run_id
+                            pending_retry_decision = retry_decision
                             media_fallback_retry_requested = True
                             break
                         # The attempt handles its own delivery, so publish the
@@ -2821,6 +2829,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         yield AttemptResolved(HandledAttempt())
                         return
 
+                    if pending_retry_decision is not None:
+                        pending_retry_decision.record_retry_success()
                     if ctx.reply_to_event_id:
                         _persist_bound_seen_event_ids(
                             scope_context=run.scope_context,
@@ -2886,6 +2896,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         attempt_media_inputs = retry_decision.media_inputs
                         attempt_run_id = ai_runtime.next_retry_run_id(continuation_state.active_run_id)
                         holder.attempt_run_id = attempt_run_id
+                        pending_retry_decision = retry_decision
                         media_fallback_retry_requested = True
                         break
                     # The attempt handles its own delivery, so publish the
@@ -3026,6 +3037,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
             if media_fallback_retry_requested:
                 continue
+            if pending_retry_decision is not None:
+                pending_retry_decision.record_retry_success()
             if emitted_output and ctx.reply_to_event_id:
                 _persist_bound_seen_event_ids(
                     scope_context=run.scope_context,
