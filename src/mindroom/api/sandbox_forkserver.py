@@ -11,6 +11,11 @@ its own fresh process - at ~ms fork cost instead of the import cost.
 
 The template must stay fork-safe: it only imports modules and then blocks on
 ``accept()``; it never starts threads, event loops, or network clients.
+
+The template's stderr file collects raw-fd output from fork children (native
+libraries or tool subprocesses writing to fd 2); Python-level tool output is
+captured per request. The file lives for the template's lifetime and is
+removed on recycle, shutdown, or orphan exit.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -47,6 +53,8 @@ _TEMPLATE_ACCEPT_POLL_SECONDS = 1.0
 _TEMPLATE_TERMINATE_WAIT_SECONDS = 5.0
 _CHILD_REQUEST_READ_TIMEOUT_SECONDS = 30.0
 _CHILD_RESPONSE_WRITE_TIMEOUT_SECONDS = 60.0
+_CHILD_TIMEOUT_GRACE_SECONDS = 5.0
+_STARTUP_FAILURE_COOLDOWN_SECONDS = 300.0
 _READY_PROBE_INTERVAL_SECONDS = 0.05
 _STDERR_TAIL_BYTES = 4096
 _RECV_CHUNK_BYTES = 65536
@@ -96,6 +104,16 @@ class _Template:
     socket_path: str
     stderr_path: Path
     runtime_dir: Path
+
+
+@dataclass(frozen=True)
+class _ChildRequest:
+    """One parent-to-child request line, authored by `_request`."""
+
+    env: dict[str, str] | None
+    cwd: str | None
+    envelope: str
+    timeout_seconds: float
 
 
 def _stderr_tail(stderr_path: Path) -> str:
@@ -148,12 +166,18 @@ class _SocketLineReader:
 class _SandboxForkserver:
     """Runner-side manager for warm template processes keyed by interpreter."""
 
-    def __init__(self, template_command: Callable[[str, str], list[str]] | None = None) -> None:
+    def __init__(
+        self,
+        template_command: Callable[[str, str], list[str]] | None = None,
+        *,
+        startup_failure_cooldown_seconds: float = _STARTUP_FAILURE_COOLDOWN_SECONDS,
+    ) -> None:
         self._template_command = template_command or _default_template_command
+        self._startup_failure_cooldown_seconds = startup_failure_cooldown_seconds
         self._lock = threading.Lock()
         self._key_locks: dict[str, threading.Lock] = {}
         self._templates: dict[str, _Template] = {}
-        self._failed_fingerprints: dict[str, str] = {}
+        self._failed_fingerprints: dict[str, tuple[str, float]] = {}
 
     def execute(
         self,
@@ -170,7 +194,8 @@ class _SandboxForkserver:
         key = python_executable or sys.executable
         fingerprint = _template_fingerprint(key, template_env)
         key_lock = self._key_lock(key)
-        if not key_lock.acquire(timeout=max(0.1, deadline - time.monotonic())):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not key_lock.acquire(timeout=remaining):
             msg = "Timed out waiting for the sandbox forkserver template."
             raise ForkserverTimeoutError(msg)
         try:
@@ -217,14 +242,19 @@ class _SandboxForkserver:
             logger.warning("sandbox_forkserver_template_died", python_executable=key)
             self._discard(key, template)
             template = None
+        # A pinned fingerprint must bail out before the recycle check so it
+        # cannot tear down a healthy template of another fingerprint.
+        failure = self._failed_fingerprints.get(fingerprint)
+        if failure is not None:
+            message, failed_at = failure
+            if time.monotonic() - failed_at < self._startup_failure_cooldown_seconds:
+                raise ForkserverStartupError(message)
+            self._failed_fingerprints.pop(fingerprint, None)
         if template is not None and template.fingerprint != fingerprint:
             logger.info("sandbox_forkserver_template_recycled", python_executable=key)
             self._discard(key, template)
             template = None
         if template is None:
-            previous_failure = self._failed_fingerprints.get(fingerprint)
-            if previous_failure is not None:
-                raise ForkserverStartupError(previous_failure)
             template = self._spawn_template(
                 key=key,
                 fingerprint=fingerprint,
@@ -265,7 +295,7 @@ class _SandboxForkserver:
         except OSError as exc:
             shutil.rmtree(runtime_dir, ignore_errors=True)
             msg = f"Failed to start sandbox forkserver template: {exc}"
-            self._failed_fingerprints[fingerprint] = msg
+            self._failed_fingerprints[fingerprint] = (msg, time.monotonic())
             raise ForkserverStartupError(msg) from exc
         template = _Template(
             fingerprint=fingerprint,
@@ -287,13 +317,13 @@ class _SandboxForkserver:
                     f"Sandbox forkserver template exited during startup "
                     f"(code {template.process.returncode}): {stderr_tail}"
                 )
-                self._failed_fingerprints[fingerprint] = msg
+                self._failed_fingerprints[fingerprint] = (msg, time.monotonic())
                 logger.warning("sandbox_forkserver_template_startup_failed", error=msg)
                 raise ForkserverStartupError(msg)
             if time.monotonic() >= deadline:
                 _terminate_template(template)
                 msg = "Timed out waiting for the sandbox forkserver template to import the runtime."
-                self._failed_fingerprints[fingerprint] = msg
+                self._failed_fingerprints[fingerprint] = (msg, time.monotonic())
                 logger.warning("sandbox_forkserver_template_startup_failed", error=msg)
                 raise ForkserverStartupError(msg)
             try:
@@ -316,13 +346,25 @@ class _SandboxForkserver:
         envelope: str,
         deadline: float,
     ) -> subprocess.CompletedProcess[str]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # Never deliver a request the caller has no budget left for; a
+            # delivered request forks a child the parent may not learn about.
+            raise ForkserverTimeoutError
         request_payload = (
-            json.dumps({"env": request_env, "cwd": request_cwd, "envelope": envelope}).encode("utf-8") + b"\n"
+            json.dumps(
+                {"env": request_env, "cwd": request_cwd, "envelope": envelope, "timeout_seconds": remaining},
+            ).encode("utf-8")
+            + b"\n"
         )
         child_pid: int | None = None
-        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            conn.settimeout(max(0.1, deadline - time.monotonic()))
+            conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        except OSError as exc:
+            msg = f"Failed to open a sandbox forkserver connection: {exc}"
+            raise ForkserverError(msg) from exc
+        try:
+            conn.settimeout(remaining)
             try:
                 conn.connect(template.socket_path)
                 conn.sendall(request_payload)
@@ -399,6 +441,9 @@ def serve_template(socket_path: str, run_payload: Callable[[str], tuple[int, str
                 conn, _addr = server.accept()
             except TimeoutError:
                 if os.getppid() != parent_pid:
+                    # Orphaned: the runner died without running its cleanup
+                    # (e.g. SIGKILL), so remove our runtime dir ourselves.
+                    shutil.rmtree(Path(socket_path).parent, ignore_errors=True)
                     return 0
                 continue
             try:
@@ -425,9 +470,9 @@ def _child_main(conn: socket.socket, run_payload: Callable[[str], tuple[int, str
         conn.settimeout(_CHILD_REQUEST_READ_TIMEOUT_SECONDS)
         reader = conn.makefile("rb")
         request_line = reader.readline()
+        # Ready-wait probe connections close without sending a request line.
         if request_line.strip():
-            request = json.loads(request_line)
-            exit_code = _run_child_request(conn, request, run_payload)
+            exit_code = _run_child_request(conn, _parse_child_request(request_line), run_payload)
     except Exception:
         with suppress(Exception):
             _send_json(
@@ -443,19 +488,33 @@ def _child_main(conn: socket.socket, run_payload: Callable[[str], tuple[int, str
     os._exit(exit_code)
 
 
+def _parse_child_request(request_line: bytes) -> _ChildRequest:
+    payload = json.loads(request_line)
+    return _ChildRequest(
+        env=payload["env"],
+        cwd=payload["cwd"],
+        envelope=payload["envelope"],
+        timeout_seconds=payload["timeout_seconds"],
+    )
+
+
 def _run_child_request(
     conn: socket.socket,
-    request: dict[str, object],
+    request: _ChildRequest,
     run_payload: Callable[[str], tuple[int, str, str]],
 ) -> int:
-    env = request.get("env")
-    if isinstance(env, dict):
+    # Self-destruct backstop for the rare case where the runner never learned
+    # this child's pid; the grace keeps the runner-side SIGKILL primary.
+    signal.alarm(max(1, math.ceil(request.timeout_seconds + _CHILD_TIMEOUT_GRACE_SECONDS)))
+    if request.env is not None:
         os.environ.clear()
-        os.environ.update({str(name): str(value) for name, value in env.items()})
-    cwd = request.get("cwd")
-    if cwd:
-        os.chdir(str(cwd))
-    returncode, stdout_text, stderr_text = run_payload(str(request["envelope"]))
+        os.environ.update(request.env)
+    if request.cwd is not None:
+        os.chdir(request.cwd)
+    # `python -m` prepends the effective cwd to sys.path; mirror that for the
+    # request cwd (the runner template drops its own baked entry at startup).
+    sys.path.insert(0, str(Path.cwd()))
+    returncode, stdout_text, stderr_text = run_payload(request.envelope)
     conn.settimeout(_CHILD_RESPONSE_WRITE_TIMEOUT_SECONDS)
     _send_json(conn, {"returncode": returncode, "stdout": stdout_text, "stderr": stderr_text})
     return 0

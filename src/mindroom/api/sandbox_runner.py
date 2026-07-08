@@ -12,7 +12,7 @@ import secrets
 import subprocess
 import sys
 from collections.abc import Mapping
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -1329,6 +1329,11 @@ def _run_forkserver_template() -> int:
     # belongs to template startup, not to importing this module.
     import mindroom.tools  # noqa: F401, PLC0415
 
+    # `python -m` prepended the runner's cwd to sys.path at template startup;
+    # fork children prepend their own request cwd instead, matching what a
+    # spawn-per-call child started in that cwd would see.
+    with suppress(ValueError):
+        sys.path.remove(str(Path.cwd()))
     return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
 
 

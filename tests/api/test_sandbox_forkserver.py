@@ -170,6 +170,9 @@ def test_timeout_kills_child_and_keeps_template_alive(
     """A timed-out request must SIGKILL the fork child without recycling the template."""
     manager, spawned = stub_manager
     pid_file = tmp_path / "child.pid"
+    # Warm the template first so the 2 s deadline below covers only the
+    # request, not stub startup on a loaded CI machine.
+    assert _stub_execute(manager).returncode == 0
 
     with pytest.raises(ForkserverTimeoutError):
         _stub_execute(manager, envelope=f"sleep:{pid_file}", timeout_seconds=2.0)
@@ -209,6 +212,60 @@ def test_template_startup_failure_pins_fingerprint() -> None:
     assert len(attempts) == 1
 
 
+def test_template_startup_failure_retries_after_cooldown() -> None:
+    """A transient startup failure must not disable the forkserver forever."""
+    attempts: list[str] = []
+
+    def _command(python_executable: str, socket_path: str) -> list[str]:
+        attempts.append(socket_path)
+        return [python_executable, "-c", "import sys; sys.exit(3)"]
+
+    manager = _SandboxForkserver(template_command=_command, startup_failure_cooldown_seconds=0.0)
+    try:
+        with pytest.raises(ForkserverStartupError):
+            _stub_execute(manager)
+        with pytest.raises(ForkserverStartupError):
+            _stub_execute(manager)
+    finally:
+        manager.shutdown()
+
+    assert len(attempts) == 2
+
+
+def test_pinned_fingerprint_leaves_healthy_template_of_other_fingerprint_alone(tmp_path: Path) -> None:
+    """A pinned fingerprint must fail fast without recycling another fingerprint's warm template."""
+    script = tmp_path / "stub_template.py"
+    script.write_text(_STUB_TEMPLATE, encoding="utf-8")
+    attempts: list[str] = []
+    broken = {"active": False}
+
+    def _command(python_executable: str, socket_path: str) -> list[str]:
+        attempts.append(socket_path)
+        if broken["active"]:
+            return [python_executable, "-c", "import sys; sys.exit(3)"]
+        return [python_executable, str(script), socket_path]
+
+    manager = _SandboxForkserver(template_command=_command)
+    healthy_env = dict(os.environ)
+    broken_env = {**healthy_env, "FORKSERVER_FINGERPRINT": "broken"}
+    try:
+        broken["active"] = True
+        with pytest.raises(ForkserverStartupError):
+            _stub_execute(manager, template_env=broken_env)
+
+        broken["active"] = False
+        healthy_pid = _template_pid(_stub_execute(manager, template_env=healthy_env))
+
+        with pytest.raises(ForkserverStartupError):
+            _stub_execute(manager, template_env=broken_env)
+
+        assert _template_pid(_stub_execute(manager, template_env=healthy_env)) == healthy_pid
+    finally:
+        manager.shutdown()
+
+    assert len(attempts) == 2
+
+
 def _forkserver_runtime(tmp_path: Path) -> tuple[RuntimePaths, Config]:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -224,7 +281,7 @@ def _forkserver_runtime(tmp_path: Path) -> tuple[RuntimePaths, Config]:
 
 
 def test_forkserver_mode_routes_through_subprocess_dispatch(tmp_path: Path) -> None:
-    """Forkserver mode must keep the subprocess routing decision in execute_tool_call."""
+    """Forkserver mode must count as a per-request child-process mode for dispatch routing."""
     runtime_paths, _config = _forkserver_runtime(tmp_path)
 
     assert sandbox_exec_module.runner_uses_subprocess(runtime_paths) is True
@@ -288,6 +345,23 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
         )
         assert response.ok is True
         assert response.result == "explicit-value"
+
+        # Spawn-per-call parity: `python -m` puts the request cwd on sys.path,
+        # so python-tool code can import modules saved into its workspace.
+        (workdir / "helper.py").write_text('VALUE = "helper-value"\n', encoding="utf-8")
+        response = sandbox_runner_module._execute_request_subprocess_sync(
+            sandbox_runner_module.SandboxRunnerExecuteRequest(
+                tool_name="python",
+                function_name="run_python_code",
+                args=["import helper\nresult = helper.VALUE", "result"],
+                kwargs={},
+                execution_env={"MINDROOM_AGENT_WORKSPACE": str(workdir)},
+            ),
+            runtime_paths,
+            config,
+        )
+        assert response.ok is True
+        assert response.result == "helper-value"
     finally:
         manager.shutdown()
 
@@ -305,7 +379,7 @@ def test_forkserver_timeout_maps_to_worker_failure(
         def execute(self, **_kwargs: object) -> subprocess.CompletedProcess[str]:
             raise ForkserverTimeoutError
 
-    monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", _TimeoutForkserver)
+    monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: _TimeoutForkserver())
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
@@ -335,7 +409,7 @@ def test_forkserver_startup_failure_falls_back_to_spawn_per_call(
             msg = "template import crashed"
             raise ForkserverStartupError(msg)
 
-    monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", _BrokenForkserver)
+    monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: _BrokenForkserver())
 
     def _fake_run(*_args: object, **run_kwargs: object) -> subprocess.CompletedProcess[str]:
         assert json.loads(str(run_kwargs["input"]))["request"]["tool_name"] == "calculator"
