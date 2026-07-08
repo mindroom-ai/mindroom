@@ -212,6 +212,28 @@ def test_template_startup_failure_pins_fingerprint() -> None:
     assert len(attempts) == 1
 
 
+def test_slow_template_warmup_survives_request_timeouts(tmp_path: Path) -> None:
+    """A ready-wait timeout must leave the template importing instead of killing and pinning it."""
+    script = tmp_path / "slow_template.py"
+    script.write_text("import time\n\ntime.sleep(2)\n\n" + _STUB_TEMPLATE, encoding="utf-8")
+    spawned: list[str] = []
+
+    def _command(python_executable: str, socket_path: str) -> list[str]:
+        spawned.append(socket_path)
+        return [python_executable, str(script), socket_path]
+
+    manager = _SandboxForkserver(template_command=_command)
+    try:
+        with pytest.raises(ForkserverTimeoutError):
+            _stub_execute(manager, timeout_seconds=0.5)
+
+        assert _stub_execute(manager, timeout_seconds=30.0).returncode == 0
+    finally:
+        manager.shutdown()
+
+    assert len(spawned) == 1
+
+
 def test_template_startup_failure_retries_after_cooldown() -> None:
     """A transient startup failure must not disable the forkserver forever."""
     attempts: list[str] = []

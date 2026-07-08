@@ -97,13 +97,15 @@ def _default_template_command(python_executable: str, socket_path: str) -> list[
     return [python_executable, "-m", "mindroom.api.sandbox_runner", TEMPLATE_ARG, socket_path]
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Template:
     fingerprint: str
     process: subprocess.Popen[bytes]
     socket_path: str
     stderr_path: Path
     runtime_dir: Path
+    # Set once the socket accepts connections; mutated only under the key lock.
+    ready: bool = False
 
 
 @dataclass(frozen=True)
@@ -255,14 +257,19 @@ class _SandboxForkserver:
             self._discard(key, template)
             template = None
         if template is None:
-            template = self._spawn_template(
-                key=key,
-                fingerprint=fingerprint,
-                template_env=template_env,
-                deadline=deadline,
-            )
+            template = self._spawn_template(key=key, fingerprint=fingerprint, template_env=template_env)
             with self._lock:
                 self._templates[key] = template
+        try:
+            self._wait_template_ready(key=key, template=template, deadline=deadline)
+        except ForkserverStartupError as exc:
+            with self._lock:
+                if self._templates.get(key) is template:
+                    self._templates.pop(key)
+            shutil.rmtree(template.runtime_dir, ignore_errors=True)
+            self._failed_fingerprints[fingerprint] = (str(exc), time.monotonic())
+            logger.warning("sandbox_forkserver_template_startup_failed", error=str(exc))
+            raise
         return template
 
     def _discard(self, key: str, template: _Template) -> None:
@@ -277,7 +284,6 @@ class _SandboxForkserver:
         key: str,
         fingerprint: str,
         template_env: dict[str, str] | None,
-        deadline: float,
     ) -> _Template:
         runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-fs-"))
         socket_path = str(runtime_dir / "template.sock")
@@ -297,35 +303,31 @@ class _SandboxForkserver:
             msg = f"Failed to start sandbox forkserver template: {exc}"
             self._failed_fingerprints[fingerprint] = (msg, time.monotonic())
             raise ForkserverStartupError(msg) from exc
-        template = _Template(
+        return _Template(
             fingerprint=fingerprint,
             process=process,
             socket_path=socket_path,
             stderr_path=stderr_path,
             runtime_dir=runtime_dir,
         )
-        self._wait_template_ready(template=template, fingerprint=fingerprint, deadline=deadline)
-        logger.info("sandbox_forkserver_template_ready", python_executable=key, template_pid=process.pid)
-        return template
 
-    def _wait_template_ready(self, *, template: _Template, fingerprint: str, deadline: float) -> None:
+    def _wait_template_ready(self, *, key: str, template: _Template, deadline: float) -> None:
+        if template.ready:
+            return
         while True:
             if template.process.poll() is not None:
                 stderr_tail = _stderr_tail(template.stderr_path)
-                shutil.rmtree(template.runtime_dir, ignore_errors=True)
                 msg = (
                     f"Sandbox forkserver template exited during startup "
                     f"(code {template.process.returncode}): {stderr_tail}"
                 )
-                self._failed_fingerprints[fingerprint] = (msg, time.monotonic())
-                logger.warning("sandbox_forkserver_template_startup_failed", error=msg)
                 raise ForkserverStartupError(msg)
             if time.monotonic() >= deadline:
-                _terminate_template(template)
-                msg = "Timed out waiting for the sandbox forkserver template to import the runtime."
-                self._failed_fingerprints[fingerprint] = (msg, time.monotonic())
-                logger.warning("sandbox_forkserver_template_startup_failed", error=msg)
-                raise ForkserverStartupError(msg)
+                # Startup outlasting one request's budget is not a template
+                # failure: keep it importing so a later request finds it warm,
+                # and report the same timeout spawn-per-call would have hit.
+                logger.info("sandbox_forkserver_template_still_importing", python_executable=key)
+                raise ForkserverTimeoutError
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
                     probe.settimeout(1.0)
@@ -333,6 +335,12 @@ class _SandboxForkserver:
             except OSError:
                 time.sleep(_READY_PROBE_INTERVAL_SECONDS)
             else:
+                template.ready = True
+                logger.info(
+                    "sandbox_forkserver_template_ready",
+                    python_executable=key,
+                    template_pid=template.process.pid,
+                )
                 return
 
     def _request(
@@ -428,6 +436,12 @@ def serve_template(socket_path: str, run_payload: Callable[[str], tuple[int, str
     after the heavy runtime import has completed. Must stay fork-safe: no
     threads, event loops, or network clients before forking.
     """
+    if (thread_count := threading.active_count()) > 1:
+        msg = (
+            f"Sandbox forkserver template must be single-threaded before forking; "
+            f"found {thread_count} threads after the runtime import."
+        )
+        raise RuntimeError(msg)
     parent_pid = os.getppid()
     # Auto-reap forked request children; each child restores SIG_DFL for its
     # own tool subprocesses immediately after fork.
@@ -476,7 +490,7 @@ def _child_main(conn: socket.socket, run_payload: Callable[[str], tuple[int, str
             request_line = b""
         if request_line.strip():
             exit_code = _run_child_request(conn, _parse_child_request(request_line), run_payload)
-    except Exception:
+    except BaseException:
         with suppress(Exception):
             _send_json(
                 conn,
