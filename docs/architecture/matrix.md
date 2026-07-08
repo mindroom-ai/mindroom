@@ -196,11 +196,13 @@ Managed rooms can be created encrypted via `rooms.<key>.encrypted: true` or `mat
 Users can also enable encryption in any room with `!encrypt confirm` (room admin only), and `!e2ee` reports encryption diagnostics.
 Enabling encryption on a Matrix room is irreversible; MindRoom never disables it.
 
-When an agent receives an event it cannot decrypt, it logs a `matrix_event_decryption_failed` warning, sends a Matrix room-key request once per session, and posts one rate-limited notice per (room, session) so the user knows to resend.
-The router posts the notice in rooms it occupies; otherwise a bot only posts when it is the sole managed bot in the room.
+When an agent receives an event it cannot decrypt from an authorized sender, it logs a `matrix_event_decryption_failed` warning, sends a best-effort room-key request once per session (delivered to the bot account's own devices, so recovery normally needs the sender to post a new message), and posts one notice per (room, session) so the user knows to resend.
+All bots share a disk-backed notice ledger, so the first bot that fails on a session posts the only notice and multi-agent rooms never storm.
+Notices are suppressed for events that predate a bot's room join or a start without sync continuity, since pre-join and already-replayed history is expected to be undecryptable.
 Decryption-failure counters are exposed on `/api/health` under `e2ee`.
 
 Each agent bootstraps a self-managed cross-signing identity at login (master and self-signing keys persisted next to its encryption store) and signs its own device, so clients that exclude non-cross-signed devices (MSC4153) keep sharing room keys with agents. `!e2ee` reports the cross-signing status.
+When the homeserver no longer has the uploaded identity (for example after a dev-server reset that kept `encryption_keys/`), the bootstrap detects the divergence and re-uploads the persisted keys instead of wedging.
 
 If a bot's encryption store under `mindroom_data/encryption_keys/` is lost while its device identity persists, startup logs in as a fresh device instead of restoring a wedged crypto identity, and re-signs the new device with the persisted cross-signing keys; `mindroom doctor` reports missing stores.
 Messages encrypted only to the lost device stay undecryptable, but the durable event cache preserves the agent's conversational context.
