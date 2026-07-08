@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, Config, iter_config_validation_messages
 
 
-def doctor() -> None:
+def doctor(config_path: Path | None = None, storage_path: Path | None = None) -> None:
     """Check your environment for common issues.
 
     Runs connectivity, configuration, and credential checks in a single pass
@@ -46,8 +46,9 @@ def doctor() -> None:
     failed = 0
     warnings = 0
 
-    runtime_paths = activate_cli_runtime()
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config_path = runtime_paths.config_path
+    console.print(f"[dim]Config directory: {config_path.parent}[/dim]")
 
     # 1. Config file exists
     p, f, w = _run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path))
