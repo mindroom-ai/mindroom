@@ -473,10 +473,6 @@ override-dependencies = [
   "pillow>=10.2,<11; python_version < '3.14'",
   "pillow>=11,<12; python_version >= '3.14'",
 ]
-# TEMPORARY: mindroom-nio 0.26.0 (cross-signing) is not on PyPI yet.
-# Remove this source once mindroom-nio releases 0.26.0 and the >=0.26.0
-# floor in [project.dependencies] resolves from PyPI.
-sources = { mindroom-nio = { git = "https://github.com/mindroom-ai/mindroom-nio.git", branch = "cross-signing-bootstrap" } }
 
 [tool.ruff]
 target-version = "py312"

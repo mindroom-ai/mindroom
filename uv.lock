@@ -426,12 +426,6 @@ wheels = [
 ]
 
 [[package]]
-name = "atomicwrites"
-version = "1.4.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/87/c6/53da25344e3e3a9c01095a89f16dbcda021c609ddb42dd6d7c0528236fb2/atomicwrites-1.4.1.tar.gz", hash = "sha256:81b2c9071a49367a7f770170e5eec8cb66567cfbbc8c73d20ce5ca4a8d71cf11", size = 14227, upload-time = "2022-07-08T18:31:40.459Z" }
-
-[[package]]
 name = "attrs"
 version = "26.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4240,7 +4234,7 @@ requires-dist = [
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
-    { name = "mindroom-nio", extras = ["e2e"], git = "https://github.com/mindroom-ai/mindroom-nio.git?branch=cross-signing-bootstrap" },
+    { name = "mindroom-nio", extras = ["e2e"], specifier = ">=0.26" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4344,17 +4338,20 @@ dev = [
 [[package]]
 name = "mindroom-nio"
 version = "0.26.0"
-source = { git = "https://github.com/mindroom-ai/mindroom-nio.git?branch=cross-signing-bootstrap#17763cfba18555ad94552804eb46a5828a17d04e" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
     { name = "aiohttp-socks" },
-    { name = "atomicwrites" },
     { name = "h11" },
     { name = "h2" },
     { name = "jsonschema" },
     { name = "pycryptodome" },
     { name = "unpaddedbase64" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d4/bf/6a94e7040bf1cf721497574efe9e6936954ddea1ad5d5fbc8e8fc3b8cf07/mindroom_nio-0.26.0.tar.gz", hash = "sha256:dc871d54bdff43f43be0804079d418d4f84f17b0c69017cda253c21c0d514d37", size = 166777, upload-time = "2026-07-08T17:28:33.542Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/74/9a61297b56f6757b165afc299fd635d7bd4f9c8a14016eae83bace152b07/mindroom_nio-0.26.0-py3-none-any.whl", hash = "sha256:f6e01c71022b2aa69ccbd8e1fd90f68f6b10d80bd70f821bdac5e812b85d72fa", size = 194563, upload-time = "2026-07-08T17:28:32.265Z" },
 ]
 
 [package.optional-dependencies]
