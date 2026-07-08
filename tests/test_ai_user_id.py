@@ -2118,8 +2118,10 @@ class TestUserIdPassthrough:
             ("[openclaw] Error: At most 0 audio(s) may be provided in one prompt.", True),
             # Invalid-request-class evidence retries once even without media wording.
             ("invalid_request_error: max_tokens must be <= 4096", True),
-            ("Rate limit exceeded", False),
-            ("Error code: 500 - internal server error", False),
+            # Any other failure of a media-bearing request also retries once;
+            # no wording decides whether to retry, only whether the cache teaches.
+            ("Rate limit exceeded", True),
+            ("Error code: 500 - internal server error", True),
         ],
     )
     def test_retry_media_inputs_after_failure_error_matching(self, error_text: str, expected: bool) -> None:
@@ -2172,8 +2174,8 @@ class TestUserIdPassthrough:
         assert custom_user_copy == repeated_custom_user_copy
 
     @pytest.mark.asyncio
-    async def test_ai_response_does_not_retry_without_media_validation_match(self, tmp_path: Path) -> None:
-        """Failures outside the invalid-request class should not trigger inline-media retry."""
+    async def test_ai_response_retries_once_without_media_for_any_failure(self, tmp_path: Path) -> None:
+        """Failures outside the invalid-request class still retry once without inline media."""
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "OpenAIChat"
@@ -2202,7 +2204,8 @@ class TestUserIdPassthrough:
             )
 
         assert response == "friendly"
-        assert mock_agent.arun.await_count == 1
+        # First attempt with media, one retry without it, then the error surfaces.
+        assert mock_agent.arun.await_count == 2
         mock_friendly_error.assert_called_once()
 
     @pytest.mark.asyncio
