@@ -60,6 +60,12 @@ _TOOL_SEARCH_TOOL_TYPE = "tool_search_tool_regex_20251119"
 _TOOL_SEARCH_TOOL_NAME = "tool_search_tool_regex"
 _NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic", "vertexai_claude"})
 
+_TOOL_SEARCH_RESULT_BLOCK_TYPE = "tool_search_tool_result"
+# The request schema for replayed tool-search results accepts only these keys
+# (ToolSearchToolResultBlockParam); response blocks additionally carry
+# citations/parsed_output/text, which the API rejects as extra inputs.
+_TOOL_SEARCH_RESULT_INPUT_KEYS = frozenset({"type", "tool_use_id", "content", "cache_control"})
+
 
 def native_tool_search_supported(provider: str, model_id: str) -> bool:
     """Return whether one authored provider/model pair supports server-side tool search.
@@ -206,6 +212,51 @@ def _model_deferred_tool_names(model: AnthropicClaude) -> frozenset[str]:
     return deferred_tool_names if isinstance(deferred_tool_names, frozenset) else frozenset()
 
 
+def _request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Strip response-only fields from replayed tool-search result blocks.
+
+    Agno replays captured server-tool blocks verbatim in assistant history,
+    and the SDK response block carries fields (``citations``, ``parsed_output``,
+    ``text``) that the request schema rejects with a 400 ("Extra inputs are
+    not permitted"). Once such a block is persisted, every later turn of that
+    conversation replays it, so the thread stays broken until the block is
+    sanitized here. Keys used for history identity (``type``, ``tool_use_id``)
+    are preserved. The input structure is never mutated.
+    """
+    messages = request_kwargs.get("messages")
+    if not isinstance(messages, list):
+        return request_kwargs
+    sanitized_messages = list(messages)
+    changed = False
+    for message_index, message in enumerate(sanitized_messages):
+        message_dict = _as_dict(message)
+        content = message_dict.get("content") if message_dict is not None else None
+        if message_dict is None or not isinstance(content, list):
+            continue
+        sanitized_content = list(content)
+        content_changed = False
+        for block_index, block in enumerate(sanitized_content):
+            block_dict = _as_dict(block)
+            if block_dict is None or block_dict.get("type") != _TOOL_SEARCH_RESULT_BLOCK_TYPE:
+                continue
+            if set(block_dict) <= _TOOL_SEARCH_RESULT_INPUT_KEYS:
+                continue
+            sanitized_content[block_index] = {
+                key: value for key, value in block_dict.items() if key in _TOOL_SEARCH_RESULT_INPUT_KEYS
+            }
+            content_changed = True
+        if content_changed:
+            sanitized_message = dict(message_dict)
+            sanitized_message["content"] = sanitized_content
+            sanitized_messages[message_index] = sanitized_message
+            changed = True
+    if not changed:
+        return request_kwargs
+    prepared_kwargs = dict(request_kwargs)
+    prepared_kwargs["messages"] = sanitized_messages
+    return prepared_kwargs
+
+
 def _request_kwargs_with_deferred_tool_search(
     request_kwargs: dict[str, Any],
     deferred_tool_names: frozenset[str],
@@ -278,8 +329,9 @@ class _PromptCacheMessagesProxy:
         self._model = model
 
     def _prepared(self, request_kwargs: dict[str, Any]) -> dict[str, Any]:
+        prepared_kwargs = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
         prepared_kwargs = _request_kwargs_with_deferred_tool_search(
-            request_kwargs,
+            prepared_kwargs,
             _model_deferred_tool_names(self._model),
         )
         if not self._model.cache_system_prompt:
@@ -369,16 +421,15 @@ def install_claude_prompt_cache_hook(model: object) -> None:
     original_get_async_client = model.get_async_client
     model_dict[_PROMPT_CACHE_HOOK_ATTR] = True
 
+    # Always proxy: the ladder and deferred-tool tagging gate themselves inside
+    # _prepared, but replayed tool-search result blocks must be sanitized on
+    # every request, including cache-disabled models replaying history.
     def _get_client_with_prompt_cache() -> object:
         client = original_get_client()
-        if not model.cache_system_prompt and not _model_deferred_tool_names(model):
-            return client
         return _PromptCacheClientProxy(client, model)
 
     def _get_async_client_with_prompt_cache() -> object:
         client = original_get_async_client()
-        if not model.cache_system_prompt and not _model_deferred_tool_names(model):
-            return client
         return _PromptCacheClientProxy(client, model)
 
     model_dict["get_client"] = _get_client_with_prompt_cache
