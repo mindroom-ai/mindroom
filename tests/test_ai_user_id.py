@@ -1493,8 +1493,8 @@ class TestUserIdPassthrough:
         assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
 
     @pytest.mark.asyncio
-    async def test_ai_response_learns_audio_unsupported_for_same_model_route(self, tmp_path: Path) -> None:
-        """Audio-only capability failure should omit audio on later calls to the same concrete route."""
+    async def test_ai_response_learns_media_unsupported_for_same_model_route(self, tmp_path: Path) -> None:
+        """A successful without-media retry teaches the route to omit media on later calls."""
         reset_model_media_capability_cache()
 
         def build_agent() -> MagicMock:
@@ -1560,10 +1560,11 @@ class TestUserIdPassthrough:
         assert fallback_marker in str(cached_prompt[-1].content)
         assert first_prompt[-1].audio == [audio_input]
         assert first_prompt[-1].images == [image_input]
-        assert retry_prompt[-1].audio == ()
-        assert retry_prompt[-1].images == [image_input]
-        assert cached_prompt[-1].audio == ()
-        assert cached_prompt[-1].images == [image_input]
+        # The retry drops all media, and the successful retry teaches the route.
+        assert not retry_prompt[-1].audio
+        assert not retry_prompt[-1].images
+        assert not cached_prompt[-1].audio
+        assert not cached_prompt[-1].images
         reset_model_media_capability_cache()
 
     @pytest.mark.asyncio
