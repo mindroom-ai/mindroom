@@ -164,6 +164,35 @@ async def test_request_vault_access_names_shared_vault_without_granting(
 
 
 @pytest.mark.asyncio
+async def test_shared_scope_tool_needs_only_ui_base_url(tmp_path: Path) -> None:
+    """A shared-scope instance never reaches the grant API, so only the UI base URL is required."""
+    env = {"MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL": "https://example.test/agent-vault"}
+    target = _worker_target(worker_scope="shared")
+    expected_vault = worker_id_for_key(target.worker_key, prefix="agent-vault")
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=target)
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "ok"
+    assert payload["access"] == "operator_managed"
+    assert payload["url"] == f"https://example.test/agent-vault/vaults/{expected_vault}"
+
+
+def test_isolated_scope_still_requires_grant_config(tmp_path: Path) -> None:
+    """Requester-isolated scopes self-grant, so the full API configuration stays required."""
+    env = {"MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL": "https://example.test/agent-vault"}
+    with pytest.raises(_AgentVaultAccessError, match="API_URL"):
+        AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=_worker_target())
+
+
+def test_unknown_target_still_requires_grant_config(tmp_path: Path) -> None:
+    """Without a worker target the reachable paths are unknown, so validation stays strict."""
+    env = {"MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL": "https://example.test/agent-vault"}
+    with pytest.raises(_AgentVaultAccessError, match="API_URL"):
+        AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=None)
+
+
+@pytest.mark.asyncio
 async def test_shared_vault_link_needs_no_requester(tmp_path: Path) -> None:
     """The shared-vault link is requester-independent, so a missing requester is fine."""
     target = _worker_target(requester=None, worker_scope="shared")

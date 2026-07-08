@@ -33,6 +33,16 @@ _DEFAULT_VAULT_NAME_PREFIX = "agent-vault"
 _HTTP_TIMEOUT_SECONDS = 15.0
 
 
+def _requires_grant_config(target: ResolvedWorkerTarget | None) -> bool:
+    """Whether this tool instance can ever reach the grant API.
+
+    Shared-scope targets return the vault name and link before any API call, so
+    they only need the UI base URL. Requester-isolated scopes self-grant and
+    need the full API configuration; unknown targets stay strict.
+    """
+    return target is None or not target.worker_key or target.worker_scope in {"user", "user_agent"}
+
+
 class _AgentVaultAccessError(RuntimeError):
     """Raised when the tool cannot be constructed from the runtime configuration."""
 
@@ -56,16 +66,16 @@ class AgentVaultAccessTools(Toolkit):
             runtime_paths.env_value(env["vault_name_prefix"]) or _DEFAULT_VAULT_NAME_PREFIX
         ).strip()
         self._owner_email = (runtime_paths.env_value(env["owner_email"]) or "").strip()
-        missing = [
-            name
-            for name, value in (
-                (env["api_url"], self._api_url),
-                (env["ui_base_url"], self._ui_base_url),
-                (env["email_domain"], self._email_domain),
+        required = [(env["ui_base_url"], self._ui_base_url)]
+        if _requires_grant_config(worker_target):
+            required.extend(
+                (
+                    (env["api_url"], self._api_url),
+                    (env["email_domain"], self._email_domain),
+                ),
             )
-            if not value
-        ]
-        if not self._admin_token and not self._admin_token_file:
+        missing = [name for name, value in required if not value]
+        if _requires_grant_config(worker_target) and not self._admin_token and not self._admin_token_file:
             missing.append(f"{env['admin_token']} or {env['admin_token_file']}")
         if missing:
             msg = f"AgentVaultAccessTools requires these environment values: {', '.join(sorted(missing))}"
