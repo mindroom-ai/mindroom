@@ -1,4 +1,4 @@
-"""Synthetic benchmark for MindRoom tool-call bridge overhead."""
+"""Synthetic benchmark for MindRoom tool-call bridge and sandbox dispatch overhead."""
 
 from __future__ import annotations
 
@@ -7,7 +7,9 @@ import asyncio
 import json
 import logging
 import math
+import tempfile
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -137,11 +139,67 @@ async def _run_benchmark(iterations: int, warmup: int) -> list[dict[str, object]
     ]
 
 
+def _run_sandbox_dispatch_case(mode: str, iterations: int, warmup: int) -> dict[str, object]:
+    """Benchmark one worker-routed sandbox dispatch mode with a trivial tool call."""
+    # Imported here so the lightweight hook benchmark does not pay the full
+    # runtime import that this case exists to measure.
+    from mindroom.api import sandbox_runner  # noqa: PLC0415
+    from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory(prefix="mindroom-dispatch-benchmark-") as tmp:
+        config_path = Path(tmp) / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.5\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        runtime_paths = resolve_primary_runtime_paths(
+            config_path=config_path,
+            storage_path=Path(tmp) / "storage",
+            process_env={"MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": mode},
+        )
+        config = sandbox_runner._runtime_config_or_empty(runtime_paths)
+
+        def _call() -> None:
+            response = sandbox_runner._execute_request_subprocess_sync(
+                sandbox_runner.SandboxRunnerExecuteRequest(
+                    tool_name="calculator",
+                    function_name="add",
+                    args=[1, 2],
+                    kwargs={},
+                ),
+                runtime_paths,
+                config,
+            )
+            if not response.ok:
+                msg = f"sandbox dispatch failed: {response.error}"
+                raise RuntimeError(msg)
+
+        for _ in range(warmup):
+            _call()
+        samples: list[float] = []
+        for _ in range(iterations):
+            started_at = time.perf_counter()
+            _call()
+            samples.append((time.perf_counter() - started_at) * 1000)
+    return {"case": f"sandbox_dispatch_{mode}", **summarize_samples(samples)}
+
+
 def main() -> None:
     """Run the command-line benchmark and print JSON results."""
-    parser = argparse.ArgumentParser(description="Benchmark MindRoom tool-call bridge overhead.")
+    parser = argparse.ArgumentParser(description="Benchmark MindRoom tool-call bridge and sandbox dispatch overhead.")
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument("--warmup", type=int, default=50)
+    parser.add_argument(
+        "--sandbox-dispatch",
+        nargs="+",
+        choices=["forkserver", "subprocess"],
+        default=None,
+        help=(
+            "Benchmark worker-routed sandbox dispatch for the given execution modes "
+            "instead of the hook bridge. Each spawn-per-call iteration pays the full "
+            "runtime import, so pass a small --iterations (e.g. 5) and --warmup 1."
+        ),
+    )
     args = parser.parse_args()
     if args.iterations < 1:
         parser.error("--iterations must be >= 1")
@@ -155,7 +213,10 @@ def main() -> None:
         wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
         cache_logger_on_first_use=False,
     )
-    results = asyncio.run(_run_benchmark(iterations=args.iterations, warmup=args.warmup))
+    if args.sandbox_dispatch:
+        results = [_run_sandbox_dispatch_case(mode, args.iterations, args.warmup) for mode in args.sandbox_dispatch]
+    else:
+        results = asyncio.run(_run_benchmark(iterations=args.iterations, warmup=args.warmup))
     print(json.dumps(results, indent=2, sort_keys=True))
 
 
