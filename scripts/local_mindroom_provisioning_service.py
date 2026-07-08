@@ -74,6 +74,10 @@ NAMESPACE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 NAMESPACE_LENGTH = 8
 MANAGED_AGENT_USERNAME_PREFIX = "mindroom_"
 MATRIX_LOCALPART_RE = re.compile(r"\A[-a-z0-9._=/+]+\Z")
+# The local MindRoom client (src/mindroom/matrix/provisioning.py) classifies
+# errors by these exact strings; a contract test keeps the two sides in sync.
+CONNECTION_REVOKED_DETAIL = "Connection revoked"
+NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
 PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
 
 
@@ -555,7 +559,7 @@ def _require_local_client(
     if not hmac.compare_digest(expected_hash, provided_hash):
         raise HTTPException(status_code=401, detail="Invalid local client credentials")
     if connection.revoked_at:
-        raise HTTPException(status_code=403, detail="Connection revoked")
+        raise HTTPException(status_code=403, detail=CONNECTION_REVOKED_DETAIL)
     return connection
 
 
@@ -870,7 +874,7 @@ async def register_agent(
         if not _is_username_permitted_for_connection(payload.username, connection.namespace):
             raise HTTPException(
                 status_code=403,
-                detail="Requested username is outside this local connection namespace",
+                detail=NAMESPACE_MISMATCH_DETAIL,
             )
         connection.last_seen_at = now
         _persist_state_unlocked(state, config.state_path)

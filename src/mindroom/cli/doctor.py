@@ -302,12 +302,34 @@ def _classify_vertexai_claude_error(
 ) -> tuple[bool | None, str]:
     """Classify one Vertex AI Claude validation failure for doctor output."""
     if isinstance(exc, APIStatusError):
-        return False, f"HTTP {exc.status_code}"
+        return False, _vertexai_claude_api_error_detail(exc)
     if isinstance(exc, DefaultCredentialsError):
         return None, str(exc)
     if isinstance(exc, RefreshError):
         return False, str(exc)
     return None, str(exc)
+
+
+def _vertexai_claude_api_error_detail(exc: APIStatusError) -> str:
+    """Turn a Vertex Claude API error into an actionable doctor message.
+
+    Model availability on Vertex is per project and region: a project can have
+    the Vertex AI API enabled yet still 404 on a Claude model when Anthropic
+    models are not enabled in its Model Garden or when the model id form is
+    wrong for Vertex (current-generation ids are bare, e.g. the anthropic
+    default; older ones are dated snapshots with an @ separator).
+    """
+    if exc.status_code == httpx.codes.NOT_FOUND:
+        return (
+            "HTTP 404: model not available in this project/region — verify the Vertex model id form "
+            "(bare current-generation id or dated @ snapshot) and that Anthropic models are enabled "
+            f"in the project's Model Garden ({exc.message})"
+        )
+    if exc.status_code == httpx.codes.FORBIDDEN:
+        if "SERVICE_DISABLED" in exc.message:
+            return "HTTP 403: the Vertex AI API (aiplatform.googleapis.com) is not enabled in this project"
+        return "HTTP 403: permission denied — check the credentials' IAM access to Vertex AI in this project"
+    return f"HTTP {exc.status_code}"
 
 
 def _validate_vertexai_claude_connection(

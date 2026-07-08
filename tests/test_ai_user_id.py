@@ -13,7 +13,7 @@ from agno.media import File
 from agno.models.message import Message
 from agno.models.metrics import Metrics
 from agno.models.openai import OpenAIChat
-from agno.models.response import ToolExecution
+from agno.models.response import ModelResponse, ToolExecution
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
     ModelRequestCompletedEvent,
@@ -1915,15 +1915,15 @@ class TestUserIdPassthrough:
                 self.client = None
                 self.async_client = None
 
-            async def ainvoke(self, *_args: object, **_kwargs: object) -> dict[str, str]:
-                return {"status": "ok"}
+            async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+                return ModelResponse(content="ok")
 
             async def ainvoke_stream(
                 self,
                 *_args: object,
                 **_kwargs: object,
-            ) -> AsyncIterator[dict[str, str]]:
-                yield {"status": "ok"}
+            ) -> AsyncIterator[ModelResponse]:
+                yield ModelResponse(content="ok")
 
         class _DeferredLoggingAgent:
             def __init__(self, model: _DeferredLoggingModel) -> None:

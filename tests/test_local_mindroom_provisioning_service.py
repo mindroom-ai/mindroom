@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import scripts.local_mindroom_provisioning_service as provisioning
+from mindroom.matrix import provisioning as matrix_provisioning
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -643,3 +644,9 @@ async def test_register_agent_user_in_use_respects_matrix_server_name_override(
     result = await provisioning._register_agent_with_matrix(config, payload)
     assert result.status == "user_in_use"
     assert result.user_id == "@mindroom_code:mindroom.chat"
+
+
+def test_client_error_detail_constants_match_service() -> None:
+    """The runtime client classifies register-agent 403s by these exact strings."""
+    assert matrix_provisioning._CONNECTION_REVOKED_DETAIL == provisioning.CONNECTION_REVOKED_DETAIL
+    assert matrix_provisioning._NAMESPACE_MISMATCH_DETAIL == provisioning.NAMESPACE_MISMATCH_DETAIL

@@ -7,10 +7,11 @@ import base64
 import json
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, fields, is_dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
 from agno.models.message import Message
 from pydantic import BaseModel
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine, Iterator, Sequence
 
     from agno.models.base import Model
+    from agno.models.message import MessageMetrics
     from agno.models.response import ModelResponse
 
     from mindroom.config.models import DebugConfig
@@ -258,24 +260,38 @@ def stream_with_llm_request_log_context[StreamEventT](
     )
 
 
+@dataclass(frozen=True)
+class _RequestLogRef:
+    """Join key and destination file of one written request record.
+
+    The response record reuses ``log_path`` so a request/response pair always
+    lands in the same daily file, even when the response arrives after
+    midnight — the offline review tool reads one file at a time.
+    """
+
+    request_log_id: str
+    log_path: Path
+
+
 async def _write_llm_request_log(
     *,
     model: Model,
     agent_name: str,
     messages: Sequence[Message],
     tools: list[dict[str, _JSONValue]] | None,
-    log_dir: str | None,
-    default_log_dir: Path,
+    log_path: Path,
     request_context: dict[str, _JSONValue] | None = None,
+    request_log_id: str,
 ) -> None:
     """Persist one request record for an LLM invocation."""
     now = datetime.now().astimezone()
     resolved_request_context = request_context if request_context is not None else _snapshot_request_log_context()
     await asyncio.to_thread(
         _write_jsonl_line,
-        _daily_log_path(log_dir, default_log_dir, now),
+        log_path,
         {
             "timestamp": now.isoformat(),
+            "request_log_id": request_log_id,
             "agent_id": agent_name,
             **resolved_request_context,
             "model_id": model.id,
@@ -289,6 +305,46 @@ async def _write_llm_request_log(
     )
 
 
+def _usage_payload(usage: MessageMetrics) -> dict[str, _JSONValue]:
+    """Return the token counts of one provider response as a JSON payload."""
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+    }
+
+
+async def _write_llm_response_log(
+    *,
+    model: Model,
+    agent_name: str,
+    request_log_ref: _RequestLogRef | None,
+    usage: MessageMetrics | None,
+    request_context: dict[str, _JSONValue],
+) -> None:
+    """Persist one compact response record with the provider-reported usage.
+
+    No-op when the request record was never written (nothing to join on) or
+    when the provider reported no usage metrics.
+    """
+    if request_log_ref is None or usage is None:
+        return
+    now = datetime.now().astimezone()
+    payload: dict[str, _JSONValue] = {
+        "timestamp": now.isoformat(),
+        "record": "response",
+        "request_log_id": request_log_ref.request_log_id,
+        "agent_id": agent_name,
+        "model_id": model.id,
+        "usage": _usage_payload(usage),
+    }
+    correlation_id = request_context.get("correlation_id")
+    if correlation_id is not None:
+        payload["correlation_id"] = correlation_id
+    await asyncio.to_thread(_write_jsonl_line, request_log_ref.log_path, payload)
+
+
 async def _write_llm_request_log_if_present(
     *,
     model: Model,
@@ -297,20 +353,29 @@ async def _write_llm_request_log_if_present(
     log_dir: str | None,
     default_log_dir: Path,
     request_context: dict[str, _JSONValue],
-) -> None:
-    """Write one request log entry when provider kwargs include API request messages."""
+) -> _RequestLogRef | None:
+    """Write one request log entry when provider kwargs include API request messages.
+
+    Returns the written record's join key and file so the matching response
+    record can be joined to it later, in the same daily file.
+    """
     messages = _request_messages(kwargs.get("messages"))
     if messages is None:
-        return
+        return None
+    request_log_ref = _RequestLogRef(
+        request_log_id=uuid4().hex,
+        log_path=_daily_log_path(log_dir, default_log_dir, datetime.now().astimezone()),
+    )
     await _write_llm_request_log(
         model=model,
         agent_name=agent_name,
         messages=messages,
         tools=_request_tools(kwargs.get("tools")),
-        log_dir=log_dir,
-        default_log_dir=default_log_dir,
+        log_path=request_log_ref.log_path,
         request_context=request_context,
+        request_log_id=request_log_ref.request_log_id,
     )
+    return request_log_ref
 
 
 def install_llm_request_logging(
@@ -334,7 +399,7 @@ def install_llm_request_logging(
         request_context = _snapshot_request_log_context()
 
         async def _invoke() -> ModelResponse:
-            await _write_llm_request_log_if_present(
+            request_log_ref = await _write_llm_request_log_if_present(
                 model=model,
                 agent_name=agent_name,
                 kwargs=kwargs,
@@ -342,7 +407,15 @@ def install_llm_request_logging(
                 default_log_dir=default_log_dir,
                 request_context=request_context,
             )
-            return await original_ainvoke(*args, **kwargs)
+            response = await original_ainvoke(*args, **kwargs)
+            await _write_llm_response_log(
+                model=model,
+                agent_name=agent_name,
+                request_log_ref=request_log_ref,
+                usage=response.response_usage,
+                request_context=request_context,
+            )
+            return response
 
         return _invoke()
 
@@ -350,7 +423,7 @@ def install_llm_request_logging(
         request_context = _snapshot_request_log_context()
 
         async def _stream() -> AsyncIterator[ModelResponse]:
-            await _write_llm_request_log_if_present(
+            request_log_ref = await _write_llm_request_log_if_present(
                 model=model,
                 agent_name=agent_name,
                 kwargs=kwargs,
@@ -358,8 +431,23 @@ def install_llm_request_logging(
                 default_log_dir=default_log_dir,
                 request_context=request_context,
             )
-            async for chunk in original_ainvoke_stream(*args, **kwargs):
-                yield chunk
+            last_usage: MessageMetrics | None = None
+            # finally: an abandoned stream (consumer break -> aclose()) must
+            # still record any usage already reported; awaiting during aclose()
+            # is allowed for async generators as long as nothing is yielded.
+            try:
+                async for chunk in original_ainvoke_stream(*args, **kwargs):
+                    if chunk.response_usage is not None:
+                        last_usage = chunk.response_usage
+                    yield chunk
+            finally:
+                await _write_llm_response_log(
+                    model=model,
+                    agent_name=agent_name,
+                    request_log_ref=request_log_ref,
+                    usage=last_usage,
+                    request_context=request_context,
+                )
 
         return _stream()
 

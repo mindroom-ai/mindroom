@@ -10,7 +10,7 @@ import sqlite3
 import sys
 from collections import Counter, defaultdict
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
@@ -76,6 +76,8 @@ class RequestRow:
     preview: str
     tools_blob: str = ""
     cache_enabled: bool = False
+    request_log_id: str = ""
+    usage: dict[str, int] | None = None
 
     @property
     def total_prefix_chars(self) -> int:
@@ -352,6 +354,9 @@ def main() -> None:
             ),
         )
 
+    print()
+    print_cache_actuals(rows)
+
 
 def resolve_storage_root(explicit_root: Path | None) -> Path:
     """Resolve the storage root used for JSONL and session DB discovery."""
@@ -450,6 +455,7 @@ def load_request_rows(
     """Load request rows plus JSONL parse diagnostics from one log file."""
     decoder = json.JSONDecoder()
     rows: list[RequestRow] = []
+    usage_by_request_log_id: dict[str, dict[str, int]] = {}
     line_count = 0
     document_count = 0
     concatenated_document_count = 0
@@ -478,13 +484,19 @@ def load_request_rows(
                 parsed_documents += 1
                 document_count += 1
                 position = end_position
-                row_error = _append_request_row(rows, payload, session_id_filter)
+                row_error = _append_request_row(rows, payload, session_id_filter, usage_by_request_log_id)
                 if row_error is not None:
                     unparseable_row_count += 1
                     unparseable_row_errors.append(row_error)
             if parsed_documents > 1:
                 concatenated_document_count += parsed_documents - 1
 
+    rows = [
+        replace(row, usage=usage_by_request_log_id[row.request_log_id])
+        if row.request_log_id in usage_by_request_log_id
+        else row
+        for row in rows
+    ]
     rows.sort(key=lambda row: row.timestamp)
     return rows, JsonlParseStats(
         line_count=line_count,
@@ -496,8 +508,17 @@ def load_request_rows(
     )
 
 
-def _append_request_row(rows: list[RequestRow], payload: object, session_id_filter: str | None) -> str | None:
+def _append_request_row(
+    rows: list[RequestRow],
+    payload: object,
+    session_id_filter: str | None,
+    usage_by_request_log_id: dict[str, dict[str, int]],
+) -> str | None:
     """Parse one logged payload into ``rows``; return an error summary when it cannot be rebuilt.
+
+    Response records (compact usage lines written after each provider call) are
+    collected into ``usage_by_request_log_id`` before any session filtering:
+    they carry no session id and are joined to request rows by request_log_id.
 
     Corrupt logged rows can fail anywhere in the provider-format rebuild (JSON
     decoding, pydantic validation, Agno's message formatting), and one bad row
@@ -505,6 +526,11 @@ def _append_request_row(rows: list[RequestRow], payload: object, session_id_filt
     and reports the failure instead.
     """
     payload_dict = object_dict(payload)
+    usage_record = parse_response_usage_record(payload_dict)
+    if usage_record is not None:
+        request_log_id, usage = usage_record
+        usage_by_request_log_id[request_log_id] = usage
+        return None
     if session_id_filter is not None and (payload_dict is None or payload_dict.get("session_id") != session_id_filter):
         return None
     try:
@@ -516,10 +542,21 @@ def _append_request_row(rows: list[RequestRow], payload: object, session_id_filt
     return None
 
 
+def parse_response_usage_record(payload_dict: JsonDict | None) -> tuple[str, dict[str, int]] | None:
+    """Parse one response record into its (request_log_id, usage) pair, or None."""
+    if payload_dict is None or payload_dict.get("record") != "response":
+        return None
+    request_log_id = payload_dict.get("request_log_id")
+    usage = object_dict(payload_dict.get("usage"))
+    if not isinstance(request_log_id, str) or not request_log_id or usage is None:
+        return None
+    return request_log_id, {key: value for key, value in usage.items() if isinstance(value, int)}
+
+
 def parse_request_row(payload: object) -> RequestRow | None:
     """Parse one logged request payload into a normalized request row."""
     payload_dict = object_dict(payload)
-    if payload_dict is None:
+    if payload_dict is None or payload_dict.get("record") == "response":
         return None
     timestamp_raw = payload_dict.get("timestamp")
     if not isinstance(timestamp_raw, str):
@@ -547,6 +584,7 @@ def parse_request_row(payload: object) -> RequestRow | None:
     # The request logger writes "agent_id"; accept "agent_name" for older logs.
     agent_name_raw = payload_dict.get("agent_id") or payload_dict.get("agent_name")
     tools_raw = payload_dict.get("tools")
+    request_log_id_raw = payload_dict.get("request_log_id")
     model_params_dict = object_dict(model_params)
     return RequestRow(
         timestamp=timestamp,
@@ -561,6 +599,7 @@ def parse_request_row(payload: object) -> RequestRow | None:
         preview=preview or "<no preview>",
         tools_blob=stable_json(tools_raw) if isinstance(tools_raw, list) and tools_raw else "",
         cache_enabled=model_params_dict is not None and model_params_dict.get("cache_system_prompt") is True,
+        request_log_id=request_log_id_raw if isinstance(request_log_id_raw, str) else "",
     )
 
 
@@ -913,6 +952,52 @@ def simulate_prompt_cache(  # noqa: C901, PLR0912, PLR0915
 
     outcomes.sort(key=lambda outcome: outcome.row.timestamp)
     return CacheSimulationReport(ttl_seconds=ttl_seconds, lookback_blocks=lookback_blocks, outcomes=tuple(outcomes))
+
+
+def print_cache_actuals(rows: list[RequestRow]) -> None:
+    """Print provider-reported cache usage joined from logged response records.
+
+    Unlike the simulation, these are the provider's own numbers: what each
+    request actually read from and wrote to the prompt cache. Token counts are
+    real tokens, so they are comparable across requests and against billing.
+    """
+    measured = [row for row in rows if row.usage is not None and is_claude_request(row.model_id)]
+    if not measured:
+        print("ACTUAL CACHE USAGE: no Claude response usage records found (older logs predate response logging).")
+        return
+
+    def token_totals(selected: list[RequestRow]) -> tuple[int, int, int]:
+        usages = [row.usage or {} for row in selected]
+        read = sum(usage.get("cache_read_tokens", 0) for usage in usages)
+        write = sum(usage.get("cache_write_tokens", 0) for usage in usages)
+        uncached = sum(usage.get("input_tokens", 0) for usage in usages)
+        return read, write, uncached
+
+    read, write, uncached = token_totals(measured)
+    prompt_total = read + write + uncached
+    print(f"ACTUAL CACHE USAGE (provider-reported, {len(measured)} of {len(rows)} requests measured)")
+    print(f"  prompt tokens: cache_read={read:,} cache_write={write:,} uncached={uncached:,}")
+    if prompt_total:
+        print(f"  actual prefix reuse: {read / prompt_total * 100:.1f}% of prompt tokens")
+    cold_misses = [row for row in measured if row.cache_enabled and (row.usage or {}).get("cache_read_tokens", 0) == 0]
+    if cold_misses:
+        print(f"  cache-enabled requests that read nothing: {len(cold_misses)}")
+
+    by_stream: dict[tuple[str, str], list[RequestRow]] = defaultdict(list)
+    for row in measured:
+        by_stream[(row.agent_name, row.model_id)].append(row)
+    ranked = sorted(
+        by_stream.items(),
+        key=lambda item: -sum((row.usage or {}).get("cache_read_tokens", 0) for row in item[1]),
+    )
+    for (agent_name, model_id), stream_rows in ranked[:5]:
+        stream_read, stream_write, stream_uncached = token_totals(stream_rows)
+        stream_total = stream_read + stream_write + stream_uncached
+        reuse = f"{stream_read / stream_total * 100:.1f}%" if stream_total else "n/a"
+        print(
+            f"    agent={agent_name} model={model_id} requests={len(stream_rows)} "
+            f"reuse={reuse} read={stream_read:,} write={stream_write:,} uncached={stream_uncached:,}",
+        )
 
 
 def print_cache_simulation(report: CacheSimulationReport) -> None:
