@@ -12,6 +12,7 @@ from types import SimpleNamespace, TracebackType
 from typing import Annotated, Any, NoReturn, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 import jwt
 import pytest
@@ -895,6 +896,21 @@ def test_health_check_reports_stale_matrix_sync(test_client: TestClient) -> None
         "e2ee": e2ee_stats().as_dict(),
         "stale_sync_entities": ["router"],
     }
+    reset_matrix_sync_health()
+    reset_runtime_state()
+
+
+def test_health_reports_live_e2ee_counter_values(test_client: TestClient) -> None:
+    """The e2ee health field must serialize the real counters, not a stale copy."""
+    reset_matrix_sync_health()
+    set_runtime_ready()
+    before = test_client.get("/api/health").json()["e2ee"]
+
+    e2ee_stats().record_failure("!e2ee-health:localhost", f"$health{uuid4().hex}:localhost")
+
+    after = test_client.get("/api/health").json()["e2ee"]
+    assert after["decrypt_failures"] == before["decrypt_failures"] + 1
+    assert after.keys() == {"decrypt_failures", "key_requests_sent", "notices_sent"}
     reset_matrix_sync_health()
     reset_runtime_state()
 

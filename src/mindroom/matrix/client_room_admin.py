@@ -123,6 +123,12 @@ async def ensure_room_encryption_enabled(client: nio.AsyncClient, room_id: str) 
         return False
     response = await client.room_put_state(room_id, _ROOM_ENCRYPTION_EVENT_TYPE, dict(_ROOM_ENCRYPTION_CONTENT))
     if isinstance(response, nio.RoomPutStateResponse):
+        cached_room = client.rooms.get(room_id)
+        if cached_room is not None:
+            # nio only encrypts sends once the cached room flips encrypted, which
+            # normally happens on the next sync; flip it now so replies sent inside
+            # the sync window (e.g. the `!encrypt` confirmation) are not plaintext.
+            cached_room.encrypted = True
         logger.info("matrix_room_encryption_enabled", room_id=room_id)
         return True
     logger.error("matrix_room_encryption_enable_failed", room_id=room_id, error=str(response))
