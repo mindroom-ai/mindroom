@@ -40,7 +40,10 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search  # noqa: E402
+from mindroom.model_defaults import CONFIG_INIT_MODEL_PRESETS  # noqa: E402
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude  # noqa: E402
+
+DEFAULT_MODEL_ID = CONFIG_INIT_MODEL_PRESETS["anthropic"].id
 
 DEFERRED_TOOL_NAME = "get_weather"
 # Deterministic padding so the system prompt clears every model's minimum
@@ -230,7 +233,7 @@ def run_live(args: argparse.Namespace) -> int:
 def main() -> int:
     """Parse arguments and run the requested probe mode."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-id", default="claude-sonnet-5", help="Claude model id to probe.")
+    parser.add_argument("--model-id", default=DEFAULT_MODEL_ID, help="Claude model id to probe.")
     parser.add_argument(
         "--provider",
         choices=("anthropic", "vertexai"),
