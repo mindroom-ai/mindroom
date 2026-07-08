@@ -98,11 +98,49 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
     failed += f
     warnings += w
 
+    # 7. Matrix encryption stores match persisted device identities
+    p, f, w = _run_doctor_step("Checking encryption stores...", lambda: _check_e2ee_stores(runtime_paths))
+    passed += p
+    failed += f
+    warnings += w
+
     # Summary
     console.print(f"\n{passed} passed, {failed} failed, {warnings} warning{'s' if warnings != 1 else ''}")
 
     if failed > 0:
         raise typer.Exit(1)
+
+
+def _check_e2ee_stores(runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Check persisted Matrix devices have their encryption stores on disk."""
+    from mindroom.matrix.client_session import olm_store_exists  # noqa: PLC0415
+    from mindroom.matrix.state import MatrixState  # noqa: PLC0415
+
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    accounts_with_devices = [
+        (key, account) for key, account in state.accounts.items() if account.device_id and account.domain
+    ]
+    if not accounts_with_devices:
+        console.print("[green]✓[/green] Encryption stores: no persisted Matrix devices yet")
+        return 1, 0, 0
+
+    missing = [
+        (key, account)
+        for key, account in accounts_with_devices
+        if not olm_store_exists(f"@{account.username}:{account.domain}", account.device_id or "", runtime_paths)
+    ]
+    if not missing:
+        count = len(accounts_with_devices)
+        console.print(f"[green]✓[/green] Encryption stores: {count} device store{'s' if count != 1 else ''} present")
+        return 1, 0, 0
+
+    for key, account in missing:
+        console.print(
+            f"[yellow]⚠[/yellow] Encryption store missing for {key} "
+            f"(@{account.username}:{account.domain}, device {account.device_id}); "
+            "MindRoom will log in as a fresh device on next start and old encrypted messages stay unreadable",
+        )
+    return 0, 0, len(missing)
 
 
 def _run_doctor_step[T](message: str, check: Callable[[], T]) -> T:

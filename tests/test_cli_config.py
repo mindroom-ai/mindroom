@@ -2420,7 +2420,7 @@ class TestDoctor:
         assert result.exit_code == 0
         assert "✓" in result.output
         assert "✗" not in result.output
-        assert "6 passed" in result.output
+        assert "7 passed" in result.output
         assert "0 failed" in result.output
         assert "1 warning" in result.output  # memory LLM not configured
         assert "Providers:" in result.output
@@ -2491,9 +2491,10 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert len(status_messages) == 6
+        assert len(status_messages) == 7
         assert any("Matrix homeserver" in msg for msg in status_messages)
         assert any("memory config" in msg for msg in status_messages)
+        assert any("encryption stores" in msg for msg in status_messages)
 
     def test_missing_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when config file is missing."""

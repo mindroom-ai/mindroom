@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.matrix import provisioning
 from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.client_session import olm_store_dir
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,
@@ -36,6 +37,17 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
+
+
+def _create_olm_store_file(
+    runtime_paths: constants_mod.RuntimePaths,
+    user_id: str,
+    device_id: str,
+) -> None:
+    """Create an empty on-disk olm store so session restore is attempted."""
+    store_dir = olm_store_dir(user_id, runtime_paths)
+    store_dir.mkdir(parents=True, exist_ok=True)
+    (store_dir / f"{user_id}_{device_id}.db").write_bytes(b"")
 
 
 def _runtime_paths(tmp_path: Path, **env: str) -> constants_mod.RuntimePaths:
@@ -1392,6 +1404,7 @@ class TestAgentLogin:
             device_id="old_device",
             access_token="old_token",  # noqa: S106
         )
+        _create_olm_store_file(runtime_paths, "@mindroom_calculator:localhost", "old_device")
         with (
             patch("mindroom.matrix.users.restore_login") as mock_restore,
             patch("mindroom.matrix.users.login") as mock_login,
@@ -1438,6 +1451,7 @@ class TestAgentLogin:
             device_id="old_device",
             access_token="old_token",  # noqa: S106
         )
+        _create_olm_store_file(runtime_paths, "@mindroom_calculator:localhost", "old_device")
         with (
             patch("mindroom.matrix.users.restore_login") as mock_restore,
             patch("mindroom.matrix.users.login") as mock_login,

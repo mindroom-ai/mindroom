@@ -185,6 +185,20 @@ Outgoing encrypted Matrix sends always deliver to unverified devices.
 MindRoom bots have no interactive device-verification flow, so enforcing nio's device-trust checks would fail every send to an encrypted room with an `OlmUnverifiedDeviceError` and the agent would appear to silently ignore messages.
 A configurable trust policy only becomes meaningful once a device-verification mechanism exists (for example trust-on-first-use, a verification command, or cross-signing support).
 
+## End-to-End Encryption
+
+Agents fully participate in encrypted rooms: they decrypt inbound text and media, reply encrypted, and re-fetch and decrypt thread history from the homeserver.
+Managed rooms can be created encrypted via `rooms.<key>.encrypted: true` or `matrix_room_access.encrypt_managed_rooms: true`, and existing managed rooms are reconciled to encrypted on startup and config reload when so configured.
+Users can also enable encryption in any room with `!encrypt confirm` (room admin only), and `!e2ee` reports encryption diagnostics.
+Enabling encryption on a Matrix room is irreversible; MindRoom never disables it.
+
+When an agent receives an event it cannot decrypt, it logs a `matrix_event_decryption_failed` warning, sends a Matrix room-key request once per session, and posts one rate-limited notice per (room, session) so the user knows to resend.
+The router posts the notice in rooms it occupies; otherwise a bot only posts when it is the sole managed bot in the room.
+Decryption-failure counters are exposed on `/api/health` under `e2ee`.
+
+If a bot's encryption store under `mindroom_data/encryption_keys/` is lost while its device identity persists, startup logs in as a fresh device instead of restoring a wedged crypto identity; `mindroom doctor` reports missing stores.
+Messages encrypted only to the lost device stay undecryptable, but the durable event cache preserves the agent's conversational context.
+
 ## Configuration
 
 Matrix settings are derived from `config.yaml`:

@@ -40,6 +40,7 @@ from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.logging_config import get_logger
+from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
@@ -714,6 +715,7 @@ async def health_check(request: Request) -> JSONResponse:
     response: dict[str, object] = {
         "status": "healthy",
         "last_sync_time": sync_health.last_sync_time.isoformat() if sync_health.last_sync_time is not None else None,
+        "e2ee": e2ee_stats().as_dict(),
     }
     if sync_health.stale_entities:
         response["stale_sync_entities"] = list(sync_health.stale_entities)

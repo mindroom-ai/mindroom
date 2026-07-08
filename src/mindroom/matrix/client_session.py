@@ -69,6 +69,18 @@ def _maybe_ssl_context(homeserver: str, runtime_paths: RuntimePaths) -> ssl_modu
     return None
 
 
+def olm_store_dir(user_id: str, runtime_paths: RuntimePaths) -> Path:
+    """Return the per-user encryption store directory."""
+    safe_user_id = user_id.replace(":", "_").replace("@", "")
+    return encryption_keys_dir(runtime_paths=runtime_paths) / safe_user_id
+
+
+def olm_store_exists(user_id: str, device_id: str, runtime_paths: RuntimePaths) -> bool:
+    """Return whether the persisted olm store for one device is present on disk."""
+    # nio's SqliteStore names its database {user_id}_{device_id}.db inside store_path.
+    return (olm_store_dir(user_id, runtime_paths) / f"{user_id}_{device_id}.db").is_file()
+
+
 def _create_matrix_client(
     homeserver: str,
     runtime_paths: RuntimePaths,
@@ -81,8 +93,7 @@ def _create_matrix_client(
     ssl_context = _maybe_ssl_context(homeserver, runtime_paths=runtime_paths)
 
     if store_path is None and user_id:
-        safe_user_id = user_id.replace(":", "_").replace("@", "")
-        store_path = str(encryption_keys_dir(runtime_paths=runtime_paths) / safe_user_id)
+        store_path = str(olm_store_dir(user_id, runtime_paths=runtime_paths))
         Path(store_path).mkdir(parents=True, exist_ok=True)
 
     client = nio.AsyncClient(
@@ -166,5 +177,7 @@ __all__ = [
     "login",
     "matrix_client",
     "matrix_startup_error",
+    "olm_store_dir",
+    "olm_store_exists",
     "restore_login",
 ]
