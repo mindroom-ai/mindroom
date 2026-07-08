@@ -326,6 +326,8 @@ class _SandboxForkserver:
             try:
                 conn.connect(template.socket_path)
                 conn.sendall(request_payload)
+            except TimeoutError as exc:
+                raise ForkserverTimeoutError from exc
             except OSError as exc:
                 self._discard(key, template)
                 msg = f"Failed to reach the sandbox forkserver template: {exc}"
@@ -334,10 +336,13 @@ class _SandboxForkserver:
             try:
                 child_pid = int(json.loads(reader.read_line())["pid"])
                 response = json.loads(reader.read_line())
+                returncode = int(response["returncode"])
+                stdout_text = str(response["stdout"])
+                stderr_text = str(response["stderr"])
             except TimeoutError as exc:
                 self._kill_child(child_pid)
                 raise ForkserverTimeoutError from exc
-            except (_ConnectionClosedError, OSError, ValueError, KeyError) as exc:
+            except (_ConnectionClosedError, OSError, ValueError, KeyError, TypeError) as exc:
                 if template.process.poll() is not None:
                     self._discard(key, template)
                 msg = "Sandbox forkserver child exited without returning a response."
@@ -346,9 +351,9 @@ class _SandboxForkserver:
             conn.close()
         return subprocess.CompletedProcess(
             args=["sandbox-forkserver", key],
-            returncode=int(response["returncode"]),
-            stdout=str(response["stdout"]),
-            stderr=str(response["stderr"]),
+            returncode=returncode,
+            stdout=stdout_text,
+            stderr=stderr_text,
         )
 
     @staticmethod
@@ -396,7 +401,13 @@ def serve_template(socket_path: str, run_payload: Callable[[str], tuple[int, str
                 if os.getppid() != parent_pid:
                     return 0
                 continue
-            child_pid = os.fork()
+            try:
+                child_pid = os.fork()
+            except OSError:
+                # Fork pressure (e.g. EAGAIN) fails this one request via EOF on
+                # the connection; the template keeps serving.
+                conn.close()
+                continue
             if child_pid == 0:
                 server.close()
                 _child_main(conn, run_payload)
