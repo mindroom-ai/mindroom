@@ -38,6 +38,14 @@ logger = get_logger(__name__)
 _PROMPT_MODEL = GOOGLE_AVATAR_PROMPT
 _IMAGE_MODEL = GOOGLE_AVATAR_IMAGE
 _ROOT_SPACE_AVATAR_NAME = "root_space"
+# Team prompts include per-member breakdowns; a low cap truncates them
+# mid-sentence and the mangled prompt makes the image model answer with
+# text instead of an image.
+_PROMPT_MAX_OUTPUT_TOKENS = 400
+# The image model occasionally returns no image for a valid prompt; each
+# retry regenerates the prompt (sampled at temperature), so attempts are
+# not identical.
+_MAX_IMAGE_ATTEMPTS = 3
 
 _ROOM_PURPOSES = {
     "lobby": "Central meeting space, entrance and welcome area",
@@ -153,7 +161,7 @@ async def _generate_prompt(
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=0.7,
-            max_output_tokens=150,
+            max_output_tokens=_PROMPT_MAX_OUTPUT_TOKENS,
         ),
     )
     if not response.text:
@@ -208,22 +216,37 @@ async def _generate_avatar(
     if target.team_members:
         console.print(f"   [dim]Team members: {', '.join(member.name for member in target.team_members)}[/dim]")
 
-    prompt = await _generate_prompt(client, target, config)
-    response = await client.aio.models.generate_content(
-        model=_IMAGE_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_modalities=["IMAGE"],
-            image_config=types.ImageConfig(
-                aspect_ratio="1:1",
-                image_size="1K",
+    image_bytes: bytes | None = None
+    for attempt in range(1, _MAX_IMAGE_ATTEMPTS + 1):
+        prompt = await _generate_prompt(client, target, config)
+        response = await client.aio.models.generate_content(
+            model=_IMAGE_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+                image_config=types.ImageConfig(
+                    aspect_ratio="1:1",
+                    image_size="1K",
+                ),
             ),
-        ),
-    )
+        )
+        image_bytes = _extract_image_bytes(response)
+        if image_bytes:
+            break
+        logger.warning(
+            "Image model returned no image for avatar target",
+            entity_type=target.entity_type,
+            entity_name=target.entity_name,
+            attempt=attempt,
+            max_attempts=_MAX_IMAGE_ATTEMPTS,
+        )
+        console.print(
+            f"[yellow]⟳ No image returned for {target.entity_type}/{target.entity_name} "
+            f"(attempt {attempt}/{_MAX_IMAGE_ATTEMPTS}); regenerating prompt[/yellow]",
+        )
 
-    image_bytes = _extract_image_bytes(response)
     if not image_bytes:
-        msg = f"No image data found for {target.entity_type}/{target.entity_name}"
+        msg = f"No image data found for {target.entity_type}/{target.entity_name} after {_MAX_IMAGE_ATTEMPTS} attempts"
         raise ValueError(msg)
 
     avatar_path.write_bytes(image_bytes)

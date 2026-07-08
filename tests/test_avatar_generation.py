@@ -1091,3 +1091,80 @@ async def test_set_room_avatars_in_matrix_wraps_router_login_failures(
         match="Failed to log in as router for avatar sync",
     ):
         await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(tmp_path))
+
+
+def _image_response(data: bytes) -> SimpleNamespace:
+    return SimpleNamespace(parts=[SimpleNamespace(inline_data=SimpleNamespace(data=data))])
+
+
+def _no_image_response() -> SimpleNamespace:
+    return SimpleNamespace(parts=[SimpleNamespace(inline_data=None, text="cannot draw that")])
+
+
+def _client_with_image_responses(responses: list[SimpleNamespace]) -> SimpleNamespace:
+    return SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content=AsyncMock(side_effect=responses))),
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_avatar_retries_with_fresh_prompt_when_no_image_returned(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_avatar_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """A no-image response regenerates the prompt and retries the image call."""
+    prompt_mock = AsyncMock(side_effect=["prompt one", "prompt two"])
+    monkeypatch.setattr(generate_avatars, "_generate_prompt", prompt_mock)
+    client = _client_with_image_responses([_no_image_response(), _image_response(b"png-bytes")])
+    target = generate_avatars._AvatarTarget(entity_type="teams", entity_name="incident", role="incident response")
+
+    await generate_avatars._generate_avatar(
+        client,  # type: ignore[arg-type]
+        target,
+        _runtime_paths(tmp_path),
+        _config_with_runtime_paths(
+            {
+                "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+                "router": {"model": "default"},
+                "agents": {"a": {"display_name": "A", "model": "default"}},
+            },
+            tmp_path,
+        ),
+    )
+
+    assert (workspace_avatar_dir / "teams" / "incident.png").read_bytes() == b"png-bytes"
+    assert prompt_mock.await_count == 2
+    assert client.aio.models.generate_content.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_avatar_raises_after_exhausting_image_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_avatar_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Persistent no-image responses fail with an attempt-count error."""
+    monkeypatch.setattr(generate_avatars, "_generate_prompt", AsyncMock(return_value="prompt"))
+    client = _client_with_image_responses(
+        [_no_image_response() for _ in range(generate_avatars._MAX_IMAGE_ATTEMPTS)],
+    )
+    target = generate_avatars._AvatarTarget(entity_type="agents", entity_name="general", role="general work")
+
+    with pytest.raises(ValueError, match=f"after {generate_avatars._MAX_IMAGE_ATTEMPTS} attempts"):
+        await generate_avatars._generate_avatar(
+            client,  # type: ignore[arg-type]
+            target,
+            _runtime_paths(tmp_path),
+            _config_with_runtime_paths(
+                {
+                    "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+                    "router": {"model": "default"},
+                    "agents": {"a": {"display_name": "A", "model": "default"}},
+                },
+                tmp_path,
+            ),
+        )
+
+    assert not (workspace_avatar_dir / "agents" / "general.png").exists()
+    assert client.aio.models.generate_content.await_count == generate_avatars._MAX_IMAGE_ATTEMPTS
