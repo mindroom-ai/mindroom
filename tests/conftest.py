@@ -44,18 +44,21 @@ from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.history import (
-    CompactionLifecycle,
-    HistoryScope,
-    PreparedHistoryState,
-    ResolvedHistorySettings,
+from mindroom.history.runtime import (
     ScopeSessionContext,
+    _resolve_history_scope,
     finalize_history_preparation,
+    open_scope_session_context,
     prepare_scope_history,
     resolve_agent_preparation_inputs,
 )
-from mindroom.history.runtime import _resolve_history_scope, open_scope_session_context
-from mindroom.history.types import ResolvedHistoryExecutionPlan
+from mindroom.history.types import (
+    CompactionLifecycle,
+    HistoryScope,
+    PreparedHistoryState,
+    ResolvedHistoryExecutionPlan,
+    ResolvedHistorySettings,
+)
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata

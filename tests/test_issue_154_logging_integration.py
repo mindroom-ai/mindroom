@@ -27,7 +27,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, tracking_dir
 from mindroom.handled_turns import HandledTurnState
-from mindroom.history import PreparedHistoryState
+from mindroom.history.types import PreparedHistoryState
 from mindroom.hooks import HookRegistry
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger, setup_logging

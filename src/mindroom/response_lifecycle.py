@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
     from mindroom.delivery_gateway import ResponseHookService, ResponseIdentity
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.history import HistoryScope
+    from mindroom.history.types import HistoryScope
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome

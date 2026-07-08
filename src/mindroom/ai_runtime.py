@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from agno.media import Audio, File, Image, Video
     from agno.models.base import Model
 
-    from mindroom.history import ScopeSessionContext
+    from mindroom.history.runtime import ScopeSessionContext
 
 __all__ = [
     "EMPTY_RESPONSE_NOTICE",

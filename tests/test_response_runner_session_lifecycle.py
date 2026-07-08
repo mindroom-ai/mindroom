@@ -33,9 +33,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history import PreparedHistoryState
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import HistoryScope
+from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_MESSAGE_CANCELLED,

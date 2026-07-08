@@ -28,16 +28,10 @@ from mindroom.execution_preparation import (
     prepare_agent_execution_context,
     render_prepared_messages_text,
 )
-from mindroom.history import (
-    HistoryPolicy,
-    HistoryScope,
-    PreparedHistoryState,
-    PreparedScopeHistory,
-    ResolvedHistorySettings,
-)
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.prompt_tokens import estimate_agent_static_tokens
-from mindroom.history.runtime import HistoryPreparationInputs
+from mindroom.history.runtime import PreparedScopeHistory, _HistoryPreparationInputs
+from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState, ResolvedHistorySettings
 from mindroom.tool_schema_cache import clear_tool_schema_cache
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import FakeModel, bind_runtime_paths, make_turn_context, make_visible_message
@@ -122,7 +116,7 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
     return PreparedScopeHistory(
         scope=scope,
         session=session,
-        resolved_inputs=HistoryPreparationInputs(
+        resolved_inputs=_HistoryPreparationInputs(
             history_settings=history_settings,
             compaction_config=compaction_config,
             has_authored_compaction_config=False,

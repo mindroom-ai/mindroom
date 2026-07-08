@@ -21,9 +21,9 @@ from mindroom.history.compaction import (
     estimate_session_summary_tokens,
 )
 from mindroom.history.prompt_tokens import (
-    StaticTokenEstimator,
     _estimate_prepared_tool_definition_tokens,
     _prepare_tools_for_estimation,
+    _StaticTokenEstimator,
     estimate_agent_static_tokens,
 )
 from mindroom.history.types import (
@@ -101,7 +101,7 @@ def test_estimate_static_tokens_includes_tool_definitions() -> None:
 
 
 def test_static_token_estimator_cache_fields_are_not_constructor_inputs() -> None:
-    assert "_non_prompt_tokens" not in inspect.signature(StaticTokenEstimator).parameters
+    assert "_non_prompt_tokens" not in inspect.signature(_StaticTokenEstimator).parameters
 
 
 def test_estimate_agent_static_tokens_uses_real_system_message_builder() -> None:

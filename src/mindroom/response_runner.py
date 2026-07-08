@@ -19,9 +19,10 @@ from mindroom.background_tasks import create_background_task
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history import HistoryScope, has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
+from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
@@ -92,7 +93,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
-    from mindroom.history import HistoryScope
+    from mindroom.history.types import HistoryScope
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage

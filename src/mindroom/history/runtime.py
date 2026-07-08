@@ -179,7 +179,7 @@ def _clear_forced_compaction_after_failure(
 
 
 @dataclass(frozen=True)
-class HistoryPreparationInputs:
+class _HistoryPreparationInputs:
     """Fully resolved policy/model/token inputs for one history preparation."""
 
     history_settings: ResolvedHistorySettings
@@ -203,7 +203,7 @@ class PreparedScopeHistory:
 
     scope: HistoryScope | None
     session: AgentSession | TeamSession | None
-    resolved_inputs: HistoryPreparationInputs
+    resolved_inputs: _HistoryPreparationInputs
     compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
     compaction_decision: CompactionDecision = field(
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
@@ -296,7 +296,7 @@ async def prepare_scope_history(
     *,
     agent: Agent,
     agent_name: str,
-    resolved_inputs: HistoryPreparationInputs,
+    resolved_inputs: _HistoryPreparationInputs,
     runtime_paths: RuntimePaths,
     config: Config,
     scope_context: ScopeSessionContext | None = None,
@@ -412,7 +412,7 @@ async def _run_scope_compaction_with_lifecycle(
     session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: HistoryScopeState,
-    resolved_inputs: HistoryPreparationInputs,
+    resolved_inputs: _HistoryPreparationInputs,
     history_budget: int | None,
     current_history_tokens: int,
     runs_before: int,
@@ -510,7 +510,7 @@ async def _run_scope_compaction(
     session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: HistoryScopeState,
-    resolved_inputs: HistoryPreparationInputs,
+    resolved_inputs: _HistoryPreparationInputs,
     history_budget: int | None,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -1062,7 +1062,7 @@ def _resolve_entity_preparation_inputs(
     compaction_config: CompactionConfig | None = None,
     has_authored_compaction_config: bool | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
-) -> HistoryPreparationInputs:
+) -> _HistoryPreparationInputs:
     resolved_entity = config.resolve_entity(entity_name)
     resolved_history_settings = history_settings
     if resolved_history_settings is None:
@@ -1094,7 +1094,7 @@ def _resolve_entity_preparation_inputs(
         )
     )
 
-    return HistoryPreparationInputs(
+    return _HistoryPreparationInputs(
         history_settings=resolved_history_settings,
         compaction_config=resolved_compaction_config,
         has_authored_compaction_config=resolved_has_authored_compaction_config,
@@ -1118,7 +1118,7 @@ def resolve_agent_preparation_inputs(
     active_context_window: int | None = None,
     static_prompt_tokens: int | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
-) -> HistoryPreparationInputs:
+) -> _HistoryPreparationInputs:
     """Resolve every history-preparation input for one agent run in one place.
 
     Explicitly provided values win; everything else falls back to the agent's

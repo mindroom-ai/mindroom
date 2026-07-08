@@ -22,7 +22,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.final_delivery import StreamTransportOutcome
-from mindroom.history import HistoryScope, PreparedHistoryState
+from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import HookRegistry
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.client import DeliveredMatrixEvent

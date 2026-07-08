@@ -48,19 +48,19 @@ from mindroom.execution_preparation import (
     render_prepared_messages_text,
     render_prepared_team_messages_text,
 )
-from mindroom.history import (
+from mindroom.history.interrupted_replay import (
+    split_interrupted_tool_trace,
+    tool_execution_call_id,
+)
+from mindroom.history.prompt_tokens import team_tool_definition_payloads_for_logging
+from mindroom.history.runtime import (
     ScopeSessionContext,
     close_team_runtime_state_dbs,
     note_prepared_history_timing,
     open_bound_scope_session_context,
     resolve_bound_team_scope_context,
-    team_tool_definition_payloads_for_logging,
-    update_scope_seen_event_ids,
 )
-from mindroom.history.interrupted_replay import (
-    split_interrupted_tool_trace,
-    tool_execution_call_id,
-)
+from mindroom.history.storage import update_scope_seen_event_ids
 from mindroom.hooks import render_system_enrichment_block
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
@@ -121,8 +121,8 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
-    from mindroom.history import CompactionLifecycle, PreparedHistoryState
     from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID

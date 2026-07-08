@@ -52,8 +52,8 @@ from mindroom.constants import (
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.execution_preparation import _PreparedExecutionContext
-from mindroom.history import PreparedHistoryState
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import PreparedHistoryState
 from mindroom.hooks import (
     EnrichmentItem,
     render_system_enrichment_block,

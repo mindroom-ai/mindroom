@@ -24,7 +24,6 @@ from mindroom.execution_preparation import (
     _build_matrix_prompt_with_history,
     _PreparedExecutionContext,
 )
-from mindroom.history import PreparedHistoryState
 from mindroom.history.prompt_tokens import (
     estimate_agent_static_tokens,
 )
@@ -34,7 +33,7 @@ from mindroom.history.runtime import (
 from mindroom.history.storage import (
     update_scope_seen_event_ids,
 )
-from mindroom.history.types import HistoryScope
+from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.memory import MemoryPromptParts
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.conftest import (
