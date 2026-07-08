@@ -27,7 +27,32 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 
 ## Quick Start
 
-### Recommended: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
+### Recommended: Hosted Matrix + Local MindRoom (`uvx` only)
+
+You only run MindRoom locally; chat and Matrix are hosted on `mindroom.chat`.
+
+**Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+```bash
+# Create ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults
+uvx mindroom config init
+
+# Add model auth (e.g. OPENAI_API_KEY or ANTHROPIC_API_KEY)
+$EDITOR ~/.mindroom/.env
+
+# Generate pair code in https://chat.mindroom.chat:
+# Settings -> Local MindRoom -> Generate Pair Code
+uvx mindroom connect --pair-code ABCD-EFGH
+
+# Start MindRoom
+uvx mindroom run
+```
+
+See [Getting Started](https://docs.mindroom.chat/getting-started/) for the full walkthrough and [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for architecture details.
+
+### Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
+
+Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
 
 **Prereqs:** Docker + Docker Compose.
 
@@ -14862,7 +14887,7 @@ For hosted multi-user private agents, also configure [Trusted Upstream Browser A
 
 ## Quick Start
 
-### Hosted Matrix + local MindRoom (simplest)
+### Hosted Matrix + local MindRoom (recommended)
 
 ```bash
 # Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
@@ -14878,7 +14903,7 @@ Generate the pair code in `https://chat.mindroom.chat` under:
 See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for the full walkthrough.
 If you want worker-routed execution tools like `coding`, `docker`, `file`, `python`, and `shell` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
-### Full Stack (recommended)
+### Full Stack Docker Compose (all-local alternative)
 
 ```bash
 git clone https://github.com/mindroom-ai/mindroom-stack

@@ -25,7 +25,32 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 
 ## Quick Start
 
-### Recommended: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
+### Recommended: Hosted Matrix + Local MindRoom (`uvx` only)
+
+You only run MindRoom locally; chat and Matrix are hosted on `mindroom.chat`.
+
+**Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+```bash
+# Create ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults
+uvx mindroom config init
+
+# Add model auth (e.g. OPENAI_API_KEY or ANTHROPIC_API_KEY)
+$EDITOR ~/.mindroom/.env
+
+# Generate pair code in https://chat.mindroom.chat:
+# Settings -> Local MindRoom -> Generate Pair Code
+uvx mindroom connect --pair-code ABCD-EFGH
+
+# Start MindRoom
+uvx mindroom run
+```
+
+See [Getting Started](getting-started.md) for the full walkthrough and [Hosted Matrix Deployment](deployment/hosted-matrix.md) for architecture details.
+
+### Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
+
+Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
 
 **Prereqs:** Docker + Docker Compose.
 
