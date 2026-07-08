@@ -19,6 +19,7 @@ from mindroom.agent_storage import (
     get_team_session,
 )
 from mindroom.constants import prompt_roles_for_history_storage
+from mindroom.history import agno_team_patch
 from mindroom.history.compaction import (
     compact_scope_history,
     estimate_prompt_visible_history_tokens,
@@ -78,6 +79,11 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+
+# Applied at history-runtime import so every entry point that replays persisted
+# history gets the Team roleful-input and inline-media dedupe patch before any
+# Agno run; slim entry points that only read leaf history types skip it.
+agno_team_patch.apply_patch()
 
 _TEAM_STATE_ROOT_DIRNAME = "teams"
 _TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
