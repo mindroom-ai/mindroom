@@ -36,7 +36,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default=OPENAI_TTS,
-            description="Plain OpenAI model IDs use OpenAI; provider-prefixed IDs (e.g. openai/gpt-4o-mini-tts) route through OpenRouter.",
+            description="Plain OpenAI model IDs use OpenAI; provider-prefixed IDs (e.g. hexgrad/kokoro-82m) route through OpenRouter.",
         ),
         ConfigField(
             name="base_url",

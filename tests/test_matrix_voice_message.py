@@ -473,13 +473,13 @@ async def test_matrix_voice_message_routes_openrouter_models_through_openrouter(
         mock_send.return_value = "$voice-event"
 
         result = await MatrixVoiceMessageTools(
-            model="openai/gpt-4o-mini-tts",
+            model="hexgrad/kokoro-82m",
             voice="alloy",
         ).matrix_voice_message("openrouter speech")
 
     mock_openai.assert_called_once_with(api_key="sk-or-test", base_url="https://openrouter.ai/api/v1")
     mock_openai.return_value.audio.speech.create.assert_called_once_with(
-        model="openai/gpt-4o-mini-tts",
+        model="hexgrad/kokoro-82m",
         voice="alloy",
         input="openrouter speech",
         response_format="mp3",
@@ -499,7 +499,7 @@ async def test_matrix_voice_message_openrouter_model_without_key_is_structured_e
         patch("mindroom.custom_tools.matrix_voice_message.get_secret_from_env", return_value=None),
         patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
     ):
-        result = await MatrixVoiceMessageTools(model="openai/gpt-4o-mini-tts").matrix_voice_message("hello")
+        result = await MatrixVoiceMessageTools(model="hexgrad/kokoro-82m").matrix_voice_message("hello")
 
     mock_openai.assert_not_called()
     payload = _payload(result)

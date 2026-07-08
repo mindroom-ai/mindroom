@@ -66,7 +66,7 @@ def _is_openrouter_base_url(base_url: str | None) -> bool:
 
 
 def _is_openrouter_model(model: str) -> bool:
-    """OpenRouter voice models are provider-prefixed, e.g. ``openai/gpt-4o-mini-tts``."""
+    """OpenRouter voice models are provider-prefixed, e.g. ``hexgrad/kokoro-82m``."""
     return "/" in model
 
 
