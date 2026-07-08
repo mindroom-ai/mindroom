@@ -11,6 +11,7 @@ import yaml
 from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeholders_in_text
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
+from mindroom.http_error_detail import error_detail_from_response
 
 from .env_file import env_path_for_config, upsert_env_values
 
@@ -68,7 +69,7 @@ def complete_local_pairing(
         raise ValueError(msg) from exc
 
     if not response.is_success:
-        detail = _extract_error_detail(response)
+        detail = error_detail_from_response(response)
         msg = f"Pairing failed ({response.status_code}): {detail}"
         raise ValueError(msg)
 
@@ -173,20 +174,3 @@ def _parse_namespace(raw_value: object) -> str | None:
     if _NAMESPACE_RE.fullmatch(namespace):
         return namespace
     return None
-
-
-def _extract_error_detail(response: httpx.Response) -> str:
-    """Extract a compact error detail from JSON or plaintext responses."""
-    try:
-        body = response.json()
-    except ValueError:
-        text = response.text.strip()
-        return text or "unknown error"
-
-    if isinstance(body, dict):
-        detail = body.get("detail")
-        if isinstance(detail, str):
-            return detail
-        if detail is not None:
-            return str(detail)
-    return "unknown error"

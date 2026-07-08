@@ -8,6 +8,7 @@ from typing import Literal, NoReturn
 import httpx
 
 from mindroom.constants import RuntimePaths, runtime_env_path, runtime_matrix_ssl_verify
+from mindroom.http_error_detail import error_detail_from_response
 from mindroom.matrix.client_session import matrix_startup_error
 from mindroom.matrix.identity import parse_current_matrix_user_id
 
@@ -86,49 +87,42 @@ class _ProvisioningRegisterResult:
     user_id: str
 
 
-# Detail strings raised by scripts/local_mindroom_provisioning_service.py when the
-# client credentials themselves are the problem. Only these justify the "re-pair"
-# advice; other 403 details (e.g. namespace enforcement) describe a different failure.
-_CLIENT_AUTH_FAILURE_DETAILS = frozenset(
-    {
-        "Missing local client credentials",
-        "Invalid local client credentials",
-        "Connection revoked",
-    },
-)
+# Kept in sync with scripts/local_mindroom_provisioning_service.py by a contract
+# test. The service's other credential failures ("Missing/Invalid local client
+# credentials") always use HTTP 401, so only the revoked detail matters for 403.
+_CONNECTION_REVOKED_DETAIL = "Connection revoked"
 _NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
-_ERROR_DETAIL_MAX_LENGTH = 300
-
-
-def _provisioning_error_detail(response: httpx.Response) -> str:
-    """Extract the server-supplied error detail from a provisioning error response."""
-    try:
-        body = response.json()
-    except ValueError:
-        body = None
-    if isinstance(body, dict):
-        detail = body.get("detail")
-        if isinstance(detail, str) and detail.strip():
-            return detail.strip()[:_ERROR_DETAIL_MAX_LENGTH]
-    return response.text.strip()[:_ERROR_DETAIL_MAX_LENGTH] or "unknown error"
 
 
 def _raise_for_register_agent_error(response: httpx.Response, *, username: str) -> NoReturn:
     """Raise the appropriate error for a failed register-agent response."""
-    detail = _provisioning_error_detail(response)
-    if response.status_code == 401 or (response.status_code == 403 and detail in _CLIENT_AUTH_FAILURE_DETAILS):
-        msg = "Provisioning credentials are invalid or revoked. Run `mindroom connect --pair-code ...` again."
+    detail = error_detail_from_response(response)
+    if response.status_code == 401 or (response.status_code == 403 and detail == _CONNECTION_REVOKED_DETAIL):
+        msg = (
+            f"Provisioning credentials are invalid or revoked (server said: {detail}). "
+            "Run `mindroom connect --pair-code ...` again."
+        )
         raise matrix_startup_error(msg, permanent=True)
     if response.status_code == 403:
         msg = f"Provisioning service refused to register agent user {username!r}: {detail}"
         if detail == _NAMESPACE_MISMATCH_DETAIL:
             msg += (
-                " Usernames must match mindroom_<entity>_<namespace> for this connection, "
-                "so this connection's namespace does not allow this username."
+                ". Usernames must match mindroom_<entity>_<namespace>; check that MINDROOM_NAMESPACE "
+                "matches this connection's namespace or re-run `mindroom connect --pair-code ...`."
             )
         raise matrix_startup_error(msg, permanent=True)
     if response.status_code == 404:
         msg = "Provisioning service does not support /register-agent yet. Deploy the latest local provisioning service."
+        raise matrix_startup_error(msg, permanent=True)
+    if response.status_code in {400, 422}:
+        msg = f"Provisioning service rejected the register-agent request (HTTP {response.status_code}): {detail}"
+        raise matrix_startup_error(msg, permanent=True)
+    if 300 <= response.status_code < 400:
+        location = response.headers.get("location", "unknown")
+        msg = (
+            f"Provisioning service URL redirects (HTTP {response.status_code} to {location}). "
+            "Update MINDROOM_PROVISIONING_URL to the final URL."
+        )
         raise matrix_startup_error(msg, permanent=True)
     msg = f"Provisioning service returned HTTP {response.status_code}: {detail}"
     raise ValueError(msg)
