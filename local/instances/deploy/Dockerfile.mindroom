@@ -12,6 +12,10 @@ COPY --from=bun /usr/local/bin/bunx /usr/local/bin/bunx
 
 WORKDIR /app
 
+# Compile bytecode at install time so pod boots skip the first-import .pyc
+# compilation of the whole dependency tree (several seconds on small pods).
+ENV UV_COMPILE_BYTECODE=1
+
 # Copy project files
 COPY pyproject.toml uv.lock README.md hatch_build.py /app/
 
@@ -35,8 +39,11 @@ ENV PUPPETEER_SKIP_DOWNLOAD=true
 # Set pretend version for setuptools-scm (no .git in container)
 ARG VERSION=0.0.0
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
+# mindroom itself installs editable (its modules import from /app/src), so
+# UV_COMPILE_BYTECODE only covers site-packages; compile the src tree too.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --all-extras --no-extra sentence_transformers --reinstall-package mindroom \
+    && /app/.venv/bin/python -m compileall -q /app/src \
     && rm -rf frontend/node_modules
 
 # Final production stage
@@ -82,6 +89,8 @@ RUN chmod +x /app/run-sandbox-runner.sh \
 # Set environment variable to indicate Docker mode
 ENV DOCKER_CONTAINER=1
 ENV PATH="/app/.venv/bin:${PATH}"
+# Runtime tool-dependency auto-installs also compile bytecode on install.
+ENV UV_COMPILE_BYTECODE=1
 
 # Run as non-root user
 USER 1000:1000
