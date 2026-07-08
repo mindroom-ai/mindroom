@@ -54,11 +54,12 @@ _TEXT_ONLY_CONTENT_TYPE_PATTERN = re.compile(
     r"content(?:\[\d+\])?\.type is invalid, allowed values: \['text'\]",
 )
 # Invalid-request-class evidence: the provider rejected the request itself, so
-# when the request carried media, retrying once without it degrades gracefully
-# for any provider without matching that provider's error prose. Exceptions
-# carry the status code; stringified errored-run text only keeps generic,
-# protocol-stable markers (OpenAI SDK "Error code: N" prefixes, HTTP phrasing,
-# OpenAI/Anthropic "invalid_request_error", Google "INVALID_ARGUMENT").
+# a successful without-media retry is proof the media caused it and the route
+# capability cache may learn from it. Retrying never depends on this evidence
+# — only teaching does. Exceptions carry the status code; stringified
+# errored-run text only keeps generic, protocol-stable markers (OpenAI SDK
+# "Error code: N" prefixes, HTTP phrasing, OpenAI/Anthropic
+# "invalid_request_error", Google "INVALID_ARGUMENT").
 _INVALID_REQUEST_STATUS_CODES = frozenset({400, 413, 415, 422})
 _PAYLOAD_TOO_LARGE_STATUS = 413
 _INVALID_REQUEST_TEXT_PATTERN = re.compile(
@@ -69,7 +70,7 @@ _INVALID_REQUEST_TEXT_PATTERN = re.compile(
 # "file" parts) as a bare "messages[N].content[M].type type error" (code 1214).
 # On the streaming path agno converts the 400 into a RunErrorEvent whose text
 # is only this bare message — the status code and "Error code: 400" marker are
-# gone — so the generic invalid-request gate cannot recognize it there.
+# gone — so this shape is teaching evidence in its own right.
 _CONTENT_PART_TYPE_ERROR_PATTERN = re.compile(
     r"messages(?:\[\d+\])?\.content(?:\[\d+\])?\.type type error",
 )
@@ -181,14 +182,21 @@ def retry_media_inputs_after_failure(
 ) -> MediaRetryDecision:
     """Decide whether and how one media-bearing request should retry.
 
-    Explicit "kind is not supported" errors teach the route cache so later
-    requests pre-drop that kind; text-only content errors teach every present
-    kind; kind-specific validation errors (malformed or mis-encoded media)
-    retry once without ever teaching. Any other invalid-request-class failure
-    retries once without media and teaches the cache only when that retry
-    succeeds — unless the error names a payload-size or context-overflow
-    cause, where dropping media can succeed for the wrong reason. A kind can
-    only be learned when it was actually present in ``media_inputs`` or
+    Every failure of a media-bearing request retries once without media —
+    no error wording decides *whether* to retry, so unknown provider prose
+    (and streamed run errors that lost their HTTP status) still degrade
+    gracefully instead of leaking a raw provider error to the user. Error
+    patterns only refine the decision: explicit "kind is not supported"
+    errors drop and teach just that kind; text-only content errors teach
+    every present kind; kind-specific validation errors (malformed or
+    mis-encoded media) drop just that kind without ever teaching. Any other
+    failure drops all media, and the route capability cache learns from the
+    retry's success only when the error carried invalid-request-class
+    evidence (4xx status or protocol-stable text markers) — a transient
+    failure whose retry happens to succeed must not teach — and never when
+    the error names a payload-size or context-overflow cause, where
+    dropping media can succeed for the wrong reason. A kind can only be
+    learned when it was actually present in ``media_inputs`` or
     ``extra_present_kinds`` (media pinned to thread-history messages in the
     run input).
     """
@@ -219,20 +227,18 @@ def retry_media_inputs_after_failure(
     if validation_kinds:
         return _media_retry_decision_for_kinds(media_inputs, validation_kinds, present_kinds=present_kinds)
 
-    if (
+    teaching_evidence = bool(
         _INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN.search(lowered_error_text)
         or _CONTENT_PART_TYPE_ERROR_PATTERN.search(lowered_error_text)
-        or _is_invalid_request_error(error, lowered_error_text)
-    ):
-        teaching_blocked = _capability_teaching_blocked(error, lowered_error_text)
-        return MediaRetryDecision(
-            should_retry=True,
-            media_inputs=_without_media_kinds(media_inputs, present_kinds),
-            removed_kinds=present_kinds,
-            teach_route_on_success=None if teaching_blocked else route,
-        )
-
-    return _no_media_retry_decision(media_inputs)
+        or _is_invalid_request_error(error, lowered_error_text),
+    )
+    teaching_blocked = _capability_teaching_blocked(error, lowered_error_text)
+    return MediaRetryDecision(
+        should_retry=True,
+        media_inputs=_without_media_kinds(media_inputs, present_kinds),
+        removed_kinds=present_kinds,
+        teach_route_on_success=route if teaching_evidence and not teaching_blocked else None,
+    )
 
 
 def reset_model_media_capability_cache() -> None:

@@ -103,15 +103,19 @@ def test_different_base_url_does_not_inherit_negative_cache() -> None:
     assert filtered.media_inputs.audio == media.audio
 
 
-def test_generic_errors_do_not_update_cache() -> None:
-    """Transient or unrelated failures should not teach media capability."""
+def test_generic_errors_retry_but_never_teach() -> None:
+    """Transient failures retry without media but must not teach capability, even on success."""
     reset_model_media_capability_cache()
     media = _media_inputs()
     route = _route()
 
     decision = retry_media_inputs_after_failure(route, "Rate limit exceeded", media)
 
-    assert decision.should_retry is False
+    assert decision.should_retry is True
+    assert decision.media_inputs == MediaInputs()
+    assert decision.teach_route_on_success is None
+
+    decision.record_retry_success()
     filtered = filter_media_inputs_for_route(route, media)
     assert filtered.media_inputs == media
 
@@ -310,8 +314,8 @@ def test_payload_too_large_retries_but_never_teaches() -> None:
     assert unsupported_media_kinds_for_route(route) == frozenset()
 
 
-def test_auth_worded_invalid_request_does_not_retry() -> None:
-    """Credential failures phrased as 400s would fail identically without media on either path."""
+def test_auth_worded_invalid_request_retries_but_never_teaches() -> None:
+    """Credential failures phrased as 400s retry (and fail again) but are not capability evidence."""
     reset_model_media_capability_cache()
     media = _media_inputs()
 
@@ -327,21 +331,22 @@ def test_auth_worded_invalid_request_does_not_retry() -> None:
         media,
     )
 
-    assert text_decision.should_retry is False
-    assert text_decision.media_inputs == media
-    assert exception_decision.should_retry is False
-    assert exception_decision.media_inputs == media
+    assert text_decision.should_retry is True
+    assert text_decision.teach_route_on_success is None
+    assert exception_decision.should_retry is True
+    assert exception_decision.teach_route_on_success is None
 
 
-def test_non_request_status_exception_does_not_retry() -> None:
-    """Server-side failures are not media evidence even when media was present."""
+def test_non_request_status_exception_retries_but_never_teaches() -> None:
+    """Server-side failures retry without media but are not capability evidence."""
     reset_model_media_capability_cache()
     media = _media_inputs()
     error = ModelProviderError(message="upstream connect error", status_code=502)
 
     decision = retry_media_inputs_after_failure(_route(), error, media)
 
-    assert decision.should_retry is False
+    assert decision.should_retry is True
+    assert decision.teach_route_on_success is None
 
 
 def test_kind_specific_error_takes_precedence_over_generic_gate() -> None:
@@ -403,8 +408,8 @@ def test_openai_invalid_audio_format_message_without_field_retries_without_cachi
     assert filter_media_inputs_for_route(route, media).media_inputs == media
 
 
-def test_openai_supported_audio_values_without_audio_field_does_not_retry() -> None:
-    """Wav/mp3 validation text alone should not be treated as an audio input failure."""
+def test_openai_supported_audio_values_without_audio_field_is_not_audio_attribution() -> None:
+    """Wav/mp3 validation text alone must not single out audio; the generic drop-all retry applies."""
     reset_model_media_capability_cache()
     media = _media_inputs()
     route = _route()
@@ -412,8 +417,9 @@ def test_openai_supported_audio_values_without_audio_field_does_not_retry() -> N
 
     decision = retry_media_inputs_after_failure(route, error, media)
 
-    assert decision.should_retry is False
-    assert decision.media_inputs == media
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"audio", "image", "file", "video"})
+    assert decision.teach_route_on_success is None
     assert filter_media_inputs_for_route(route, media).media_inputs == media
 
 

@@ -82,11 +82,12 @@ The retried prompt includes `[Inline media unavailable for this model]` to infor
 Agents can still reference the files via attachment IDs and tools.
 
 This fallback is transparent — no user action is required.
+Any failure of a media-bearing request triggers one retry without media — no error wording decides whether to retry, so unknown provider prose degrades gracefully instead of surfacing a raw provider error.
 When the provider names the rejected media kind (for example "audio input is not supported"), only that kind is dropped and the model route immediately learns that it is unsupported.
-Any other invalid-request rejection (HTTP 400/413/415/422, or generic markers like `Error code: 400` in the error text) triggers one retry without media, so new providers degrade gracefully without MindRoom knowing their error wording.
-When such a retry succeeds, the model route learns that the dropped media kinds are unsupported, and later requests omit them up front instead of paying a failed API call.
+When a retry succeeds after an invalid-request rejection (HTTP 400/413/415/422, or generic markers like `Error code: 400` in the error text), the model route learns that the dropped media kinds are unsupported, and later requests omit them up front instead of paying a failed API call.
+Transient failures (rate limits, server errors) also retry without media, but never teach the capability state, since their retry can succeed for reasons unrelated to media support.
 This learned capability state is process-local and resets on restart.
-Payload-size and context-overflow rejections still retry without media but never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
+Payload-size and context-overflow rejections likewise never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
 
 ## Limitations
 
