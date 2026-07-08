@@ -4344,7 +4344,7 @@ dev = [
 [[package]]
 name = "mindroom-nio"
 version = "0.26.0"
-source = { git = "https://github.com/mindroom-ai/mindroom-nio.git?branch=cross-signing-bootstrap#7495fd01eaa6476328c993cc5b31673082bc5cd7" }
+source = { git = "https://github.com/mindroom-ai/mindroom-nio.git?branch=cross-signing-bootstrap#17763cfba18555ad94552804eb46a5828a17d04e" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },

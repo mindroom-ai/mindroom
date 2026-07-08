@@ -128,6 +128,8 @@ async def test_add_confirmation_reactions_sends_confirm_and_cancel_annotations()
             },
         },
     ]
+    # Reactions must reach encrypted rooms; bots deliver to unverified devices.
+    assert all(call.kwargs["ignore_unverified_devices"] is True for call in client.room_send.await_args_list)
 
 
 class TestCommandParser:
