@@ -10,7 +10,7 @@ from agno.tools import Toolkit
 
 from mindroom.config.main import Config  # noqa: TC001
 from mindroom.constants import RuntimePaths  # noqa: TC001
-from mindroom.history import request_compaction_before_next_reply
+from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_current_session_id
 
 if TYPE_CHECKING:

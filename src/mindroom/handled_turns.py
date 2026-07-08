@@ -21,7 +21,7 @@ from typing import Any, NotRequired, TypedDict
 
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
-from mindroom.history import HistoryScope, HistoryScopeMetadata
+from mindroom.history.types import HistoryScope, HistoryScopeMetadata
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget, MessageTargetMetadata
 from mindroom.timestamp_formatting import normalize_timestamp_ms

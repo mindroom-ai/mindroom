@@ -18,7 +18,6 @@ from agno.tools import Toolkit
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
-from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import (
     ScopeSessionContext,
     _estimate_preparation_static_tokens_for_team,
@@ -29,6 +28,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.types import (
     HistoryScope,
+    PreparedHistoryState,
 )
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.token_budget import estimate_text_tokens, stable_serialize

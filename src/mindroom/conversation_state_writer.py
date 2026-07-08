@@ -12,7 +12,8 @@ from agno.run.team import TeamRunOutput
 from mindroom.agent_storage import create_session_storage, get_agent_session, get_team_session
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.history import HistoryScope, create_scope_session_storage
+from mindroom.history.runtime import create_scope_session_storage
+from mindroom.history.types import HistoryScope
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
 from mindroom.team_scope import ad_hoc_team_scope_id
 

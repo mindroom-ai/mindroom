@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
     from agno.models.response import ToolExecution
 
-    from mindroom.history import ScopeSessionContext
+    from mindroom.history.runtime import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.hooks import EnrichmentItem
     from mindroom.tool_system.events import ToolTraceEntry

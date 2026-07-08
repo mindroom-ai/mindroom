@@ -14,14 +14,14 @@ from mindroom import constants
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
 from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState, SourceEventMetadata
-from mindroom.thread_utils import create_session_id
+from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
     import nio
 
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
-    from mindroom.history import HistoryScope
+    from mindroom.history.types import HistoryScope
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_policy import ResponseAction

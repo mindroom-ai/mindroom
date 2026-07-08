@@ -28,9 +28,8 @@ from mindroom.constants import (
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import StreamTransportOutcome
-from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import ScopeSessionContext
-from mindroom.history.types import HistoryScope
+from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import (
     HookContextSupport,
     HookRegistry,

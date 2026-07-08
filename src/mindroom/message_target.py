@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypedDict, cast
 
-from mindroom.thread_utils import create_session_id
+from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
     from mindroom.scheduling import ScheduledWorkflow

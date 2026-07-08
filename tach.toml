@@ -75,7 +75,9 @@ depends_on = [
     "mindroom.credentials_sync",
     "mindroom.error_handling",
     "mindroom.execution_preparation",
-    "mindroom.history",
+    "mindroom.history.prompt_tokens",
+    "mindroom.history.runtime",
+    "mindroom.history.types",
     "mindroom.history.interrupted_replay",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
@@ -239,6 +241,9 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.tool_system.dependencies",
     "mindroom.claude_prompt_cache",
+    "mindroom.claude_stream_retry",
+    "mindroom.codex_model",
+    "mindroom.vertex_claude_compat",
 ]
 visibility = [
     "mindroom.ai",
@@ -508,7 +513,7 @@ depends_on = [
     "mindroom.api.openai_streaming_protocol",
     "mindroom.constants",
     "mindroom.execution_preparation",
-    "mindroom.history",
+    "mindroom.history.runtime",
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.routing",
@@ -884,7 +889,10 @@ depends_on = [
     "mindroom.attachments",
     "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.history",
+    "mindroom.history.policy",
+    "mindroom.history.prompt_tokens",
+    "mindroom.history.runtime",
+    "mindroom.history.storage",
     "mindroom.matrix.client_visible_messages",
     "mindroom.prompt_message_tags",
     "mindroom.streaming",
@@ -901,14 +909,15 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.history"
+depends_on = []
+
+[[modules]]
+path = "mindroom.history.manual"
 depends_on = [
-    "mindroom.history.agno_team_patch",
-    "mindroom.history.compaction",
     "mindroom.history.policy",
-    "mindroom.history.prompt_tokens",
     "mindroom.history.runtime",
     "mindroom.history.storage",
-    "mindroom.history.types",
+    "mindroom.logging_config",
 ]
 
 [[modules]]
@@ -994,6 +1003,7 @@ path = "mindroom.history.runtime"
 depends_on = [
     "mindroom.agent_storage",
     "mindroom.constants",
+    "mindroom.history.agno_team_patch",
     "mindroom.history.compaction",
     "mindroom.history.policy",
     "mindroom.history.prompt_tokens",
@@ -1182,7 +1192,8 @@ depends_on = [
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",
-    "mindroom.history",
+    "mindroom.history.storage",
+    "mindroom.history.types",
     "mindroom.history.interrupted_replay",
     "mindroom.history.turn_recorder",
     "mindroom.hooks",
@@ -1271,7 +1282,9 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.execution_preparation",
-    "mindroom.history",
+    "mindroom.history.prompt_tokens",
+    "mindroom.history.runtime",
+    "mindroom.history.storage",
     "mindroom.history.interrupted_replay",
     "mindroom.hooks",
     "mindroom.knowledge",
@@ -2020,7 +2033,8 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.history",
+    "mindroom.history.runtime",
+    "mindroom.history.types",
     "mindroom.runtime_protocols",
     "mindroom.team_scope",
 ]
@@ -2322,6 +2336,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_system.metadata"
 depends_on = [
+    "mindroom.constants",
     "mindroom.mcp.registry",
     "mindroom.tool_system.dependencies",
     "mindroom.tool_system.output_files",
@@ -3427,42 +3442,6 @@ expose = [
 ]
 from = ["mindroom.tool_system.worker_routing"]
 
-[[interfaces]]
-expose = [
-    "CompactionOutcome",
-    "HistoryPolicy",
-    "HistoryScope",
-    "PreparedHistoryState",
-    "PreparedScopeHistory",
-    "ResolvedHistorySettings",
-    "ResolvedReplayPlan",
-    "ScopeSessionContext",
-    "StaticTokenEstimator",
-    "agent_static_token_estimator",
-    "agent_tool_definition_payloads_for_logging",
-    "apply_replay_plan",
-    "close_agent_runtime_state_dbs",
-    "close_team_runtime_state_dbs",
-    "compute_prompt_token_breakdown",
-    "context_budget_after_reserve",
-    "create_scope_session_storage",
-    "finalize_history_preparation",
-    "has_pending_force_compaction_scope",
-    "note_prepared_history_timing",
-    "open_bound_scope_session_context",
-    "open_resolved_scope_session_context",
-    "prepare_bound_scope_history",
-    "prepare_scope_history",
-    "read_scope_seen_event_ids",
-    "read_scope_state",
-    "resolve_agent_preparation_inputs",
-    "resolve_bound_team_scope_context",
-    "resolve_history_execution_plan",
-    "team_static_token_estimator",
-    "team_tool_definition_payloads_for_logging",
-    "update_scope_seen_event_ids",
-]
-from = ["mindroom.history"]
 
 [[interfaces]]
 expose = [

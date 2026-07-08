@@ -26,10 +26,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import HistoryScope
+from mindroom.history.types import HistoryScope, PreparedHistoryState
 from tests.conftest import make_turn_context
 
 if TYPE_CHECKING:

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
-from mindroom.attachments import unique_attachment_ids
+from mindroom.attachment_ids import unique_attachment_ids
 from mindroom.hooks import (
     CustomEventContext,
     HookContextSupport,

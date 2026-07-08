@@ -7,11 +7,11 @@ from collections.abc import Sequence  # noqa: TC003
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.attachment_ids import merge_attachment_ids
 from mindroom.attachment_media import attachment_records_to_media, resolve_scoped_attachments
 from mindroom.attachments import (
     format_attachments_prompt,
     format_voice_transcript_attachment_guidance,
-    merge_attachment_ids,
     parse_attachment_ids_from_thread_history,
     register_matrix_media_attachment,
     register_thread_history_media_attachments,

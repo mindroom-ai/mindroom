@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
-    from mindroom.history import (
+    from mindroom.history.types import (
         CompactionLifecycleFailure,
         CompactionLifecycleProgress,
         CompactionLifecycleStart,

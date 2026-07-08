@@ -14,6 +14,7 @@ import nio
 import pytest
 
 import mindroom.matrix.media as media_module
+from mindroom.attachment_ids import merge_attachment_ids, unique_attachment_ids
 from mindroom.attachment_media import attachment_records_to_media, resolve_scoped_attachments
 from mindroom.attachments import (
     AttachmentRecord,
@@ -27,13 +28,11 @@ from mindroom.attachments import (
     format_attachments_prompt,
     format_voice_transcript_attachment_guidance,
     load_attachment,
-    merge_attachment_ids,
     parse_attachment_ids_from_event_source,
     parse_attachment_ids_from_thread_history,
     register_local_attachment,
     resolve_attachments,
     resolve_thread_attachment_ids,
-    unique_attachment_ids,
 )
 from tests.conftest import make_visible_message
 

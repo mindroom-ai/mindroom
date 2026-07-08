@@ -15,7 +15,7 @@ import mindroom.memory._file_backend as file_backend_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.history import PreparedHistoryState
+from mindroom.history.types import PreparedHistoryState
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory._file_backend import FileMemoryBackend
 from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths

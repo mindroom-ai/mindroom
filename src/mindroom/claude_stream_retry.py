@@ -26,14 +26,15 @@ from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from agno.exceptions import ContextWindowExceededError, ModelProviderError
-from agno.models.anthropic import Claude as AnthropicClaude
 
+from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator, Iterator
     from typing import Any
 
+    from agno.models.anthropic import Claude as AnthropicClaude
     from agno.models.response import ModelResponse
 
 logger = get_logger(__name__)
@@ -173,13 +174,17 @@ def install_claude_stream_retry_hook(model: object) -> None:
     meaningful output are retried; anything else re-raises immediately so
     partially streamed responses are never duplicated.
     """
-    if not isinstance(model, AnthropicClaude):
+    claude_model = as_anthropic_claude(model)
+    if claude_model is None:
         return
-    model_dict = vars(model)
+    model_dict = vars(claude_model)
     if model_dict.get(_STREAM_RETRY_HOOK_ATTR) is True:
         return
-    original_invoke_stream = model.invoke_stream
-    original_ainvoke_stream = model.ainvoke_stream
+    original_invoke_stream = claude_model.invoke_stream
+    original_ainvoke_stream = claude_model.ainvoke_stream
     model_dict[_STREAM_RETRY_HOOK_ATTR] = True
-    model_dict["invoke_stream"] = partial(_invoke_stream_with_retry, model, original_invoke_stream)
-    model_dict["ainvoke_stream"] = cast("Any", partial(_ainvoke_stream_with_retry, model, original_ainvoke_stream))
+    model_dict["invoke_stream"] = partial(_invoke_stream_with_retry, claude_model, original_invoke_stream)
+    model_dict["ainvoke_stream"] = cast(
+        "Any",
+        partial(_ainvoke_stream_with_retry, claude_model, original_ainvoke_stream),
+    )

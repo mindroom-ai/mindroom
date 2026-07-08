@@ -35,7 +35,7 @@ type _ToolDefinition = dict[str, object]
 
 
 @dataclass(slots=True)
-class StaticTokenEstimator:
+class _StaticTokenEstimator:
     """Request-local static-token estimator that caches the non-prompt cost once."""
 
     non_prompt_tokens_fn: Callable[[], int]
@@ -48,14 +48,14 @@ class StaticTokenEstimator:
         return estimate_text_tokens(full_prompt) + self._non_prompt_tokens
 
 
-def agent_static_token_estimator(agent: Agent) -> StaticTokenEstimator:
+def agent_static_token_estimator(agent: Agent) -> _StaticTokenEstimator:
     """Return a request-local static-token estimator for one prepared agent response."""
-    return StaticTokenEstimator(partial(_estimate_agent_non_prompt_static_tokens, agent))
+    return _StaticTokenEstimator(partial(_estimate_agent_non_prompt_static_tokens, agent))
 
 
-def team_static_token_estimator(team: Team) -> StaticTokenEstimator:
+def team_static_token_estimator(team: Team) -> _StaticTokenEstimator:
     """Return a request-local static-token estimator for one prepared team response."""
-    return StaticTokenEstimator(partial(_estimate_team_non_prompt_static_tokens, team))
+    return _StaticTokenEstimator(partial(_estimate_team_non_prompt_static_tokens, team))
 
 
 def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:

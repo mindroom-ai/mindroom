@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
-    from mindroom.history import PreparedHistoryState
+    from mindroom.history.types import PreparedHistoryState
 
 _AI_RUN_METADATA_VERSION = 1
 

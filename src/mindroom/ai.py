@@ -34,21 +34,20 @@ from mindroom.ai_run_metadata import (
 )
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
-from mindroom.history import (
-    HistoryScope,
-    PreparedHistoryState,
-    ScopeSessionContext,
-    agent_tool_definition_payloads_for_logging,
-    apply_replay_plan,
-    close_agent_runtime_state_dbs,
-    note_prepared_history_timing,
-    open_resolved_scope_session_context,
-)
 from mindroom.history.interrupted_replay import (
     persist_interrupted_replay,
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
+from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_logging
+from mindroom.history.runtime import (
+    ScopeSessionContext,
+    apply_replay_plan,
+    close_agent_runtime_state_dbs,
+    note_prepared_history_timing,
+    open_resolved_scope_session_context,
+)
+from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
@@ -100,8 +99,8 @@ if TYPE_CHECKING:
     from mindroom.ai_turn_state import AITurnState
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
-    from mindroom.history import CompactionLifecycle
     from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.history.types import CompactionLifecycle
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import EmptyRunDiscard, StandaloneReplaySnapshot, TurnRunState

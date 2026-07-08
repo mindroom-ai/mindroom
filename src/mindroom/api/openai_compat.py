@@ -75,7 +75,7 @@ from mindroom.api.openai_streaming_protocol import (
 )
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.execution_preparation import render_prepared_team_messages_text
-from mindroom.history import ScopeSessionContext, close_team_runtime_state_dbs, open_bound_scope_session_context
+from mindroom.history.runtime import ScopeSessionContext, close_team_runtime_state_dbs, open_bound_scope_session_context
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,

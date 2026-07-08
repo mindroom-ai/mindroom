@@ -9,7 +9,8 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom import interactive
-from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
+from mindroom.attachment_ids import merge_attachment_ids
+from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import (
     CoalescedBatch,
