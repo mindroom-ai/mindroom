@@ -19,6 +19,7 @@ import pytest
 from mindroom import shell_supervisor
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.constants import resolve_runtime_paths
+from mindroom.shell_execution import run_command
 from mindroom.shell_supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
@@ -204,6 +205,52 @@ async def test_client_disconnect_cancels_foreground_run() -> None:
             assert registry == {}
     finally:
         shutil.rmtree(pid_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_backgrounded_handle_is_discarded_when_client_died_in_same_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that backgrounds in the same loop cycle the client dies must not leak.
+
+    When ``asyncio.wait`` reports the run and the client EOF as done together,
+    the registered handle is undeliverable and the command must be killed.
+    """
+    registry: dict[str, ProcessRecord] = {}
+    result = await run_command(
+        registry,
+        namespace="ns",
+        argv=["sleep", "300"],
+        env=_MINIMAL_ENV,
+        cwd=None,
+        tail=100,
+        timeout=0,
+    )
+    assert result.handle is not None
+    assert result.handle in registry
+    pid = registry[result.handle].pid
+
+    async def completed_run(*_args: object, **_kwargs: object) -> object:
+        return result
+
+    monkeypatch.setattr(shell_supervisor, "run_command", completed_run)
+    eof_reader = asyncio.StreamReader()
+    eof_reader.feed_eof()
+    payload = {
+        "op": "run",
+        "namespace": "ns",
+        "argv": ["sleep", "300"],
+        "env": _MINIMAL_ENV,
+        "cwd": None,
+        "tail": 100,
+        "timeout": 0,
+    }
+
+    message = await shell_supervisor._handle_run(registry, payload, eof_reader)
+
+    assert message is None
+    assert registry == {}
+    await _assert_pid_dead(pid)
 
 
 @pytest.mark.asyncio

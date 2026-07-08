@@ -112,6 +112,19 @@ class ProcessRecord:
     _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
+@dataclass(frozen=True)
+class _RunResult:
+    """Outcome of one run_command call.
+
+    ``handle`` is set only when the command timed out and was registered as a
+    background record, so callers that could not deliver the message can roll
+    the registration back with ``discard_background_record``.
+    """
+
+    message: str
+    handle: str | None = None
+
+
 async def run_command(
     registry: dict[str, ProcessRecord],
     *,
@@ -121,7 +134,7 @@ async def run_command(
     cwd: str | None,
     tail: int,
     timeout: float,  # noqa: ASYNC109
-) -> str:
+) -> _RunResult:
     """Run one shell command; return output, an error message, or a background handle.
 
     When the command completes within ``timeout`` seconds the last ``tail``
@@ -142,7 +155,7 @@ async def run_command(
             start_new_session=True,
         )
     except Exception as exc:
-        return f"Error: {exc}"
+        return _RunResult(message=f"Error: {exc}")
 
     stdout_buf = _OutputBuffer()
     stderr_buf = _OutputBuffer()
@@ -161,9 +174,11 @@ async def run_command(
                 with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.killpg(process.pid, signal.SIGKILL)
                 await _cancel_pending_tasks(stdout_reader, stderr_reader)
-                return (
-                    f"Error: Too many backgrounded processes ({active}/{_MAX_BACKGROUNDED}). "
-                    "Kill or wait for existing ones before running more."
+                return _RunResult(
+                    message=(
+                        f"Error: Too many backgrounded processes ({active}/{_MAX_BACKGROUNDED}). "
+                        "Kill or wait for existing ones before running more."
+                    ),
                 )
             handle = f"shell:{uuid.uuid4().hex[:8]}"
             record = ProcessRecord(
@@ -183,11 +198,14 @@ async def run_command(
             background_handle = handle
             background_monitor_task = record._monitor_task
             await asyncio.sleep(0)
-            return (
-                f"Command timed out after {timeout}s. Still running (PID {process.pid}).\n"
-                f"Handle: {handle}\n"
-                f"Use check_shell_command('{handle}') to poll or "
-                f"kill_shell_command('{handle}') to stop."
+            return _RunResult(
+                message=(
+                    f"Command timed out after {timeout}s. Still running (PID {process.pid}).\n"
+                    f"Handle: {handle}\n"
+                    f"Use check_shell_command('{handle}') to poll or "
+                    f"kill_shell_command('{handle}') to stop."
+                ),
+                handle=handle,
             )
 
         await _await_reader_tasks_with_grace(
@@ -209,8 +227,8 @@ async def run_command(
         raise
 
     if process.returncode != 0:
-        return f"Error: {stderr_buf.render()}"
-    return stdout_buf.render(tail=tail)
+        return _RunResult(message=f"Error: {stderr_buf.render()}")
+    return _RunResult(message=stdout_buf.render(tail=tail))
 
 
 def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: str) -> str:
@@ -260,12 +278,23 @@ def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: 
 def kill_all_records(registry: dict[str, ProcessRecord]) -> None:
     """Kill every unfinished process group in *registry* and clear it."""
     for record in registry.values():
-        if record._monitor_task is not None:
-            record._monitor_task.cancel()
-        if not record.finished:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(record.pid, signal.SIGKILL)
+        _kill_record(record)
     registry.clear()
+
+
+def discard_background_record(registry: dict[str, ProcessRecord], handle: str) -> None:
+    """Kill and drop one just-registered background record whose handle is undeliverable."""
+    record = registry.pop(handle, None)
+    if record is not None:
+        _kill_record(record)
+
+
+def _kill_record(record: ProcessRecord) -> None:
+    if record._monitor_task is not None:
+        record._monitor_task.cancel()
+    if not record.finished:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(record.pid, signal.SIGKILL)
 
 
 def _sweep_stale_records(registry: dict[str, ProcessRecord]) -> None:
@@ -380,7 +409,7 @@ async def _terminate_process_group(
     if process.returncode is None:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, signal.SIGKILL)
-        with contextlib.suppress(asyncio.TimeoutError):
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(process.wait(), timeout=grace_period)
 
 

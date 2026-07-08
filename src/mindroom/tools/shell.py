@@ -406,7 +406,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     tail=tail,
                     timeout=timeout,
                 )
-            return await run_command(
+            result = await run_command(
                 _process_registry,
                 namespace=self._handle_namespace,
                 argv=argv,
@@ -415,6 +415,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 tail=tail,
                 timeout=timeout,
             )
+            return result.message
 
         def check_shell_command(self, handle: str) -> str:
             """Poll the status of a backgrounded shell command.

@@ -42,7 +42,14 @@ from functools import partial
 from pathlib import Path
 
 from mindroom.logging_config import get_logger
-from mindroom.shell_execution import ProcessRecord, check_command, kill_all_records, kill_command, run_command
+from mindroom.shell_execution import (
+    ProcessRecord,
+    check_command,
+    discard_background_record,
+    kill_all_records,
+    kill_command,
+    run_command,
+)
 
 logger = get_logger(__name__)
 
@@ -94,15 +101,23 @@ async def _handle_run(
     # cancelled local run instead of lingering with an undelivered handle.
     eof_task = asyncio.create_task(reader.read())
     done, _pending = await asyncio.wait({run_task, eof_task}, return_when=asyncio.FIRST_COMPLETED)
-    if run_task in done:
-        eof_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await eof_task
-        return await run_task
-    run_task.cancel()
+    if eof_task in done:
+        # The client is gone even if the run finished in the same loop cycle:
+        # a handle registered by that run is undeliverable, so discard it
+        # instead of leaving the command running with no owner.
+        if run_task.done():
+            result = await run_task
+            if result.handle is not None:
+                discard_background_record(registry, result.handle)
+        else:
+            run_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await run_task
+        return None
+    eof_task.cancel()
     with suppress(asyncio.CancelledError):
-        await run_task
-    return None
+        await eof_task
+    return (await run_task).message
 
 
 async def _handle_connection(
@@ -251,6 +266,8 @@ def _sync_supervisor_request(socket_path: str, request: dict[str, object]) -> st
 def _recv_line(conn: socket.socket) -> bytes:
     buffer = bytearray()
     while b"\n" not in buffer:
+        if len(buffer) >= _REQUEST_LIMIT_BYTES:
+            break
         chunk = conn.recv(65536)
         if not chunk:
             break
