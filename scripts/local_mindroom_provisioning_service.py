@@ -13,6 +13,16 @@ This service is designed for hosted Matrix + chat deployments where users run
 MindRoom locally. Browser users authenticate with their Matrix access token.
 Paired local MindRoom installs receive client credentials that can request
 registration tokens for agent account creation.
+
+Namespace exemption: pairing always assigns each new connection a random
+namespace, and register-agent only accepts usernames shaped like
+``mindroom_<entity>_<namespace>``. Legacy/operator installs that predate
+namespaces use plain ``mindroom_<entity>`` usernames. To exempt such a trusted
+connection, an operator stops the service, sets ``"namespace": ""`` on that
+connection in the persisted state file (``MINDROOM_PROVISIONING_STATE_PATH``,
+default ``/var/lib/mindroom-local-provisioning/state.json``), and starts the
+service again. An exempt connection skips the namespace suffix check but may
+still only register valid Matrix localparts starting with ``mindroom_``.
 """
 
 from __future__ import annotations
@@ -22,6 +32,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -53,6 +64,7 @@ RATE_LIMIT_STALE_SECONDS = 3600
 NAMESPACE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 NAMESPACE_LENGTH = 8
 MANAGED_AGENT_USERNAME_PREFIX = "mindroom_"
+MATRIX_LOCALPART_RE = re.compile(r"\A[a-z0-9._=/+-]+\Z")
 PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
 
 
@@ -406,11 +418,10 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
 
     for item in payload.get("connections", []):
         connection_id = item["id"]
+        # An explicitly empty namespace is a namespace-exempt connection
+        # (operator-set, see module docstring) and must survive restarts.
         namespace = item.get("namespace")
-        if isinstance(namespace, str):
-            namespace = namespace.strip().lower()
-        if not isinstance(namespace, str) or not namespace:
-            namespace = _derive_namespace(connection_id)
+        namespace = namespace.strip().lower() if isinstance(namespace, str) else _derive_namespace(connection_id)
         connection = LocalConnection(
             id=connection_id,
             user_id=item["user_id"],
@@ -459,6 +470,22 @@ def _is_managed_agent_username_for_namespace(username: str, namespace: str) -> b
         and username.endswith(suffix)
         and len(username) > len(MANAGED_AGENT_USERNAME_PREFIX) + len(suffix)
     )
+
+
+def _is_username_permitted_for_connection(username: str, namespace: str) -> bool:
+    """Return whether a connection may register the requested agent username.
+
+    An empty namespace marks a namespace-exempt connection (operator-set, see
+    module docstring): the namespace suffix check is skipped, but the username
+    must still be a valid Matrix localpart with the managed agent prefix.
+    """
+    if not namespace:
+        return (
+            username.startswith(MANAGED_AGENT_USERNAME_PREFIX)
+            and len(username) > len(MANAGED_AGENT_USERNAME_PREFIX)
+            and MATRIX_LOCALPART_RE.match(username) is not None
+        )
+    return _is_managed_agent_username_for_namespace(username, namespace)
 
 
 def _expire_if_needed(session: PairSession, now: datetime) -> None:
@@ -817,7 +844,7 @@ async def register_agent(
     async with state.lock:
         connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
         _enforce_rate_limit_unlocked(state, key=f"register:agent:{connection.id}", limit=60, window_seconds=60)
-        if not _is_managed_agent_username_for_namespace(payload.username, connection.namespace):
+        if not _is_username_permitted_for_connection(payload.username, connection.namespace):
             raise HTTPException(
                 status_code=403,
                 detail="Requested username is outside this local connection namespace",
