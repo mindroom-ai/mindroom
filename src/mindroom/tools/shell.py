@@ -2,18 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
-import codecs
-import contextlib
 import json
 import os
 import re
 import shlex
-import signal
-import time
-import uuid
-from collections import deque
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
@@ -25,6 +17,19 @@ from mindroom.constants import (
     shell_execution_runtime_env_values,
     subprocess_path_with_prepends,
     workspace_home_identity_env,
+)
+from mindroom.shell_execution import (
+    DEFAULT_RUN_TIMEOUT_SECONDS,
+    ProcessRecord,
+    check_command,
+    kill_command,
+    run_command,
+)
+from mindroom.shell_supervisor import (
+    SHELL_SUPERVISOR_SOCKET_ENV,
+    check_command_via_supervisor,
+    kill_command_via_supervisor,
+    run_command_via_supervisor,
 )
 from mindroom.tool_system.metadata import (
     ConfigField,
@@ -71,22 +76,15 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
         "no_proxy",
     },
 )
-_STALE_RECORD_SECONDS = 600  # 10 minutes
-_MAX_BACKGROUNDED = 16
-_MAX_OUTPUT_LINES = 10_000
-_MAX_OUTPUT_BYTES = 50 * 1024
-_STREAM_READ_CHUNK_BYTES = 8192
-_PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
-_POST_EXIT_READER_GRACE_SECONDS = 0.5
 _SHELL_ARGS_ERROR = (
     '\'args\' must be a shell command string or a flat list of strings. Send args like "ls -la" or ["git", "status"].'
 )
 _SHELL_COMMAND_LINE_CHARS = frozenset("$|&;<>*?~`!(){}[]\n\r")
 
 # Module-level process registry shared across all MindRoomShellTools instances.
-# This ensures handles survive toolkit re-creation (e.g. in sandbox runner mode
-# where _resolve_entrypoint builds a fresh toolkit per request).
-_process_registry: dict[str, _ProcessRecord] = {}
+# This ensures handles survive toolkit re-creation for local execution; when a
+# supervisor socket is advertised, the supervisor owns the registry instead.
+_process_registry: dict[str, ProcessRecord] = {}
 
 
 def _normalize_shell_command_line(command: str) -> list[str]:
@@ -237,89 +235,6 @@ def _handle_namespace(*, runtime_paths: RuntimePaths, base_dir: Path | None) -> 
     return f"{storage_root}::{resolved_base_dir}"
 
 
-@dataclass
-class _OutputBuffer:
-    """Bound shell output by both line count and encoded byte size."""
-
-    max_lines: int = _MAX_OUTPUT_LINES
-    max_bytes: int = _MAX_OUTPUT_BYTES
-    chunks: deque[str] = field(default_factory=deque)
-    byte_count: int = 0
-    truncated: bool = False
-
-    def append(self, text: str) -> None:
-        if not text:
-            return
-
-        encoded = text.encode("utf-8", errors="replace")
-        if len(encoded) > self.max_bytes:
-            text = encoded[-self.max_bytes :].decode("utf-8", errors="ignore")
-            encoded = text.encode("utf-8", errors="replace")
-            self.truncated = True
-
-        self.chunks.append(text)
-        self.byte_count += len(encoded)
-
-        while self.chunks and self.byte_count > self.max_bytes:
-            removed = self.chunks.popleft()
-            self.byte_count -= len(removed.encode("utf-8", errors="replace"))
-            self.truncated = True
-
-        self._trim_to_max_lines()
-
-    def render(self, *, tail: int | None = None) -> str:
-        output = self._rendered_text()
-        output_lines = output.split("\n") if output else []
-        if tail is not None:
-            output_lines = output_lines[-tail:]
-        output = "\n".join(output_lines)
-        if not self.truncated:
-            return output
-
-        notice = (
-            f"[Output truncated to the last {self.max_bytes} bytes. "
-            "Redirect command output to a file for complete results.]"
-        )
-        return f"{notice}\n{output}" if output else notice
-
-    def __len__(self) -> int:
-        output = self._rendered_text()
-        return len(output.split("\n")) if output else 0
-
-    def _rendered_text(self) -> str:
-        return "".join(self.chunks).rstrip("\n")
-
-    def _trim_to_max_lines(self) -> None:
-        output = self._rendered_text()
-        lines = output.split("\n")
-        if len(lines) <= self.max_lines:
-            return
-
-        output = "\n".join(lines[-self.max_lines :])
-        self.chunks = deque([output])
-        self.byte_count = len(output.encode("utf-8", errors="replace"))
-        self.truncated = True
-
-
-@dataclass
-class _ProcessRecord:
-    """Tracks a backgrounded shell process."""
-
-    namespace: str
-    handle: str
-    pid: int
-    args: list[str]
-    process: asyncio.subprocess.Process
-    stdout_buf: _OutputBuffer = field(default_factory=_OutputBuffer)
-    stderr_buf: _OutputBuffer = field(default_factory=_OutputBuffer)
-    started_at: float = field(default_factory=time.monotonic)
-    tail: int = 100
-    finished: bool = False
-    finished_at: float | None = None
-    return_code: int | None = None
-    _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
-
-
 @register_tool_with_metadata(
     name="shell",
     display_name="Shell Commands",
@@ -440,15 +355,18 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 ),
             )
             self._base_process_env = dict(runtime_paths.process_env)
-            self._processes = _process_registry
             self._handle_namespace = _handle_namespace(runtime_paths=runtime_paths, base_dir=self.base_dir)
             self._shell_path_prepend = shell_path_prepend
+            # Sandbox tool subprocesses delegate execution to the runner's
+            # long-lived shell supervisor so background handles survive the
+            # per-request process.
+            self._supervisor_socket = os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV) or None
 
         async def run_shell_command(
             self,
             args: list[str] | str,
             tail: int = 100,
-            timeout: int = 120,  # noqa: ASYNC109
+            timeout: int = DEFAULT_RUN_TIMEOUT_SECONDS,  # noqa: ASYNC109
         ) -> str:
             """Runs a shell command and returns the output or error.
 
@@ -467,93 +385,36 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 The command output, an error message, or a background handle.
 
             """
-            self._sweep_stale_records()
-
             try:
                 command_args = _normalize_shell_args(args)
-                subprocess_env = _shell_subprocess_env(
-                    self._runtime_env,
-                    base_process_env=self._base_process_env,
-                    shell_path_prepend=self._shell_path_prepend,
-                )
-                process = await asyncio.create_subprocess_exec(
-                    *_shell_subprocess_args(command_args, subprocess_env),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=str(self.base_dir) if self.base_dir else None,
-                    env=subprocess_env,
-                    start_new_session=True,
-                )
-            except Exception as exc:
+            except ValueError as exc:
                 return f"Error: {exc}"
-
-            stdout_buf = _OutputBuffer()
-            stderr_buf = _OutputBuffer()
-            background_handle: str | None = None
-            background_monitor_task: asyncio.Task[None] | None = None
-
-            stdout_reader = asyncio.create_task(_read_stream(process.stdout, stdout_buf))
-            stderr_reader = asyncio.create_task(_read_stream(process.stderr, stderr_buf))
-
-            try:
-                try:
-                    await _await_foreground_process_exit(process, timeout_seconds=timeout)
-                except TimeoutError:
-                    active = sum(1 for r in self._processes.values() if not r.finished)
-                    if active >= _MAX_BACKGROUNDED:
-                        with contextlib.suppress(ProcessLookupError, PermissionError):
-                            os.killpg(process.pid, signal.SIGKILL)
-                        await _cancel_pending_tasks(stdout_reader, stderr_reader)
-                        return (
-                            f"Error: Too many backgrounded processes ({active}/{_MAX_BACKGROUNDED}). "
-                            "Kill or wait for existing ones before running more."
-                        )
-                    handle = f"shell:{uuid.uuid4().hex[:8]}"
-                    record = _ProcessRecord(
-                        namespace=self._handle_namespace,
-                        handle=handle,
-                        pid=process.pid,
-                        args=command_args,
-                        process=process,
-                        stdout_buf=stdout_buf,
-                        stderr_buf=stderr_buf,
-                        tail=tail,
-                    )
-                    record._monitor_task = asyncio.create_task(
-                        _monitor_process(self._processes, handle, process, stdout_reader, stderr_reader),
-                    )
-                    self._processes[handle] = record
-                    background_handle = handle
-                    background_monitor_task = record._monitor_task
-                    await asyncio.sleep(0)
-                    return (
-                        f"Command timed out after {timeout}s. Still running (PID {process.pid}).\n"
-                        f"Handle: {handle}\n"
-                        f"Use check_shell_command('{handle}') to poll or "
-                        f"kill_shell_command('{handle}') to stop."
-                    )
-
-                await _await_reader_tasks_with_grace(
-                    stdout_reader,
-                    stderr_reader,
-                    grace_seconds=_POST_EXIT_READER_GRACE_SECONDS,
+            subprocess_env = _shell_subprocess_env(
+                self._runtime_env,
+                base_process_env=self._base_process_env,
+                shell_path_prepend=self._shell_path_prepend,
+            )
+            argv = _shell_subprocess_args(command_args, subprocess_env)
+            cwd = str(self.base_dir) if self.base_dir else None
+            if self._supervisor_socket is not None:
+                return await run_command_via_supervisor(
+                    self._supervisor_socket,
+                    namespace=self._handle_namespace,
+                    argv=argv,
+                    env=subprocess_env,
+                    cwd=cwd,
+                    tail=tail,
+                    timeout=timeout,
                 )
-            except asyncio.CancelledError:
-                if background_handle is not None:
-                    self._processes.pop(background_handle, None)
-                if background_monitor_task is not None:
-                    background_monitor_task.cancel()
-                if process.returncode is None:
-                    await _terminate_process_group(process)
-                await _cancel_pending_tasks(stdout_reader, stderr_reader)
-                if background_monitor_task is not None:
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await background_monitor_task
-                raise
-
-            if process.returncode != 0:
-                return f"Error: {stderr_buf.render()}"
-            return stdout_buf.render(tail=tail)
+            return await run_command(
+                _process_registry,
+                namespace=self._handle_namespace,
+                argv=argv,
+                env=subprocess_env,
+                cwd=cwd,
+                tail=tail,
+                timeout=timeout,
+            )
 
         def check_shell_command(self, handle: str) -> str:
             """Poll the status of a backgrounded shell command.
@@ -569,26 +430,13 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 Output if the command finished, or a status summary if still running.
 
             """
-            record = self._processes.get(handle)
-            if record is None or record.namespace != self._handle_namespace:
-                return f"Error: Unknown handle '{handle}'"
-
-            elapsed = time.monotonic() - record.started_at
-
-            if record.finished:
-                output = record.stdout_buf.render(tail=record.tail)
-                errors = record.stderr_buf.render()
-                result = f"Status: FINISHED (exit code {record.return_code}, ran for {elapsed:.1f}s)\n"
-                if record.return_code != 0 and errors:
-                    result += f"Stderr:\n{errors}\n"
-                result += f"Output:\n{output}"
-                return result
-
-            partial = record.stdout_buf.render(tail=50)
-            return (
-                f"Status: RUNNING (PID {record.pid}, elapsed {elapsed:.1f}s)\n"
-                f"Partial output ({len(record.stdout_buf)} lines buffered):\n{partial}"
-            )
+            if self._supervisor_socket is not None:
+                return check_command_via_supervisor(
+                    self._supervisor_socket,
+                    namespace=self._handle_namespace,
+                    handle=handle,
+                )
+            return check_command(_process_registry, namespace=self._handle_namespace, handle=handle)
 
         def kill_shell_command(self, handle: str, force: bool = False) -> str:
             """Kill a backgrounded shell command.
@@ -601,158 +449,13 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 Confirmation message or error.
 
             """
-            record = self._processes.get(handle)
-            if record is None or record.namespace != self._handle_namespace:
-                return f"Error: Unknown handle '{handle}'"
-
-            if record.finished:
-                return f"Process already finished (exit code {record.return_code})"
-
-            sig = signal.SIGKILL if force else signal.SIGTERM
-            sig_name = "SIGKILL" if force else "SIGTERM"
-            try:
-                os.killpg(record.pid, sig)
-            except (ProcessLookupError, PermissionError):
-                return f"Process {record.pid} already exited"
-
-            action = "Force-killed" if force else "Terminated"
-            return (
-                f"{action} process {record.pid} ({sig_name} sent). Use check_shell_command('{handle}') to confirm exit."
-            )
-
-        def _sweep_stale_records(self) -> None:
-            """Remove records that finished more than 10 minutes ago."""
-            now = time.monotonic()
-            stale = [
-                h
-                for h, r in self._processes.items()
-                if r.finished and r.finished_at is not None and (now - r.finished_at) > _STALE_RECORD_SECONDS
-            ]
-            for h in stale:
-                self._processes.pop(h, None)
+            if self._supervisor_socket is not None:
+                return kill_command_via_supervisor(
+                    self._supervisor_socket,
+                    namespace=self._handle_namespace,
+                    handle=handle,
+                    force=force,
+                )
+            return kill_command(_process_registry, namespace=self._handle_namespace, handle=handle, force=force)
 
     return MindRoomShellTools
-
-
-async def _read_stream(stream: asyncio.StreamReader | None, buf: _OutputBuffer) -> None:
-    """Read bounded chunks from an async stream into *buf* until EOF."""
-    if stream is None:
-        return
-
-    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    while True:
-        chunk = await stream.read(_STREAM_READ_CHUNK_BYTES)
-        if not chunk:
-            break
-        buf.append(decoder.decode(chunk))
-
-    buf.append(decoder.decode(b"", final=True))
-
-
-async def _cancel_pending_tasks(*tasks: asyncio.Task[None]) -> None:
-    """Cancel any pending tasks and wait for them to finish."""
-    pending_tasks = [task for task in tasks if not task.done()]
-    for task in pending_tasks:
-        task.cancel()
-    for task in pending_tasks:
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-
-async def _await_foreground_process_exit(
-    process: asyncio.subprocess.Process,
-    *,
-    timeout_seconds: float,
-) -> None:
-    """Wait for the foreground process to exit without depending on pipe EOF."""
-    if process.returncode is not None:
-        return
-    if timeout_seconds <= 0:
-        raise TimeoutError
-
-    wait_task = asyncio.create_task(process.wait())
-    deadline = asyncio.get_running_loop().time() + timeout_seconds
-    try:
-        while process.returncode is None:
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise TimeoutError
-            done_tasks, _pending_tasks = await asyncio.wait(
-                (wait_task,),
-                timeout=min(_PROCESS_EXIT_POLL_INTERVAL_SECONDS, remaining),
-            )
-            if wait_task in done_tasks:
-                await wait_task
-                return
-    finally:
-        if not wait_task.done():
-            wait_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await wait_task
-
-
-async def _await_reader_tasks_with_grace(
-    stdout_reader: asyncio.Task[None],
-    stderr_reader: asyncio.Task[None],
-    *,
-    grace_seconds: float,
-) -> None:
-    """Drain reader tasks briefly after foreground exit, then stop waiting for EOF."""
-    reader_tasks = (stdout_reader, stderr_reader)
-    done_tasks, pending_tasks = await asyncio.wait(reader_tasks, timeout=grace_seconds)
-
-    try:
-        for task in done_tasks:
-            await task
-    finally:
-        for task in pending_tasks:
-            task.cancel()
-        for task in pending_tasks:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-
-async def _terminate_process_group(
-    process: asyncio.subprocess.Process,
-    *,
-    grace_period: float = 0.5,
-) -> None:
-    """Terminate a subprocess process group, escalating to SIGKILL if needed."""
-    if process.returncode is not None:
-        return
-
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(process.pid, signal.SIGTERM)
-
-    try:
-        await asyncio.wait_for(process.wait(), timeout=grace_period)
-    except TimeoutError:
-        pass
-    else:
-        return
-
-    if process.returncode is None:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(process.pid, signal.SIGKILL)
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(process.wait(), timeout=grace_period)
-
-
-async def _monitor_process(
-    registry: dict[str, _ProcessRecord],
-    handle: str,
-    process: asyncio.subprocess.Process,
-    stdout_reader: asyncio.Task[None],
-    stderr_reader: asyncio.Task[None],
-) -> None:
-    """Wait for a backgrounded process to exit and update its record."""
-    try:
-        await process.wait()
-    finally:
-        await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
-        await _cancel_pending_tasks(stdout_reader, stderr_reader)
-        record = registry.get(handle)
-        if record is not None:
-            record.finished = True
-            record.finished_at = time.monotonic()
-            record.return_code = process.returncode

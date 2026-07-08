@@ -14,9 +14,9 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
+from mindroom.shell_execution import _MAX_OUTPUT_BYTES
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tools.shell import (
-    _MAX_OUTPUT_BYTES,
     _process_registry,
     _workspace_home_contract_env_from_process_env,
     shell_tools,
@@ -957,7 +957,7 @@ async def test_max_backgrounded_limit(tmp_path: Path) -> None:
     handles: list[str] = []
 
     # Patch to a small limit
-    with patch("mindroom.tools.shell._MAX_BACKGROUNDED", 2):
+    with patch("mindroom.shell_execution._MAX_BACKGROUNDED", 2):
         # Fill up to the limit
         for _ in range(2):
             result = await run_fn(["sleep", "300"], timeout=0)

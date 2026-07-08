@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from mindroom import constants
+from mindroom import constants, shell_supervisor
 from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_forkserver, sandbox_protocol, sandbox_worker_prep
 from mindroom.api.worker_responses import (
     SandboxWorkerCleanupResponse,
@@ -41,6 +41,7 @@ from mindroom.runtime_env_policy import (
     sandbox_runner_startup_process_env,
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.shell_execution import DEFAULT_RUN_TIMEOUT_SECONDS
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ToolConfigOverrideError,
@@ -83,6 +84,7 @@ logger = get_logger(__name__)
 
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _WORKSPACE_ENV_HOOK_TOOL_NAMES = frozenset({"shell", "python"})
+_SHELL_DISPATCH_TIMEOUT_GRACE_SECONDS = 30.0
 _STARTUP_RUNTIME_PATHS_JSON_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 
 
@@ -1198,6 +1200,39 @@ def _execute_request_forkserver(
     return _parse_subprocess_response(request, runtime_paths, completed)
 
 
+def _shell_run_timeout_seconds(prepared: PreparedSandboxRunnerExecuteRequest) -> float:
+    """Return the foreground wait requested by one run_shell_command call."""
+    if prepared.function_name != "run_shell_command":
+        return 0.0
+    raw_timeout = prepared.kwargs.get("timeout", DEFAULT_RUN_TIMEOUT_SECONDS)
+    try:
+        return max(0.0, float(raw_timeout))
+    except (TypeError, ValueError):
+        return float(DEFAULT_RUN_TIMEOUT_SECONDS)
+
+
+def _shell_subprocess_dispatch_context(
+    prepared: PreparedSandboxRunnerExecuteRequest,
+    subprocess_context: _PreparedSandboxSubprocessContext,
+    timeout_seconds: float,
+) -> tuple[_PreparedSandboxSubprocessContext, float]:
+    """Attach the shell supervisor socket and cover the shell timeout in the budget.
+
+    Background shell handles live in the runner's long-lived supervisor
+    process, so the per-request subprocess only relays the call. Its budget
+    must outlast the shell command's own foreground timeout or the runner
+    would kill the relay (and with it the supervised command) mid-wait.
+    """
+    socket_path = shell_supervisor.ensure_shell_supervisor()
+    subprocess_env = dict(subprocess_context.subprocess_env or {})
+    subprocess_env[shell_supervisor.SHELL_SUPERVISOR_SOCKET_ENV] = socket_path
+    timeout_seconds = max(
+        timeout_seconds,
+        _shell_run_timeout_seconds(prepared) + _SHELL_DISPATCH_TIMEOUT_GRACE_SECONDS,
+    )
+    return replace(subprocess_context, subprocess_env=subprocess_env), timeout_seconds
+
+
 def _execute_request_subprocess_sync(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
@@ -1225,6 +1260,15 @@ def _execute_request_subprocess_sync(
         runtime_paths=constants.serialize_runtime_paths(prepared_request.runtime_paths),
     )
     timeout_seconds = sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths)
+    if prepared_request.request.tool_name == "shell":
+        try:
+            subprocess_context, timeout_seconds = _shell_subprocess_dispatch_context(
+                prepared_request.request,
+                subprocess_context,
+                timeout_seconds,
+            )
+        except shell_supervisor.ShellSupervisorStartupError as exc:
+            return _subprocess_failure_response(request, str(exc), runtime_paths)
 
     if sandbox_exec.runner_uses_forkserver(runtime_paths) and sandbox_forkserver.forkserver_supported():
         forkserver_response = _execute_request_forkserver(
@@ -1558,10 +1602,7 @@ async def execute_tool_call(
             if exc.failure_kind == "worker":
                 return SandboxRunnerExecuteResponse(ok=False, error=str(exc), failure_kind="worker")
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # Shell background handles live in the long-lived runner process, so shell
-    # must stay on the in-process path even when the runner defaults to
-    # per-request subprocess execution.
-    if payload.tool_name != "shell" and sandbox_exec.runner_uses_subprocess(runtime_paths):
+    if sandbox_exec.runner_uses_subprocess(runtime_paths):
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
@@ -1582,7 +1623,7 @@ async def execute_tool_call(
     # Worker-routed execution stays on the subprocess path so the per-worker
     # virtualenv and worker-specific process environment remain authoritative,
     # even when this pod is itself a dedicated worker runtime.
-    if payload.tool_name != "shell" and payload.worker_key is not None:
+    if payload.worker_key is not None:
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
