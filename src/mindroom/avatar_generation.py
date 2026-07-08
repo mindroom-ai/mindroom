@@ -186,6 +186,16 @@ async def _generate_prompt(
     return final_prompt
 
 
+def _no_image_diagnostic(response: types.GenerateContentResponse) -> str:
+    """Summarize a no-image response for logs without dumping the payload."""
+    finish_reasons = [
+        str(candidate.finish_reason) for candidate in response.candidates or [] if candidate.finish_reason
+    ]
+    texts = [text for part in response.parts or [] if isinstance(text := getattr(part, "text", None), str)]
+    snippet = " ".join(texts).strip()[:200]
+    return f"finish_reasons={finish_reasons or None} text={snippet!r}"
+
+
 def _extract_image_bytes(response: types.GenerateContentResponse) -> bytes | None:
     """Return the first generated image bytes from a Gemini response."""
     for part in response.parts or []:
@@ -239,11 +249,13 @@ async def _generate_avatar(
             entity_name=target.entity_name,
             attempt=attempt,
             max_attempts=_MAX_IMAGE_ATTEMPTS,
+            response_diagnostic=_no_image_diagnostic(response),
         )
-        console.print(
-            f"[yellow]⟳ No image returned for {target.entity_type}/{target.entity_name} "
-            f"(attempt {attempt}/{_MAX_IMAGE_ATTEMPTS}); regenerating prompt[/yellow]",
-        )
+        if attempt < _MAX_IMAGE_ATTEMPTS:
+            console.print(
+                f"[yellow]⟳ No image returned for {target.entity_type}/{target.entity_name} "
+                f"(attempt {attempt}/{_MAX_IMAGE_ATTEMPTS}); regenerating prompt[/yellow]",
+            )
 
     if not image_bytes:
         msg = f"No image data found for {target.entity_type}/{target.entity_name} after {_MAX_IMAGE_ATTEMPTS} attempts"

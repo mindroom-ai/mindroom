@@ -1094,11 +1094,14 @@ async def test_set_room_avatars_in_matrix_wraps_router_login_failures(
 
 
 def _image_response(data: bytes) -> SimpleNamespace:
-    return SimpleNamespace(parts=[SimpleNamespace(inline_data=SimpleNamespace(data=data))])
+    return SimpleNamespace(candidates=None, parts=[SimpleNamespace(inline_data=SimpleNamespace(data=data))])
 
 
 def _no_image_response() -> SimpleNamespace:
-    return SimpleNamespace(parts=[SimpleNamespace(inline_data=None, text="cannot draw that")])
+    return SimpleNamespace(
+        candidates=[SimpleNamespace(finish_reason="STOP")],
+        parts=[SimpleNamespace(inline_data=None, text="cannot draw that")],
+    )
 
 
 def _client_with_image_responses(responses: list[SimpleNamespace]) -> SimpleNamespace:
@@ -1120,7 +1123,7 @@ async def test_generate_avatar_retries_with_fresh_prompt_when_no_image_returned(
     target = generate_avatars._AvatarTarget(entity_type="teams", entity_name="incident", role="incident response")
 
     await generate_avatars._generate_avatar(
-        client,  # type: ignore[arg-type]
+        client,
         target,
         _runtime_paths(tmp_path),
         _config_with_runtime_paths(
@@ -1153,7 +1156,7 @@ async def test_generate_avatar_raises_after_exhausting_image_attempts(
 
     with pytest.raises(ValueError, match=f"after {generate_avatars._MAX_IMAGE_ATTEMPTS} attempts"):
         await generate_avatars._generate_avatar(
-            client,  # type: ignore[arg-type]
+            client,
             target,
             _runtime_paths(tmp_path),
             _config_with_runtime_paths(
