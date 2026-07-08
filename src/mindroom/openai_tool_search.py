@@ -26,15 +26,17 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any, cast
 
-from agno.models.openai import OpenAIResponses
-
 from mindroom.model_defaults import OPENAI_TOOL_SEARCH_MIN_GPT_VERSION
+from mindroom.model_instance_checks import isinstance_of_loaded
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
     from agno.models.message import Message
+    from agno.models.openai import OpenAIResponses
     from agno.models.response import ModelResponse
+
+_OPENAI_RESPONSES_CLASS = ("agno.models.openai.responses", "OpenAIResponses")
 
 _DEFERRED_TOOL_NAMES_ATTR = "_mindroom_openai_deferred_tool_names"
 _TOOL_SEARCH_ITEMS_KEY = "tool_search_items"
@@ -74,7 +76,7 @@ def install_openai_deferred_tool_search(model: object, *, deferred_tool_names: f
     and tool discovery never invalidates the prompt cache. No-op for
     non-Responses models and empty name sets.
     """
-    if not isinstance(model, OpenAIResponses) or not deferred_tool_names:
+    if not isinstance_of_loaded(model, _OPENAI_RESPONSES_CLASS) or not deferred_tool_names:
         return
     vars(model)[_DEFERRED_TOOL_NAMES_ATTR] = frozenset(deferred_tool_names)
 

@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.knowledge.embedder.ollama import OllamaEmbedder
-
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
-from mindroom.embeddings import MindRoomOpenAIEmbedder, create_sentence_transformers_embedder
+from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 
 if TYPE_CHECKING:
@@ -23,6 +21,10 @@ def create_configured_embedder(config: Config, runtime_paths: RuntimePaths) -> E
     embedder_config = config.memory.embedder.config
 
     if provider == "openai":
+        # Imported at first construction so only the configured embedder
+        # provider's SDK loads (#1436).
+        from mindroom.openai_embedder import MindRoomOpenAIEmbedder  # noqa: PLC0415
+
         return MindRoomOpenAIEmbedder(
             id=embedder_config.model,
             api_key=get_api_key_for_provider("openai", runtime_paths=runtime_paths),
@@ -31,6 +33,8 @@ def create_configured_embedder(config: Config, runtime_paths: RuntimePaths) -> E
         )
 
     if provider == "ollama":
+        from agno.knowledge.embedder.ollama import OllamaEmbedder  # noqa: PLC0415
+
         host = get_ollama_host(runtime_paths=runtime_paths) or embedder_config.host or OLLAMA_HOST_DEFAULT
         return OllamaEmbedder(id=embedder_config.model, host=host)
 

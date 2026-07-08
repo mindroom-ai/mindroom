@@ -8,11 +8,10 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 import nio
 from agno.agent import Agent
-from agno.models.vertexai.claude import Claude as VertexAIClaude
 from pydantic import BaseModel, Field
 
 from mindroom import model_loading
@@ -21,6 +20,7 @@ from mindroom.entity_resolution import resolve_room_scoped_model_override
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.model_instance_checks import isinstance_of_loaded
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -86,9 +86,9 @@ def _configure_summary_model_temperature(
     model_name: str,
 ) -> None:
     """Prepare the summary model's temperature setting for one request."""
-    if isinstance(model, VertexAIClaude):
+    if isinstance_of_loaded(model, ("agno.models.vertexai.claude", "Claude")):
         # Vertex Claude's rawPredict helper rejects a temperature field entirely.
-        model.temperature = None
+        cast("_SupportsTemperature", model).temperature = None
         return
     if isinstance(model, _SupportsTemperature):
         model.temperature = summary_temperature

@@ -35,22 +35,25 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
-from agno.models.anthropic import Claude
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
 from mindroom.logging_config import get_logger
+from mindroom.model_instance_checks import isinstance_of_loaded
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
+    from agno.models.anthropic import Claude
     from agno.models.base import Model
     from agno.models.response import ModelResponse
 
 logger = get_logger(__name__)
+
+_ANTHROPIC_CLAUDE_CLASS = ("agno.models.anthropic.claude", "Claude")
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 
@@ -116,21 +119,22 @@ def configure_summary_model(model: Model, *, timeout_seconds: float | None = Non
     Mutating the instance is safe: ``get_model_instance`` builds a fresh model per
     call and compaction loads its own instance per run.
     """
-    if not isinstance(model, Claude):
+    if not isinstance_of_loaded(model, _ANTHROPIC_CLAUDE_CLASS):
         logger.debug(
             "Compaction summary model tuning skipped",
             model_type=type(model).__name__,
             reason="provider_specific_tuning_only_defined_for_claude",
         )
         return model
+    claude_model = cast("Claude", model)
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    model.cache_system_prompt = False
-    model.extended_cache_time = False
-    model.thinking = None
-    model.timeout = min(model.timeout, resolved_timeout) if model.timeout else resolved_timeout
-    client_params = dict(model.client_params or {})
+    claude_model.cache_system_prompt = False
+    claude_model.extended_cache_time = False
+    claude_model.thinking = None
+    claude_model.timeout = min(claude_model.timeout, resolved_timeout) if claude_model.timeout else resolved_timeout
+    client_params = dict(claude_model.client_params or {})
     client_params["max_retries"] = 0
-    model.client_params = client_params
+    claude_model.client_params = client_params
     return model
 
 
@@ -278,8 +282,8 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
 
 
 def _summary_output_token_limit(model: Model) -> int | None:
-    if isinstance(model, Claude):
-        return model.max_tokens
+    if isinstance_of_loaded(model, _ANTHROPIC_CLAUDE_CLASS):
+        return cast("Claude", model).max_tokens
     return None
 
 
