@@ -436,10 +436,11 @@ async def _watch_config(
                 continue
 
             changed_paths = file_watcher.changed_watched_paths(last_mtimes, current_mtimes)
+            vanished = file_watcher.any_paths_newly_missing(last_mtimes, current_mtimes)
             last_mtimes = current_mtimes
             if changed_paths:
                 pending_paths.update(changed_paths)
-            elif pending_paths:
+            elif pending_paths and not vanished:
                 logger.info("Config file changed", paths=sorted(str(path) for path in pending_paths))
                 pending_paths.clear()
                 await _reload_config_after_file_change(api_app, runtime_paths)

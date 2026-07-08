@@ -545,6 +545,41 @@ class TestWatchPaths:
         assert fired_at_scan == [6]
 
     @pytest.mark.asyncio
+    async def test_a_newly_vanished_file_defers_the_pending_callback(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A file vanishing mid-burst keeps deferring; the fire happens once the set is stable."""
+        monkeypatch.setattr(file_watcher, "_WATCH_SCAN_INTERVAL_SECONDS", 0.001)
+        top = (tmp_path / "config.yaml").resolve()
+        included = (tmp_path / "agents.yaml").resolve()
+        scan_snapshots = [
+            {top: 1, included: 1},  # baseline
+            {top: 2, included: 1},  # change -> dirty
+            {top: 2, included: 0},  # included vanished mid-burst -> keep deferring
+            {top: 2, included: 0},  # still missing but no new transition -> quiet, fire
+        ]
+        scans = {"count": 0}
+        fired_at_scan: list[int] = []
+        stop_event = asyncio.Event()
+
+        def scripted_snapshot(paths: object) -> dict[Path, int]:
+            del paths
+            index = min(scans["count"], len(scan_snapshots) - 1)
+            scans["count"] += 1
+            return dict(scan_snapshots[index])
+
+        async def on_change() -> None:
+            fired_at_scan.append(scans["count"])
+            stop_event.set()
+
+        monkeypatch.setattr(file_watcher, "paths_mtime_snapshot", scripted_snapshot)
+        await asyncio.wait_for(file_watcher.watch_paths(lambda: (top, included), on_change, stop_event), timeout=2)
+
+        assert fired_at_scan == [4]
+
+    @pytest.mark.asyncio
     async def test_missing_file_stays_silent_until_it_reappears(
         self,
         tmp_path: Path,

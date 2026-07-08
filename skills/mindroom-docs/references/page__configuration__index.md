@@ -79,6 +79,7 @@ Error handling is strict so a broken split fails loudly:
 
 Hot reload watches every included file, so editing any file in the include tree triggers the same config reload as editing `config.yaml`.
 A reload fires only after the watched files have been quiet for one full scan interval (about one second of added latency), so a multi-file update from `git pull` or a sync tool lands completely before the reload reads the tree.
+A watched file vanishing between scans also defers a pending reload by one scan, so a delete-and-recreate save cannot be read mid-rename.
 Deleting an included file does not trigger a reload by itself: the watcher deliberately treats a missing file as an in-progress editor save and waits until it reappears or another watched file changes.
 To remove an include file, delete the `!include` reference from the including file too — that edit triggers the reload.
 If a reload fails, every file the failed attempt read stays watched alongside the last good set, so fixing a newly added include file — even one the last good config never referenced — triggers the retry reload.
