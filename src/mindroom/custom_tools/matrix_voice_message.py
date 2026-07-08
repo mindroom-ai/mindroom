@@ -434,7 +434,6 @@ class MatrixVoiceMessageTools(Toolkit):
             context.client,
             preflight.room_id,
             prepared_audio.audio_bytes,
-            config=context.config,
             mimetype=prepared_audio.mimetype,
             filename=_OPUS_FILENAME,
             caption=caption.strip() if isinstance(caption, str) and caption.strip() else None,

@@ -36,7 +36,6 @@ from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import (
     CacheConfig,
-    MatrixDeliveryConfig,
     MatrixRoomAccessConfig,
     MatrixSpaceConfig,
     MindRoomUserConfig,
@@ -143,7 +142,6 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "prompts",
     "matrix_room_access",
     "matrix_space",
-    "matrix_delivery",
 )
 _OPTIONAL_MODEL_SECTION_NAMES = ("debug", "external_trigger_policy", "tool_approval")
 
@@ -415,10 +413,6 @@ class Config(BaseModel):
     matrix_space: MatrixSpaceConfig = Field(
         default_factory=MatrixSpaceConfig,
         description="Optional root Matrix Space for grouping managed rooms",
-    )
-    matrix_delivery: MatrixDeliveryConfig = Field(
-        default_factory=MatrixDeliveryConfig,
-        description="Outgoing Matrix event delivery behavior",
     )
     authorization: AuthorizationConfig = Field(
         default_factory=AuthorizationConfig,

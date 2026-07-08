@@ -47,13 +47,11 @@ class _StopManager:
         _client: object,
         message_id: str,
         *,
-        config: Config,
         notify_outbound_event: object,
     ) -> str:
         self.added_buttons.append(message_id)
         self.add_stop_button_kwargs.append(
             {
-                "config": config,
                 "notify_outbound_event": notify_outbound_event,
             },
         )
@@ -194,7 +192,6 @@ async def test_response_attempt_adds_stop_button_for_online_user_and_removes_it_
     assert stop_manager.added_buttons == ["$thinking"]
     assert stop_manager.add_stop_button_kwargs == [
         {
-            "config": runner.deps.config,
             "notify_outbound_event": runner.deps.notify_outbound_event,
         },
     ]

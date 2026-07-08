@@ -8,14 +8,12 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot
-    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 
@@ -303,8 +301,6 @@ async def add_confirmation_reactions(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
-    *,
-    config: Config,
 ) -> None:
     """Add confirmation reaction buttons to a config change message.
 
@@ -312,16 +308,14 @@ async def add_confirmation_reactions(
         client: The Matrix client
         room_id: The room ID
         event_id: The event ID of the message to add reactions to
-        config: Active config for Matrix delivery policy
 
     """
-    ignore_unverified_devices = ignore_unverified_devices_for_config(config)
     for reaction_name, reaction_key in (("confirm", "✅"), ("cancel", "❌")):
         response = await client.room_send(
             room_id=room_id,
             message_type="m.reaction",
             content=build_reaction_content(event_id, reaction_key),
-            ignore_unverified_devices=ignore_unverified_devices,
+            ignore_unverified_devices=True,
         )
         if not isinstance(response, nio.RoomSendResponse):
             logger.warning("Failed to add %s reaction", reaction_name, error=str(response))

@@ -183,7 +183,6 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
         context.client,
         "!room:localhost",
         b"prepared-opus-bytes",
-        config=context.config,
         mimetype="audio/ogg",
         filename="voice-message.opus",
         caption="Voice reply",
@@ -280,11 +279,8 @@ async def test_matrix_voice_message_companion_message_sends_to_same_thread(tmp_p
         _client: object,
         _room_id: str,
         content: dict[str, object],
-        *,
-        config: Config,
     ) -> DeliveredMatrixEvent:
         nonlocal sent_text_content
-        assert isinstance(config, Config)
         sent_text_content = content
         return DeliveredMatrixEvent(event_id="$companion-event", content_sent=content)
 
@@ -339,10 +335,7 @@ async def test_matrix_voice_message_voice_failure_reports_sent_companion(tmp_pat
         _client: object,
         _room_id: str,
         content: dict[str, object],
-        *,
-        config: Config,
     ) -> DeliveredMatrixEvent:
-        assert isinstance(config, Config)
         return DeliveredMatrixEvent(event_id="$companion-event", content_sent=content)
 
     with (

@@ -15,7 +15,6 @@ from nio import crypto
 from nio.api import Api
 from nio.exceptions import OlmTrustError
 
-from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.logging_config import get_logger
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.media import upload_content_uri, upload_media_bytes
@@ -75,7 +74,6 @@ async def _send_prepared_room_message(
     message_type: str,
     cache_bypass: bool,
     operation: str,
-    ignore_unverified_devices: bool,
 ) -> object | None:
     """Send one prepared Matrix room message and normalize local delivery exceptions."""
     try:
@@ -103,11 +101,13 @@ async def _send_prepared_room_message(
                 data,
                 response_data=(room_id,),
             )
+        # Bots have no interactive device-verification flow, so encrypted sends
+        # always deliver to unverified devices.
         return await client.room_send(
             room_id=room_id,
             message_type=message_type,
             content=content_sent,
-            ignore_unverified_devices=ignore_unverified_devices,
+            ignore_unverified_devices=True,
         )
     except asyncio.CancelledError:
         raise
@@ -182,7 +182,6 @@ async def send_message_result(
     room_id: str,
     content: dict[str, Any],
     *,
-    config: Config,
     operation: str = "send_message",
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
@@ -241,7 +240,6 @@ async def send_message_result(
         message_type=message_type,
         cache_bypass=cache_bypass,
         operation=operation,
-        ignore_unverified_devices=ignore_unverified_devices_for_config(config),
     )
     if response is None:
         emit_timing_event(
@@ -426,7 +424,6 @@ async def send_file_message(
     room_id: str,
     file_path: str | Path,
     *,
-    config: Config,
     thread_id: str | None = None,
     caption: str | None = None,
     latest_thread_event_id: str | None = None,
@@ -467,7 +464,7 @@ async def send_file_message(
     if thread_relation is not None:
         content["m.relates_to"] = thread_relation
 
-    delivered = await send_message_result(client, room_id, content, config=config)
+    delivered = await send_message_result(client, room_id, content)
     if delivered is not None and conversation_cache is not None:
         conversation_cache.notify_outbound_message(
             room_id,
@@ -482,7 +479,6 @@ async def send_audio_message(
     room_id: str,
     audio_bytes: bytes,
     *,
-    config: Config,
     mimetype: str,
     filename: str = "voice-message.opus",
     caption: str | None = None,
@@ -533,7 +529,7 @@ async def send_audio_message(
     if thread_relation is not None:
         content["m.relates_to"] = thread_relation
 
-    delivered = await send_message_result(client, room_id, content, config=config)
+    delivered = await send_message_result(client, room_id, content)
     if delivered is not None and conversation_cache is not None:
         conversation_cache.notify_outbound_message(
             room_id,
@@ -602,7 +598,6 @@ async def edit_message_result(
     new_content: dict[str, Any],
     new_text: str,
     *,
-    config: Config,
     extra_content: dict[str, Any] | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Edit an existing Matrix message and return the exact delivered payload."""
@@ -613,7 +608,7 @@ async def edit_message_result(
         extra_content=extra_content,
     )
 
-    return await send_message_result(client, room_id, edit_content, config=config, operation="edit_message")
+    return await send_message_result(client, room_id, edit_content, operation="edit_message")
 
 
 __all__ = [

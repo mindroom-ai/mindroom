@@ -116,9 +116,6 @@ _PROVIDER_HELP = "Default model provider for the generated config."
 _PROVIDER_CHOICES_TEXT = (
     "anthropic, azure, bedrock_claude, codex, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
 )
-_MATRIX_DELIVERY_TEMPLATE_BLOCK = """\
-matrix_delivery:
-  ignore_unverified_devices: true"""
 
 
 def _config_init_storage_plan(
@@ -978,8 +975,6 @@ matrix_room_access:
 matrix_space:
   enabled: true
   name: MindRoom
-
-{_MATRIX_DELIVERY_TEMPLATE_BLOCK}
 
 # File-based memory requires no external LLM.
 memory:

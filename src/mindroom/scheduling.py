@@ -972,7 +972,6 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     workflow,
                     current_target,
                     error_message,
-                    config,
                     conversation_cache,
                 )
     finally:
@@ -1081,7 +1080,6 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     workflow,
                     current_target,
                     error_message,
-                    config,
                     conversation_cache,
                 )
             if latest_pending_task is not None:

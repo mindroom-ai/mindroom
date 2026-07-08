@@ -110,9 +110,7 @@ async def test_add_confirmation_reactions_sends_confirm_and_cancel_annotations()
     client = AsyncMock()
     response = MagicMock(spec=nio.RoomSendResponse)
     client.room_send.return_value = response
-    config = SimpleNamespace(matrix_delivery=SimpleNamespace(ignore_unverified_devices=False))
-
-    await add_confirmation_reactions(client, "!room:example.org", "$preview", config=config)
+    await add_confirmation_reactions(client, "!room:example.org", "$preview")
 
     assert [call.kwargs["content"] for call in client.room_send.await_args_list] == [
         {
@@ -710,7 +708,6 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         context.client,
         "!room:example.org",
         "$preview",
-        config=context.config,
     )
     context.record_handled_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(

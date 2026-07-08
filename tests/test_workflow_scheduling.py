@@ -595,7 +595,6 @@ class TestExecuteScheduledWorkflow:
 
     async def test_scheduled_failure_notice_labels_latest_thread_lookup(self) -> None:
         """Scheduled failure notices should attribute latest-thread lookups."""
-        config = _runtime_bound_config(Config())
         workflow = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC),
@@ -622,7 +621,6 @@ class TestExecuteScheduledWorkflow:
                 workflow,
                 target,
                 "Workflow failed",
-                config,
                 conversation_cache,
             )
 

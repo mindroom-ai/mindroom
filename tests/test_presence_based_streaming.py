@@ -307,8 +307,6 @@ class TestBotIntegration:
             _client: object,
             _room_id: str,
             content: dict,
-            *,
-            config: Config,
         ) -> object:
             assert config is expected_config
             return delivered_matrix_event("$stream", content)
@@ -319,8 +317,6 @@ class TestBotIntegration:
             _event_id: str,
             content: dict,
             _display_text: str,
-            *,
-            config: Config,
         ) -> object:
             assert config is expected_config
             return delivered_matrix_event("$edit", content)

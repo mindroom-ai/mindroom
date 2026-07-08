@@ -162,7 +162,6 @@ class ResponseAttemptRunner:
                     await self.deps.stop_manager.add_stop_button(
                         self.deps.client,
                         message_id,
-                        config=self.deps.config,
                         notify_outbound_event=self.deps.notify_outbound_event,
                     )
 
