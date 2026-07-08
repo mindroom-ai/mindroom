@@ -145,11 +145,16 @@ def _run_sandbox_dispatch_case(mode: str, iterations: int, warmup: int) -> dict[
     # runtime import that this case exists to measure.
     from mindroom.api import sandbox_runner  # noqa: PLC0415
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
+    from mindroom.model_defaults import CONFIG_INIT_MODEL_PRESETS  # noqa: PLC0415
 
+    default_model = CONFIG_INIT_MODEL_PRESETS["openai"]
     with tempfile.TemporaryDirectory(prefix="mindroom-dispatch-benchmark-") as tmp:
         config_path = Path(tmp) / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.5\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n"
+            f"    provider: {default_model.provider}\n"
+            f"    id: {default_model.id}\n"
+            "agents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         runtime_paths = resolve_primary_runtime_paths(
