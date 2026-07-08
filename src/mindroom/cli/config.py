@@ -217,11 +217,15 @@ def _append_missing_env_defaults(
     return True
 
 
-def _should_replace_env_file(env_path: Path, *, force: bool) -> bool:
+def _should_replace_env_file(env_path: Path, *, force: bool, no_input: bool) -> bool:
     """Return whether config init should create or overwrite the full env template."""
     if not env_path.exists():
         return True
-    return force or typer.confirm(f"Overwrite existing .env file ({env_path})?", default=False)
+    if force:
+        return True
+    if no_input:
+        return False
+    return typer.confirm(f"Overwrite existing .env file ({env_path})?", default=False)
 
 
 def _config_init_env_hint(matrix_server: _MatrixServerPreset, selected_preset: _ProviderPreset) -> str:
@@ -407,6 +411,11 @@ def config_init(
         "--print",
         help="Print generated config YAML with syntax highlighting instead of writing files.",
     ),
+    no_input: bool = typer.Option(
+        False,
+        "--no-input",
+        help="Never prompt: keep an existing config.yaml unchanged, create anything missing, and use the default provider preset.",
+    ),
 ) -> None:
     """Create a starter config.yaml with example agents and models.
 
@@ -415,47 +424,54 @@ def config_init(
     target = _resolve_config_path(path)
     env_path = target.parent / ".env"
 
+    # With --no-input an existing config.yaml is kept, but .env handling still
+    # runs so a missing .env is recreated and hosted defaults are appended.
+    keep_existing_config = False
     if target.exists() and not force and not print_config:
         console.print(f"[yellow]Config file already exists:[/yellow] {target}")
-        if not typer.confirm("Overwrite existing config file?"):
+        if no_input:
+            console.print("Keeping existing config.yaml. Use --force to overwrite.")
+            keep_existing_config = True
+        elif not typer.confirm("Overwrite existing config file?"):
             console.print("[dim]Aborted.[/dim]")
             raise typer.Exit(0)
 
     selected_matrix_server, selected_preset = _resolve_config_init_selection(
         matrix_server,
         provider=provider,
-        interactive=not print_config,
+        interactive=not print_config and not no_input,
     )
 
-    replace_env_file = False if print_config else _should_replace_env_file(env_path, force=force)
+    replace_env_file = False if print_config else _should_replace_env_file(env_path, force=force, no_input=no_input)
     storage_root, use_storage_env_placeholder = _config_init_storage_plan(
         target.parent,
         env_path,
         replace_env_file=replace_env_file,
     )
 
-    content = _full_template(
-        selected_preset,
-        target.parent,
-        storage_root=storage_root,
-        use_storage_env_placeholder=use_storage_env_placeholder,
-        matrix_server=selected_matrix_server,
-    )
+    if not keep_existing_config:
+        content = _full_template(
+            selected_preset,
+            target.parent,
+            storage_root=storage_root,
+            use_storage_env_placeholder=use_storage_env_placeholder,
+            matrix_server=selected_matrix_server,
+        )
 
-    # `connect` can run before `config init`, when no config exists to patch.
-    # In that order, connect persists the owner MXID in .env so init can render
-    # authorization defaults without leaving pairing placeholders behind.
-    if owner_user_id := _config_init_owner_user_id(target):
-        from mindroom.cli.owner import replace_owner_placeholders_in_text  # noqa: PLC0415
+        # `connect` can run before `config init`, when no config exists to patch.
+        # In that order, connect persists the owner MXID in .env so init can render
+        # authorization defaults without leaving pairing placeholders behind.
+        if owner_user_id := _config_init_owner_user_id(target):
+            from mindroom.cli.owner import replace_owner_placeholders_in_text  # noqa: PLC0415
 
-        content = replace_owner_placeholders_in_text(content, owner_user_id)
+            content = replace_owner_placeholders_in_text(content, owner_user_id)
 
-    if print_config:
-        console.print(_yaml_syntax(content, line_numbers=False, word_wrap=False), soft_wrap=True)
-        return
+        if print_config:
+            console.print(_yaml_syntax(content, line_numbers=False, word_wrap=False), soft_wrap=True)
+            return
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
 
     _ensure_mind_workspace(_default_mind_workspace(storage_root), force=force)
 
@@ -467,7 +483,10 @@ def config_init(
         replace_existing=replace_env_file,
     )
 
-    console.print(f"[green]Config created:[/green] {target}")
+    if keep_existing_config:
+        console.print(f"[green]Config unchanged:[/green] {target}")
+    else:
+        console.print(f"[green]Config created:[/green] {target}")
     _print_config_init_next_steps(
         env_path,
         env_changed=env_changed,

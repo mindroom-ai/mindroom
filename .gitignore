@@ -254,3 +254,6 @@ mindroom-test-storage/
 .claude/reports/
 REVIEW-*.md
 .codex-worktrees/
+
+# Swift Package Manager build artifacts (macOS menubar app)
+macos/MindRoom/.build/

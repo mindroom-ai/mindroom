@@ -37,15 +37,11 @@ final class LoginItemController {
         }
     }
 
-    func toggle() {
-        do {
-            if isEnabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
-        } catch {
-            MindRoomCommandRunner.shared.lastOutputForDisplay = error.localizedDescription
+    func toggle() throws {
+        if isEnabled {
+            try SMAppService.mainApp.unregister()
+        } else {
+            try SMAppService.mainApp.register()
         }
     }
 }

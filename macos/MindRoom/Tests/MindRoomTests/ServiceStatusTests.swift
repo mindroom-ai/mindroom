@@ -61,4 +61,33 @@ final class MindRoomCommandTests: XCTestCase {
         XCTAssertEqual(MindRoomCommand.openConfigFolder.title, "Open Config Folder")
         XCTAssertEqual(MindRoomCommand.openLogsFolder.title, "Open Logs Folder")
     }
+
+    func testEveryUserRunCommandExposesASuccessMessage() {
+        let commands: [MindRoomCommand] = [
+            .installRuntime, .updateRuntime, .installService, .startService, .stopService,
+            .restartService, .initializeHostedConfig, .initializeSelfHostedConfig,
+            .localStackSetup, .pairHosted(pairCode: "ABCD-EFGH"),
+        ]
+        for command in commands {
+            XCTAssertNotNil(command.successMessage, "\(command.title) has no success message")
+        }
+        XCTAssertNil(MindRoomCommand.serviceStatus.successMessage)
+        XCTAssertNil(MindRoomCommand.openDashboard.successMessage)
+    }
+}
+
+final class CommandResultTests: XCTestCase {
+    func testCondensedOutputCollapsesBlankLinesAndWhitespace() {
+        let result = CommandResult(exitCode: 1, output: "  Error: bad config  \n\n\n  second line \n")
+
+        XCTAssertEqual(result.condensedOutput, "Error: bad config\nsecond line")
+    }
+
+    func testCondensedOutputKeepsTailOfLongOutput() {
+        let result = CommandResult(exitCode: 1, output: String(repeating: "x", count: 2000) + "\nError: the part that matters")
+
+        XCTAssertEqual(result.condensedOutput.count, 800)
+        XCTAssertTrue(result.condensedOutput.hasPrefix("..."))
+        XCTAssertTrue(result.condensedOutput.hasSuffix("Error: the part that matters"))
+    }
 }
