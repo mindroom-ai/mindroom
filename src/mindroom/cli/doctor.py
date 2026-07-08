@@ -48,7 +48,7 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config_path = runtime_paths.config_path
-    console.print(f"[dim]Config directory: {config_path.parent}[/dim]")
+    console.print(f"[dim]Config directory: {runtime_paths.config_dir}[/dim]")
 
     # 1. Config file exists
     p, f, w = _run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path))
@@ -57,7 +57,7 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
     warnings += w
 
     # 2+. Config validity + provider API key validation (skip if file missing)
-    if config_path.exists():
+    if config_path.is_file():
         config, p, f, w = _run_doctor_step(
             "Validating configuration...",
             lambda: _check_config_valid(runtime_paths),
@@ -113,9 +113,12 @@ def _run_doctor_step[T](message: str, check: Callable[[], T]) -> T:
 
 def _check_config_exists(config_path: Path) -> tuple[int, int, int]:
     """Check config file exists. Returns (passed, failed, warnings)."""
-    if config_path.exists():
+    if config_path.is_file():
         console.print(f"[green]✓[/green] Config file: {config_path}")
         return 1, 0, 0
+    if config_path.exists():
+        console.print(f"[red]✗[/red] Config path is not a file: {config_path}")
+        return 0, 1, 0
     console.print(f"[red]✗[/red] Config file not found: {config_path}")
     return 0, 1, 0
 
