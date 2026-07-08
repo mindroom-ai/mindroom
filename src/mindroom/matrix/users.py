@@ -20,6 +20,7 @@ from mindroom.matrix.client_session import (
     olm_store_exists,
     restore_login,
 )
+from mindroom.matrix.cross_signing import ensure_agent_cross_signing
 from mindroom.matrix.identity import MatrixID, managed_account_key, parse_current_matrix_user_id
 from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
@@ -1058,6 +1059,7 @@ async def login_agent_user(
                     runtime_paths,
                     matrix_id=matrix_id,
                 )
+                await ensure_agent_cross_signing(restored_client, agent_user)
                 return restored_client
 
     client = await login(
@@ -1082,4 +1084,5 @@ async def login_agent_user(
         runtime_paths,
         matrix_id=matrix_id,
     )
+    await ensure_agent_cross_signing(client, agent_user)
     return client

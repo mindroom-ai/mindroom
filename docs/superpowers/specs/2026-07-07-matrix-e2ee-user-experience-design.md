@@ -142,7 +142,7 @@ The fork already gives a quiet baseline (no per-message shields for other users'
 
 1. Phase 1 (shipped, PR #1423): unconditional encrypted delivery, decrypt-failure logging and key requests.
 2. Phase 2 (implemented on the `e2ee-phase2-ux` branch, live-verified 2026-07-07): D3 room enablement (config + `!encrypt`; dashboard toggle deferred), D4 notices and `!e2ee`, D5 doctor checks and fresh-device fallback without cross-signing.
-3. Phase 3 (mindroom-nio fork): D2 cross-signing bootstrap and re-signing; then wire the mindroom startup path to it and add the strict-client live test (Element lab flag) to smoke docs.
+3. Phase 3 (implemented; mindroom-nio fork PR #3 + mindroom wiring): D2 cross-signing bootstrap and re-signing, wired into agent login and live-verified (master + self-signing keys uploaded, live device signed) against local Synapse.
 4. Phase 4 (mindroom-cinny fork, after D2): D7 verified-agent affordance and key-backup onboarding; lift the js-sdk bump gate.
 5. Phase 5 (optional): D6 key backup; flip `encrypt_managed_rooms` default after D2 soak.
 

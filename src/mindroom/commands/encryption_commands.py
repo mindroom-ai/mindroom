@@ -9,6 +9,7 @@ from mindroom.matrix.client_room_admin import (
     room_admin_power_user,
     room_encryption_enabled,
 )
+from mindroom.matrix.cross_signing import cross_signing_status_line
 from mindroom.matrix.decrypt_failure import e2ee_stats
 
 if TYPE_CHECKING:
@@ -83,7 +84,7 @@ async def handle_e2ee_command(
         f"- Room: {room_state}",
         f"- Responding bot: `{client.user_id or 'unknown'}` (device `{client.device_id or 'unknown'}`)",
         f"- Encryption store: {store_state}",
-        "- Cross-signing: not yet supported (bot devices show as unverified)",
+        f"- Cross-signing: {cross_signing_status_line(client)}",
         f"- Undecryptable events in this room since startup: {room_failures}",
         (
             f"- Process totals since startup: {stats.decrypt_failures} undecryptable, "

@@ -225,13 +225,14 @@ class TestE2EECommand:
         client.user_id = "@mindroom_assistant:localhost"
         client.device_id = "DEVICEID"
         client.olm = MagicMock()
+        client.cross_signing_identity = None
 
         response = await handle_e2ee_command(client=client, room_id="!room:localhost")
 
         assert "Room: encrypted" in response
         assert "@mindroom_assistant:localhost" in response
         assert "DEVICEID" in response
-        assert "Cross-signing: not yet supported" in response
+        assert "Cross-signing: not bootstrapped" in response
 
 
 class TestCommandParsing:
@@ -277,6 +278,7 @@ class TestStoreLossFallback:
         fresh_client.user_id = "@mindroom_assistant:localhost"
         fresh_client.device_id = "NEWDEVICE"
         fresh_client.access_token = "new-token"  # noqa: S105
+        fresh_client.olm = None
 
         with (
             patch("mindroom.matrix.users.restore_login", new=AsyncMock()) as mock_restore,
@@ -311,6 +313,7 @@ class TestStoreLossFallback:
         restored_client.user_id = user_id
         restored_client.device_id = "GOODDEVICE"
         restored_client.access_token = "token"  # noqa: S105
+        restored_client.olm = None
 
         with (
             patch("mindroom.matrix.users.restore_login", new=AsyncMock(return_value=restored_client)) as mock_restore,
