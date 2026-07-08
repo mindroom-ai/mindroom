@@ -7,10 +7,10 @@ MindRoom can be deployed in various ways depending on your needs.
 | Method | Best For |
 |--------|----------|
 | [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/) | Recommended and simplest: run only `uvx mindroom run` locally |
+| [NixOS LXC (Incus)](https://github.com/mindroom-ai/lxc-nixos) | Give a MindRoom agent full freedom over its own persistent NixOS virtual machine while the host controls what it sees |
 | [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) | Run MindRoom locally while execution tools run in isolated workers |
 | [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/) | Require static allowlists or human approval before Kubernetes workers reach external hostnames |
 | Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
-| [NixOS LXC (Incus)](https://github.com/mindroom-ai/lxc-nixos) | Give a MindRoom agent full control over its own NixOS machine |
 | [Docker (single container)](https://docs.mindroom.chat/deployment/docker/) | Single MindRoom runtime or when you already have Matrix |
 | [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/) | Multi-tenant SaaS, production |
 | [Trusted upstream browser auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) | Hosted private agents behind an authenticated access layer |
@@ -51,6 +51,20 @@ Generate the pair code in `https://chat.mindroom.chat` under:
 See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for the full walkthrough.
 If you want worker-routed execution tools like `coding`, `docker`, `file`, `python`, and `shell` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
+### NixOS LXC container (preferred alternative, agent-controlled machine)
+
+Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
+The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, Cinny, Element, Caddy) plus Docker and `ragenix`-based secrets wiring, so the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
+It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
+It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/); see the repo README for the full setup.
+
+```bash
+git clone https://github.com/mindroom-ai/lxc-nixos.git
+cd lxc-nixos
+incus launch images:nixos/unstable mindroom -c security.nesting=true
+incus config device add mindroom repo disk source="$PWD" path=/mnt/repo shift=true
+```
+
 ### Full Stack Docker Compose (all-local alternative)
 
 ```bash
@@ -65,19 +79,6 @@ docker compose up -d
 The stack exposes MindRoom at `http://localhost:8765`, the MindRoom client at `http://localhost:8080`, and Matrix at `http://localhost:8008`.
 The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
 If you access it from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
-
-### NixOS LXC container (agent-controlled machine)
-
-Use this when you want to give a MindRoom agent full control over its own machine.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions an Incus LXC container running NixOS with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, Cinny, Element, Caddy) plus Docker and `ragenix`-based secrets wiring, so the agent can rebuild and manage the system it runs on.
-It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/); see the repo README for the full setup.
-
-```bash
-git clone https://github.com/mindroom-ai/lxc-nixos.git
-cd lxc-nixos
-incus launch images:nixos/unstable mindroom -c security.nesting=true
-incus config device add mindroom repo disk source="$PWD" path=/mnt/repo shift=true
-```
 
 ### Direct (Development)
 

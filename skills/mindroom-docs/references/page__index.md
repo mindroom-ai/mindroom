@@ -44,6 +44,13 @@ uvx mindroom run
 
 See [Getting Started](https://docs.mindroom.chat/getting-started/) for the full walkthrough and [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for architecture details.
 
+### Preferred alternative: NixOS LXC container (agent-controlled machine)
+
+Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
+A standalone NixOS flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, Cinny, Element, Caddy) plus Docker and secrets wiring, so the agent can rebuild and manage the persistent virtual machine it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
+It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
+See [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) for the full setup.
+
 ### Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
 
 Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
@@ -68,12 +75,6 @@ Open:
 The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
 
 If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
-
-### Alternative: NixOS LXC container (agent-controlled machine)
-
-Use this when you want to give a MindRoom agent full control over its own machine.
-A standalone NixOS flake provisions an Incus LXC container with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, Cinny, Element, Caddy) plus Docker and secrets wiring, so the agent can rebuild and manage the system it runs on.
-This path is more involved than the others; see [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) for the full setup.
 
 ### Manual Install (advanced)
 

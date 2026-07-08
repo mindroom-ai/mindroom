@@ -110,6 +110,23 @@ Protect the dashboard API in non-localhost environments by setting `MINDROOM_API
 For a detailed architecture and credential model, see:
 [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/).
 
+## Preferred alternative: NixOS LXC container (agent-controlled machine)
+
+Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
+The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, Cinny, Element, Caddy) plus Docker and `ragenix`-based secrets wiring.
+Because the whole virtual machine is declared in the flake, the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
+It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
+It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/).
+
+```bash
+git clone https://github.com/mindroom-ai/lxc-nixos.git
+cd lxc-nixos
+incus launch images:nixos/unstable mindroom -c security.nesting=true
+incus config device add mindroom repo disk source="$PWD" path=/mnt/repo shift=true
+```
+
+Then follow the repo README for operator SSH keys, secrets bootstrap, and the `nixos-rebuild switch` deployment flow.
+
 ## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
 
 Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
@@ -145,22 +162,6 @@ Open:
 The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
 
 If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
-
-## Alternative: NixOS LXC container (agent-controlled machine)
-
-Use this when you want to give a MindRoom agent full control over its own machine.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions an Incus LXC container running NixOS with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, Cinny, Element, Caddy) plus Docker and `ragenix`-based secrets wiring.
-Because the whole machine is declared in the flake, the agent can rebuild and manage the system it runs on.
-This path is more involved than the others and requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/).
-
-```bash
-git clone https://github.com/mindroom-ai/lxc-nixos.git
-cd lxc-nixos
-incus launch images:nixos/unstable mindroom -c security.nesting=true
-incus config device add mindroom repo disk source="$PWD" path=/mnt/repo shift=true
-```
-
-Then follow the repo README for operator SSH keys, secrets bootstrap, and the `nixos-rebuild switch` deployment flow.
 
 ## Manual Install (advanced)
 
