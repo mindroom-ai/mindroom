@@ -574,6 +574,30 @@ async def test_matrix_voice_message_openrouter_base_url_uses_openrouter_key(tmp_
 
 
 @pytest.mark.asyncio
+async def test_matrix_voice_message_rejects_invalid_response_format_even_for_openrouter(tmp_path: Path) -> None:
+    """Misconfigured response formats should fail preflight before OpenRouter mp3 coercion hides them."""
+    context = _context(tmp_path, thread_id=None)
+
+    def fake_secret(name: str, _runtime_paths: object) -> str | None:
+        return "sk-or-test" if name == "OPENROUTER_API_KEY" else None
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.get_secret_from_env", side_effect=fake_secret),
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+    ):
+        result = await MatrixVoiceMessageTools(
+            model="hexgrad/kokoro-82m",
+            response_format="ogg",
+        ).matrix_voice_message("hello")
+
+    mock_openai.assert_not_called()
+    payload = _payload(result)
+    assert payload["status"] == "error"
+    assert payload["message"] == "response_format must be one of: aac, flac, mp3, opus, wav."
+
+
+@pytest.mark.asyncio
 async def test_matrix_voice_message_rejects_unknown_response_format(tmp_path: Path) -> None:
     """Unsupported response formats should fail preflight before any TTS call."""
     context = _context(tmp_path, thread_id=None)

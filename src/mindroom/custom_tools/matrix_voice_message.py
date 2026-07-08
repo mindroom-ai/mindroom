@@ -147,6 +147,11 @@ class MatrixVoiceMessageTools(Toolkit):
         if explicit is not None:
             return explicit
         if _is_openrouter_model(self._model):
+            logger.info(
+                "matrix_voice_tts_routed_to_openrouter",
+                model=self._model,
+                reason="provider_prefixed_model_without_explicit_base_url",
+            )
             return _OPENROUTER_TTS_BASE_URL
         return None
 
@@ -245,13 +250,14 @@ class MatrixVoiceMessageTools(Toolkit):
         if not normalized_text:
             return None, self._payload("error", message="text is required and must be non-empty.")
 
-        base_url = self._base_url_for_context(context)
-        response_format = self._response_format_for_target(base_url)
-        if response_format not in _ALLOWED_RESPONSE_FORMATS:
+        if self._response_format not in _ALLOWED_RESPONSE_FORMATS:
             return None, self._payload(
                 "error",
                 message=f"response_format must be one of: {', '.join(sorted(_ALLOWED_RESPONSE_FORMATS))}.",
             )
+
+        base_url = self._base_url_for_context(context)
+        response_format = self._response_format_for_target(base_url)
 
         resolved_room_id = resolve_optional_room_id(context, room_id)
         if not room_access_allowed(context, resolved_room_id):
