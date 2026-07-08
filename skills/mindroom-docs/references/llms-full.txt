@@ -127,7 +127,7 @@ mindroom run
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
 | **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
-| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!model [name\|list\|reset]`, `!thread_mode [room\|thread\|reset\|show]`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands handled by the router |
+| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!model [name\|list\|reset]`, `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands handled by the router |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
@@ -167,7 +167,7 @@ mindroom run
 - [Image Messages](https://docs.mindroom.chat/images/) - Image analysis with vision models
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Context-scoped file and video handling
 - [Streaming Responses](https://docs.mindroom.chat/streaming/) - Progressive message edits with presence-based gating
-- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!model [name|list|reset]`, `!thread_mode [room|thread|reset|show]`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
+- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!model [name|list|reset]`, `!thread_mode [room|thread|reset|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
 - [Interactive Q&A](https://docs.mindroom.chat/interactive/) - Clickable multiple-choice questions via Matrix reactions
 - [Authorization](https://docs.mindroom.chat/authorization/) - User and room access control
 - [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Optional root Matrix Space for grouping managed rooms
@@ -1317,6 +1317,7 @@ matrix_room_access:
   publish_to_room_directory: false # Publish managed rooms in server room directory
   invite_only_rooms: []            # Room keys/aliases/IDs that stay invite-only/private
   reconcile_existing_rooms: false  # Explicit migration of existing managed rooms
+  encrypt_managed_rooms: false     # Enable Matrix E2EE on managed rooms (irreversible per room)
 
 # Authorization (optional)
 authorization:
@@ -1522,6 +1523,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
 - `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
+- `matrix_room_access.encrypt_managed_rooms` enables Matrix end-to-end encryption on managed rooms; per-room `rooms.<key>.encrypted` overrides it, enabling is irreversible, and MindRoom never disables encryption on a room
 - In `multi_user` mode, MindRoom sets managed room join rules and directory visibility from config
 - In `multi_user` mode, MindRoom also reconciles managed room power levels so `com.mindroom.thread.tags` can be written at PL0
 - Publishing to the room directory requires the managing service account (typically router) to have moderator/admin power in each room
@@ -13025,6 +13027,8 @@ Commands start with `!` and are handled by the router agent.
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room |
+| `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) |
+| `!e2ee` | Show encryption diagnostics for this room |
 | `!config <operation>` | View and modify configuration (disabled by default, admin only when enabled) |
 | `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
@@ -13188,6 +13192,31 @@ Show or switch how future agent replies are grouped in the current Matrix room.
 `!thread_mode reset` removes the room override so agents use configured `thread_mode` and `room_thread_modes` values again.
 Set and reset are Matrix room-admin-only actions.
 The override is stored in MindRoom runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
+
+### `!encrypt`
+
+Enable Matrix end-to-end encryption for the current room.
+
+```
+!encrypt
+!encrypt confirm
+```
+
+`!encrypt` reviews what enabling encryption means for the room without changing anything.
+`!encrypt confirm` enables encryption and is a Matrix room-admin-only action.
+Enabling encryption is irreversible: a room can never go back to unencrypted, and people joining later cannot read messages sent before they joined.
+Managed rooms can also be encrypted from config via `rooms.<key>.encrypted: true` or `matrix_room_access.encrypt_managed_rooms: true`.
+
+### `!e2ee`
+
+Show encryption diagnostics for the current room.
+
+```
+!e2ee
+```
+
+The report includes the room's encryption state, the responding bot account and device, the encryption store status, and decryption-failure counters since startup.
+Use it when an agent seems to ignore messages in an encrypted room.
 
 ### `!config`
 
@@ -14630,6 +14659,20 @@ Room-scoped authorization entries are intentionally not used for root Space admi
 Outgoing encrypted Matrix sends always deliver to unverified devices.
 MindRoom bots have no interactive device-verification flow, so enforcing nio's device-trust checks would fail every send to an encrypted room with an `OlmUnverifiedDeviceError` and the agent would appear to silently ignore messages.
 A configurable trust policy only becomes meaningful once a device-verification mechanism exists (for example trust-on-first-use, a verification command, or cross-signing support).
+
+## End-to-End Encryption
+
+Agents fully participate in encrypted rooms: they decrypt inbound text and media, reply encrypted, and re-fetch and decrypt thread history from the homeserver.
+Managed rooms can be created encrypted via `rooms.<key>.encrypted: true` or `matrix_room_access.encrypt_managed_rooms: true`, and existing managed rooms are reconciled to encrypted on startup and config reload when so configured.
+Users can also enable encryption in any room with `!encrypt confirm` (room admin only), and `!e2ee` reports encryption diagnostics.
+Enabling encryption on a Matrix room is irreversible; MindRoom never disables it.
+
+When an agent receives an event it cannot decrypt, it logs a `matrix_event_decryption_failed` warning, sends a Matrix room-key request once per session, and posts one rate-limited notice per (room, session) so the user knows to resend.
+The router posts the notice in rooms it occupies; otherwise a bot only posts when it is the sole managed bot in the room.
+Decryption-failure counters are exposed on `/api/health` under `e2ee`.
+
+If a bot's encryption store under `mindroom_data/encryption_keys/` is lost while its device identity persists, startup logs in as a fresh device instead of restoring a wedged crypto identity; `mindroom doctor` reports missing stores.
+Messages encrypted only to the lost device stay undecryptable, but the durable event cache preserves the agent's conversational context.
 
 ## Configuration
 

@@ -18,6 +18,7 @@ from mindroom.matrix.client_room_admin import (
     create_space,
     ensure_room_admin_power_levels,
     ensure_room_directory_visibility,
+    ensure_room_encryption_enabled,
     ensure_room_join_rule,
     ensure_room_name,
     ensure_thread_tags_power_level,
@@ -152,6 +153,14 @@ async def _configure_managed_room_access(
     return False
 
 
+def _managed_room_should_be_encrypted(room_key: str, config: Config) -> bool:
+    """Return whether one managed room is configured for Matrix encryption."""
+    room_config = config.rooms.get(room_key)
+    if room_config is not None and room_config.encrypted is not None:
+        return room_config.encrypted
+    return config.matrix_room_access.encrypt_managed_rooms
+
+
 def _room_key_to_name(room_key: str) -> str:
     """Convert a room key to a human-readable room name.
 
@@ -246,6 +255,8 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
                 await ensure_room_name(client, room_id, explicit_room_name)
             await ensure_room_has_topic(client, room_id, room_key, topic_room_name, config, runtime_paths)
             await ensure_thread_tags_power_level(client, room_id)
+            if _managed_room_should_be_encrypted(room_key, config):
+                await ensure_room_encryption_enabled(client, room_id)
 
             if config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.reconcile_existing_rooms:
                 await _configure_managed_room_access(
@@ -297,6 +308,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
         alias=alias_localpart,
         topic=topic,
         power_users=power_users or [],
+        encrypted=_managed_room_should_be_encrypted(room_key, config),
     )
 
     if created_room_id:

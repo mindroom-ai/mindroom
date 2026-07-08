@@ -1751,7 +1751,13 @@ class AgentBot:
     async def _on_decryption_failure(self, room: nio.MatrixRoom, event: nio.MegolmEvent) -> None:
         client = self.client
         assert client is not None
-        await handle_decrypt_failure(client, room, event)
+        await handle_decrypt_failure(
+            client,
+            room,
+            event,
+            agent_name=self.agent_name,
+            runtime_paths=self.runtime_paths,
+        )
 
     async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""

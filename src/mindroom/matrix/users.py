@@ -8,11 +8,18 @@ from functools import cached_property
 
 import httpx
 import nio
+from nio import crypto
 
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix import provisioning
-from mindroom.matrix.client_session import login, matrix_client, matrix_startup_error, restore_login
+from mindroom.matrix.client_session import (
+    login,
+    matrix_client,
+    matrix_startup_error,
+    olm_store_exists,
+    restore_login,
+)
 from mindroom.matrix.identity import MatrixID, managed_account_key, parse_current_matrix_user_id
 from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
@@ -995,7 +1002,23 @@ async def login_agent_user(
     """
     expected_user_id = _validated_expected_agent_user_id(agent_user)
 
-    if agent_user.access_token and agent_user.device_id:
+    store_intact = not crypto.ENCRYPTION_ENABLED or (
+        agent_user.device_id is None or olm_store_exists(expected_user_id, agent_user.device_id, runtime_paths)
+    )
+    if not store_intact:
+        logger.warning(
+            "matrix_olm_store_missing_fresh_device_login",
+            agent=agent_user.agent_name,
+            user_id=expected_user_id,
+            device_id=agent_user.device_id,
+            hint=(
+                "The encryption store for this device is gone; restoring the session would wedge "
+                "its crypto identity. Logging in as a fresh device instead. Messages encrypted "
+                "only to the lost device stay undecryptable."
+            ),
+        )
+
+    if store_intact and agent_user.access_token and agent_user.device_id:
         try:
             restored_client = await restore_login(
                 homeserver,
