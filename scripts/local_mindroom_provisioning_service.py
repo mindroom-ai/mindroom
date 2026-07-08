@@ -16,12 +16,16 @@ registration tokens for agent account creation.
 
 Namespace exemption: pairing always assigns each new connection a random
 namespace, and register-agent only accepts usernames shaped like
-``mindroom_<entity>_<namespace>``. Legacy/operator installs that predate
-namespaces use plain ``mindroom_<entity>`` usernames. To exempt such a trusted
-connection, an operator stops the service, sets ``"namespace": ""`` on that
-connection in the persisted state file (``MINDROOM_PROVISIONING_STATE_PATH``,
-default ``/var/lib/mindroom-local-provisioning/state.json``), and starts the
-service again. The value must be exactly ``""``: ``null``, a removed key, or a
+``mindroom_<entity>_<namespace>``. The operator's own installs are the
+deliberate exception: they keep the plain ``mindroom_<entity>`` names. To mark
+such a trusted connection namespace-exempt, the operator stops the service,
+sets ``"namespace": ""`` on that connection in the persisted state file
+(``MINDROOM_PROVISIONING_STATE_PATH``, default
+``/var/lib/mindroom-local-provisioning/state.json``), and starts the service
+again. The paired install must also unset ``MINDROOM_NAMESPACE`` in its local
+``.env`` (``mindroom connect`` writes one during pairing) so the client builds
+plain usernames, and the exemption is per-connection, so re-pairing requires
+editing the state file again. The value must be exactly ``""``: ``null``, a removed key, or a
 whitespace-only string fails closed to a derived namespace that will not match
 the connection's original pairing namespace. An exempt connection skips only
 the namespace suffix check — usernames must still be valid Matrix localparts
