@@ -109,8 +109,20 @@ def test_router_dispatch_raises_a_purposeful_error(tmp_path: Path) -> None:
 def test_descriptive_worker_id_keeps_scope_readable() -> None:
     """Descriptive worker ids embed scope, requester localpart, and agent, dropping v1 and the default tenant."""
     name = descriptive_worker_id_for_key("v1:default:user_agent:@alice.doe:example.test:code", prefix="agent-vault")
-    assert name.startswith("agent-vault-user-agent-alice-doe-code-")
+    assert re.fullmatch(r"agent-vault-user-agent-alice-doe-code-[0-9a-f]{10}", name)
     assert len(name) <= 63
+
+
+def test_descriptive_worker_id_shared_scope_with_default_tenant() -> None:
+    """The most common shape, a default-tenant shared agent, reads as shared-<agent>."""
+    name = descriptive_worker_id_for_key("v1:default:shared:research", prefix="agent-vault")
+    assert name.startswith("agent-vault-shared-research-")
+
+
+def test_descriptive_worker_id_slugifies_non_dns_prefix_characters() -> None:
+    """Underscores or dots in a configured prefix are normalized to a DNS-safe slug."""
+    name = descriptive_worker_id_for_key("v1:default:shared:research", prefix="agent_vault.v2")
+    assert name.startswith("agent-vault-v2-shared-research-")
     assert re.fullmatch(r"[a-z0-9-]+", name)
 
 

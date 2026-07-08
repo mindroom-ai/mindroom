@@ -232,9 +232,9 @@ def normalize_worker_key_part(value: str) -> str:
 
 
 def _digest_and_safe_prefix(worker_key: str, prefix: str, *, digest_length: int) -> tuple[str, str]:
-    """Return the worker-key digest and a prefix normalized to fit a DNS label beside it."""
+    """Return the worker-key digest and a prefix normalized to a DNS-label-safe slug beside it."""
     digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:digest_length]
-    normalized_prefix = prefix.strip().lower().strip("-") or _DEFAULT_WORKER_NAME_PREFIX
+    normalized_prefix = re.sub(r"[^a-z0-9-]+", "-", prefix.lower()).strip("-") or _DEFAULT_WORKER_NAME_PREFIX
     max_prefix_length = _DNS_LABEL_MAX_LENGTH - len(digest) - 1
     safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
     if not safe_prefix:
