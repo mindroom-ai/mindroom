@@ -812,7 +812,7 @@ class DockerWorkerBackend:
         shared_storage_root = self.config.storage_mount_path
         env = {
             SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
-            SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "subprocess",
+            SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "forkserver",
             _RUNNER_PORT_ENV_NAME: str(self.config.worker_port),
             _STARTUP_RUNTIME_PATHS_ENV: json.dumps(
                 serialize_runtime_paths(startup_runtime_paths),

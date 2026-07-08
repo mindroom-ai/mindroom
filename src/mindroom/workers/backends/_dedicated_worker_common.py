@@ -193,7 +193,7 @@ def build_dedicated_worker_runtime_paths(
     process_env.update(
         {
             SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
-            SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "subprocess",
+            SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "forkserver",
             SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"]: str(worker_port),
             "MINDROOM_CONFIG_PATH": str(config_path),
             "MINDROOM_STORAGE_PATH": str(dedicated_root),
