@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from threading import Lock
 from typing import ClassVar, Literal, cast, get_args
+from urllib.parse import urlparse
 
 from agno.tools import Toolkit
 from openai import APIStatusError, OpenAI
@@ -30,6 +31,9 @@ _OPUS_FILENAME = "voice-message.opus"
 _DEFAULT_RESPONSE_FORMAT = "opus"
 _SpeechResponseFormat = Literal["aac", "flac", "mp3", "opus", "wav"]
 _ALLOWED_RESPONSE_FORMATS = frozenset(get_args(_SpeechResponseFormat))
+_OPENROUTER_TTS_BASE_URL = "https://openrouter.ai/api/v1"
+# OpenRouter's /audio/speech endpoint only returns mp3 or pcm; mp3 is the one we can turn into a Matrix voice message.
+_OPENROUTER_RESPONSE_FORMAT = "mp3"
 logger = get_logger(__name__)
 
 
@@ -41,6 +45,7 @@ class _VoiceMessagePreflight:
     room_id: str
     api_key: str
     base_url: str | None
+    response_format: str
 
 
 def _normalize_openai_base_url(base_url: str | None) -> str | None:
@@ -52,6 +57,17 @@ def _normalize_openai_base_url(base_url: str | None) -> str | None:
     if normalized.endswith("/v1"):
         return normalized
     return f"{normalized}/v1"
+
+
+def _is_openrouter_base_url(base_url: str | None) -> bool:
+    if base_url is None:
+        return False
+    return urlparse(base_url).hostname == "openrouter.ai"
+
+
+def _is_openrouter_model(model: str) -> bool:
+    """OpenRouter voice models are provider-prefixed, e.g. ``openai/gpt-4o-mini-tts``."""
+    return "/" in model
 
 
 def _input_validation_error(
@@ -127,18 +143,36 @@ class MatrixVoiceMessageTools(Toolkit):
         )
 
     def _base_url_for_context(self, context: ToolRuntimeContext) -> str | None:
-        return self._base_url or _normalize_openai_base_url(get_secret_from_env("TTS_URL", context.runtime_paths))
+        explicit = self._base_url or _normalize_openai_base_url(get_secret_from_env("TTS_URL", context.runtime_paths))
+        if explicit is not None:
+            return explicit
+        if _is_openrouter_model(self._model):
+            return _OPENROUTER_TTS_BASE_URL
+        return None
 
     def _api_key_for_context(self, context: ToolRuntimeContext, *, base_url: str | None) -> str | None:
         if self._api_key:
             return self._api_key
+        if _is_openrouter_base_url(base_url):
+            return get_secret_from_env("OPENROUTER_API_KEY", context.runtime_paths)
         if base_url is not None:
             return LOCAL_OPENAI_API_KEY_DEFAULT
         return get_secret_from_env("OPENAI_API_KEY", context.runtime_paths)
 
-    def _generate_speech_bytes(self, *, api_key: str, base_url: str | None, text: str) -> bytes:
+    def _response_format_for_target(self, base_url: str | None) -> str:
+        if _is_openrouter_base_url(base_url) and self._response_format != _OPENROUTER_RESPONSE_FORMAT:
+            logger.info(
+                "matrix_voice_response_format_coerced",
+                configured_format=self._response_format,
+                effective_format=_OPENROUTER_RESPONSE_FORMAT,
+                reason="openrouter_speech_supports_mp3_only",
+            )
+            return _OPENROUTER_RESPONSE_FORMAT
+        return self._response_format
+
+    def _generate_speech_bytes(self, *, api_key: str, base_url: str | None, text: str, response_format: str) -> bytes:
         client = OpenAI(api_key=api_key) if base_url is None else OpenAI(api_key=api_key, base_url=base_url)
-        response_format = cast("_SpeechResponseFormat", self._response_format)
+        response_format = cast("_SpeechResponseFormat", response_format)
         response = client.audio.speech.create(
             model=self._model,
             voice=self._voice,
@@ -211,7 +245,9 @@ class MatrixVoiceMessageTools(Toolkit):
         if not normalized_text:
             return None, self._payload("error", message="text is required and must be non-empty.")
 
-        if self._response_format not in _ALLOWED_RESPONSE_FORMATS:
+        base_url = self._base_url_for_context(context)
+        response_format = self._response_format_for_target(base_url)
+        if response_format not in _ALLOWED_RESPONSE_FORMATS:
             return None, self._payload(
                 "error",
                 message=f"response_format must be one of: {', '.join(sorted(_ALLOWED_RESPONSE_FORMATS))}.",
@@ -232,13 +268,17 @@ class MatrixVoiceMessageTools(Toolkit):
                 message=limit_error,
             )
 
-        base_url = self._base_url_for_context(context)
         api_key = self._api_key_for_context(context, base_url=base_url)
         if not api_key:
+            missing_key_message = (
+                "OPENROUTER_API_KEY is required to use an OpenRouter voice model with matrix_voice_message."
+                if _is_openrouter_base_url(base_url)
+                else "OPENAI_API_KEY or a local TTS base_url/TTS_URL is required for matrix_voice_message."
+            )
             return None, self._payload(
                 "error",
                 room_id=resolved_room_id,
-                message="OPENAI_API_KEY or a local TTS base_url/TTS_URL is required for matrix_voice_message.",
+                message=missing_key_message,
             )
 
         return _VoiceMessagePreflight(
@@ -246,6 +286,7 @@ class MatrixVoiceMessageTools(Toolkit):
             room_id=resolved_room_id,
             api_key=api_key,
             base_url=base_url,
+            response_format=response_format,
         ), None
 
     async def _latest_thread_event_id_or_error(
@@ -349,6 +390,7 @@ class MatrixVoiceMessageTools(Toolkit):
                 api_key=preflight.api_key,
                 base_url=preflight.base_url,
                 text=preflight.text,
+                response_format=preflight.response_format,
             )
         except Exception as error:
             status_code = error.status_code if isinstance(error, APIStatusError) else None
@@ -367,13 +409,13 @@ class MatrixVoiceMessageTools(Toolkit):
                 message="Failed to generate speech.",
             )
 
-        prepared_audio = await prepare_voice_audio_bytes(audio_bytes, response_format=self._response_format)
+        prepared_audio = await prepare_voice_audio_bytes(audio_bytes, response_format=preflight.response_format)
         if prepared_audio is None:
             logger.error(
                 "matrix_voice_audio_preparation_failed",
                 room_id=preflight.room_id,
                 thread_id=effective_thread_id,
-                response_format=self._response_format,
+                response_format=preflight.response_format,
             )
             return self._payload(
                 "error",
