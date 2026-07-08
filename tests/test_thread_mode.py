@@ -31,8 +31,8 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.session_ids import create_session_id, parse_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
-from mindroom.thread_utils import create_session_id, parse_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 if TYPE_CHECKING:

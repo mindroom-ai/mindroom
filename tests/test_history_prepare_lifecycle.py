@@ -47,7 +47,7 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
 )
-from mindroom.thread_utils import create_session_id
+from mindroom.session_ids import create_session_id
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,

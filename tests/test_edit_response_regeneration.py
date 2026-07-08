@@ -44,7 +44,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
-from mindroom.thread_utils import create_session_id
+from mindroom.session_ids import create_session_id
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,

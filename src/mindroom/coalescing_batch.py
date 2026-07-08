@@ -7,7 +7,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
-from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
+from .attachment_ids import merge_attachment_ids
+from .attachments import parse_attachment_ids_from_event_source
 from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY, VOICE_TRANSCRIPT_KEY
 from .dispatch_handoff import (
     DispatchEvent,

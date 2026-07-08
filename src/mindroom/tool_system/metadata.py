@@ -15,14 +15,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import mindroom.tool_system.plugin_imports as plugin_module
+from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.dependencies import auto_install_optional_extra_for_import_retry, ensure_tool_deps
-from mindroom.tool_system.output_files import (
-    DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
-    ToolOutputFilePolicy,
-    wrap_toolkit_for_output_files,
-)
 from mindroom.tool_system.registry_state import (
     BUILTIN_TOOL_METADATA,
     BUILTIN_TOOL_REGISTRY,
@@ -531,6 +527,13 @@ def _build_tool_instance(
             subject="Tool",
         )
         raise ToolMetadataValidationError(msg)
+
+    # Imported on first tool construction so importing the registry stays free
+    # of the agno runtime import chain (#1436).
+    from mindroom.tool_system.output_files import (  # noqa: PLC0415
+        ToolOutputFilePolicy,
+        wrap_toolkit_for_output_files,
+    )
 
     metadata = TOOL_METADATA[tool_name]
     tool_class = TOOL_REGISTRY[tool_name]()

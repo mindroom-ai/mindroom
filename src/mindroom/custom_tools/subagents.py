@@ -24,6 +24,7 @@ from mindroom.responder_availability import (
     live_responder_entity_names,
     materializable_agent_names_for_orchestrator,
 )
+from mindroom.session_ids import create_session_id, parse_session_id
 from mindroom.thread_summary import (
     THREAD_SUMMARY_MAX_LENGTH,
     normalize_thread_summary_text,
@@ -31,7 +32,6 @@ from mindroom.thread_summary import (
     update_last_summary_count,
 )
 from mindroom.thread_tags import ThreadTagsError, normalize_tag_name, set_thread_tag
-from mindroom.thread_utils import create_session_id, parse_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:

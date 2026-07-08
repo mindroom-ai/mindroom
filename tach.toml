@@ -2322,6 +2322,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_system.metadata"
 depends_on = [
+    "mindroom.constants",
     "mindroom.mcp.registry",
     "mindroom.tool_system.dependencies",
     "mindroom.tool_system.output_files",
