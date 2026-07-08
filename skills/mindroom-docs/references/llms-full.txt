@@ -16131,10 +16131,15 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.m
 | `MINDROOM_SANDBOX_RUNNER_PORT` | Port the sandbox runner listens on | `8766` |
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to indicate runner mode | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Runner bearer token. Static runners use the shared primary token; Kubernetes dedicated workers receive a per-worker derived token. | _(required)_ |
-| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess` or `subprocess` | `inprocess` |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout | `120` |
+| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess`, `subprocess`, or `forkserver` | `inprocess` |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`) | `mindroom_data` next to config _(will fail if not writable)_ |
 | `MINDROOM_CONFIG_PATH` | Path to config.yaml (for plugin tool registration) | _(optional)_ |
+
+`subprocess` runs every non-shell tool call in a fresh `python -m mindroom.api.sandbox_runner` child that re-imports the runtime on each call.
+`forkserver` keeps one warm template process per interpreter that imports the runtime once and forks a fresh child per call, preserving per-call process isolation while removing the per-call import cost.
+Dedicated Docker and Kubernetes workers default to `forkserver`.
+If the warm template fails to start, dispatch falls back to spawn-per-call and retries the template after a cooldown.
 
 ## Execution modes
 
@@ -16241,7 +16246,7 @@ It also proves garbage and missing proxy session tokens are refused.
 Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process.
 These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts.
-To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE=subprocess`.
+To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` is `subprocess` or `forkserver`.
 
 ## Workspace home contract
 
