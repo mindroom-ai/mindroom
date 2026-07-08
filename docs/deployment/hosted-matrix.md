@@ -10,6 +10,10 @@ This guide covers the simplest production-like setup:
 - Web chat runs at `https://chat.mindroom.chat`
 - You run only `mindroom run` locally via `uvx`
 
+Watch the 2-minute setup video:
+
+[![MindRoom: installing and talking to my first AI agent in 2 minutes](https://img.youtube.com/vi/jR3xLUxyWhg/maxresdefault.jpg)](https://youtu.be/jR3xLUxyWhg)
+
 ## What Runs Where
 
 | Component | Runs on | Purpose |

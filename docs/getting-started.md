@@ -10,6 +10,9 @@ This guide will help you set up MindRoom and create your first AI agent.
 
 If you do not want to self-host Matrix yet, this is the simplest setup.
 You only run MindRoom locally.
+Watch the 2-minute setup video:
+
+[![MindRoom: installing and talking to my first AI agent in 2 minutes](https://img.youtube.com/vi/jR3xLUxyWhg/maxresdefault.jpg)](https://youtu.be/jR3xLUxyWhg)
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
