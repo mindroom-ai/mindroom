@@ -61,6 +61,8 @@ def _invalid_managed_agent_username(case: str, namespace: str) -> str:
         return f"other_code_{namespace}"
     if case == "plain_username_without_namespace":
         return f"{provisioning.MANAGED_AGENT_USERNAME_PREFIX}foo"
+    if case == "invalid_localpart_for_namespace":
+        return _managed_agent_username("Foo", namespace)
     msg = f"Unknown invalid username case: {case}"
     raise ValueError(msg)
 
@@ -305,6 +307,7 @@ def test_pair_status_rejects_missing_session_header(
         "wrong_namespace_suffix",
         "wrong_prefix_for_namespace",
         "plain_username_without_namespace",
+        "invalid_localpart_for_namespace",
     ],
 )
 def test_register_agent_rejects_username_outside_connection_namespace(

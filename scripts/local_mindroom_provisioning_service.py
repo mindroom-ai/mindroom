@@ -64,7 +64,7 @@ RATE_LIMIT_STALE_SECONDS = 3600
 NAMESPACE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 NAMESPACE_LENGTH = 8
 MANAGED_AGENT_USERNAME_PREFIX = "mindroom_"
-MATRIX_LOCALPART_RE = re.compile(r"\A[a-z0-9._=/+-]+\Z")
+MATRIX_LOCALPART_RE = re.compile(r"\A[-a-z0-9._=/+]+\Z")
 PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
 
 
@@ -475,15 +475,16 @@ def _is_managed_agent_username_for_namespace(username: str, namespace: str) -> b
 def _is_username_permitted_for_connection(username: str, namespace: str) -> bool:
     """Return whether a connection may register the requested agent username.
 
-    An empty namespace marks a namespace-exempt connection (operator-set, see
-    module docstring): the namespace suffix check is skipped, but the username
-    must still be a valid Matrix localpart with the managed agent prefix.
+    Every username must be a valid Matrix localpart. An empty namespace marks
+    a namespace-exempt connection (operator-set, see module docstring): the
+    namespace suffix check is skipped, but the managed agent prefix is still
+    required.
     """
+    if MATRIX_LOCALPART_RE.match(username) is None:
+        return False
     if not namespace:
-        return (
-            username.startswith(MANAGED_AGENT_USERNAME_PREFIX)
-            and len(username) > len(MANAGED_AGENT_USERNAME_PREFIX)
-            and MATRIX_LOCALPART_RE.match(username) is not None
+        return username.startswith(MANAGED_AGENT_USERNAME_PREFIX) and len(username) > len(
+            MANAGED_AGENT_USERNAME_PREFIX,
         )
     return _is_managed_agent_username_for_namespace(username, namespace)
 
