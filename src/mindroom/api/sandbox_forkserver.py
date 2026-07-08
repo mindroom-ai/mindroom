@@ -327,10 +327,9 @@ class _SandboxForkserver:
                 logger.warning("sandbox_forkserver_template_startup_failed", error=msg)
                 raise ForkserverStartupError(msg)
             try:
-                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                probe.settimeout(1.0)
-                probe.connect(template.socket_path)
-                probe.close()
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                    probe.settimeout(1.0)
+                    probe.connect(template.socket_path)
             except OSError:
                 time.sleep(_READY_PROBE_INTERVAL_SECONDS)
             else:
@@ -400,7 +399,9 @@ class _SandboxForkserver:
 
     @staticmethod
     def _kill_child(child_pid: int | None) -> None:
-        if child_pid is None:
+        # The pid is deserialized from the child's socket message; never let a
+        # degenerate value reach os.kill, where 0 targets the process group.
+        if child_pid is None or child_pid <= 0:
             return
         with suppress(OSError):
             os.kill(child_pid, signal.SIGKILL)
@@ -467,10 +468,12 @@ def _child_main(conn: socket.socket, run_payload: Callable[[str], tuple[int, str
     exit_code = 1
     try:
         _send_json(conn, {"pid": os.getpid()})
-        conn.settimeout(_CHILD_REQUEST_READ_TIMEOUT_SECONDS)
-        reader = conn.makefile("rb")
-        request_line = reader.readline()
-        # Ready-wait probe connections close without sending a request line.
+        reader = _SocketLineReader(conn, time.monotonic() + _CHILD_REQUEST_READ_TIMEOUT_SECONDS)
+        try:
+            request_line = reader.read_line()
+        except _ConnectionClosedError:
+            # Ready-wait probe connections close without sending a request line.
+            request_line = b""
         if request_line.strip():
             exit_code = _run_child_request(conn, _parse_child_request(request_line), run_payload)
     except Exception:
