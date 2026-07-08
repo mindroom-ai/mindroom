@@ -124,6 +124,22 @@ async def test_does_not_retry_after_meaningful_output() -> None:
 
 
 @pytest.mark.asyncio
+async def test_does_not_retry_after_provider_data_delta() -> None:
+    """Provider-data deltas (e.g. thinking signatures) count as meaningful output."""
+    model, calls = _hooked_model_with_async_attempts(
+        [
+            [ModelResponse(provider_data={"signature": "sig"}), _mid_stream_api_error()],
+            [ModelResponse(content="never reached")],
+        ],
+    )
+
+    with pytest.raises(ModelProviderError):
+        await _collect(model.ainvoke_stream([], object()))
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_does_not_retry_non_transient_error() -> None:
     """Client errors such as HTTP 400 are not retried."""
     model, calls = _hooked_model_with_async_attempts(
@@ -180,19 +196,68 @@ def test_sync_stream_retries_transient_error() -> None:
 
 
 def test_install_is_idempotent() -> None:
-    """Installing the hook twice wraps the stream only once."""
-    model, calls = _hooked_model_with_sync_attempts(
-        [
-            [_mid_stream_api_error()],
-            [ModelResponse(content="recovered")],
-        ],
-    )
+    """A second install must not stack another retry layer on top of the first.
+
+    The script exhausts the retry budget and only then offers a success: a
+    single hook raises after the final retry, while a stacked double hook
+    would keep going and reach the success attempt.
+    """
+    attempts: list[list[ModelResponse | Exception]] = [
+        [_mid_stream_api_error()] for _ in range(claude_stream_retry._MAX_TRANSIENT_RETRIES + 1)
+    ]
+    attempts.append([ModelResponse(content="only reachable when double-wrapped")])
+    model, calls = _hooked_model_with_sync_attempts(attempts)
     install_claude_stream_retry_hook(model)
 
-    responses = list(model.invoke_stream([], object()))
+    with pytest.raises(ModelProviderError):
+        list(model.invoke_stream([], object()))
 
-    assert [response.content for response in responses] == ["recovered"]
-    assert len(calls) == 2
+    assert len(calls) == claude_stream_retry._MAX_TRANSIENT_RETRIES + 1
+
+
+def test_early_close_closes_underlying_sync_stream() -> None:
+    """Closing the wrapper mid-stream closes the in-flight request too."""
+    model = Claude(id="claude-sonnet-5")
+    finalized: list[bool] = []
+
+    def fake_invoke_stream(*_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
+        try:
+            yield ModelResponse(content="first")
+            yield ModelResponse(content="second")
+        finally:
+            finalized.append(True)
+
+    vars(model)["invoke_stream"] = fake_invoke_stream
+    install_claude_stream_retry_hook(model)
+
+    stream = model.invoke_stream([], object())
+    assert next(stream).content == "first"
+    stream.close()
+
+    assert finalized == [True]
+
+
+@pytest.mark.asyncio
+async def test_early_aclose_closes_underlying_async_stream() -> None:
+    """Aclosing the wrapper mid-stream finalizes the in-flight request too."""
+    model = Claude(id="claude-sonnet-5")
+    finalized: list[bool] = []
+
+    async def fake_ainvoke_stream(*_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        try:
+            yield ModelResponse(content="first")
+            yield ModelResponse(content="second")
+        finally:
+            finalized.append(True)
+
+    vars(model)["ainvoke_stream"] = fake_ainvoke_stream
+    install_claude_stream_retry_hook(model)
+
+    stream = model.ainvoke_stream([], object())
+    assert (await anext(stream)).content == "first"
+    await stream.aclose()
+
+    assert finalized == [True]
 
 
 def test_install_skips_non_claude_models() -> None:

@@ -20,6 +20,7 @@ consumers streamed to the user, so those errors propagate unchanged.
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from functools import partial
 from typing import TYPE_CHECKING, cast
@@ -30,7 +31,7 @@ from agno.models.anthropic import Claude as AnthropicClaude
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator, Iterator
     from typing import Any
 
     from agno.models.response import ModelResponse
@@ -58,13 +59,30 @@ def _is_transient_model_error(error: BaseException) -> bool:
 
 
 def _has_meaningful_output(response: ModelResponse) -> bool:
-    """Return whether one streamed delta already reached downstream consumers."""
+    """Return whether one streamed delta already reached downstream consumers.
+
+    Anything beyond role/event bookkeeping counts: downstream consumers
+    accumulate these fields (Agno extends provider-data lists, MindRoom's
+    collector appends content), so replaying an attempt that set any of them
+    would duplicate state.
+    """
     return bool(
         response.content
+        or response.parsed
+        or response.audio
+        or response.images
+        or response.videos
+        or response.audios
+        or response.files
+        or response.tool_calls
+        or response.tool_executions
+        or response.provider_data
         or response.reasoning_content
         or response.redacted_reasoning_content
-        or response.tool_calls
-        or response.tool_executions,
+        or response.citations
+        or response.response_usage
+        or response.extra
+        or response.updated_session_state,
     )
 
 
@@ -74,7 +92,9 @@ def _should_reraise(error: ModelProviderError, *, yielded_meaningful_output: boo
 
 
 def _retry_delay_seconds(attempt: int) -> float:
-    return _RETRY_BASE_DELAY_SECONDS * (2**attempt)
+    # Jitter spreads retries from agents that failed on the same provider
+    # incident, instead of re-hitting it in synchronized pulses.
+    return _RETRY_BASE_DELAY_SECONDS * (2**attempt) * (1.0 + random.uniform(0.0, 0.25))  # noqa: S311
 
 
 def _log_retry(model: AnthropicClaude, error: ModelProviderError, *, attempt: int, delay: float) -> None:
@@ -91,15 +111,16 @@ def _log_retry(model: AnthropicClaude, error: ModelProviderError, *, attempt: in
 
 def _invoke_stream_with_retry(
     model: AnthropicClaude,
-    original_invoke_stream: Callable[..., Iterator[ModelResponse]],
+    original_invoke_stream: Callable[..., Generator[ModelResponse, None, None]],
     *args: object,
     **kwargs: object,
 ) -> Iterator[ModelResponse]:
     """Replay one synchronous stream request after transient pre-output errors."""
     for attempt in range(_MAX_TRANSIENT_RETRIES + 1):
         yielded_meaningful_output = False
+        stream = original_invoke_stream(*args, **kwargs)
         try:
-            for response in original_invoke_stream(*args, **kwargs):
+            for response in stream:
                 yielded_meaningful_output = yielded_meaningful_output or _has_meaningful_output(response)
                 yield response
         except ModelProviderError as error:
@@ -110,19 +131,24 @@ def _invoke_stream_with_retry(
             time.sleep(delay)
         else:
             return
+        finally:
+            # If the consumer closes us mid-stream (GeneratorExit at the yield
+            # above), close the underlying request instead of leaving it to GC.
+            stream.close()
 
 
 async def _ainvoke_stream_with_retry(
     model: AnthropicClaude,
-    original_ainvoke_stream: Callable[..., AsyncIterator[ModelResponse]],
+    original_ainvoke_stream: Callable[..., AsyncGenerator[ModelResponse, None]],
     *args: object,
     **kwargs: object,
 ) -> AsyncIterator[ModelResponse]:
     """Replay one asynchronous stream request after transient pre-output errors."""
     for attempt in range(_MAX_TRANSIENT_RETRIES + 1):
         yielded_meaningful_output = False
+        stream = original_ainvoke_stream(*args, **kwargs)
         try:
-            async for response in original_ainvoke_stream(*args, **kwargs):
+            async for response in stream:
                 yielded_meaningful_output = yielded_meaningful_output or _has_meaningful_output(response)
                 yield response
         except ModelProviderError as error:
@@ -133,6 +159,11 @@ async def _ainvoke_stream_with_retry(
             await asyncio.sleep(delay)
         else:
             return
+        finally:
+            # Async generators abandoned mid-stream are only finalized by the
+            # GC hook; close the underlying request deterministically when the
+            # consumer cancels or closes us at the yield above.
+            await stream.aclose()
 
 
 def install_claude_stream_retry_hook(model: object) -> None:
