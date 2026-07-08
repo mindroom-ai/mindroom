@@ -124,6 +124,21 @@ async def test_recovery_failure_still_does_not_raise(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_failing_sidecar_write_during_recovery_does_not_raise(tmp_path: Path) -> None:
+    """An OSError from the sidecar save (full disk, permissions) must not block startup."""
+    client, identity = _client_with_uploaded_identity(tmp_path)
+    client.ensure_cross_signing.side_effect = nio.exceptions.LocalProtocolError(
+        "Device signature upload failed",
+    )
+    identity.save.side_effect = OSError("disk full")
+
+    with patch.object(cross_signing, "_server_master_public_key", new=AsyncMock(return_value=None)):
+        await ensure_agent_cross_signing(client, _agent_user())  # no exception
+
+    assert client.ensure_cross_signing.await_count == 1  # the retry never ran
+
+
+@pytest.mark.asyncio
 async def test_server_master_key_parsed_from_keys_query() -> None:
     """The server key check reads master_keys from /keys/query."""
     client = AsyncMock(spec=nio.AsyncClient)

@@ -34,7 +34,14 @@ async def ensure_agent_cross_signing(client: nio.AsyncClient, agent_user: AgentM
     try:
         status = await client.ensure_cross_signing(password=agent_user.password)
     except Exception as exc:
-        status = await _recover_from_server_identity_loss(client, agent_user, exc)
+        # The recovery path touches the network and writes the sidecar file;
+        # it must uphold the same never-block-startup contract as the
+        # bootstrap itself (e.g. an OSError from identity.save on a full disk).
+        try:
+            status = await _recover_from_server_identity_loss(client, agent_user, exc)
+        except Exception as recovery_exc:
+            _log_bootstrap_failed(client, agent_user, f"{exc}; recovery failed: {recovery_exc}")
+            return
         if status is None:
             return
     if status != "already_signed":
