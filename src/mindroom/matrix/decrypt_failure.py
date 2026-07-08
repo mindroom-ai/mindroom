@@ -35,8 +35,8 @@ async def handle_decrypt_failure(client: nio.AsyncClient, room: nio.MatrixRoom, 
         key_request_already_sent=already_requested,
         hint=(
             "The sending client did not share this Megolm session with the bot's device. "
-            "A room-key request is sent so the session can recover; if the sender's client "
-            "does not honor it, ask the sender to send a new message."
+            "The bot requests the room key once per session; if the sender's client does "
+            "not honor the request, ask the sender to send a new message."
         ),
     )
     if already_requested:
