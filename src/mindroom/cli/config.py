@@ -118,7 +118,7 @@ _PROVIDER_CHOICES_TEXT = (
 )
 _MATRIX_DELIVERY_TEMPLATE_BLOCK = """\
 matrix_delivery:
-  ignore_unverified_devices: false"""
+  ignore_unverified_devices: true"""
 
 
 def _config_init_storage_plan(

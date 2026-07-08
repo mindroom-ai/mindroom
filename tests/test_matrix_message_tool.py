@@ -1289,7 +1289,7 @@ async def test_matrix_message_react_happy_path() -> None:
                 "key": "🔥",
             },
         },
-        ignore_unverified_devices=False,
+        ignore_unverified_devices=True,
     )
 
 

@@ -1492,7 +1492,7 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
         assert current_loop is request_loop
         assert room_id == "!room:localhost"
         assert message_type == "io.mindroom.tool_approval"
-        assert ignore_unverified_devices is False
+        assert ignore_unverified_devices is True
         assert content["status"] == "pending"
         return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
 

@@ -185,15 +185,15 @@ Room-scoped authorization entries are intentionally not used for root Space admi
 
 ## Delivery Policy
 
-Outgoing encrypted Matrix sends keep nio's device-trust checks enabled by default.
+Outgoing encrypted Matrix sends deliver to unverified devices by default.
 
 ```yaml
 matrix_delivery:
-  ignore_unverified_devices: false
+  ignore_unverified_devices: true
 ```
 
-Operators can set `matrix_delivery.ignore_unverified_devices` to `true` when bot delivery should proceed even if encrypted rooms contain unverified devices.
-This is a security tradeoff because Matrix may encrypt outgoing events for devices the bot has not verified.
+MindRoom bots have no interactive device-verification flow, so enforcing nio's device-trust checks would fail every send to an encrypted room with an `OlmUnverifiedDeviceError` and the agent would appear to silently ignore messages.
+Operators can set `matrix_delivery.ignore_unverified_devices` to `false` to enforce strict device trust, accepting that delivery to encrypted rooms then requires out-of-band device verification.
 
 ## Configuration
 

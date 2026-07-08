@@ -560,7 +560,7 @@ matrix_space:
 
 # Matrix delivery policy (optional)
 matrix_delivery:
-  ignore_unverified_devices: false # Default: false (keep Matrix E2EE device-trust checks enabled)
+  ignore_unverified_devices: true  # Default: true (deliver to unverified devices in encrypted rooms)
 
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
@@ -573,9 +573,9 @@ Root Space admin reconciliation is grant-only and preserves existing Matrix admi
 Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
 Demote stale Space admins manually in a Matrix client when needed.
 
-`matrix_delivery.ignore_unverified_devices` is an explicit opt-in for outgoing encrypted Matrix sends.
-Leave it `false` to preserve Matrix E2EE device-trust checks.
-Setting it to `true` can improve bot delivery when rooms contain unverified devices, but Matrix may encrypt messages for devices the bot has not verified.
+`matrix_delivery.ignore_unverified_devices` controls device trust for outgoing encrypted Matrix sends.
+It defaults to `true` because bots have no interactive device-verification flow, and enforcing device trust would fail every send to an encrypted room until each device is verified out of band.
+Set it to `false` to enforce nio's device-trust checks when you intentionally manage device verification yourself.
 
 ## Credential Seeds
 
