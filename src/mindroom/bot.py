@@ -36,6 +36,7 @@ from mindroom.hooks import (
     send_hook_message,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
+from mindroom.matrix.decrypt_failure import handle_decrypt_failure
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
@@ -1360,6 +1361,14 @@ class AgentBot:
                 ),
                 nio.UnknownEvent,
             )
+            client.add_event_callback(
+                _create_task_wrapper(
+                    self._on_decryption_failure,
+                    owner=self._runtime_view,
+                    on_error=self._mark_callback_failed,
+                ),
+                nio.MegolmEvent,
+            )
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
@@ -1738,6 +1747,11 @@ class AgentBot:
             storage_root=self.runtime_paths.storage_root,
         ):
             await self._emit_room_member_joined_hooks(join)
+
+    async def _on_decryption_failure(self, room: nio.MatrixRoom, event: nio.MegolmEvent) -> None:
+        client = self.client
+        assert client is not None
+        await handle_decrypt_failure(client, room, event)
 
     async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""

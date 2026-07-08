@@ -23,34 +23,38 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     return client
 
 
-def test_matrix_delivery_default_keeps_device_trust_policy() -> None:
-    """Matrix delivery should not ignore unverified devices by default."""
+def test_matrix_delivery_default_ignores_unverified_devices() -> None:
+    """Matrix delivery should ignore unverified devices by default.
+
+    Bots have no interactive device-verification flow, so enforcing device
+    trust would fail every encrypted-room send with OlmUnverifiedDeviceError.
+    """
     config = Config()
 
-    assert config.matrix_delivery.ignore_unverified_devices is False
+    assert config.matrix_delivery.ignore_unverified_devices is True
 
 
-def test_matrix_delivery_yaml_opt_in(tmp_path) -> None:  # noqa: ANN001
-    """Operators should be able to explicitly opt in to ignoring unverified devices."""
+def test_matrix_delivery_yaml_opt_out(tmp_path) -> None:  # noqa: ANN001
+    """Operators should be able to explicitly opt in to strict device-trust checks."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "matrix_delivery:\n  ignore_unverified_devices: true\n",
+        "matrix_delivery:\n  ignore_unverified_devices: false\n",
         encoding="utf-8",
     )
 
     config = load_config_yaml(config_path)
 
-    assert config.matrix_delivery.ignore_unverified_devices is True
+    assert config.matrix_delivery.ignore_unverified_devices is False
 
 
 @pytest.mark.asyncio
-async def test_send_message_result_defaults_ignore_unverified_devices_to_false() -> None:
-    """Direct Matrix delivery should pass the safe nio default explicitly."""
+async def test_send_message_result_defaults_ignore_unverified_devices_to_true() -> None:
+    """Direct Matrix delivery should pass the bot-friendly default explicitly."""
     client = _mock_client()
 
     await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"}, config=Config())
 
-    assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is False
+    assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
 
 
 @pytest.mark.asyncio
@@ -64,10 +68,10 @@ async def test_send_message_result_requires_config() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_message_result_passes_matrix_delivery_opt_in_to_room_send() -> None:
-    """The Matrix delivery config opt-in should reach nio room_send."""
+async def test_send_message_result_passes_matrix_delivery_opt_out_to_room_send() -> None:
+    """The strict device-trust opt-out should reach nio room_send."""
     client = _mock_client()
-    config = Config(matrix_delivery={"ignore_unverified_devices": True})
+    config = Config(matrix_delivery={"ignore_unverified_devices": False})
 
     await send_message_result(
         client,
@@ -76,14 +80,14 @@ async def test_send_message_result_passes_matrix_delivery_opt_in_to_room_send() 
         config=config,
     )
 
-    assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
+    assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is False
 
 
 @pytest.mark.asyncio
-async def test_send_message_result_passes_matrix_delivery_opt_in_to_encrypted_room_send() -> None:
-    """The Matrix delivery opt-in should reach nio for encrypted room sends."""
+async def test_send_message_result_passes_matrix_delivery_opt_out_to_encrypted_room_send() -> None:
+    """The strict device-trust opt-out should reach nio for encrypted room sends."""
     client = _mock_client(encrypted=True)
-    config = Config(matrix_delivery={"ignore_unverified_devices": True})
+    config = Config(matrix_delivery={"ignore_unverified_devices": False})
 
     await send_message_result(
         client,
@@ -92,4 +96,4 @@ async def test_send_message_result_passes_matrix_delivery_opt_in_to_encrypted_ro
         config=config,
     )
 
-    assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
+    assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is False

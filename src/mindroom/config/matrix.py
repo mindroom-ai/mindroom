@@ -93,10 +93,12 @@ class MatrixDeliveryConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ignore_unverified_devices: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Whether outgoing encrypted Matrix sends should ignore unverified devices. "
-            "The default keeps nio's device-trust checks enabled."
+            "Bots have no interactive device-verification flow, so the default delivers "
+            "to unverified devices; set to false to enforce nio's device-trust checks, "
+            "which blocks delivery to encrypted rooms until every device is verified."
         ),
     )
 

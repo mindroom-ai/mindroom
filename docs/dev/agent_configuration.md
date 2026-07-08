@@ -359,11 +359,11 @@ Configure outgoing Matrix delivery policy:
 
 ```yaml
 matrix_delivery:
-  ignore_unverified_devices: false  # Keep Matrix E2EE device-trust checks enabled by default
+  ignore_unverified_devices: true  # Default: deliver to unverified devices in encrypted rooms
 ```
 
-Set `ignore_unverified_devices` to `true` only when the operator intentionally accepts delivery to encrypted rooms that contain unverified devices.
-This can improve bot delivery semantics, but Matrix may encrypt outgoing messages for devices the bot has not verified.
+`ignore_unverified_devices` defaults to `true` because bots have no interactive device-verification flow; enforcing device trust would fail every encrypted-room send with an `OlmUnverifiedDeviceError`.
+Set it to `false` only when the operator intentionally verifies devices out of band and wants strict Matrix E2EE device-trust checks.
 
 ## Defaults Configuration
 

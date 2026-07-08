@@ -271,7 +271,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         *,
         ignore_unverified_devices: bool = False,
     ) -> object:
-        assert ignore_unverified_devices is False
+        assert ignore_unverified_devices is True
         event_id = f"$helper_{len(helper_events)}"
         helper_events.append(
             {
@@ -290,7 +290,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         *,
         ignore_unverified_devices: bool = False,
     ) -> object:
-        assert ignore_unverified_devices is False
+        assert ignore_unverified_devices is True
         event_id = f"$calc_{len(calc_events)}"
         calc_events.append(
             {
@@ -580,7 +580,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             ignore_unverified_devices: bool = False,
         ) -> object:
             assert message_type == "m.room.message"
-            assert ignore_unverified_devices is False
+            assert ignore_unverified_devices is True
             event_id = f"$calc_{len(events_sent)}"
             events_sent.append(
                 {
