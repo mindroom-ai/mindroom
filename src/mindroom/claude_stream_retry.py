@@ -1,0 +1,154 @@
+"""Transient-error retry for Claude streaming model requests.
+
+The Anthropic SDK retries HTTP-level failures (429/5xx, connection errors)
+before a stream is established, but once the response is committed as 200 the
+API reports server faults as an SSE ``error`` event instead. The SDK raises
+that event as an ``APIStatusError`` with status code 200 and never retries it,
+Agno converts it into a generic ``ModelProviderError``, and without this hook
+the whole agent run fails on a documented-retryable fault (observed in
+production as ``{'type': 'api_error', 'message': 'Internal server error'}``
+from Vertex).
+
+This hook wraps ``invoke_stream``/``ainvoke_stream`` on Anthropic-family Claude
+models (direct API, Vertex, and Bedrock share the Agno model class) and
+re-issues the request when an attempt fails with a transient error before
+producing any meaningful output. Attempts that already yielded content, tool
+calls, or reasoning cannot be replayed without duplicating what downstream
+consumers streamed to the user, so those errors propagate unchanged.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from functools import partial
+from typing import TYPE_CHECKING, cast
+
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
+from agno.models.anthropic import Claude as AnthropicClaude
+
+from mindroom.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable, Iterator
+    from typing import Any
+
+    from agno.models.response import ModelResponse
+
+logger = get_logger(__name__)
+
+_STREAM_RETRY_HOOK_ATTR = "_mindroom_claude_stream_retry_hook_installed"
+
+# One initial attempt plus this many re-issued requests.
+_MAX_TRANSIENT_RETRIES = 2
+_RETRY_BASE_DELAY_SECONDS = 1.0
+
+# Statuses that indicate a transient provider fault. 200 is the mid-stream SSE
+# ``error`` event case (the HTTP response was already committed when the server
+# failed). 502 is also Agno's default when it wraps connection errors and
+# unexpected SDK exceptions, which are equally worth one more attempt.
+_RETRYABLE_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
+
+
+def _is_transient_model_error(error: BaseException) -> bool:
+    """Return whether one model-call failure is worth re-issuing the request."""
+    if isinstance(error, ContextWindowExceededError):
+        return False
+    return isinstance(error, ModelProviderError) and error.status_code in _RETRYABLE_STATUS_CODES
+
+
+def _has_meaningful_output(response: ModelResponse) -> bool:
+    """Return whether one streamed delta already reached downstream consumers."""
+    return bool(
+        response.content
+        or response.reasoning_content
+        or response.redacted_reasoning_content
+        or response.tool_calls
+        or response.tool_executions,
+    )
+
+
+def _should_reraise(error: ModelProviderError, *, yielded_meaningful_output: bool, attempt: int) -> bool:
+    """Return whether one failed attempt must propagate instead of retrying."""
+    return yielded_meaningful_output or attempt >= _MAX_TRANSIENT_RETRIES or not _is_transient_model_error(error)
+
+
+def _retry_delay_seconds(attempt: int) -> float:
+    return _RETRY_BASE_DELAY_SECONDS * (2**attempt)
+
+
+def _log_retry(model: AnthropicClaude, error: ModelProviderError, *, attempt: int, delay: float) -> None:
+    logger.warning(
+        "Retrying Claude stream after transient model error",
+        model_id=model.id,
+        status_code=error.status_code,
+        error=str(error.message),
+        attempt=attempt + 1,
+        max_retries=_MAX_TRANSIENT_RETRIES,
+        delay_seconds=delay,
+    )
+
+
+def _invoke_stream_with_retry(
+    model: AnthropicClaude,
+    original_invoke_stream: Callable[..., Iterator[ModelResponse]],
+    *args: object,
+    **kwargs: object,
+) -> Iterator[ModelResponse]:
+    """Replay one synchronous stream request after transient pre-output errors."""
+    for attempt in range(_MAX_TRANSIENT_RETRIES + 1):
+        yielded_meaningful_output = False
+        try:
+            for response in original_invoke_stream(*args, **kwargs):
+                yielded_meaningful_output = yielded_meaningful_output or _has_meaningful_output(response)
+                yield response
+        except ModelProviderError as error:
+            if _should_reraise(error, yielded_meaningful_output=yielded_meaningful_output, attempt=attempt):
+                raise
+            delay = _retry_delay_seconds(attempt)
+            _log_retry(model, error, attempt=attempt, delay=delay)
+            time.sleep(delay)
+        else:
+            return
+
+
+async def _ainvoke_stream_with_retry(
+    model: AnthropicClaude,
+    original_ainvoke_stream: Callable[..., AsyncIterator[ModelResponse]],
+    *args: object,
+    **kwargs: object,
+) -> AsyncIterator[ModelResponse]:
+    """Replay one asynchronous stream request after transient pre-output errors."""
+    for attempt in range(_MAX_TRANSIENT_RETRIES + 1):
+        yielded_meaningful_output = False
+        try:
+            async for response in original_ainvoke_stream(*args, **kwargs):
+                yielded_meaningful_output = yielded_meaningful_output or _has_meaningful_output(response)
+                yield response
+        except ModelProviderError as error:
+            if _should_reraise(error, yielded_meaningful_output=yielded_meaningful_output, attempt=attempt):
+                raise
+            delay = _retry_delay_seconds(attempt)
+            _log_retry(model, error, attempt=attempt, delay=delay)
+            await asyncio.sleep(delay)
+        else:
+            return
+
+
+def install_claude_stream_retry_hook(model: object) -> None:
+    """Wrap a Claude model's stream invocations with transient-error retries.
+
+    Idempotent per model instance. Only attempts that have not yet yielded
+    meaningful output are retried; anything else re-raises immediately so
+    partially streamed responses are never duplicated.
+    """
+    if not isinstance(model, AnthropicClaude):
+        return
+    model_dict = vars(model)
+    if model_dict.get(_STREAM_RETRY_HOOK_ATTR) is True:
+        return
+    original_invoke_stream = model.invoke_stream
+    original_ainvoke_stream = model.ainvoke_stream
+    model_dict[_STREAM_RETRY_HOOK_ATTR] = True
+    model_dict["invoke_stream"] = partial(_invoke_stream_with_retry, model, original_invoke_stream)
+    model_dict["ainvoke_stream"] = cast("Any", partial(_ainvoke_stream_with_retry, model, original_ainvoke_stream))

@@ -18,6 +18,7 @@ from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
 
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
+from mindroom.claude_stream_retry import install_claude_stream_retry_hook
 from mindroom.codex_model import CodexResponses, derive_codex_prompt_cache_key, normalize_codex_model_id
 from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
@@ -317,4 +318,5 @@ def get_model_instance(
             default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
         )
     install_claude_prompt_cache_hook(model)
+    install_claude_stream_retry_hook(model)
     return model
