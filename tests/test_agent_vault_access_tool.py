@@ -13,8 +13,8 @@ from mindroom.custom_tools.agent_vault_access import AgentVaultAccessTools, _Age
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    descriptive_worker_id_for_key,
     resolve_worker_target,
-    worker_id_for_key,
 )
 
 if TYPE_CHECKING:
@@ -119,7 +119,7 @@ async def test_request_vault_access_grants_and_returns_link(
 ) -> None:
     """A first request resolves the vault, grants admin access, and returns the link."""
     target = _worker_target()
-    expected_vault = worker_id_for_key(target.worker_key, prefix="agent-vault")
+    expected_vault = descriptive_worker_id_for_key(target.worker_key, prefix="agent-vault")
     api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 409, "/users": 201})
     _patch_client(monkeypatch, api)
 
@@ -150,7 +150,7 @@ async def test_request_vault_access_names_shared_vault_without_granting(
     _patch_client(monkeypatch, api)
 
     target = _worker_target(worker_scope="shared")
-    expected_vault = worker_id_for_key(target.worker_key, prefix="agent-vault")
+    expected_vault = descriptive_worker_id_for_key(target.worker_key, prefix="agent-vault")
     tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=target)
     payload = json.loads(await tool.request_vault_access())
 
@@ -168,7 +168,7 @@ async def test_shared_scope_tool_needs_only_ui_base_url(tmp_path: Path) -> None:
     """A shared-scope instance never reaches the grant API, so only the UI base URL is required."""
     env = {"MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL": "https://example.test/agent-vault"}
     target = _worker_target(worker_scope="shared")
-    expected_vault = worker_id_for_key(target.worker_key, prefix="agent-vault")
+    expected_vault = descriptive_worker_id_for_key(target.worker_key, prefix="agent-vault")
 
     tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=target)
     payload = json.loads(await tool.request_vault_access())
@@ -247,7 +247,7 @@ async def test_request_vault_access_joins_worker_created_vault(
     the owner actor vault-admin) before POSTing the member grant.
     """
     target = _worker_target()
-    expected_vault = worker_id_for_key(target.worker_key, prefix="agent-vault")
+    expected_vault = descriptive_worker_id_for_key(target.worker_key, prefix="agent-vault")
     # Pre-existing vault (409 on create), not yet joined (200 on join).
     api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 201})
     _patch_client(monkeypatch, api)

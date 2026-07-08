@@ -17,7 +17,11 @@ from mindroom.agent_vault_access_grants import (
     resolve_agent_vault_access_grant_targets,
     wait_for_agent_vault_ready,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, worker_id_for_key
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    descriptive_worker_id_for_key,
+    resolve_worker_target,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -100,7 +104,7 @@ def test_resolves_shared_grant_to_runtime_worker_vault(tmp_path: Path) -> None:
     )
 
     assert target.worker_key == expected_worker_target.worker_key
-    assert target.vault == worker_id_for_key(expected_worker_target.worker_key, prefix="agent-vault")
+    assert target.vault == descriptive_worker_id_for_key(expected_worker_target.worker_key, prefix="agent-vault")
 
 
 def test_resolves_user_agent_grant_to_runtime_worker_vault(tmp_path: Path) -> None:
@@ -141,7 +145,7 @@ def test_resolves_user_agent_grant_to_runtime_worker_vault(tmp_path: Path) -> No
     )
 
     assert target.worker_key == expected_worker_target.worker_key
-    assert target.vault == worker_id_for_key(expected_worker_target.worker_key, prefix="agent-vault")
+    assert target.vault == descriptive_worker_id_for_key(expected_worker_target.worker_key, prefix="agent-vault")
 
 
 @pytest.mark.asyncio

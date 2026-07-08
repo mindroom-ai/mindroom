@@ -27,10 +27,10 @@ from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
+    descriptive_worker_id_for_key,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
-    worker_id_for_key,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
@@ -3118,7 +3118,7 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert 'export HOME="/agent-vault"' not in mint_script
     mint_env = {e["name"]: e["value"] for e in mint["env"]}
     # The vault name is the worker's own deterministic vault, owner email is configured.
-    assert mint_env["AGENT_VAULT_VAULT"] == worker_id_for_key(worker_key, prefix="agent-vault")
+    assert mint_env["AGENT_VAULT_VAULT"] == descriptive_worker_id_for_key(worker_key, prefix="agent-vault")
     assert mint_env["AGENT_VAULT_OWNER_EMAIL"] == "vault-owner@example.test"
     # The owner password (bootstrap secret) is mounted only on the init container.
     assert any(m["name"] == "agent-vault-bootstrap" for m in mint["volumeMounts"])
@@ -3127,7 +3127,7 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert all(m["name"] != "agent-vault-bootstrap" for m in main["volumeMounts"])
     assert any(m["name"] == "agent-vault-token" and m.get("readOnly") for m in main["volumeMounts"])
     main_env = {e["name"]: e.get("value") for e in main["env"]}
-    expected_vault = worker_id_for_key(worker_key, prefix="agent-vault")
+    expected_vault = descriptive_worker_id_for_key(worker_key, prefix="agent-vault")
     assert main_env["MINDROOM_WORKER_EGRESS_PROXY_URL"] == "http://agent-vault:14322"
     assert main_env["MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE"] == "/agent-vault/token"  # noqa: S105
     assert main_env["MINDROOM_WORKER_EGRESS_PROXY_VAULT"] == expected_vault
