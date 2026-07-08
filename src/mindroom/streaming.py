@@ -1040,7 +1040,7 @@ class StreamingResponse:
 
     async def _send_initial_content(self, client: nio.AsyncClient, *, content: dict[str, Any]) -> bool:
         """Send the initial streaming event."""
-        delivered = await send_message_result(client, self.room_id, content, config=self.config)
+        delivered = await send_message_result(client, self.room_id, content)
         if delivered is None:
             return False
         self.event_id = delivered.event_id
@@ -1066,7 +1066,6 @@ class StreamingResponse:
             self.event_id,
             content,
             display_text,
-            config=self.config,
         )
         if delivered is None:
             return False

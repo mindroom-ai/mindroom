@@ -25,13 +25,12 @@ The configuration file has these top-level sections:
 10. **authorization** - Fine-grained user and room permissions
 11. **matrix_room_access** - Managed room access mode and discoverability
 12. **matrix_space** - Optional root Matrix Space for grouping rooms
-13. **matrix_delivery** - Outgoing Matrix delivery policy
-14. **mindroom_user** - Internal MindRoom user account settings
-15. **timezone** - Timezone for scheduled tasks (default: `UTC`)
-16. **bot_accounts** - Non-MindRoom bot Matrix user IDs (e.g., bridge bots)
-17. **rooms** - Managed Matrix room metadata for standalone rooms and dashboard-created rooms
-18. **room_models** - Per-room model overrides
-19. **plugins** - Plugin paths for tool/skill extensions
+13. **mindroom_user** - Internal MindRoom user account settings
+14. **timezone** - Timezone for scheduled tasks (default: `UTC`)
+15. **bot_accounts** - Non-MindRoom bot Matrix user IDs (e.g., bridge bots)
+16. **rooms** - Managed Matrix room metadata for standalone rooms and dashboard-created rooms
+17. **room_models** - Per-room model overrides
+18. **plugins** - Plugin paths for tool/skill extensions
 
 ## Model Configuration
 
@@ -352,18 +351,6 @@ The configured `mindroom_user` also receives root Space admin power when the int
 Room-specific `authorization.room_permissions` users do not become root Space admins unless they are also global users.
 Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
 Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
-
-## Matrix Delivery Configuration
-
-Configure outgoing Matrix delivery policy:
-
-```yaml
-matrix_delivery:
-  ignore_unverified_devices: true  # Default: deliver to unverified devices in encrypted rooms
-```
-
-`ignore_unverified_devices` defaults to `true` because bots have no interactive device-verification flow; enforcing device trust would fail every encrypted-room send with an `OlmUnverifiedDeviceError`.
-Set it to `false` only when the operator intentionally verifies devices out of band and wants strict Matrix E2EE device-trust checks.
 
 ## Defaults Configuration
 

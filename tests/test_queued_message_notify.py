@@ -801,7 +801,6 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         5,
         "default",
         conversation_cache,
-        config=config,
     )
 
 

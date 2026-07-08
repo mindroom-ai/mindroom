@@ -11,7 +11,6 @@ from typing import Any, ClassVar
 import nio
 from agno.tools import Toolkit
 
-from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -806,7 +805,7 @@ class MatrixApiTools(Toolkit):
                 room_id=room_id,
                 message_type=normalized_event_type,
                 content=normalized_content,
-                ignore_unverified_devices=ignore_unverified_devices_for_config(context.config),
+                ignore_unverified_devices=True,
             )
         except Exception as exc:
             self._audit_write(

@@ -10,7 +10,6 @@ import nio
 import pytest
 from nio.exceptions import OlmUnverifiedDeviceError
 
-from mindroom.config.main import Config
 from mindroom.matrix.client import DeliveredMatrixEvent, join_room
 from mindroom.matrix.client_delivery import (
     _msgtype_for_mimetype,
@@ -163,11 +162,8 @@ class TestSendFileMessage:
             _client: object,
             _room: str,
             content: dict,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
             nonlocal sent_content
-            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -179,7 +175,6 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
-                config=Config(),
             )
 
         assert event_id == "$evt:localhost"
@@ -203,11 +198,8 @@ class TestSendFileMessage:
             _client: object,
             _room: str,
             content: dict,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
             nonlocal sent_content
-            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -233,7 +225,6 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
-                config=Config(),
             )
 
         assert event_id == "$evt:localhost"
@@ -254,11 +245,8 @@ class TestSendFileMessage:
             _client: object,
             _room: str,
             content: dict,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
             nonlocal sent_content
-            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -270,7 +258,6 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
-                config=Config(),
                 thread_id="$root:localhost",
                 latest_thread_event_id="$latest:localhost",
             )
@@ -295,11 +282,8 @@ class TestSendFileMessage:
             _client: object,
             _room: str,
             content: dict,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
             nonlocal sent_content
-            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -311,7 +295,6 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
-                config=Config(),
                 thread_id="$root:localhost",
                 latest_thread_event_id="$precomputed:localhost",
             )
@@ -333,7 +316,6 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
-                config=Config(),
                 thread_id="$root:localhost",
             )
 
@@ -370,7 +352,6 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
-                config=Config(),
                 thread_id="$root:localhost",
                 latest_thread_event_id="$precomputed:localhost",
                 conversation_cache=conversation_cache,
@@ -392,7 +373,6 @@ class TestSendFileMessage:
             client,
             "!room:localhost",
             tmp_path / "gone.txt",
-            config=Config(),
         )
         assert result is None
 
@@ -412,7 +392,6 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
-                config=Config(),
             )
 
         assert result is None
@@ -430,11 +409,8 @@ class TestSendFileMessage:
             _client: object,
             _room: str,
             content: dict,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
             nonlocal sent_content
-            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -446,7 +422,6 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
-                config=Config(),
                 caption="Q4 Report",
             )
 
@@ -470,11 +445,8 @@ class TestSendAudioMessage:
             _client: object,
             _room: str,
             content: dict,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
             nonlocal sent_content
-            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$voice:localhost", content_sent=content)
 
@@ -483,7 +455,6 @@ class TestSendAudioMessage:
                 client,
                 "!room:localhost",
                 b"audio-bytes",
-                config=Config(),
                 mimetype="audio/mpeg",
                 filename="reply.mp3",
                 caption="Voice reply",
@@ -522,11 +493,8 @@ class TestSendAudioMessage:
             _client: object,
             _room: str,
             content: dict,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
             nonlocal sent_content
-            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$voice:localhost", content_sent=content)
 
@@ -549,7 +517,6 @@ class TestSendAudioMessage:
                 client,
                 "!room:localhost",
                 b"audio-bytes",
-                config=Config(),
                 mimetype="audio/mpeg",
                 filename="reply.mp3",
                 duration_ms=1234,
@@ -582,7 +549,6 @@ class TestSendAudioMessage:
                 client,
                 "!room:localhost",
                 b"audio-bytes",
-                config=Config(),
                 mimetype="audio/mpeg",
             )
 
@@ -601,11 +567,8 @@ class TestSendAudioMessage:
             _client: object,
             _room: str,
             content: dict,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
             nonlocal sent_content
-            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$voice:localhost", content_sent=content)
 
@@ -614,7 +577,6 @@ class TestSendAudioMessage:
                 client,
                 "!room:localhost",
                 b"audio-bytes",
-                config=Config(),
                 mimetype="audio/ogg",
                 duration_ms=1000,
                 thread_id="$thread-root",
@@ -641,11 +603,8 @@ class TestSendAudioMessage:
             _client: object,
             _room: str,
             content: dict,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
             nonlocal sent_content
-            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$audio:localhost", content_sent=content)
 
@@ -654,7 +613,6 @@ class TestSendAudioMessage:
                 client,
                 "!room:localhost",
                 b"audio-bytes",
-                config=Config(),
                 mimetype="audio/mpeg",
                 filename="reply.mp3",
             )
@@ -681,7 +639,6 @@ class TestSendAudioMessage:
             client,
             "!room:localhost",
             b"audio-bytes",
-            config=Config(),
             mimetype="audio/ogg",
             filename="reply.opus",
             duration_ms=1000,
@@ -729,7 +686,6 @@ class TestSendMessageResult:
                 client,
                 "!room:localhost",
                 {"body": "hello", "msgtype": "m.text"},
-                config=Config(),
             )
 
         assert result is None
@@ -757,7 +713,6 @@ class TestSendMessageResult:
                 client,
                 "!room:localhost",
                 {"body": "hello", "msgtype": "m.text"},
-                config=Config(),
             )
 
         assert result is not None
@@ -791,7 +746,6 @@ class TestSendMessageResult:
                 client,
                 "!room:localhost",
                 {"body": "hello", "msgtype": "m.text"},
-                config=Config(),
             )
 
         assert result is None
@@ -814,7 +768,6 @@ class TestSendMessageResult:
                 client,
                 "!room:localhost",
                 {"body": "hello", "msgtype": "m.text"},
-                config=Config(),
             )
 
         assert result is not None
@@ -841,7 +794,6 @@ class TestSendMessageResult:
                 client,
                 "!room:localhost",
                 {"body": "hello", "msgtype": "m.text"},
-                config=Config(),
             )
 
         assert result is None
@@ -874,7 +826,6 @@ class TestSendMessageResult:
                 "$placeholder",
                 {"body": "hello", "msgtype": "m.text"},
                 "hello",
-                config=Config(),
             )
 
         assert result is None
@@ -901,7 +852,6 @@ class TestSendMessageResult:
                 client,
                 "!room:localhost",
                 {"body": "hello", "msgtype": "m.text"},
-                config=Config(),
             )
 
         assert result is None
@@ -942,11 +892,8 @@ class TestSendFileMessageMsgtype:
             _client: object,
             _room: str,
             content: dict,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
             nonlocal sent_content
-            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -958,7 +905,6 @@ class TestSendFileMessageMsgtype:
                 client,
                 "!room:localhost",
                 file,
-                config=Config(),
             )
 
         assert event_id == "$evt:localhost"
@@ -980,11 +926,8 @@ class TestSendFileMessageMsgtype:
             _client: object,
             _room: str,
             content: dict,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
             nonlocal sent_content
-            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -996,7 +939,6 @@ class TestSendFileMessageMsgtype:
                 client,
                 "!room:localhost",
                 file,
-                config=Config(),
             )
 
         assert event_id == "$evt:localhost"

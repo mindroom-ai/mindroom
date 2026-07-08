@@ -200,9 +200,8 @@ async def test_execute_external_trigger_sends_to_fixed_thread_target_with_source
         caller_label="external_trigger",
     )
     send_and_track_message.assert_awaited_once()
-    _client, room_id, content, sent_config, sent_cache = send_and_track_message.await_args.args
+    _client, room_id, content, sent_cache = send_and_track_message.await_args.args
     assert room_id == "!fixed:localhost"
-    assert sent_config is config
     assert sent_cache is conversation_cache
     assert content["m.relates_to"]["event_id"] == "$thread-root"
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"

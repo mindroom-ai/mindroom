@@ -317,7 +317,6 @@ async def send_attachment_paths(
             context.client,
             room_id,
             attachment_path,
-            config=context.config,
             thread_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
             conversation_cache=context.conversation_cache,

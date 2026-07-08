@@ -78,7 +78,7 @@ async def execute_external_trigger(
         latest_thread_event_id=latest_thread_event_id,
         extra_content=_external_trigger_content_metadata(snapshot, payload),
     )
-    delivered = await send_and_track_message(client, room_id, content, config, conversation_cache)
+    delivered = await send_and_track_message(client, room_id, content, conversation_cache)
     if delivered is None:
         return None
     return delivered.event_id

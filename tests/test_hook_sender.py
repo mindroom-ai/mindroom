@@ -92,9 +92,8 @@ def test_hooks_package_reexports_hook_message_sender() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_and_track_message_records_delivered_content(tmp_path: Path) -> None:
+async def test_send_and_track_message_records_delivered_content() -> None:
     """Shared send tracking should cache the exact content returned by delivery."""
-    config = _config(tmp_path)
     content = {"msgtype": "m.text", "body": "already built"}
     delivered_content = {"msgtype": "m.text", "body": "already built", "server": "normalized"}
     conversation_cache = MagicMock()
@@ -103,10 +102,7 @@ async def test_send_and_track_message_records_delivered_content(tmp_path: Path) 
         _client: object,
         _room_id: str,
         _content: dict[str, object],
-        *,
-        config: Config,
     ) -> object:
-        assert isinstance(config, Config)
         return delivered_matrix_event("$tracked", delivered_content)
 
     with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send) as mock_send_result:
@@ -114,7 +110,6 @@ async def test_send_and_track_message_records_delivered_content(tmp_path: Path) 
             AsyncMock(),
             "!room:localhost",
             content,
-            config,
             conversation_cache,
         )
 
@@ -574,10 +569,7 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
         _client: object,
         _room_id: str,
         content: dict[str, object],
-        *,
-        config: Config,
     ) -> object:
-        assert isinstance(config, Config)
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 
@@ -616,10 +608,7 @@ async def test_hook_send_message_preserves_original_sender_for_downstream_dispat
         _client: object,
         _room_id: str,
         content: dict[str, object],
-        *,
-        config: Config,
     ) -> object:
-        assert isinstance(config, Config)
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 
@@ -1260,10 +1249,7 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
         _client: object,
         _room_id: str,
         content: dict[str, object],
-        *,
-        config: Config,
     ) -> object:
-        assert isinstance(config, Config)
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 
@@ -1293,10 +1279,7 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
         _client: object,
         _room_id: str,
         content: dict[str, object],
-        *,
-        config: Config,
     ) -> object:
-        assert isinstance(config, Config)
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 

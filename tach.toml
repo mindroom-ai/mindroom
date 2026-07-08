@@ -283,7 +283,6 @@ visibility = ["mindroom.approval_manager"]
 path = "mindroom.approval_transport"
 depends_on = [
     "mindroom.constants",
-    "mindroom.config.matrix",
     "mindroom.logging_config",
     "mindroom.matrix.cache",
     "mindroom.matrix.client_delivery",
@@ -783,7 +782,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.matrix_conversation_operations"
 depends_on = [
-    "mindroom.config.matrix",
     "mindroom.constants",
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.attachments",
@@ -1776,7 +1774,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.client_delivery"
-depends_on = ["mindroom.config.matrix"]
+depends_on = []
 visibility = [
     "mindroom.approval_transport",
     "mindroom.conversation_resolver",
@@ -2209,7 +2207,6 @@ depends_on = [
 path = "mindroom.commands.config_confirmation"
 depends_on = [
     "mindroom.commands.config_commands",
-    "mindroom.config.matrix",
     "mindroom.delivery_gateway",
     "mindroom.logging_config",
 ]

@@ -14,7 +14,6 @@ from agno.models.vertexai.claude import Claude as VertexAIClaude
 from pydantic import ValidationError
 
 from mindroom.config.main import Config
-from mindroom.config.matrix import MatrixDeliveryConfig
 from mindroom.constants import RuntimePaths
 from mindroom.entity_resolution import resolve_room_scoped_model_override
 from mindroom.logging_config import setup_logging
@@ -345,7 +344,6 @@ def _mock_config(
             "thread_summary_temperature": summary_temperature,
         },
         room_thread_summary_models=room_thread_summary_models or {},
-        matrix_delivery=MatrixDeliveryConfig(),
     )
 
 
@@ -856,7 +854,6 @@ class TestMaybeGenerateThreadSummary:
             5,
             "default",
             self.conversation_cache,
-            config=config,
         )
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
@@ -894,7 +891,6 @@ class TestMaybeGenerateThreadSummary:
             5,
             "default",
             self.conversation_cache,
-            config=config,
         )
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
@@ -1318,7 +1314,6 @@ class TestSendSummaryEvent:
         conversation_cache = AsyncMock()
         conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
         conversation_cache.notify_outbound_message = Mock()
-        config = _mock_config()
 
         result = await send_thread_summary_event(
             client,
@@ -1328,7 +1323,6 @@ class TestSendSummaryEvent:
             message_count=15,
             model_name="haiku",
             conversation_cache=conversation_cache,
-            config=config,
         )
 
         assert result == "$s1"
@@ -1366,7 +1360,6 @@ class TestSendSummaryEvent:
         conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
         conversation_cache.notify_outbound_message = Mock()
         summary = "x" * (THREAD_SUMMARY_MAX_LENGTH + 1)
-        config = _mock_config()
 
         result = await send_thread_summary_event(
             client,
@@ -1376,7 +1369,6 @@ class TestSendSummaryEvent:
             message_count=15,
             model_name="haiku",
             conversation_cache=conversation_cache,
-            config=config,
         )
 
         assert result == "$s1"
@@ -1393,7 +1385,6 @@ class TestSendSummaryEvent:
         conversation_cache = AsyncMock()
         conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
         conversation_cache.notify_outbound_message = Mock()
-        config = _mock_config()
 
         result = await send_thread_summary_event(
             client,
@@ -1403,7 +1394,6 @@ class TestSendSummaryEvent:
             message_count=5,
             model_name="default",
             conversation_cache=conversation_cache,
-            config=config,
         )
 
         assert result is None
@@ -1416,7 +1406,6 @@ class TestSendSummaryEvent:
         conversation_cache = AsyncMock()
         conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(side_effect=RuntimeError("lookup boom"))
         conversation_cache.notify_outbound_message = Mock()
-        config = _mock_config()
 
         result = await send_thread_summary_event(
             client,
@@ -1426,7 +1415,6 @@ class TestSendSummaryEvent:
             message_count=5,
             model_name="default",
             conversation_cache=conversation_cache,
-            config=config,
         )
 
         assert result == "$s1"
@@ -1448,7 +1436,6 @@ class TestSetManualThreadSummary:
             *_make_thread_history(3),
             _make_summary_notice_message("$root1", message_count=2),
         ]
-        config = _mock_config()
 
         with patch(
             "mindroom.thread_summary.send_thread_summary_event",
@@ -1459,7 +1446,6 @@ class TestSetManualThreadSummary:
                 "!room:x",
                 "$root1",
                 "  # **Fix** [ISSUE-116](http://example.com)  ",
-                config=config,
                 conversation_cache=conversation_cache,
             )
 
@@ -1474,7 +1460,6 @@ class TestSetManualThreadSummary:
             3,
             "manual",
             conversation_cache,
-            config=config,
         )
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$root1")] == 3
 
@@ -1484,7 +1469,6 @@ class TestSetManualThreadSummary:
         conversation_cache = AsyncMock()
         conversation_cache.get_thread_history.return_value = _make_thread_history(5)
         update_last_summary_count("!room:x", "$root1", 2)
-        config = _mock_config()
 
         with (
             patch(
@@ -1498,7 +1482,6 @@ class TestSetManualThreadSummary:
                 "!room:x",
                 "$root1",
                 "failed write",
-                config=config,
                 conversation_cache=conversation_cache,
             )
 
@@ -1509,7 +1492,6 @@ class TestSetManualThreadSummary:
         client = _mock_client()
         conversation_cache = AsyncMock()
         conversation_cache.get_thread_history.side_effect = TimeoutError("timed out")
-        config = _mock_config()
 
         with pytest.raises(ThreadSummaryWriteError, match=r"Failed to fetch thread history for the target thread\."):
             await set_manual_thread_summary(
@@ -1517,7 +1499,6 @@ class TestSetManualThreadSummary:
                 "!room:x",
                 "$root1",
                 "done",
-                config=config,
                 conversation_cache=conversation_cache,
             )
 

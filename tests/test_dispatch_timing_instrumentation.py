@@ -13,7 +13,6 @@ from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import ai as ai_module
-from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
@@ -182,7 +181,6 @@ async def test_send_message_result_marks_prepare_and_send_phases() -> None:
             client,
             "!room:localhost",
             {"body": "hello", "msgtype": "m.text"},
-            config=Config(),
         )
 
     assert result is not None

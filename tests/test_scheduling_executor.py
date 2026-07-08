@@ -290,9 +290,8 @@ async def test_hook_suppression_is_undelivered_outcome(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_scheduled_failure_notice_follows_workflow_target(tmp_path: Path) -> None:
+async def test_send_scheduled_failure_notice_follows_workflow_target() -> None:
     """Runner failure notices follow the workflow thread and reply to its latest event."""
-    config = _config(tmp_path)
     workflow = _workflow("Recurring job")
     target = MessageTarget.for_scheduled_task(workflow)
     conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
@@ -306,7 +305,6 @@ async def test_send_scheduled_failure_notice_follows_workflow_target(tmp_path: P
             workflow,
             target,
             "❌ Recurring task failed: executor test task\nTask ID: task-9\nError: boom",
-            config,
             conversation_cache,
         )
 

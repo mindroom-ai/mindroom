@@ -14,7 +14,6 @@ from mindroom.runtime_env_policy import is_runtime_database_url_env_name
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 _RoomAccessMode = Literal["single_user_private", "multi_user"]
@@ -85,27 +84,6 @@ class MatrixSpaceConfig(BaseModel):
             msg = "matrix_space.name cannot be empty"
             raise ValueError(msg)
         return normalized
-
-
-class MatrixDeliveryConfig(BaseModel):
-    """Configuration for outgoing Matrix event delivery."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    ignore_unverified_devices: bool = Field(
-        default=True,
-        description=(
-            "Whether outgoing encrypted Matrix sends should ignore unverified devices. "
-            "Bots have no interactive device-verification flow, so the default delivers "
-            "to unverified devices; set to false to enforce nio's device-trust checks, "
-            "which blocks delivery to encrypted rooms until every device is verified."
-        ),
-    )
-
-
-def ignore_unverified_devices_for_config(config: Config) -> bool:
-    """Return the explicit Matrix delivery trust policy for outgoing sends."""
-    return config.matrix_delivery.ignore_unverified_devices
 
 
 class MatrixRoomAccessConfig(BaseModel):
