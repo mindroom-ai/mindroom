@@ -58,6 +58,7 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import (
+    MediaRetryDecision,
     ModelMediaRoute,
     build_model_media_route,
     filter_media_inputs_for_route,
@@ -318,9 +319,7 @@ class _StreamingAttemptState:
     request_metric_totals: dict[str, int] = field(default_factory=empty_request_metric_totals)
     first_token_latency: float | None = None
     first_token_logged: bool = False
-    media_fallback_retry_requested: bool = False
-    media_fallback_retry_inputs: MediaInputs | None = None
-    media_fallback_removed_kinds: frozenset[MediaKind] = frozenset()
+    media_fallback_retry: MediaRetryDecision | None = None
     user_error: Exception | None = None
     stream_exception: Exception | None = None
 
@@ -733,9 +732,7 @@ def _request_stream_retry(
     )
     if not retry_decision.should_retry:
         return False
-    state.media_fallback_retry_requested = True
-    state.media_fallback_retry_inputs = retry_decision.media_inputs
-    state.media_fallback_removed_kinds = retry_decision.removed_kinds
+    state.media_fallback_retry = retry_decision
     logger.warning(
         log_message,
         agent=agent_name,
@@ -942,6 +939,7 @@ async def _run_non_streaming_agent_attempts(
     """Run one non-streaming agent response sequence, including media fallback."""
     agent = run_context.prepared_run.agent
     response: RunOutput | None = None
+    pending_retry_decision: MediaRetryDecision | None = None
     try:
         for retried_after_media_fallback in (False, True):
             response = None
@@ -982,6 +980,7 @@ async def _run_non_streaming_agent_attempts(
                         error=str(e),
                         removed_media_kinds=sorted(retry_decision.removed_kinds),
                     )
+                    pending_retry_decision = retry_decision
                     attempt.retry(
                         run_context.run_input,
                         fallback_prompt=run_context.inline_media_fallback_prompt,
@@ -1009,6 +1008,7 @@ async def _run_non_streaming_agent_attempts(
                         error=error_text,
                         removed_media_kinds=sorted(retry_decision.removed_kinds),
                     )
+                    pending_retry_decision = retry_decision
                     attempt.retry(
                         run_context.run_input,
                         fallback_prompt=run_context.inline_media_fallback_prompt,
@@ -1027,6 +1027,8 @@ async def _run_non_streaming_agent_attempts(
             break
 
         assert response is not None
+        if pending_retry_decision is not None and response.status not in (RunStatus.error, RunStatus.cancelled):
+            pending_retry_decision.record_retry_success()
         return _NonStreamingAttemptResult(response=response, attempt=attempt)
     finally:
         ai_runtime.cleanup_queued_notice_state(
@@ -1830,7 +1832,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901
+    async def _run_streaming_attempt(  # noqa: C901, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -1879,6 +1881,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         holder.attempt_started = True
         turn_state = run.turn_state
         state = _StreamingAttemptState()
+        pending_retry_decision: MediaRetryDecision | None = None
 
         for retried_after_media_fallback in (False, True):
             state = _StreamingAttemptState()
@@ -1910,12 +1913,13 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ):
                 yield stream_chunk
 
-            if state.media_fallback_retry_requested:
+            if state.media_fallback_retry is not None:
+                pending_retry_decision = state.media_fallback_retry
                 attempt.retry(
                     run_context.run_input,
                     fallback_prompt=run_context.inline_media_fallback_prompt,
-                    extra_removed_kinds=state.media_fallback_removed_kinds,
-                    retry_media_inputs=state.media_fallback_retry_inputs or MediaInputs(),
+                    extra_removed_kinds=pending_retry_decision.removed_kinds,
+                    retry_media_inputs=pending_retry_decision.media_inputs,
                     run_id=continuation_state.active_run_id,
                 )
                 continue
@@ -1986,6 +1990,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 )
                 return
 
+            if pending_retry_decision is not None:
+                pending_retry_decision.record_retry_success()
             break
 
         metadata_content: dict[str, Any] | None = None

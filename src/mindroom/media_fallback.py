@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
 from agno.models.anthropic import Claude
 from agno.models.azure.openai_chat import AzureOpenAI
 from agno.models.cerebras import Cerebras
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from agno.models.base import Model
 
 __all__ = [
+    "MediaRetryDecision",
     "ModelMediaRoute",
     "append_inline_media_fallback_prompt",
     "build_model_media_route",
@@ -51,11 +53,20 @@ _OPENAI_OUTPUT_FORMAT_PATTERN = re.compile(r"\boutput_format\b")
 _TEXT_ONLY_CONTENT_TYPE_PATTERN = re.compile(
     r"content(?:\[\d+\])?\.type is invalid, allowed values: \['text'\]",
 )
-# Z.ai reports content part types it cannot parse at all (e.g. OpenAI-style
-# "file" parts) as a bare type error on the message path.
-_CONTENT_PART_TYPE_ERROR_PATTERN = re.compile(
-    r"messages(?:\[\d+\])?\.content(?:\[\d+\])?\.type type error",
+# Invalid-request-class evidence: the provider rejected the request itself, so
+# when the request carried media, retrying once without it degrades gracefully
+# for any provider without matching that provider's error prose. Exceptions
+# carry the status code; stringified errored-run text only keeps generic,
+# protocol-stable markers (OpenAI SDK "Error code: N" prefixes, HTTP phrasing,
+# OpenAI/Anthropic "invalid_request_error", Google "INVALID_ARGUMENT").
+_INVALID_REQUEST_STATUS_CODES = frozenset({400, 413, 415, 422})
+_PAYLOAD_TOO_LARGE_STATUS = 413
+_INVALID_REQUEST_TEXT_PATTERN = re.compile(
+    r"error code: (?:400|413|415|422)\b|\bbad request\b|\binvalid_request_error\b|\binvalid_argument\b",
 )
+# Invalid-request errors that name credentials are not media failures; retrying
+# without media would fail identically.
+_AUTH_ERROR_TEXT_PATTERN = re.compile(r"api[\s_-]?key|unauthorized|forbidden|authentication")
 _MEDIA_KIND_PATTERN = r"audio|image|video|file|document"
 _INLINE_MEDIA_UNSUPPORTED_PATTERNS = (
     re.compile(rf"(?P<kind>{_MEDIA_KIND_PATTERN}) input is not supported"),
@@ -93,12 +104,24 @@ class _MediaFilterResult:
 
 
 @dataclass(frozen=True, slots=True)
-class _MediaRetryDecision:
-    """Retry policy after one provider media failure."""
+class MediaRetryDecision:
+    """Retry policy after one provider media failure.
+
+    ``teach_route_on_success`` carries the route whose capability cache should
+    learn ``removed_kinds`` once the without-media retry actually succeeds; the
+    attempt loop reports that via :meth:`record_retry_success`.
+    """
 
     should_retry: bool
     media_inputs: MediaInputs
     removed_kinds: frozenset[MediaKind]
+    teach_route_on_success: ModelMediaRoute | None = None
+
+    def record_retry_success(self) -> None:
+        """Teach the route cache from the successful without-media experiment."""
+        if self.teach_route_on_success is None or not self.removed_kinds:
+            return
+        _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE.setdefault(self.teach_route_on_success, set()).update(self.removed_kinds)
 
 
 # Intentional process-lifetime pessimism: learned negative capability state is cleared by restart.
@@ -146,15 +169,19 @@ def retry_media_inputs_after_failure(
     media_inputs: MediaInputs,
     *,
     extra_present_kinds: frozenset[MediaKind] = frozenset(),
-) -> _MediaRetryDecision:
+) -> MediaRetryDecision:
     """Decide whether and how one media-bearing request should retry.
 
     Explicit "kind is not supported" errors teach the route cache so later
     requests pre-drop that kind; text-only content errors teach every present
-    kind; validation and ambiguous media errors retry once without poisoning
-    the cache. A kind can only be learned when it was actually present in
-    ``media_inputs`` or ``extra_present_kinds`` (media pinned to
-    thread-history messages in the run input).
+    kind; kind-specific validation errors (malformed or mis-encoded media)
+    retry once without ever teaching. Any other invalid-request-class failure
+    retries once without media and teaches the cache only when that retry
+    succeeds — unless the error names a payload-size or context-overflow
+    cause, where dropping media can succeed for the wrong reason. A kind can
+    only be learned when it was actually present in ``media_inputs`` or
+    ``extra_present_kinds`` (media pinned to thread-history messages in the
+    run input).
     """
     present_kinds = media_inputs.kinds() | extra_present_kinds
     if not present_kinds:
@@ -170,7 +197,8 @@ def retry_media_inputs_after_failure(
             cache_route=route,
         )
 
-    if _TEXT_ONLY_CONTENT_TYPE_PATTERN.search(error_text.lower()):
+    lowered_error_text = error_text.lower()
+    if _TEXT_ONLY_CONTENT_TYPE_PATTERN.search(lowered_error_text):
         return _media_retry_decision_for_kinds(
             media_inputs,
             present_kinds,
@@ -182,11 +210,16 @@ def retry_media_inputs_after_failure(
     if validation_kinds:
         return _media_retry_decision_for_kinds(media_inputs, validation_kinds, present_kinds=present_kinds)
 
-    if _is_ambiguous_media_error(error_text):
-        return _MediaRetryDecision(
+    if _INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN.search(lowered_error_text) or _is_invalid_request_error(
+        error,
+        lowered_error_text,
+    ):
+        teaching_blocked = _capability_teaching_blocked(error, lowered_error_text)
+        return MediaRetryDecision(
             should_retry=True,
             media_inputs=_without_media_kinds(media_inputs, present_kinds),
             removed_kinds=present_kinds,
+            teach_route_on_success=None if teaching_blocked else route,
         )
 
     return _no_media_retry_decision(media_inputs)
@@ -215,25 +248,48 @@ def _media_retry_decision_for_kinds(
     *,
     present_kinds: frozenset[MediaKind],
     cache_route: ModelMediaRoute | None = None,
-) -> _MediaRetryDecision:
+) -> MediaRetryDecision:
     removed_kinds = kinds & present_kinds
     if not removed_kinds:
         return _no_media_retry_decision(media_inputs)
     if cache_route is not None:
         _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE.setdefault(cache_route, set()).update(removed_kinds)
-    return _MediaRetryDecision(
+    return MediaRetryDecision(
         should_retry=True,
         media_inputs=_without_media_kinds(media_inputs, removed_kinds),
         removed_kinds=removed_kinds,
     )
 
 
-def _no_media_retry_decision(media_inputs: MediaInputs) -> _MediaRetryDecision:
-    return _MediaRetryDecision(
+def _no_media_retry_decision(media_inputs: MediaInputs) -> MediaRetryDecision:
+    return MediaRetryDecision(
         should_retry=False,
         media_inputs=media_inputs,
         removed_kinds=frozenset(),
     )
+
+
+def _is_invalid_request_error(error: Exception | str, lowered_error_text: str) -> bool:
+    if isinstance(error, ModelProviderError) and error.status_code in _INVALID_REQUEST_STATUS_CODES:
+        return True
+    if _AUTH_ERROR_TEXT_PATTERN.search(lowered_error_text):
+        return False
+    return bool(_INVALID_REQUEST_TEXT_PATTERN.search(lowered_error_text))
+
+
+def _capability_teaching_blocked(error: Exception | str, lowered_error_text: str) -> bool:
+    """Report when a retry success would not prove the media kinds unsupported.
+
+    Payload-size and context-overflow rejections shrink below the limit once
+    media is dropped, so a successful retry says nothing about capability.
+    """
+    if isinstance(error, ContextWindowExceededError):
+        return True
+    if isinstance(error, ModelProviderError) and error.status_code == _PAYLOAD_TOO_LARGE_STATUS:
+        return True
+    if f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in lowered_error_text:
+        return True
+    return any(marker in lowered_error_text for marker in ModelProviderError.CONTEXT_WINDOW_PATTERNS)
 
 
 def _unsupported_media_kinds_from_error(error_text: str) -> frozenset[MediaKind]:
@@ -262,14 +318,6 @@ def _media_validation_kinds_from_error(error_text: str) -> frozenset[MediaKind]:
     ):
         kinds.add("audio")
     return frozenset(kinds)
-
-
-def _is_ambiguous_media_error(error_text: str) -> bool:
-    lowered_error_text = error_text.lower()
-    return bool(
-        _INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN.search(lowered_error_text)
-        or _CONTENT_PART_TYPE_ERROR_PATTERN.search(lowered_error_text),
-    )
 
 
 def _canonical_media_kind(provider_kind: str) -> MediaKind | None:
