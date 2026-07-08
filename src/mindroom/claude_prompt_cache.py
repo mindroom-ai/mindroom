@@ -38,6 +38,13 @@ tool, and orders the tools array deterministically (non-deferred first, then
 deferred sorted by name). Deferred tools may not carry ``cache_control`` (the
 API rejects the request), which is why the ladder's tools marker targets the
 last non-deferred tool.
+
+The hook's third job is history repair: replayed tool-search result blocks
+are stripped down to the request schema on every request, because Agno
+persists the response-shape block verbatim and the API rejects its extra
+fields as a 400. This is why the client proxy is installed unconditionally —
+the ladder and defer tagging gate themselves per request, but a cache-disabled
+model with no deferred tools can still replay poisoned history.
 """
 
 from __future__ import annotations
@@ -405,12 +412,14 @@ def install_claude_prompt_cache_hook(model: object) -> None:
     """Route an Agno Claude model's SDK clients through the prompt-cache ladder.
 
     Applies to every Anthropic-family Claude model (direct API, Vertex, and
-    Bedrock all share the SDK client shape). The ladder is skipped per request
-    while ``cache_system_prompt`` is falsy, so callers that deliberately
-    disable caching (for example one-off summary calls) stay unmarked even
-    when they reuse a hooked model instance. The proxy still engages for such
-    models once deferred tool names are registered, because defer_loading
-    tagging is independent of the cache ladder.
+    Bedrock all share the SDK client shape). Every request goes through the
+    client proxy; the ladder and defer_loading tagging gate themselves per
+    request inside ``_prepared``, so callers that deliberately disable caching
+    (for example one-off summary calls) stay unmarked even when they reuse a
+    hooked model instance. The proxy is never skipped outright because
+    replayed tool-search result blocks must be sanitized on every request —
+    a cache-disabled model with no deferred tools still replays poisoned
+    history.
     """
     if not isinstance(model, AnthropicClaude):
         return
@@ -421,9 +430,6 @@ def install_claude_prompt_cache_hook(model: object) -> None:
     original_get_async_client = model.get_async_client
     model_dict[_PROMPT_CACHE_HOOK_ATTR] = True
 
-    # Always proxy: the ladder and deferred-tool tagging gate themselves inside
-    # _prepared, but replayed tool-search result blocks must be sanitized on
-    # every request, including cache-disabled models replaying history.
     def _get_client_with_prompt_cache() -> object:
         client = original_get_client()
         return _PromptCacheClientProxy(client, model)
