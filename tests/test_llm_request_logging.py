@@ -13,6 +13,8 @@ from agno.models.response import ModelResponse
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
 from mindroom.llm_request_logging import (
+    _RequestLogRef,
+    _write_llm_response_log,
     bind_llm_request_log_context,
     current_llm_request_log_context,
     install_llm_request_logging,
@@ -385,3 +387,53 @@ async def test_llm_response_record_skipped_without_usage(tmp_path: Path) -> None
     entries = _read_log_entries(tmp_path)
     assert len(entries) == 1
     assert "record" not in entries[0]
+
+
+@pytest.mark.asyncio
+async def test_llm_response_usage_recorded_when_stream_is_abandoned(tmp_path: Path) -> None:
+    """Usage seen before an early aclose() must still produce a response record."""
+
+    @dataclass
+    class _EarlyUsageModel(_FakeModel):
+        async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+            yield ModelResponse(content="ok", response_usage=MessageMetrics(input_tokens=3, cache_read_tokens=42))
+            yield ModelResponse(content="never consumed")
+
+    model = _EarlyUsageModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    stream = model.ainvoke_stream(
+        messages=[Message(role="user", content="hello")],
+        assistant_message=Message(role="assistant"),
+        tools=[],
+    )
+    first_chunk = await anext(stream)
+    assert first_chunk.content == "ok"
+    await stream.aclose()
+
+    request_entry, response_entry = _read_log_entries(tmp_path)
+    assert response_entry["record"] == "response"
+    assert response_entry["request_log_id"] == request_entry["request_log_id"]
+    assert response_entry["usage"]["cache_read_tokens"] == 42
+
+
+@pytest.mark.asyncio
+async def test_llm_response_record_reuses_the_request_records_file(tmp_path: Path) -> None:
+    """The response record must land in the request record's daily file, not the current day's."""
+    request_day_file = tmp_path / "llm-requests-2026-01-01.jsonl"
+    await _write_llm_response_log(
+        model=_FakeModel(),
+        agent_name="default",
+        request_log_ref=_RequestLogRef(request_log_id="req-1", log_path=request_day_file),
+        usage=MessageMetrics(input_tokens=1, cache_read_tokens=5),
+        request_context={},
+    )
+
+    entries = [json.loads(line) for line in request_day_file.read_text(encoding="utf-8").splitlines()]
+    assert entries[0]["record"] == "response"
+    assert entries[0]["request_log_id"] == "req-1"
