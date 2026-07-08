@@ -16136,7 +16136,7 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.m
 | `MINDROOM_STORAGE_PATH` | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`) | `mindroom_data` next to config _(will fail if not writable)_ |
 | `MINDROOM_CONFIG_PATH` | Path to config.yaml (for plugin tool registration) | _(optional)_ |
 
-`subprocess` runs every non-shell tool call in a fresh `python -m mindroom.api.sandbox_runner` child that re-imports the runtime on each call.
+`subprocess` runs every tool call in a fresh `python -m mindroom.api.sandbox_runner` child that re-imports the runtime on each call.
 `forkserver` keeps one warm template process per interpreter that imports the runtime once and forks a fresh child per call, preserving per-call process isolation while removing the per-call import cost.
 Dedicated Docker and Kubernetes workers default to `forkserver`.
 If the warm template fails to start, dispatch falls back to spawn-per-call and retries the template after a cooldown.
@@ -16248,8 +16248,9 @@ It also proves garbage and missing proxy session tokens are refused.
 
 Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process.
-These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts.
-To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` is `subprocess` or `forkserver`.
+Handles are owned by a small worker-local shell supervisor process that the runner spawns on first shell use: they survive multiple requests to the same runner, but not runner or worker restarts.
+Shell requests run in per-request subprocesses like every other execution tool; the request process computes the shell env and cwd, then relays run/check/kill to the supervisor over a unix socket advertised via `MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET`.
+When the supervisor exits (runner shutdown, worker restart, or orphaning), it kills any still-running supervised process groups, so handles are invalidated without leaking processes.
 
 ## Workspace home contract
 
