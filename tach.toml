@@ -241,6 +241,9 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.tool_system.dependencies",
     "mindroom.claude_prompt_cache",
+    "mindroom.claude_stream_retry",
+    "mindroom.codex_model",
+    "mindroom.vertex_claude_compat",
 ]
 visibility = [
     "mindroom.ai",
@@ -2828,22 +2831,6 @@ expose = [
     "get_team_session",
 ]
 from = ["mindroom.agent_storage"]
-
-# Consumed dynamically by mindroom.model_loading (lazy provider imports keep
-# provider SDKs out of slim entry-point import graphs, #1436).
-[[interfaces]]
-expose = [
-    "CodexResponses",
-    "derive_codex_prompt_cache_key",
-    "normalize_codex_model_id",
-]
-from = ["mindroom.codex_model"]
-
-# Consumed dynamically by mindroom.model_loading (lazy provider imports keep
-# provider SDKs out of slim entry-point import graphs, #1436).
-[[interfaces]]
-expose = ["MindroomVertexAIClaude"]
-from = ["mindroom.vertex_claude_compat"]
 
 [[interfaces]]
 expose = [

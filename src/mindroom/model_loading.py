@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
@@ -37,26 +36,6 @@ _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
 # 10 minutes unless the client has an explicit timeout; 3600s is the SDK's own
 # ceiling for non-streaming operations.
 _CLAUDE_REQUEST_TIMEOUT_SECONDS = 3600.0
-
-# Model classes resolve lazily by dotted path so importing this module does not
-# import every provider SDK; only the configured provider's SDK loads (#1436).
-_PROVIDER_MODEL_CLASS_PATHS: dict[str, tuple[str, str]] = {
-    "anthropic": ("agno.models.anthropic", "Claude"),
-    "azure": ("agno.models.azure", "AzureOpenAI"),
-    "cerebras": ("agno.models.cerebras", "Cerebras"),
-    "deepseek": ("agno.models.deepseek", "DeepSeek"),
-    "gemini": ("agno.models.google", "Gemini"),
-    "google": ("agno.models.google", "Gemini"),
-    "groq": ("agno.models.groq", "Groq"),
-    "llama_cpp": ("agno.models.llama_cpp", "LlamaCpp"),
-    "openai": ("agno.models.openai", "OpenAIChat"),
-    "vertexai_claude": ("mindroom.vertex_claude_compat", "MindroomVertexAIClaude"),
-}
-
-
-def _load_model_class(module_path: str, class_name: str) -> type[Any]:
-    """Import one provider model class on first use."""
-    return cast("type[Any]", getattr(import_module(module_path), class_name))
 
 
 def _canonical_provider(provider: str) -> str:
@@ -153,11 +132,12 @@ def _set_bedrock_claude_session(extra_kwargs: dict[str, Any], aws_profile: str |
         session_kwargs["profile_name"] = str(aws_profile)
     if aws_region := extra_kwargs.get("aws_region"):
         session_kwargs["region_name"] = str(aws_region)
-    session_module = import_module("boto3.session")
-    extra_kwargs["session"] = session_module.Session(**session_kwargs)
+    import boto3.session  # noqa: PLC0415
+
+    extra_kwargs["session"] = boto3.session.Session(**session_kwargs)
 
 
-def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
+def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     provider: str,
     model_id: str,
     model_config: ModelConfig,
@@ -165,7 +145,12 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> Model:
-    """Create a model instance for one provider."""
+    """Create a model instance for one provider.
+
+    Model classes import inside their provider branches so importing this
+    module never imports a provider SDK; only the configured provider's SDK
+    loads at first model construction (#1436).
+    """
     canonical_provider = _canonical_provider(provider)
 
     if (
@@ -207,19 +192,21 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
         extra_kwargs.setdefault("timeout", _CLAUDE_REQUEST_TIMEOUT_SECONDS)
 
     if canonical_provider == "ollama":
+        from agno.models.ollama import Ollama  # noqa: PLC0415
+
         host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT
         logger.debug("using_ollama_host", host=host)
-        ollama_class = _load_model_class("agno.models.ollama", "Ollama")
-        return ollama_class(id=model_id, host=host, **extra_kwargs)
+        return Ollama(id=model_id, host=host, **extra_kwargs)
 
     if canonical_provider == "openrouter":
+        from agno.models.openrouter import OpenRouter  # noqa: PLC0415
+
         api_key = extra_kwargs.pop("api_key", None)
         if not api_key:
             api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
-        openrouter_class = _load_model_class("agno.models.openrouter", "OpenRouter")
-        return openrouter_class(id=model_id, api_key=api_key, **extra_kwargs)
+        return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
 
     if canonical_provider == "zai":
         # OpenAILike neither reads a provider env var nor rejects a missing key,
@@ -236,20 +223,23 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
         extra_kwargs.setdefault("base_url", ZAI_BASE_URL_DEFAULT)
         extra_kwargs.setdefault("name", "ZAI")
         extra_kwargs.setdefault("provider", "ZAI")
-        openai_like_class = _load_model_class("agno.models.openai.like", "OpenAILike")
-        return openai_like_class(id=model_id, **extra_kwargs)
+        from agno.models.openai.like import OpenAILike  # noqa: PLC0415
+
+        return OpenAILike(id=model_id, **extra_kwargs)
 
     if canonical_provider in {"codex", "openai_codex"}:
-        codex_module = import_module("mindroom.codex_model")
+        from mindroom.codex_model import (  # noqa: PLC0415
+            CodexResponses,
+            derive_codex_prompt_cache_key,
+            normalize_codex_model_id,
+        )
+
         extra_kwargs.pop("api_key", None)
         if "prompt_cache_key" not in extra_kwargs and execution_identity is not None:
-            prompt_cache_key = codex_module.derive_codex_prompt_cache_key(execution_identity)
+            prompt_cache_key = derive_codex_prompt_cache_key(execution_identity)
             if prompt_cache_key is not None:
                 extra_kwargs["prompt_cache_key"] = prompt_cache_key
-        return cast(
-            "Model",
-            codex_module.CodexResponses(id=codex_module.normalize_codex_model_id(model_id), **extra_kwargs),
-        )
+        return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
 
     if canonical_provider == _BEDROCK_CLAUDE_PROVIDER:
         extra_kwargs.pop("api_key", None)
@@ -260,14 +250,56 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
             missing_message="Missing AWS Bedrock dependencies. Install with: pip install 'mindroom[aws_bedrock]'",
         )
         _populate_bedrock_claude_runtime_kwargs(extra_kwargs, runtime_paths)
-        aws_bedrock_module = import_module("agno.models.aws.claude")
-        aws_bedrock_claude = cast("type[Model]", aws_bedrock_module.Claude)
-        return aws_bedrock_claude(id=model_id, **extra_kwargs)
+        from agno.models.aws.claude import Claude as AwsBedrockClaude  # noqa: PLC0415
 
-    model_class_path = _PROVIDER_MODEL_CLASS_PATHS.get(canonical_provider)
-    if model_class_path is not None:
-        model_class = _load_model_class(*model_class_path)
-        return model_class(id=model_id, **extra_kwargs)
+        return AwsBedrockClaude(id=model_id, **extra_kwargs)
+
+    if canonical_provider == "openai":
+        from agno.models.openai import OpenAIChat  # noqa: PLC0415
+
+        return OpenAIChat(id=model_id, **extra_kwargs)
+
+    if canonical_provider == "azure":
+        # The concrete module, not agno.models.azure: the package init wraps
+        # this import in a try/except stub whose fallback is not a Model.
+        from agno.models.azure.openai_chat import AzureOpenAI  # noqa: PLC0415
+
+        return AzureOpenAI(id=model_id, **extra_kwargs)
+
+    if canonical_provider == "anthropic":
+        from agno.models.anthropic import Claude  # noqa: PLC0415
+
+        return Claude(id=model_id, **extra_kwargs)
+
+    if canonical_provider in {"gemini", "google"}:
+        from agno.models.google import Gemini  # noqa: PLC0415
+
+        return Gemini(id=model_id, **extra_kwargs)
+
+    if canonical_provider == "vertexai_claude":
+        from mindroom.vertex_claude_compat import MindroomVertexAIClaude  # noqa: PLC0415
+
+        return MindroomVertexAIClaude(id=model_id, **extra_kwargs)
+
+    if canonical_provider == "llama_cpp":
+        from agno.models.llama_cpp import LlamaCpp  # noqa: PLC0415
+
+        return LlamaCpp(id=model_id, **extra_kwargs)
+
+    if canonical_provider == "cerebras":
+        from agno.models.cerebras import Cerebras  # noqa: PLC0415
+
+        return Cerebras(id=model_id, **extra_kwargs)
+
+    if canonical_provider == "groq":
+        from agno.models.groq import Groq  # noqa: PLC0415
+
+        return Groq(id=model_id, **extra_kwargs)
+
+    if canonical_provider == "deepseek":
+        from agno.models.deepseek import DeepSeek  # noqa: PLC0415
+
+        return DeepSeek(id=model_id, **extra_kwargs)
 
     msg = f"Unsupported AI provider: {provider}"
     raise ValueError(msg)
