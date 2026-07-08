@@ -11,6 +11,7 @@ from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
 from agno.models.message import Message
 from pydantic import BaseModel
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine, Iterator, Sequence
 
     from agno.models.base import Model
+    from agno.models.message import MessageMetrics
     from agno.models.response import ModelResponse
 
     from mindroom.config.models import DebugConfig
@@ -267,6 +269,7 @@ async def _write_llm_request_log(
     log_dir: str | None,
     default_log_dir: Path,
     request_context: dict[str, _JSONValue] | None = None,
+    request_log_id: str,
 ) -> None:
     """Persist one request record for an LLM invocation."""
     now = datetime.now().astimezone()
@@ -276,6 +279,7 @@ async def _write_llm_request_log(
         _daily_log_path(log_dir, default_log_dir, now),
         {
             "timestamp": now.isoformat(),
+            "request_log_id": request_log_id,
             "agent_id": agent_name,
             **resolved_request_context,
             "model_id": model.id,
@@ -289,6 +293,48 @@ async def _write_llm_request_log(
     )
 
 
+def _usage_payload(usage: MessageMetrics) -> dict[str, _JSONValue]:
+    """Return the token counts of one provider response as a JSON payload."""
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+    }
+
+
+async def _write_llm_response_log(
+    *,
+    model: Model,
+    agent_name: str,
+    request_log_id: str | None,
+    usage: MessageMetrics | None,
+    log_dir: str | None,
+    default_log_dir: Path,
+    request_context: dict[str, _JSONValue],
+) -> None:
+    """Persist one compact response record with the provider-reported usage.
+
+    No-op when the request record was never written (no request_log_id to join
+    on) or when the provider reported no usage metrics.
+    """
+    if request_log_id is None or usage is None:
+        return
+    now = datetime.now().astimezone()
+    payload: dict[str, _JSONValue] = {
+        "timestamp": now.isoformat(),
+        "record": "response",
+        "request_log_id": request_log_id,
+        "agent_id": agent_name,
+        "model_id": model.id,
+        "usage": _usage_payload(usage),
+    }
+    correlation_id = request_context.get("correlation_id")
+    if correlation_id is not None:
+        payload["correlation_id"] = correlation_id
+    await asyncio.to_thread(_write_jsonl_line, _daily_log_path(log_dir, default_log_dir, now), payload)
+
+
 async def _write_llm_request_log_if_present(
     *,
     model: Model,
@@ -297,11 +343,16 @@ async def _write_llm_request_log_if_present(
     log_dir: str | None,
     default_log_dir: Path,
     request_context: dict[str, _JSONValue],
-) -> None:
-    """Write one request log entry when provider kwargs include API request messages."""
+) -> str | None:
+    """Write one request log entry when provider kwargs include API request messages.
+
+    Returns the generated request_log_id when a record was written, so the
+    matching response record can be joined to it later.
+    """
     messages = _request_messages(kwargs.get("messages"))
     if messages is None:
-        return
+        return None
+    request_log_id = uuid4().hex
     await _write_llm_request_log(
         model=model,
         agent_name=agent_name,
@@ -310,7 +361,9 @@ async def _write_llm_request_log_if_present(
         log_dir=log_dir,
         default_log_dir=default_log_dir,
         request_context=request_context,
+        request_log_id=request_log_id,
     )
+    return request_log_id
 
 
 def install_llm_request_logging(
@@ -334,7 +387,7 @@ def install_llm_request_logging(
         request_context = _snapshot_request_log_context()
 
         async def _invoke() -> ModelResponse:
-            await _write_llm_request_log_if_present(
+            request_log_id = await _write_llm_request_log_if_present(
                 model=model,
                 agent_name=agent_name,
                 kwargs=kwargs,
@@ -342,7 +395,17 @@ def install_llm_request_logging(
                 default_log_dir=default_log_dir,
                 request_context=request_context,
             )
-            return await original_ainvoke(*args, **kwargs)
+            response = await original_ainvoke(*args, **kwargs)
+            await _write_llm_response_log(
+                model=model,
+                agent_name=agent_name,
+                request_log_id=request_log_id,
+                usage=response.response_usage,
+                log_dir=debug_config.llm_request_log_dir,
+                default_log_dir=default_log_dir,
+                request_context=request_context,
+            )
+            return response
 
         return _invoke()
 
@@ -350,7 +413,7 @@ def install_llm_request_logging(
         request_context = _snapshot_request_log_context()
 
         async def _stream() -> AsyncIterator[ModelResponse]:
-            await _write_llm_request_log_if_present(
+            request_log_id = await _write_llm_request_log_if_present(
                 model=model,
                 agent_name=agent_name,
                 kwargs=kwargs,
@@ -358,8 +421,20 @@ def install_llm_request_logging(
                 default_log_dir=default_log_dir,
                 request_context=request_context,
             )
+            last_usage: MessageMetrics | None = None
             async for chunk in original_ainvoke_stream(*args, **kwargs):
+                if chunk.response_usage is not None:
+                    last_usage = chunk.response_usage
                 yield chunk
+            await _write_llm_response_log(
+                model=model,
+                agent_name=agent_name,
+                request_log_id=request_log_id,
+                usage=last_usage,
+                log_dir=debug_config.llm_request_log_dir,
+                default_log_dir=default_log_dir,
+                request_context=request_context,
+            )
 
         return _stream()
 

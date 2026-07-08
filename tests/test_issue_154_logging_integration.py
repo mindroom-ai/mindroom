@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import structlog
 from agno.models.message import Message
+from agno.models.response import ModelResponse
 from agno.run.agent import ModelRequestCompletedEvent, RunCompletedEvent, RunContentEvent
 from agno.run.base import RunStatus
 
@@ -70,15 +71,15 @@ class _LoggingModel:
     client: object | None = None
     async_client: object | None = None
 
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> dict[str, str]:
-        return {"status": "ok"}
+    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        return ModelResponse(content="ok")
 
     async def ainvoke_stream(
         self,
         *_args: object,
         **_kwargs: object,
-    ) -> AsyncIterator[dict[str, str]]:
-        yield {"status": "ok"}
+    ) -> AsyncIterator[ModelResponse]:
+        yield ModelResponse(content="ok")
 
 
 class _InvokeAgent:

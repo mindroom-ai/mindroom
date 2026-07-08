@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.models.message import Message, MessageMetrics
+from agno.models.response import ModelResponse
 
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
@@ -31,11 +32,14 @@ class _FakeModel:
     client: object | None = None
     async_client: object | None = None
 
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> dict[str, str]:
-        return {"status": "ok"}
+    response_usage: MessageMetrics | None = None
 
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[dict[str, str]]:
-        yield {"status": "ok"}
+    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        return ModelResponse(content="ok", response_usage=self.response_usage)
+
+    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        yield ModelResponse(content="ok")
+        yield ModelResponse(content="!", response_usage=self.response_usage)
 
 
 class _PlainAsyncIterator:
@@ -116,7 +120,7 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:  # noqa
             assistant_message=assistant_message,
             tools=[{"name": "search"}],
         )
-    assert result == {"status": "ok"}
+    assert result.content == "ok"
 
     with bind_llm_request_log_context(
         agent_id="assistant",
@@ -138,7 +142,7 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:  # noqa
             tools=[],
         )
     streamed = [chunk async for chunk in stream]
-    assert streamed == [{"status": "ok"}]
+    assert [chunk.content for chunk in streamed] == ["ok", "!"]
 
     entries = _read_log_entries(tmp_path)
     assert len(entries) == 2
@@ -298,3 +302,86 @@ async def test_llm_request_logging_disabled_creates_no_file(tmp_path: Path) -> N
         tools=[],
     )
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_llm_response_usage_record_written_and_linked(tmp_path: Path) -> None:
+    """A provider response with usage should append a response record joined by request_log_id."""
+    model = _FakeModel(
+        response_usage=MessageMetrics(input_tokens=5, output_tokens=7, cache_read_tokens=100, cache_write_tokens=20),
+    )
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    with bind_llm_request_log_context(agent_id="assistant", session_id="session-1", correlation_id="corr-9"):
+        await model.ainvoke(
+            messages=[Message(role="user", content="hello")],
+            assistant_message=Message(role="assistant"),
+            tools=[],
+        )
+
+    request_entry, response_entry = _read_log_entries(tmp_path)
+    assert request_entry["request_log_id"]
+    assert "record" not in request_entry
+    assert response_entry["record"] == "response"
+    assert response_entry["request_log_id"] == request_entry["request_log_id"]
+    assert response_entry["agent_id"] == "default"
+    assert response_entry["model_id"] == "test-model"
+    assert response_entry["correlation_id"] == "corr-9"
+    assert response_entry["usage"] == {
+        "input_tokens": 5,
+        "output_tokens": 7,
+        "cache_read_tokens": 100,
+        "cache_write_tokens": 20,
+    }
+
+
+@pytest.mark.asyncio
+async def test_llm_response_usage_record_uses_final_stream_chunk(tmp_path: Path) -> None:
+    """Streaming should record the usage carried by the last usage-bearing chunk."""
+    model = _FakeModel(response_usage=MessageMetrics(input_tokens=3, cache_read_tokens=42))
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    stream = model.ainvoke_stream(
+        messages=[Message(role="user", content="hello")],
+        assistant_message=Message(role="assistant"),
+        tools=[],
+    )
+    assert [chunk.content async for chunk in stream] == ["ok", "!"]
+
+    request_entry, response_entry = _read_log_entries(tmp_path)
+    assert response_entry["record"] == "response"
+    assert response_entry["request_log_id"] == request_entry["request_log_id"]
+    assert response_entry["usage"]["cache_read_tokens"] == 42
+    assert response_entry["usage"]["output_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_llm_response_record_skipped_without_usage(tmp_path: Path) -> None:
+    """Responses without usage metrics should not produce response records."""
+    model = _FakeModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    await model.ainvoke(
+        messages=[Message(role="user", content="hello")],
+        assistant_message=Message(role="assistant"),
+        tools=[],
+    )
+
+    entries = _read_log_entries(tmp_path)
+    assert len(entries) == 1
+    assert "record" not in entries[0]
