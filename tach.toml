@@ -40,6 +40,14 @@ path = "mindroom.path_globs"
 depends_on = []
 
 [[modules]]
+path = "mindroom.http_error_detail"
+depends_on = []
+visibility = [
+    "mindroom.cli.connect",
+    "mindroom.matrix.provisioning",
+]
+
+[[modules]]
 path = "mindroom.tool_schema_cache"
 depends_on = []
 visibility = [
@@ -1053,7 +1061,11 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.provisioning"
-depends_on = ["mindroom.matrix.client_session", "mindroom.constants"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.http_error_detail",
+    "mindroom.matrix.client_session",
+]
 
 [[modules]]
 path = "mindroom.matrix.room_cleanup"
@@ -2078,6 +2090,7 @@ depends_on = [
     "mindroom.cli.owner",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
+    "mindroom.http_error_detail",
 ]
 
 [[modules]]
