@@ -29,7 +29,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 
 ### Recommended: Hosted Matrix + Local MindRoom (`uvx` only)
 
-You only run MindRoom locally; chat and Matrix are hosted on `mindroom.chat`.
+You only run MindRoom locally; the Matrix homeserver is hosted at `mindroom.chat` and the chat UI at `chat.mindroom.chat`.
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
@@ -14867,7 +14867,7 @@ MindRoom can be deployed in various ways depending on your needs.
 
 | Method | Best For |
 |--------|----------|
-| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/) | Simplest setup: run only `uvx mindroom run` locally |
+| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/) | Recommended and simplest: run only `uvx mindroom run` locally |
 | [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) | Run MindRoom locally while execution tools run in isolated workers |
 | [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/) | Require static allowlists or human approval before Kubernetes workers reach external hostnames |
 | Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |

@@ -23,7 +23,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 
 ### Recommended: Hosted Matrix + Local MindRoom (`uvx` only)
 
-You only run MindRoom locally; chat and Matrix are hosted on `mindroom.chat`.
+You only run MindRoom locally; the Matrix homeserver is hosted at `mindroom.chat` and the chat UI at `chat.mindroom.chat`.
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
