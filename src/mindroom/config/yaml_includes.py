@@ -12,6 +12,9 @@ Supported tags (Home Assistant semantics unless noted):
 
 Relative paths resolve against the directory of the file containing the tag.
 Every resolved path must stay inside the top-level config file's directory.
+Explicit include paths may not contain hidden components: any path component starting
+with ``.`` (other than the ``.``/``..`` navigation components) is rejected, so
+``!include_text .env`` fails with a clear include error.
 Directory includes recurse into subdirectories, take only ``.yaml``/``.yml`` files in
 lexicographic order of their relative path, and skip names starting with ``.`` or ``_``.
 Unlike Home Assistant, duplicate keys across ``!include_dir_merge_named`` files and
@@ -80,6 +83,10 @@ def _resolve_include_path(loader: _IncludeLoader, node: yaml.Node) -> Path:
         raise _include_error(msg, node)
     if Path(raw).is_absolute():
         msg = f"{node.tag} does not allow absolute paths: '{raw}'"
+        raise _include_error(msg, node)
+    hidden = next((part for part in Path(raw).parts if part.startswith(".") and part not in {".", ".."}), None)
+    if hidden is not None:
+        msg = f"{node.tag} does not allow hidden path components: '{raw}'"
         raise _include_error(msg, node)
     resolved = (loader.source_path.parent / raw).resolve()
     if not resolved.is_relative_to(loader.root_dir):
@@ -315,6 +322,21 @@ _IncludeLoader.add_constructor("!include_dir_merge_list", _construct_include_dir
 _IncludeLoader.add_constructor("!include_dir_merge_named", _construct_include_dir_merge_named)
 
 
+def attach_partial_source_files(exc: BaseException, files: frozenset[Path]) -> None:
+    """Record on ``exc`` the config files a failed load had read before raising.
+
+    Reload watchers use this set to keep covering include files that a broken
+    edit referenced, so fixing them still triggers a retry reload.
+    """
+    exc.partial_source_files = files  # ty: ignore[unresolved-attribute]
+
+
+def partial_source_files(exc: BaseException) -> frozenset[Path] | None:
+    """Return the config files a failed load read before raising ``exc``, if recorded."""
+    files = getattr(exc, "partial_source_files", None)
+    return files if isinstance(files, frozenset) else None
+
+
 def load_yaml_config_source_with_digests(
     path: Path,
     *,
@@ -324,18 +346,23 @@ def load_yaml_config_source_with_digests(
 
     ``source`` optionally supplies the top-level file's bytes so a caller that
     already read the file parses and fingerprints exactly those bytes.
+    Parse failures carry the files read so far via :func:`partial_source_files`.
     """
     top = path.resolve()
     files_read: dict[Path, str] = {}
     file_texts: dict[Path, str] = {}
-    data = _parse_yaml_file(
-        top,
-        root_dir=top.parent,
-        files_read=files_read,
-        file_texts=file_texts,
-        include_chain=(top,),
-        source=source,
-    )
+    try:
+        data = _parse_yaml_file(
+            top,
+            root_dir=top.parent,
+            files_read=files_read,
+            file_texts=file_texts,
+            include_chain=(top,),
+            source=source,
+        )
+    except (yaml.YAMLError, OSError, UnicodeError) as exc:
+        attach_partial_source_files(exc, frozenset(files_read))
+        raise
     return cast("dict[str, Any]", data or {}), files_read
 
 

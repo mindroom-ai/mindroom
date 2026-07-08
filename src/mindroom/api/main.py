@@ -409,9 +409,15 @@ async def _watch_config(
     *,
     poll_interval_seconds: float = 1.0,
 ) -> None:
-    """Watch the config source files, rebinding automatically when runtime paths change."""
+    """Watch the config source files, rebinding automatically when runtime paths change.
+
+    A reload fires only after a quiet scan: scans that detect changes accumulate
+    them instead of reloading, so multi-file updates (git pull, rsync) land
+    completely before the reload reads the tree.
+    """
     runtime_paths, last_mtimes = _watched_config_mtimes(api_app)
     watched_config_path: Path = runtime_paths.config_path
+    pending_paths: set[Path] = set()
 
     while not stop_event.is_set():
         try:
@@ -426,12 +432,16 @@ async def _watch_config(
                 # Runtime swap: rebaseline the new source set without reloading.
                 watched_config_path = runtime_paths.config_path
                 last_mtimes = current_mtimes
+                pending_paths.clear()
                 continue
 
             changed_paths = file_watcher.changed_watched_paths(last_mtimes, current_mtimes)
             last_mtimes = current_mtimes
             if changed_paths:
-                logger.info("Config file changed", paths=[str(path) for path in changed_paths])
+                pending_paths.update(changed_paths)
+            elif pending_paths:
+                logger.info("Config file changed", paths=sorted(str(path) for path in pending_paths))
+                pending_paths.clear()
                 await _reload_config_after_file_change(api_app, runtime_paths)
         except (OSError, PermissionError):
             last_mtimes = dict.fromkeys(last_mtimes, 0)

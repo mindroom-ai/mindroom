@@ -64,8 +64,14 @@ async def watch_paths(
     ``paths_provider`` is re-evaluated every scan so the watched set can grow or
     shrink between calls (e.g. config ``!include`` files after a reload). Change
     detection follows :func:`changed_watched_paths`.
+
+    The callback fires only after a quiet scan: a scan that detects changes marks
+    the watcher dirty, and the callback runs on the next scan with no new changes.
+    Multi-file updates (git pull, rsync) thus land completely before a reload
+    reads the tree, at the cost of one extra scan interval of latency.
     """
     last_snapshot = paths_mtime_snapshot(paths_provider())
+    dirty = False
 
     while stop_event is None or not stop_event.is_set():
         await asyncio.sleep(_WATCH_SCAN_INTERVAL_SECONDS)
@@ -75,6 +81,9 @@ async def watch_paths(
             changed = bool(changed_watched_paths(last_snapshot, current_snapshot))
             last_snapshot = current_snapshot
             if changed:
+                dirty = True
+            elif dirty:
+                dirty = False
                 await callback()
         except Exception:
             # Don't let callback errors stop the watcher

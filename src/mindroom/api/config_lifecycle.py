@@ -24,6 +24,7 @@ from mindroom.config.main import (
 from mindroom.config.yaml_includes import (
     load_yaml_config_source,
     load_yaml_config_source_with_digests,
+    partial_source_files,
     source_files_fingerprint,
 )
 from mindroom.logging_config import get_logger
@@ -173,6 +174,10 @@ def _load_config_result(
             config_path=str(runtime_paths.config_path),
             errors=detail,
         )
+        if source_files is None:
+            # A parse-time failure never reached the full set; the files read
+            # so far keep the watcher covering a broken new include file.
+            source_files = partial_source_files(exc)
         return (
             ConfigLoadResult(success=False, error_status_code=422, error_detail=detail),
             None,
@@ -190,7 +195,11 @@ def _load_config_result(
             source_files,
         )
     else:
-        logger.info("loaded_agent_configuration", path=str(runtime_paths.config_path))
+        logger.info(
+            "loaded_agent_configuration",
+            path=str(runtime_paths.config_path),
+            source_file_count=len(source_files),
+        )
         logger.info("loaded_agent_configuration_count", agent_count=len(runtime_config.agents))
         logger.info("Loaded API config", config_path=str(runtime_paths.config_path))
         return ConfigLoadResult(success=True), validated_payload, runtime_config, source_fingerprint, source_files
@@ -761,6 +770,14 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
             )
             return False
         same_source = source_fingerprint is not None and source_fingerprint == current.source_fingerprint
+        # A failed load publishes the union of the last good source set and the
+        # files the failed attempt read, so the watcher never loses last-good
+        # coverage while still covering newly added include files whose edit
+        # broke the config; the next successful load replaces the union with
+        # the real set, shrinking it back.
+        published_source_files = source_files if source_files is not None else current.source_files
+        if not result.success and source_files is not None and current.source_files is not None:
+            published_source_files = source_files | current.source_files
         current_state.snapshot = _published_snapshot(
             current,
             increment_generation=not same_source,
@@ -768,11 +785,7 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
             runtime_config=runtime_config if runtime_config is not None else current.runtime_config,
             config_load_result=result,
             source_fingerprint=source_fingerprint,
-            # A load that failed before parsing keeps the last known source set
-            # so the watcher still covers the include file whose edit broke the
-            # config; a parsed-but-invalid load adopts the fresh set so newly
-            # added include files are watched while the user fixes them.
-            source_files=source_files if source_files is not None else current.source_files,
+            source_files=published_source_files,
         )
     return result.success
 

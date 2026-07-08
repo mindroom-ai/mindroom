@@ -6,10 +6,8 @@ import asyncio
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-import yaml
-
 from mindroom.config.main import load_config
-from mindroom.config.yaml_includes import load_yaml_config_source
+from mindroom.config.yaml_includes import partial_source_files
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.config_updates import (
     build_config_update_plan,
@@ -28,15 +26,6 @@ if TYPE_CHECKING:
     from mindroom.orchestration.config_updates import ConfigUpdatePlan
 
 logger = get_logger(__name__)
-
-
-def _parse_only_source_files(config_path: Path) -> frozenset[Path] | None:
-    """Best-effort source set of a config that failed to load, for watching."""
-    try:
-        _, source_files = load_yaml_config_source(config_path)
-    except (OSError, yaml.YAMLError, UnicodeError):
-        return None
-    return source_files
 
 
 _CONFIG_RELOAD_DEBOUNCE_SECONDS = 2.0
@@ -232,15 +221,14 @@ class ConfigReloadLifecycle:
         logger.info("Configuration file changed, checking for updates...")
         try:
             updated = await self.update_config()
-        except Exception:
+        except Exception as exc:
             logger.exception("Configuration update failed; will retry if a new change is queued")
-            # Keep watching the broken config's own source set so fixing a
-            # newly added include file (not yet in the last good config) still
+            # Keep watching every file the broken load read so fixing a newly
+            # added include file (not yet in the last good config) still
             # triggers the retry reload.
-            self.failed_reload_source_files = await asyncio.to_thread(
-                _parse_only_source_files,
-                self.runtime_paths.config_path,
-            )
+            failed_files = partial_source_files(exc)
+            if failed_files is not None:
+                self.failed_reload_source_files = failed_files
             return
         self.failed_reload_source_files = None
         if updated:

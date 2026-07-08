@@ -58,7 +58,7 @@ from mindroom.config.runtime_overlays import (
 )
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
-from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_source
+from mindroom.config.yaml_includes import ConfigIncludeError, attach_partial_source_files, load_yaml_config_source
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ROUTER_AGENT_NAME,
@@ -1831,13 +1831,19 @@ def load_config(
 
     data, source_files = load_yaml_config_source(path)
 
-    config = Config.validate_with_runtime(
-        data,
-        runtime_paths,
-        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-    )
+    try:
+        config = Config.validate_with_runtime(
+            data,
+            runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        # Parsing succeeded, so the full file set is known; expose it the same
+        # way as parse-time failures so reload watchers keep covering it.
+        attach_partial_source_files(exc, source_files)
+        raise
     config._source_files = source_files
-    logger.info("loaded_agent_configuration", path=str(path))
+    logger.info("loaded_agent_configuration", path=str(path), source_file_count=len(source_files))
     logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
     return config
 

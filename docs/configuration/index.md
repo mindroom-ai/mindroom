@@ -69,6 +69,7 @@ Relative paths resolve against the directory of the file containing the tag, so 
 Absolute paths are rejected, and every include must stay inside the top-level config file's directory (symlinks and `..` are resolved before the check), so config edits can never read arbitrary host files.
 Directory includes recurse into subdirectories, take only `.yaml`/`.yml` files, and process them in lexicographic order of their relative path.
 Files and directories whose name starts with `.` or `_` are skipped by directory includes.
+Explicit include paths may not contain hidden components: any path component starting with `.` (other than the `.` and `..` navigation components) is rejected, so `!include_text .env` fails with a clear include error.
 The `_` convention gives shared snippet files a home inside included trees, such as `agents/_shared/web_tools.yaml` above, which is pulled in via an explicit `!include`.
 Use such snippets instead of YAML anchors when sharing values between files, because YAML anchors are scoped to a single file and cannot cross an include boundary.
 
@@ -81,8 +82,10 @@ Error handling is strict so a broken split fails loudly:
 - An empty included file resolves to `null` under `!include`, and contributes nothing to directory includes.
 
 Hot reload watches every included file, so editing any file in the include tree triggers the same config reload as editing `config.yaml`.
+A reload fires only after the watched files have been quiet for one full scan interval (about one second of added latency), so a multi-file update from `git pull` or a sync tool lands completely before the reload reads the tree.
 Deleting an included file does not trigger a reload by itself: the watcher deliberately treats a missing file as an in-progress editor save and waits until it reappears or another watched file changes.
 To remove an include file, delete the `!include` reference from the including file too — that edit triggers the reload.
+If a reload fails, every file the failed attempt read stays watched alongside the last good set, so fixing a newly added include file — even one the last good config never referenced — triggers the retry reload.
 
 When migrating an existing monolith, use `mindroom config resolve` to print the fully merged config with sorted keys, and diff the output before and after the split to prove equivalence:
 

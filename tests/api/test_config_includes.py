@@ -10,6 +10,7 @@ import hashlib
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -158,9 +159,10 @@ class TestIncludeAwareSnapshots:
         assert after.config_load_result.success is False
         assert after.source_files == snapshot.source_files
 
-    def test_failed_validation_reload_adopts_the_new_source_set(self, split_app: FastAPI) -> None:
-        """A parsed-but-invalid reload starts watching newly added include files."""
-        runtime_paths = _snapshot(split_app).runtime_paths
+    def test_failed_validation_reload_unions_in_the_new_source_set(self, split_app: FastAPI) -> None:
+        """A parsed-but-invalid reload watches newly added include files plus the last good set."""
+        snapshot = _snapshot(split_app)
+        runtime_paths = snapshot.runtime_paths
         new_include = runtime_paths.config_path.parent / "agents" / "bad_agent.yaml"
         new_include.write_text("bad_agent: [not, a, mapping]\n", encoding="utf-8")
 
@@ -169,8 +171,58 @@ class TestIncludeAwareSnapshots:
         after = _snapshot(split_app)
         assert after.config_load_result is not None
         assert after.config_load_result.success is False
+        assert snapshot.source_files is not None
         assert after.source_files is not None
         assert new_include.resolve() in after.source_files
+        assert snapshot.source_files <= after.source_files
+
+    def test_parse_failure_in_new_include_file_is_still_watched(self, split_app: FastAPI) -> None:
+        """A syntax error inside a newly referenced include file joins the watched set."""
+        snapshot = _snapshot(split_app)
+        runtime_paths = snapshot.runtime_paths
+        top = runtime_paths.config_path
+        new_include = top.parent / "defaults.yaml"
+        new_include.write_text("markdown: [unclosed\n", encoding="utf-8")
+        top.write_text(
+            SPLIT_TOP_SOURCE.replace("defaults:\n  markdown: true\n", "defaults: !include defaults.yaml\n"),
+            encoding="utf-8",
+        )
+
+        assert config_lifecycle.load_config_into_app(runtime_paths, split_app) is False
+
+        after = _snapshot(split_app)
+        assert after.config_load_result is not None
+        assert after.config_load_result.success is False
+        assert snapshot.source_files is not None
+        assert after.source_files is not None
+        assert new_include.resolve() in after.source_files
+        assert snapshot.source_files <= after.source_files
+        # A later successful load shrinks the union back to the real set.
+        new_include.write_text("markdown: false\n", encoding="utf-8")
+        assert config_lifecycle.load_config_into_app(runtime_paths, split_app) is True
+        final = _snapshot(split_app)
+        assert final.source_files is not None
+        assert new_include.resolve() in final.source_files
+        assert final.config_data["defaults"]["markdown"] is False
+
+    def test_successful_load_logs_the_source_file_count(
+        self,
+        split_runtime_paths: constants.RuntimePaths,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The API's loaded_agent_configuration log line reports how many files resolved."""
+        events: list[tuple[str, dict[str, object]]] = []
+
+        class _RecordingLogger:
+            def info(self, event: str, **kwargs: object) -> None:
+                events.append((event, kwargs))
+
+        monkeypatch.setattr(config_lifecycle, "logger", _RecordingLogger())
+        api_app = _make_api_app(split_runtime_paths)
+        assert config_lifecycle.load_config_into_app(split_runtime_paths, api_app) is True
+
+        counts = [kwargs["source_file_count"] for event, kwargs in events if event == "loaded_agent_configuration"]
+        assert counts == [3]
 
     def test_publish_runtime_config_records_disk_source_files(
         self,
@@ -389,3 +441,105 @@ async def test_watch_config_reloads_when_an_included_file_changes(
     await watch_task
 
     assert loaded_paths == [split_runtime_paths.config_path]
+
+
+@pytest.mark.asyncio
+async def test_watch_config_coalesces_a_multi_file_burst_into_one_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    split_runtime_paths: constants.RuntimePaths,
+) -> None:
+    """Edits to several source files within one update burst trigger exactly one reload."""
+    main.initialize_api_app(main.app, split_runtime_paths)
+    assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app) is True
+
+    loaded_paths: list[Path] = []
+    stop_event = asyncio.Event()
+
+    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> bool:
+        loaded_paths.append(runtime_paths.config_path)
+        return False
+
+    monkeypatch.setattr(config_lifecycle, "load_config_into_app", _record_load)
+
+    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
+    await asyncio.sleep(0.05)
+    config_dir = split_runtime_paths.config_path.parent
+    burst_paths = (
+        split_runtime_paths.config_path,
+        config_dir / "models.yaml",
+        config_dir / "agents" / "test_agent.yaml",
+    )
+    future_time = time.time() + 5
+    for path in burst_paths:
+        path.write_text(path.read_text(encoding="utf-8") + "# touched\n", encoding="utf-8")
+        os.utime(path, (future_time, future_time))
+    await asyncio.sleep(0.2)
+
+    stop_event.set()
+    await watch_task
+
+    assert loaded_paths == [split_runtime_paths.config_path]
+
+
+async def _wait_for_snapshot(
+    api_app: FastAPI,
+    predicate: Callable[[config_lifecycle.ApiSnapshot], bool],
+    timeout_seconds: float = 5.0,
+) -> config_lifecycle.ApiSnapshot:
+    """Poll the app's published snapshot until ``predicate`` holds."""
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while asyncio.get_running_loop().time() < deadline:
+        snapshot = _snapshot(api_app)
+        if predicate(snapshot):
+            return snapshot
+        await asyncio.sleep(0.02)
+    msg = "snapshot condition not met before timeout"
+    raise AssertionError(msg)
+
+
+@pytest.mark.asyncio
+async def test_watch_config_recovers_after_fixing_a_broken_new_include(
+    split_runtime_paths: constants.RuntimePaths,
+) -> None:
+    """Fixing only a broken newly referenced include file triggers a reload that goes live."""
+    main.initialize_api_app(main.app, split_runtime_paths)
+    assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app) is True
+    stop_event = asyncio.Event()
+    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
+    await asyncio.sleep(0.05)
+
+    top = split_runtime_paths.config_path
+    new_include = top.parent / "defaults.yaml"
+    future_time = time.time() + 5
+    new_include.write_text("markdown: [unclosed\n", encoding="utf-8")
+    top.write_text(
+        SPLIT_TOP_SOURCE.replace("defaults:\n  markdown: true\n", "defaults: !include defaults.yaml\n"),
+        encoding="utf-8",
+    )
+    os.utime(new_include, (future_time, future_time))
+    os.utime(top, (future_time, future_time))
+
+    failed = await _wait_for_snapshot(
+        main.app,
+        lambda snapshot: snapshot.config_load_result is not None and not snapshot.config_load_result.success,
+    )
+    # The old config stays live and the broken new include file is watched.
+    assert failed.config_data["agents"]["test_agent"]["display_name"] == "Test Agent"
+    assert failed.source_files is not None
+    assert new_include.resolve() in failed.source_files
+    # Let the watcher baseline the newly watched file before fixing it.
+    await asyncio.sleep(0.1)
+
+    # Fix ONLY the new include file; the next scans reload and go live.
+    future_time += 5
+    new_include.write_text("markdown: false\n", encoding="utf-8")
+    os.utime(new_include, (future_time, future_time))
+
+    recovered = await _wait_for_snapshot(
+        main.app,
+        lambda snapshot: snapshot.config_load_result is not None and snapshot.config_load_result.success,
+    )
+    assert recovered.config_data["defaults"]["markdown"] is False
+
+    stop_event.set()
+    await watch_task
