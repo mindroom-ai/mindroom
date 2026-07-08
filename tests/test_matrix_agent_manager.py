@@ -859,48 +859,78 @@ class TestMatrixRegistration:
                 runtime_paths=runtime_paths,
             )
 
-    @pytest.mark.asyncio
-    async def test_register_user_via_provisioning_service_invalid_credentials_is_permanent(
-        self,
+    @staticmethod
+    async def _register_via_provisioning_with_response(
         tmp_path: Path,
+        response: httpx.Response,
     ) -> None:
-        """Credential revocation from the provisioning service should stop startup retries."""
-        client_secret = "secret-123"  # noqa: S105
-        password = "test_pass"  # noqa: S105
-
-        class _FakeResponse:
-            is_success = False
-            status_code = 403
-            text = "forbidden"
-
-        class _FakeAsyncClient:
-            def __init__(self, *_: object, **__: object) -> None:
-                pass
-
-            async def __aenter__(self) -> Self:
-                return self
-
-            async def __aexit__(self, *_: object) -> None:
-                return None
-
-            async def post(self, *_: object, **__: object) -> _FakeResponse:
-                return _FakeResponse()
-
         runtime_paths = constants_mod.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-        with (
-            patch.object(provisioning.httpx, "AsyncClient", _FakeAsyncClient),
-            pytest.raises(PermanentMatrixStartupError, match="invalid or revoked"),
-        ):
+        with patch.object(provisioning.httpx, "AsyncClient", _recording_httpx_async_client([], response)):
             await provisioning.register_user_via_provisioning_service(
                 provisioning_url="https://provisioning.example",
                 client_id="client-123",
-                client_secret=client_secret,
+                client_secret="secret-123",  # noqa: S106
                 homeserver="http://localhost:8008",
-                username="test_user",
-                password=password,
+                username="mindroom_test_user_otherns",
+                password="test_pass",  # noqa: S106
                 display_name="Test User",
                 runtime_paths=runtime_paths,
             )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status_code", "detail"),
+        [
+            (401, "Invalid local client credentials"),
+            (403, "Connection revoked"),
+        ],
+    )
+    async def test_register_user_via_provisioning_service_client_auth_failure_is_permanent(
+        self,
+        tmp_path: Path,
+        status_code: int,
+        detail: str,
+    ) -> None:
+        """Only genuine client-auth failures should claim the credentials are invalid or revoked."""
+        with pytest.raises(PermanentMatrixStartupError, match="invalid or revoked"):
+            await self._register_via_provisioning_with_response(
+                tmp_path,
+                httpx.Response(status_code, json={"detail": detail}),
+            )
+
+    @pytest.mark.asyncio
+    async def test_register_user_via_provisioning_service_namespace_mismatch_surfaces_detail(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A namespace-enforcement 403 must surface the server detail, not blame the credentials."""
+        detail = "Requested username is outside this local connection namespace"
+        with pytest.raises(PermanentMatrixStartupError) as excinfo:
+            await self._register_via_provisioning_with_response(
+                tmp_path,
+                httpx.Response(403, json={"detail": detail}),
+            )
+
+        message = str(excinfo.value)
+        assert detail in message
+        assert "mindroom_<entity>_<namespace>" in message
+        assert "invalid or revoked" not in message
+        assert "secret-123" not in message
+        assert "test_pass" not in message
+
+    @pytest.mark.asyncio
+    async def test_register_user_via_provisioning_service_malformed_error_body_surfaces_text(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A 403 with a non-JSON body should surface the raw text instead of the re-pair advice."""
+        with pytest.raises(PermanentMatrixStartupError, match="policy says no") as excinfo:
+            await self._register_via_provisioning_with_response(
+                tmp_path,
+                httpx.Response(403, content=b"policy says no"),
+            )
+
+        assert "invalid or revoked" not in str(excinfo.value)
 
     @pytest.mark.asyncio
     async def test_register_user_via_provisioning_service_invalid_json_is_permanent(self, tmp_path: Path) -> None:

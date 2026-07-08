@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, NoReturn
 
 import httpx
 
@@ -86,6 +86,54 @@ class _ProvisioningRegisterResult:
     user_id: str
 
 
+# Detail strings raised by scripts/local_mindroom_provisioning_service.py when the
+# client credentials themselves are the problem. Only these justify the "re-pair"
+# advice; other 403 details (e.g. namespace enforcement) describe a different failure.
+_CLIENT_AUTH_FAILURE_DETAILS = frozenset(
+    {
+        "Missing local client credentials",
+        "Invalid local client credentials",
+        "Connection revoked",
+    },
+)
+_NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
+_ERROR_DETAIL_MAX_LENGTH = 300
+
+
+def _provisioning_error_detail(response: httpx.Response) -> str:
+    """Extract the server-supplied error detail from a provisioning error response."""
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        detail = body.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()[:_ERROR_DETAIL_MAX_LENGTH]
+    return response.text.strip()[:_ERROR_DETAIL_MAX_LENGTH] or "unknown error"
+
+
+def _raise_for_register_agent_error(response: httpx.Response, *, username: str) -> NoReturn:
+    """Raise the appropriate error for a failed register-agent response."""
+    detail = _provisioning_error_detail(response)
+    if response.status_code == 401 or (response.status_code == 403 and detail in _CLIENT_AUTH_FAILURE_DETAILS):
+        msg = "Provisioning credentials are invalid or revoked. Run `mindroom connect --pair-code ...` again."
+        raise matrix_startup_error(msg, permanent=True)
+    if response.status_code == 403:
+        msg = f"Provisioning service refused to register agent user {username!r}: {detail}"
+        if detail == _NAMESPACE_MISMATCH_DETAIL:
+            msg += (
+                " Usernames must match mindroom_<entity>_<namespace> for this connection, "
+                "so this connection's namespace does not allow this username."
+            )
+        raise matrix_startup_error(msg, permanent=True)
+    if response.status_code == 404:
+        msg = "Provisioning service does not support /register-agent yet. Deploy the latest local provisioning service."
+        raise matrix_startup_error(msg, permanent=True)
+    msg = f"Provisioning service returned HTTP {response.status_code}: {detail}"
+    raise ValueError(msg)
+
+
 async def register_user_via_provisioning_service(
     *,
     provisioning_url: str,
@@ -120,18 +168,7 @@ async def register_user_via_provisioning_service(
         raise ValueError(msg) from exc
 
     if not response.is_success:
-        detail = response.text.strip() or "unknown error"
-        if response.status_code in {401, 403}:
-            msg = "Provisioning credentials are invalid or revoked. Run `mindroom connect --pair-code ...` again."
-            raise matrix_startup_error(msg, permanent=True)
-        if response.status_code == 404:
-            msg = (
-                "Provisioning service does not support /register-agent yet. "
-                "Deploy the latest local provisioning service."
-            )
-            raise matrix_startup_error(msg, permanent=True)
-        msg = f"Provisioning service returned HTTP {response.status_code}: {detail}"
-        raise ValueError(msg)
+        _raise_for_register_agent_error(response, username=username)
 
     try:
         body = response.json()
