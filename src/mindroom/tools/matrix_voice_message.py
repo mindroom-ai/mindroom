@@ -24,10 +24,11 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
-            label="OpenAI API Key",
+            label="TTS API Key",
             type="password",
             required=False,
             default=None,
+            description="When empty, OpenAI models use OPENAI_API_KEY and OpenRouter voice models use OPENROUTER_API_KEY.",
         ),
         ConfigField(
             name="model",
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default=OPENAI_TTS,
+            description="Plain OpenAI model IDs use OpenAI; provider-prefixed IDs (e.g. hexgrad/kokoro-82m) route through OpenRouter.",
         ),
         ConfigField(
             name="base_url",
@@ -42,7 +44,7 @@ if TYPE_CHECKING:
             type="url",
             required=False,
             default=None,
-            description="OpenAI-compatible speech endpoint (e.g. a local Kokoro server); leave empty to use OpenAI.",
+            description="OpenAI-compatible speech endpoint (e.g. a local Kokoro server); leave empty to use OpenAI or OpenRouter based on the model ID.",
         ),
         ConfigField(
             name="voice",
@@ -57,7 +59,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default="opus",
-            description="Audio format the TTS endpoint returns: aac, flac, mp3, opus, or wav. Non-opus formats require ffmpeg and ffprobe.",
+            description="Audio format the TTS endpoint returns: aac, flac, mp3, opus, or wav. Non-opus formats require ffmpeg and ffprobe. OpenRouter voice models always use mp3.",
         ),
     ],
     dependencies=["openai"],
