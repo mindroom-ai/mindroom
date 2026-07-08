@@ -1010,6 +1010,12 @@ authorization:
       - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
 defaults:
+  # Execution tools (shell, file, python, coding, docker) run directly in the
+  # MindRoom process. For isolation, run them in a sandboxed worker instead:
+  # deploy the sandbox runner (Docker Compose or Kubernetes) and remove this
+  # line — or replace [] with the tools to route, e.g. [shell, file, python].
+  # See https://docs.mindroom.chat/deployment/sandbox-proxy/
+  worker_tools: []
   tools:
     - scheduler
   markdown: true
