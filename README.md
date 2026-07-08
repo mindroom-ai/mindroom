@@ -184,7 +184,7 @@ See [macOS app guide](docs/installation/macos-app.md) for setup, updates, and un
 Use this path if you want to run MindRoom locally while using hosted chat + Matrix on `mindroom.chat`.
 Watch the 2-minute setup video:
 
-[![MindRoom: installing and talking to my first AI agent in 2 minutes](https://img.youtube.com/vi/jR3xLUxyWhg/maxresdefault.jpg)](https://youtu.be/jR3xLUxyWhg)
+<a href="https://youtu.be/jR3xLUxyWhg"><img src="https://img.youtube.com/vi/jR3xLUxyWhg/maxresdefault.jpg" alt="MindRoom: installing and talking to my first AI agent in 2 minutes" width="480"></a>
 
 ```bash
 # Create ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults
