@@ -752,6 +752,7 @@ depends_on = [
     "mindroom.commands.handler",
     "mindroom.constants",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.decrypt_failure",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.runtime_protocols",
@@ -1119,6 +1120,7 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.matrix.client_session",
+    "mindroom.matrix.cross_signing",
     "mindroom.matrix.provisioning",
     "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
@@ -1855,12 +1857,20 @@ depends_on = [
     "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
-    "mindroom.matrix.state",
 ]
 visibility = [
     "mindroom.api.main",
     "mindroom.bot",
+    "mindroom.bot_room_lifecycle",
     "mindroom.commands.encryption_commands",
+]
+
+[[modules]]
+path = "mindroom.matrix.cross_signing"
+depends_on = ["mindroom.logging_config"]
+visibility = [
+    "mindroom.commands.encryption_commands",
+    "mindroom.matrix.users",
 ]
 
 [[modules]]
@@ -2282,6 +2292,7 @@ visibility = ["mindroom.commands.handler"]
 path = "mindroom.commands.encryption_commands"
 depends_on = [
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.cross_signing",
     "mindroom.matrix.decrypt_failure",
 ]
 visibility = ["mindroom.commands.handler"]

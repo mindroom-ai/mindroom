@@ -36,7 +36,7 @@ from mindroom.hooks import (
     send_hook_message,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
-from mindroom.matrix.decrypt_failure import handle_decrypt_failure
+from mindroom.matrix.decrypt_failure import handle_decrypt_failure, raise_notice_floor
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
@@ -1018,6 +1018,10 @@ class AgentBot:
         self._sync_checkpoint = None
         client = cast("Any", self.client)
         client.next_batch = startup.sync_token
+        if startup.sync_token is None and self.client.user_id:
+            # Without sync continuity the initial sync replays recent history an
+            # earlier device may already have handled; don't re-notify on it.
+            raise_notice_floor(self.client.user_id)
         if startup.legacy_token:
             self.logger.warning("matrix_sync_token_uncertified_legacy")
 
@@ -1751,6 +1755,13 @@ class AgentBot:
     async def _on_decryption_failure(self, room: nio.MatrixRoom, event: nio.MegolmEvent) -> None:
         client = self.client
         assert client is not None
+        if not is_authorized_sender(event.sender, self.config, room.room_id, self.runtime_paths):
+            self.logger.debug(
+                "ignoring_decrypt_failure_from_unauthorized_sender",
+                user_id=event.sender,
+                room_id=room.room_id,
+            )
+            return
         await handle_decrypt_failure(
             client,
             room,

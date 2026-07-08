@@ -188,6 +188,43 @@ class TestAgentBot(AgentBotTestBase):
         assert (
             mock_client.add_event_callback.call_count == 14
         )  # invite, message, redaction, reaction, audio, image/file/video, unknown-event, megolm callbacks
+        registered_event_types = [call.args[1] for call in mock_client.add_event_callback.call_args_list]
+        assert nio.MegolmEvent in registered_event_types  # undecryptable events must not vanish silently
+
+    @pytest.mark.asyncio
+    @patch("mindroom.config.main.load_config")
+    async def test_decrypt_failure_ingress_applies_sender_authorization(
+        self,
+        mock_load_config: MagicMock,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """The decrypt-failure path must gate senders like every other ingress path."""
+        mock_load_config.return_value = self.create_mock_config(tmp_path)
+        config = mock_load_config.return_value
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock(spec=nio.MegolmEvent)
+        event.sender = "@stranger:localhost"
+
+        with (
+            patch("mindroom.bot.is_authorized_sender", return_value=False) as gate,
+            patch("mindroom.bot.handle_decrypt_failure", new=AsyncMock()) as handler,
+        ):
+            await bot._on_decryption_failure(room, event)
+
+        handler.assert_not_awaited()
+        gate.assert_called_once_with(event.sender, config, room.room_id, bot.runtime_paths)
+
+        with (
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.bot.handle_decrypt_failure", new=AsyncMock()) as handler,
+        ):
+            await bot._on_decryption_failure(room, event)
+
+        handler.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
