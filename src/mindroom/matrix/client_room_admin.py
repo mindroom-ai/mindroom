@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
+_ROOM_ENCRYPTION_EVENT_TYPE = "m.room.encryption"
+_ROOM_ENCRYPTION_CONTENT = {"algorithm": "m.megolm.v1.aes-sha2"}
 _ROOM_ADMIN_POWER_LEVEL = 100
 _THREAD_TAGS_POWER_LEVEL = 0
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
@@ -38,20 +40,13 @@ async def invite_to_room(
     return False
 
 
-async def create_room(
+def _create_room_initial_state(
     client: nio.AsyncClient,
-    name: str,
-    alias: str | None = None,
-    topic: str | None = None,
-    power_users: list[str] | None = None,
-) -> str | None:
-    """Create a new Matrix room."""
-    room_config: dict[str, Any] = {"name": name}
-    if alias:
-        room_config["alias"] = alias
-    if topic:
-        room_config["topic"] = topic
-
+    power_users: list[str] | None,
+    *,
+    encrypted: bool,
+) -> list[dict[str, Any]]:
+    """Build the initial state events for one managed room creation."""
     power_level_content: dict[str, Any] = {
         "users_default": _DEFAULT_USER_POWER_LEVEL,
         "state_default": _DEFAULT_STATE_EVENT_POWER_LEVEL,
@@ -66,7 +61,30 @@ async def create_room(
         users[client.user_id] = _ROOM_ADMIN_POWER_LEVEL
     if users:
         power_level_content["users"] = users
-    room_config["initial_state"] = [{"type": _POWER_LEVELS_EVENT_TYPE, "content": power_level_content}]
+    initial_state: list[dict[str, Any]] = [{"type": _POWER_LEVELS_EVENT_TYPE, "content": power_level_content}]
+    if encrypted:
+        initial_state.append(
+            {"type": _ROOM_ENCRYPTION_EVENT_TYPE, "state_key": "", "content": dict(_ROOM_ENCRYPTION_CONTENT)},
+        )
+    return initial_state
+
+
+async def create_room(
+    client: nio.AsyncClient,
+    name: str,
+    alias: str | None = None,
+    topic: str | None = None,
+    power_users: list[str] | None = None,
+    *,
+    encrypted: bool = False,
+) -> str | None:
+    """Create a new Matrix room."""
+    room_config: dict[str, Any] = {"name": name}
+    if alias:
+        room_config["alias"] = alias
+    if topic:
+        room_config["topic"] = topic
+    room_config["initial_state"] = _create_room_initial_state(client, power_users, encrypted=encrypted)
 
     response = await client.room_create(**room_config)
     if isinstance(response, nio.RoomCreateResponse):
@@ -79,6 +97,36 @@ async def create_room(
         return room_id
     logger.error("matrix_room_creation_failed", name=name, error=str(response))
     return None
+
+
+async def room_encryption_enabled(client: nio.AsyncClient, room_id: str) -> bool | None:
+    """Return whether a room has encryption enabled, or None when the state is unreadable."""
+    response = await client.room_get_state_event(room_id, _ROOM_ENCRYPTION_EVENT_TYPE)
+    if isinstance(response, nio.RoomGetStateEventResponse):
+        return True
+    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        return False
+    logger.warning("matrix_room_encryption_state_unreadable", room_id=room_id, error=str(response))
+    return None
+
+
+async def ensure_room_encryption_enabled(client: nio.AsyncClient, room_id: str) -> bool:
+    """Enable Matrix encryption on a room if it is not already enabled.
+
+    Enabling encryption is irreversible; this helper never disables it.
+    Returns whether the room is encrypted after the call.
+    """
+    enabled = await room_encryption_enabled(client, room_id)
+    if enabled:
+        return True
+    if enabled is None:
+        return False
+    response = await client.room_put_state(room_id, _ROOM_ENCRYPTION_EVENT_TYPE, dict(_ROOM_ENCRYPTION_CONTENT))
+    if isinstance(response, nio.RoomPutStateResponse):
+        logger.info("matrix_room_encryption_enabled", room_id=room_id)
+        return True
+    logger.error("matrix_room_encryption_enable_failed", room_id=room_id, error=str(response))
+    return False
 
 
 def _with_thread_tags_power_level(power_levels_content: dict[str, Any]) -> dict[str, Any]:
@@ -598,6 +646,7 @@ __all__ = [
     "create_space",
     "ensure_room_admin_power_levels",
     "ensure_room_directory_visibility",
+    "ensure_room_encryption_enabled",
     "ensure_room_join_rule",
     "ensure_room_name",
     "ensure_thread_tags_power_level",
@@ -608,4 +657,5 @@ __all__ = [
     "join_room",
     "leave_room",
     "room_admin_power_user",
+    "room_encryption_enabled",
 ]

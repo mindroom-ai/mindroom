@@ -25,6 +25,8 @@ class CommandType(Enum):
     CONFIG = "config"  # Configuration command
     MODEL = "model"  # Per-thread model override command
     THREAD_MODE = "thread_mode"  # Room-level thread mode override command
+    ENCRYPT = "encrypt"  # Room encryption enablement command
+    E2EE = "e2ee"  # Encryption diagnostics command
     HI = "hi"  # Welcome message command
     UNKNOWN = "unknown"  # Special type for unrecognized commands
 
@@ -43,6 +45,11 @@ _COMMAND_DOCS = {
         "!thread_mode [room|thread|reset|show]",
         "Show or switch the thread mode used in the current room (room admin only)",
     ),
+    CommandType.ENCRYPT: (
+        "!encrypt [confirm]",
+        "Enable end-to-end encryption for this room (irreversible, room admin only)",
+    ),
+    CommandType.E2EE: ("!e2ee", "Show encryption diagnostics for this room"),
     CommandType.HI: ("!hi", "Show welcome message"),
 }
 _WELCOME_COMMAND_TYPES = (CommandType.HI, CommandType.SCHEDULE, CommandType.HELP)
@@ -112,9 +119,11 @@ class _CommandParser:
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
     MODEL_PATTERN = re.compile(r"^!model(?:\s+(.+))?$", re.IGNORECASE)
     THREAD_MODE_PATTERN = re.compile(r"^!thread[_-]?mode(?:\s+(.+))?$", re.IGNORECASE)
+    ENCRYPT_PATTERN = re.compile(r"^!encrypt(?:\s+(.+))?$", re.IGNORECASE)
+    E2EE_PATTERN = re.compile(r"^!e2ee$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
 
-    def parse(self, message: str) -> Command | None:  # noqa: C901, PLR0911
+    def parse(self, message: str) -> Command | None:  # noqa: C901, PLR0911, PLR0912
         """Parse a message for commands.
 
         Args:
@@ -211,6 +220,18 @@ class _CommandParser:
                 args={"args_text": args_text},
                 raw_text=message,
             )
+
+        match = self.ENCRYPT_PATTERN.match(message)
+        if match:
+            args_text = match.group(1).strip() if match.group(1) else ""
+            return Command(
+                type=CommandType.ENCRYPT,
+                args={"args_text": args_text},
+                raw_text=message,
+            )
+
+        if self.E2EE_PATTERN.match(message):
+            return Command(type=CommandType.E2EE, args={}, raw_text=message)
 
         logger.debug("unknown_command", command=message)
         return Command(
@@ -358,6 +379,23 @@ How it works:
 - Model names come from the `models:` section of config.yaml
 - The override is scoped to one thread and survives restarts; other threads and rooms are unaffected
 - Room-wide overrides are configured separately via `room_models` in config.yaml"""
+
+    if topic in {"encrypt", "e2ee", "encryption"}:
+        return """**Encryption Commands**
+
+Usage: `!encrypt [confirm]` - Enable end-to-end encryption for the current room
+       `!e2ee` - Show encryption diagnostics for the current room
+
+**Examples:**
+- `!encrypt` - Review what enabling encryption means for this room
+- `!encrypt confirm` - Enable encryption (room admin only)
+- `!e2ee` - Show room encryption state, bot device, and decryption-failure counters
+
+How it works:
+- Enabling encryption is **irreversible**; a room can never go back to unencrypted
+- People joining later cannot read messages sent before they joined
+- Managed rooms can also be encrypted from config via `rooms.<key>.encrypted: true`
+  or `matrix_room_access.encrypt_managed_rooms: true`"""
 
     if topic in {"thread_mode", "thread-mode", "threadmode"}:
         return """**Thread Mode Command**

@@ -29,6 +29,7 @@ from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.matrix.state import MatrixState
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
@@ -891,6 +892,7 @@ def test_health_check_reports_stale_matrix_sync(test_client: TestClient) -> None
     assert response.json() == {
         "status": "unhealthy",
         "last_sync_time": stale_sync_time.isoformat(),
+        "e2ee": e2ee_stats().as_dict(),
         "stale_sync_entities": ["router"],
     }
     reset_matrix_sync_health()
@@ -936,6 +938,7 @@ def test_health_after_watchdog_restart_stays_unhealthy_until_sync(test_client: T
     assert response.json() == {
         "status": "unhealthy",
         "last_sync_time": stale_time.isoformat(),
+        "e2ee": e2ee_stats().as_dict(),
         "stale_sync_entities": ["router"],
     }
 
@@ -5166,6 +5169,7 @@ def test_health_repeated_restarts_do_not_extend_first_sync_grace(test_client: Te
     assert response.json() == {
         "status": "unhealthy",
         "last_sync_time": None,
+        "e2ee": e2ee_stats().as_dict(),
         "stale_sync_entities": ["router"],
     }
     assert _matrix_sync_state["router"].loop_started_time == first_start_time

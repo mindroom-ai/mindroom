@@ -19,6 +19,8 @@ Commands start with `!` and are handled by the router agent.
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room |
+| `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) |
+| `!e2ee` | Show encryption diagnostics for this room |
 | `!config <operation>` | View and modify configuration (disabled by default, admin only when enabled) |
 | `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
@@ -182,6 +184,31 @@ Show or switch how future agent replies are grouped in the current Matrix room.
 `!thread_mode reset` removes the room override so agents use configured `thread_mode` and `room_thread_modes` values again.
 Set and reset are Matrix room-admin-only actions.
 The override is stored in MindRoom runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
+
+### `!encrypt`
+
+Enable Matrix end-to-end encryption for the current room.
+
+```
+!encrypt
+!encrypt confirm
+```
+
+`!encrypt` reviews what enabling encryption means for the room without changing anything.
+`!encrypt confirm` enables encryption and is a Matrix room-admin-only action.
+Enabling encryption is irreversible: a room can never go back to unencrypted, and people joining later cannot read messages sent before they joined.
+Managed rooms can also be encrypted from config via `rooms.<key>.encrypted: true` or `matrix_room_access.encrypt_managed_rooms: true`.
+
+### `!e2ee`
+
+Show encryption diagnostics for the current room.
+
+```
+!e2ee
+```
+
+The report includes the room's encryption state, the responding bot account and device, the encryption store status, and decryption-failure counters since startup.
+Use it when an agent seems to ignore messages in an encrypted room.
 
 ### `!config`
 

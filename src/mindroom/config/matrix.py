@@ -115,6 +115,14 @@ class MatrixRoomAccessConfig(BaseModel):
             "on startup and config reload"
         ),
     )
+    encrypt_managed_rooms: bool = Field(
+        default=False,
+        description=(
+            "Whether managed rooms should have Matrix end-to-end encryption enabled by default. "
+            "Per-room rooms.<key>.encrypted overrides this. "
+            "Enabling encryption on a Matrix room is irreversible; MindRoom never disables it."
+        ),
+    )
 
     @field_validator("invite_only_rooms")
     @classmethod

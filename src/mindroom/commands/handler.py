@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
+from mindroom.commands.encryption_commands import handle_e2ee_command, handle_encrypt_command
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
@@ -382,6 +383,21 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             room_id=room.room_id,
             requester_user_id=requester_user_id,
             sender_user_id=event.sender,
+        )
+
+    elif command.type == CommandType.ENCRYPT:
+        response_text = await handle_encrypt_command(
+            command.args.get("args_text", ""),
+            client=context.client,
+            room_id=room.room_id,
+            requester_user_id=requester_user_id,
+            sender_user_id=event.sender,
+        )
+
+    elif command.type == CommandType.E2EE:
+        response_text = await handle_e2ee_command(
+            client=context.client,
+            room_id=room.room_id,
         )
 
     elif command.type == CommandType.UNKNOWN:

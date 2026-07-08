@@ -521,6 +521,7 @@ matrix_room_access:
   publish_to_room_directory: false # Publish managed rooms in server room directory
   invite_only_rooms: []            # Room keys/aliases/IDs that stay invite-only/private
   reconcile_existing_rooms: false  # Explicit migration of existing managed rooms
+  encrypt_managed_rooms: false     # Enable Matrix E2EE on managed rooms (irreversible per room)
 
 # Authorization (optional)
 authorization:
@@ -726,6 +727,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](../authorization.md))
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
 - `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
+- `matrix_room_access.encrypt_managed_rooms` enables Matrix end-to-end encryption on managed rooms; per-room `rooms.<key>.encrypted` overrides it, enabling is irreversible, and MindRoom never disables encryption on a room
 - In `multi_user` mode, MindRoom sets managed room join rules and directory visibility from config
 - In `multi_user` mode, MindRoom also reconciles managed room power levels so `com.mindroom.thread.tags` can be written at PL0
 - Publishing to the room directory requires the managing service account (typically router) to have moderator/admin power in each room
