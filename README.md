@@ -266,6 +266,8 @@ Plain replies that never reach threaded context still stay plain replies.
 - `!config <operation>` - Manage configuration
 - `!model [name|list|reset]` - Show or switch the model used in the current thread
 - `!thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room (room admin only)
+- `!encrypt [confirm]` - Enable end-to-end encryption for this room (irreversible, room admin only)
+- `!e2ee` - Show encryption diagnostics for this room
 - `!hi` - Show welcome message
 
 <!-- OUTPUT:END -->
