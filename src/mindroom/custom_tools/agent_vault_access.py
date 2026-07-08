@@ -31,16 +31,17 @@ if TYPE_CHECKING:
 
 _DEFAULT_VAULT_NAME_PREFIX = "agent-vault"
 _HTTP_TIMEOUT_SECONDS = 15.0
+_REQUESTER_ISOLATED_SCOPES = frozenset({"user", "user_agent"})
 
 
 def _requires_grant_config(target: ResolvedWorkerTarget | None) -> bool:
-    """Whether this tool instance can ever reach the grant API.
+    """Whether construction must require the grant API configuration.
 
     Shared-scope targets return the vault name and link before any API call, so
     they only need the UI base URL. Requester-isolated scopes self-grant and
     need the full API configuration; unknown targets stay strict.
     """
-    return target is None or not target.worker_key or target.worker_scope in {"user", "user_agent"}
+    return target is None or not target.worker_key or target.worker_scope in _REQUESTER_ISOLATED_SCOPES
 
 
 class _AgentVaultAccessError(RuntimeError):
@@ -66,8 +67,9 @@ class AgentVaultAccessTools(Toolkit):
             runtime_paths.env_value(env["vault_name_prefix"]) or _DEFAULT_VAULT_NAME_PREFIX
         ).strip()
         self._owner_email = (runtime_paths.env_value(env["owner_email"]) or "").strip()
+        requires_grant_config = _requires_grant_config(worker_target)
         required = [(env["ui_base_url"], self._ui_base_url)]
-        if _requires_grant_config(worker_target):
+        if requires_grant_config:
             required.extend(
                 (
                     (env["api_url"], self._api_url),
@@ -75,7 +77,7 @@ class AgentVaultAccessTools(Toolkit):
                 ),
             )
         missing = [name for name, value in required if not value]
-        if _requires_grant_config(worker_target) and not self._admin_token and not self._admin_token_file:
+        if requires_grant_config and not self._admin_token and not self._admin_token_file:
             missing.append(f"{env['admin_token']} or {env['admin_token_file']}")
         if missing:
             msg = f"AgentVaultAccessTools requires these environment values: {', '.join(sorted(missing))}"
@@ -99,7 +101,7 @@ class AgentVaultAccessTools(Toolkit):
                 "Agent Vault access requires a worker-scoped agent.",
             )
         vault = worker_id_for_key(target.worker_key, prefix=self._vault_name_prefix)
-        if target.worker_scope not in {"user", "user_agent"}:
+        if target.worker_scope not in _REQUESTER_ISOLATED_SCOPES:
             # One shared vault backs this agent for every user, so self-service
             # admin grants would hand its credentials to any requester. Still
             # name the vault: the link grants nothing (the UI enforces vault
@@ -120,6 +122,10 @@ class AgentVaultAccessTools(Toolkit):
                 },
                 sort_keys=True,
             )
+        return await self._self_grant_and_link(target, vault)
+
+    async def _self_grant_and_link(self, target: ResolvedWorkerTarget, vault: str) -> str:
+        """Grant the requester admin access on their requester-isolated vault and return the link payload."""
         identity = target.execution_identity
         requester_id = identity.requester_id if identity is not None else None
         if not requester_id:
@@ -152,9 +158,10 @@ class AgentVaultAccessTools(Toolkit):
                     ),
                 )
             granted = await self._grant_admin(vault, email, token)
-        except (_AgentVaultAccessError, httpx.HTTPError) as exc:
-            detail = f"Agent Vault API request failed: {exc}" if isinstance(exc, httpx.HTTPError) else str(exc)
-            return self._error(detail)
+        except _AgentVaultAccessError as exc:
+            return self._error(str(exc))
+        except httpx.HTTPError as exc:
+            return self._error(f"Agent Vault API request failed: {exc}")
 
         status = "granted" if granted else "already had access"
         return json.dumps(
