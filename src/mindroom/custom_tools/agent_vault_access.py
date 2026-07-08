@@ -31,6 +31,17 @@ if TYPE_CHECKING:
 
 _DEFAULT_VAULT_NAME_PREFIX = "agent-vault"
 _HTTP_TIMEOUT_SECONDS = 15.0
+_REQUESTER_ISOLATED_SCOPES = frozenset({"user", "user_agent"})
+
+
+def _requires_grant_config(target: ResolvedWorkerTarget | None) -> bool:
+    """Whether construction must require the grant API configuration.
+
+    Shared-scope targets return the vault name and link before any API call, so
+    they only need the UI base URL. Requester-isolated scopes self-grant and
+    need the full API configuration; unknown targets stay strict.
+    """
+    return target is None or not target.worker_key or target.worker_scope in _REQUESTER_ISOLATED_SCOPES
 
 
 class _AgentVaultAccessError(RuntimeError):
@@ -56,16 +67,17 @@ class AgentVaultAccessTools(Toolkit):
             runtime_paths.env_value(env["vault_name_prefix"]) or _DEFAULT_VAULT_NAME_PREFIX
         ).strip()
         self._owner_email = (runtime_paths.env_value(env["owner_email"]) or "").strip()
-        missing = [
-            name
-            for name, value in (
-                (env["api_url"], self._api_url),
-                (env["ui_base_url"], self._ui_base_url),
-                (env["email_domain"], self._email_domain),
+        requires_grant_config = _requires_grant_config(worker_target)
+        required = [(env["ui_base_url"], self._ui_base_url)]
+        if requires_grant_config:
+            required.extend(
+                (
+                    (env["api_url"], self._api_url),
+                    (env["email_domain"], self._email_domain),
+                ),
             )
-            if not value
-        ]
-        if not self._admin_token and not self._admin_token_file:
+        missing = [name for name, value in required if not value]
+        if requires_grant_config and not self._admin_token and not self._admin_token_file:
             missing.append(f"{env['admin_token']} or {env['admin_token_file']}")
         if missing:
             msg = f"AgentVaultAccessTools requires these environment values: {', '.join(sorted(missing))}"
@@ -79,13 +91,41 @@ class AgentVaultAccessTools(Toolkit):
         Resolves the vault that backs your worker identity for this agent,
         grants your Agent Vault account admin access, and returns the UI link
         where you can add or update the secrets this agent's tools will use.
+        For shared-worker agents it returns the vault name and link without
+        granting anything; an operator manages access to shared vaults.
         """
         target = self._worker_target
-        if target_error := self._target_error(target):
-            return self._error(target_error)
-        assert target is not None  # Narrowed by _target_error.
-        worker_key = target.worker_key
-        assert worker_key is not None  # Narrowed by _target_error.
+        if target is None or not target.worker_key:
+            return self._error(
+                "no worker identity is available for this agent, so it has no dedicated vault. "
+                "Agent Vault access requires a worker-scoped agent.",
+            )
+        vault = worker_id_for_key(target.worker_key, prefix=self._vault_name_prefix)
+        if target.worker_scope not in _REQUESTER_ISOLATED_SCOPES:
+            # One shared vault backs this agent for every user, so self-service
+            # admin grants would hand its credentials to any requester. Still
+            # name the vault: the link grants nothing (the UI enforces vault
+            # membership) and is how the designated admin finds their vault.
+            return json.dumps(
+                {
+                    "tool": "agent_vault_access",
+                    "status": "ok",
+                    "vault": vault,
+                    "access": "operator_managed",
+                    "url": self._vault_link(vault),
+                    "note": (
+                        "This agent uses a shared worker scope, so one vault backs it for all users and "
+                        "self-service admin grants are disabled. An operator grants access to this vault "
+                        "instead: pass them this vault name and link, or open the link if you already "
+                        "have access."
+                    ),
+                },
+                sort_keys=True,
+            )
+        return await self._self_grant_and_link(target, vault)
+
+    async def _self_grant_and_link(self, target: ResolvedWorkerTarget, vault: str) -> str:
+        """Grant the requester admin access on their requester-isolated vault and return the link payload."""
         identity = target.execution_identity
         requester_id = identity.requester_id if identity is not None else None
         if not requester_id:
@@ -98,7 +138,6 @@ class AgentVaultAccessTools(Toolkit):
                 "expected a Matrix ID whose localpart maps to the configured email domain.",
             )
 
-        vault = worker_id_for_key(worker_key, prefix=self._vault_name_prefix)
         try:
             # One token read per request: both API calls must use the same
             # token, or a rotation between them could 401 the second call.
@@ -124,7 +163,6 @@ class AgentVaultAccessTools(Toolkit):
         except httpx.HTTPError as exc:
             return self._error(f"Agent Vault API request failed: {exc}")
 
-        link = urljoin(self._ui_base_url.rstrip("/") + "/", f"vaults/{quote(vault, safe='')}")
         status = "granted" if granted else "already had access"
         return json.dumps(
             {
@@ -133,7 +171,7 @@ class AgentVaultAccessTools(Toolkit):
                 "vault": vault,
                 "email": email,
                 "access": status,
-                "url": link,
+                "url": self._vault_link(vault),
                 "note": (
                     "Open the link, log in through the usual SSO gate, and manage this agent's secrets there. "
                     "Anyone you grant can read those secrets, so only add what this agent needs."
@@ -142,19 +180,8 @@ class AgentVaultAccessTools(Toolkit):
             sort_keys=True,
         )
 
-    def _target_error(self, target: ResolvedWorkerTarget | None) -> str | None:
-        if target is None or not target.worker_key:
-            return (
-                "no worker identity is available for this agent, so it has no dedicated vault. "
-                "Agent Vault access requires a worker-scoped agent."
-            )
-        if target.worker_scope not in {"user", "user_agent"}:
-            return (
-                "Agent Vault self-service admin access requires a requester-isolated worker vault "
-                "(worker_scope=user or worker_scope=user_agent). This agent uses a shared worker scope, "
-                "so ask an operator to configure shared credentials or give the agent a private worker scope."
-            )
-        return None
+    def _vault_link(self, vault: str) -> str:
+        return urljoin(self._ui_base_url.rstrip("/") + "/", f"vaults/{quote(vault, safe='')}")
 
     def _requester_email(self, requester_id: str) -> str | None:
         # Matrix IDs look like @localpart:server; map localpart to the configured domain.

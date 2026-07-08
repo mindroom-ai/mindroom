@@ -409,7 +409,8 @@ For non-Kubernetes deployments, point worker egress at a shared proxy you run yo
 
 The `agent_vault_access` tool lets a user ask their own agent for a link to manage that agent's vault.
 It resolves the caller's worker target to that worker's vault (`worker_id_for_key(worker_key, prefix)`, matching `agentVault.vaultNamePrefix`), grants the caller's Agent Vault account admin access to that vault through the API, and returns the gated UI link.
-It only self-grants for requester-isolated worker scopes (`user` or `user_agent`); shared worker vaults require operator-managed credentials.
+It only self-grants for requester-isolated worker scopes (`user` or `user_agent`).
+For shared worker scopes it returns the vault name and UI link without granting anything (`"access": "operator_managed"`): the link alone grants nothing because the UI enforces vault membership, and it is how the operator-designated admin discovers which vault backs the agent.
 Configure it per deployment:
 
 ```bash
@@ -419,6 +420,8 @@ MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL=https://example.com/agent-vault
 MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN=example.com
 MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX=agent-vault  # must match workers.kubernetes.agentVault.vaultNamePrefix
 ```
+
+Agents on a shared worker scope never reach the grant API, so for them only `MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL` (plus the matching vault name prefix) is required; the API URL, admin token, and email domain stay required for requester-isolated scopes.
 
 The tool maps a requester's Matrix localpart to `localpart@EMAIL_DOMAIN` for the account grant.
 That mapping only decides *UI management access*; it never changes which worker reaches which vault, so the runtime secret boundary stays the per-worker vault scope plus the in-pod proxy-role token.
