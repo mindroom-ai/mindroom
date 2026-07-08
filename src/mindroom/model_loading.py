@@ -5,21 +5,8 @@ from __future__ import annotations
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 
-from agno.models.anthropic import Claude
-from agno.models.azure import AzureOpenAI
-from agno.models.cerebras import Cerebras
-from agno.models.deepseek import DeepSeek
-from agno.models.google import Gemini
-from agno.models.groq import Groq
-from agno.models.llama_cpp import LlamaCpp
-from agno.models.ollama import Ollama
-from agno.models.openai import OpenAIChat
-from agno.models.openai.like import OpenAILike
-from agno.models.openrouter import OpenRouter
-
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.claude_stream_retry import install_claude_stream_retry_hook
-from mindroom.codex_model import CodexResponses, derive_codex_prompt_cache_key, normalize_codex_model_id
 from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host, get_secret_from_env
@@ -33,7 +20,6 @@ from mindroom.runtime_env_policy import (
     VERTEXAI_CLAUDE_ENV_BY_KEY,
 )
 from mindroom.tool_system.dependencies import ensure_optional_deps
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 
 if TYPE_CHECKING:
     from agno.models.base import Model
@@ -51,6 +37,26 @@ _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
 # 10 minutes unless the client has an explicit timeout; 3600s is the SDK's own
 # ceiling for non-streaming operations.
 _CLAUDE_REQUEST_TIMEOUT_SECONDS = 3600.0
+
+# Model classes resolve lazily by dotted path so importing this module does not
+# import every provider SDK; only the configured provider's SDK loads (#1436).
+_PROVIDER_MODEL_CLASS_PATHS: dict[str, tuple[str, str]] = {
+    "anthropic": ("agno.models.anthropic", "Claude"),
+    "azure": ("agno.models.azure", "AzureOpenAI"),
+    "cerebras": ("agno.models.cerebras", "Cerebras"),
+    "deepseek": ("agno.models.deepseek", "DeepSeek"),
+    "gemini": ("agno.models.google", "Gemini"),
+    "google": ("agno.models.google", "Gemini"),
+    "groq": ("agno.models.groq", "Groq"),
+    "llama_cpp": ("agno.models.llama_cpp", "LlamaCpp"),
+    "openai": ("agno.models.openai", "OpenAIChat"),
+    "vertexai_claude": ("mindroom.vertex_claude_compat", "MindroomVertexAIClaude"),
+}
+
+
+def _load_model_class(module_path: str, class_name: str) -> type[Any]:
+    """Import one provider model class on first use."""
+    return cast("type[Any]", getattr(import_module(module_path), class_name))
 
 
 def _canonical_provider(provider: str) -> str:
@@ -203,7 +209,8 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
     if canonical_provider == "ollama":
         host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT
         logger.debug("using_ollama_host", host=host)
-        return Ollama(id=model_id, host=host, **extra_kwargs)
+        ollama_class = _load_model_class("agno.models.ollama", "Ollama")
+        return ollama_class(id=model_id, host=host, **extra_kwargs)
 
     if canonical_provider == "openrouter":
         api_key = extra_kwargs.pop("api_key", None)
@@ -211,7 +218,8 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
             api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
-        return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
+        openrouter_class = _load_model_class("agno.models.openrouter", "OpenRouter")
+        return openrouter_class(id=model_id, api_key=api_key, **extra_kwargs)
 
     if canonical_provider == "zai":
         # OpenAILike neither reads a provider env var nor rejects a missing key,
@@ -228,15 +236,20 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
         extra_kwargs.setdefault("base_url", ZAI_BASE_URL_DEFAULT)
         extra_kwargs.setdefault("name", "ZAI")
         extra_kwargs.setdefault("provider", "ZAI")
-        return OpenAILike(id=model_id, **extra_kwargs)
+        openai_like_class = _load_model_class("agno.models.openai.like", "OpenAILike")
+        return openai_like_class(id=model_id, **extra_kwargs)
 
     if canonical_provider in {"codex", "openai_codex"}:
+        codex_module = import_module("mindroom.codex_model")
         extra_kwargs.pop("api_key", None)
         if "prompt_cache_key" not in extra_kwargs and execution_identity is not None:
-            prompt_cache_key = derive_codex_prompt_cache_key(execution_identity)
+            prompt_cache_key = codex_module.derive_codex_prompt_cache_key(execution_identity)
             if prompt_cache_key is not None:
                 extra_kwargs["prompt_cache_key"] = prompt_cache_key
-        return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
+        return cast(
+            "Model",
+            codex_module.CodexResponses(id=codex_module.normalize_codex_model_id(model_id), **extra_kwargs),
+        )
 
     if canonical_provider == _BEDROCK_CLAUDE_PROVIDER:
         extra_kwargs.pop("api_key", None)
@@ -251,21 +264,9 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
         aws_bedrock_claude = cast("type[Model]", aws_bedrock_module.Claude)
         return aws_bedrock_claude(id=model_id, **extra_kwargs)
 
-    provider_map: dict[str, type[Any]] = {
-        "openai": OpenAIChat,
-        "azure": AzureOpenAI,
-        "anthropic": Claude,
-        "gemini": Gemini,
-        "google": Gemini,
-        "vertexai_claude": MindroomVertexAIClaude,
-        "llama_cpp": LlamaCpp,
-        "cerebras": Cerebras,
-        "groq": Groq,
-        "deepseek": DeepSeek,
-    }
-
-    model_class = provider_map.get(canonical_provider)
-    if model_class is not None:
+    model_class_path = _PROVIDER_MODEL_CLASS_PATHS.get(canonical_provider)
+    if model_class_path is not None:
+        model_class = _load_model_class(*model_class_path)
         return model_class(id=model_id, **extra_kwargs)
 
     msg = f"Unsupported AI provider: {provider}"

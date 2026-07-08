@@ -49,11 +49,13 @@ model with no deferred tools can still replay poisoned history.
 
 from __future__ import annotations
 
-from typing import Any, cast
-
-from agno.models.anthropic import Claude as AnthropicClaude
+import sys
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
+
+if TYPE_CHECKING:
+    from agno.models.anthropic import Claude as AnthropicClaude
 
 _PROMPT_CACHE_HOOK_ATTR = "_mindroom_claude_prompt_cache_hook_installed"
 _DEFERRED_TOOL_NAMES_ATTR = "_mindroom_claude_deferred_tool_names"
@@ -85,6 +87,19 @@ def native_tool_search_supported(provider: str, model_id: str) -> bool:
     if canonical_provider not in _NATIVE_TOOL_SEARCH_PROVIDERS:
         return False
     return not model_id.startswith(TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES)
+
+
+def as_anthropic_claude(model: object) -> AnthropicClaude | None:
+    """Narrow one model to Agno's Claude without importing the anthropic SDK.
+
+    A Claude instance can only exist once ``agno.models.anthropic`` is
+    imported, so probing ``sys.modules`` keeps non-Claude runtimes from paying
+    the anthropic import just to no-op these hooks (#1436).
+    """
+    module = sys.modules.get("agno.models.anthropic")
+    if module is None or not isinstance(model, module.Claude):
+        return None
+    return cast("AnthropicClaude", model)
 
 
 def _prompt_cache_control(*, extended_cache_time: bool = False) -> dict[str, str]:
@@ -421,22 +436,23 @@ def install_claude_prompt_cache_hook(model: object) -> None:
     a cache-disabled model with no deferred tools still replays poisoned
     history.
     """
-    if not isinstance(model, AnthropicClaude):
+    claude_model = as_anthropic_claude(model)
+    if claude_model is None:
         return
-    model_dict = vars(model)
+    model_dict = vars(claude_model)
     if model_dict.get(_PROMPT_CACHE_HOOK_ATTR) is True:
         return
-    original_get_client = model.get_client
-    original_get_async_client = model.get_async_client
+    original_get_client = claude_model.get_client
+    original_get_async_client = claude_model.get_async_client
     model_dict[_PROMPT_CACHE_HOOK_ATTR] = True
 
     def _get_client_with_prompt_cache() -> object:
         client = original_get_client()
-        return _PromptCacheClientProxy(client, model)
+        return _PromptCacheClientProxy(client, claude_model)
 
     def _get_async_client_with_prompt_cache() -> object:
         client = original_get_async_client()
-        return _PromptCacheClientProxy(client, model)
+        return _PromptCacheClientProxy(client, claude_model)
 
     model_dict["get_client"] = _get_client_with_prompt_cache
     model_dict["get_async_client"] = _get_async_client_with_prompt_cache
@@ -450,7 +466,8 @@ def install_claude_deferred_tool_search(model: object, *, deferred_tool_names: f
     stay out of the rendered prompt prefix and tool discovery never invalidates
     the prompt cache. No-op for non-Claude models and empty name sets.
     """
-    if not isinstance(model, AnthropicClaude) or not deferred_tool_names:
+    claude_model = as_anthropic_claude(model)
+    if claude_model is None or not deferred_tool_names:
         return
-    install_claude_prompt_cache_hook(model)
-    vars(model)[_DEFERRED_TOOL_NAMES_ATTR] = frozenset(deferred_tool_names)
+    install_claude_prompt_cache_hook(claude_model)
+    vars(claude_model)[_DEFERRED_TOOL_NAMES_ATTR] = frozenset(deferred_tool_names)
