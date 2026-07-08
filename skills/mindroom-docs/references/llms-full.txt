@@ -12883,13 +12883,17 @@ The retried prompt includes `[Inline media unavailable for this model]` to infor
 Agents can still reference the files via attachment IDs and tools.
 
 This fallback is transparent — no user action is required.
-It detects provider-specific error patterns such as unsupported media type, base64 field validation failures, and capability rejections.
+When the provider names the rejected media kind (for example "audio input is not supported"), only that kind is dropped and the model route immediately learns that it is unsupported.
+Any other invalid-request rejection (HTTP 400/413/415/422, or generic markers like `Error code: 400` in the error text) triggers one retry without media, so new providers degrade gracefully without MindRoom knowing their error wording.
+When such a retry succeeds, the model route learns that the dropped media kinds are unsupported, and later requests omit them up front instead of paying a failed API call.
+This learned capability state is process-local and resets on restart.
+Payload-size and context-overflow rejections still retry without media but never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
 
 ## Limitations
 
 - **Routing with multiple eligible responders** -- without an `@mention`, the router uses the image caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
-- **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error. If the model rejects the image entirely, the [media fallback](#media-fallback) retries without the inline image.
+- **Model support** -- vision input requires a model that supports it. Text-only models reject inline images, and the [media fallback](#media-fallback) retries without them so the agent still answers with a note that it cannot view the attachment.
 
 # Attachments
 

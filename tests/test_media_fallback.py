@@ -282,18 +282,26 @@ def test_payload_too_large_retries_but_never_teaches() -> None:
 
 
 def test_auth_worded_invalid_request_does_not_retry() -> None:
-    """Credential failures phrased as 400s would fail identically without media."""
+    """Credential failures phrased as 400s would fail identically without media on either path."""
     reset_model_media_capability_cache()
     media = _media_inputs()
 
-    decision = retry_media_inputs_after_failure(
+    text_decision = retry_media_inputs_after_failure(
         _route(),
         "Error code: 400 - invalid api key provided",
         media,
     )
+    # Google rejects bad API keys with HTTP 400, so the status-code path needs the same exclusion.
+    exception_decision = retry_media_inputs_after_failure(
+        _route(),
+        ModelProviderError(message="API key not valid. Please pass a valid API key.", status_code=400),
+        media,
+    )
 
-    assert decision.should_retry is False
-    assert decision.media_inputs == media
+    assert text_decision.should_retry is False
+    assert text_decision.media_inputs == media
+    assert exception_decision.should_retry is False
+    assert exception_decision.media_inputs == media
 
 
 def test_non_request_status_exception_does_not_retry() -> None:

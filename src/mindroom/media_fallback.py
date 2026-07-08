@@ -62,7 +62,8 @@ _TEXT_ONLY_CONTENT_TYPE_PATTERN = re.compile(
 _INVALID_REQUEST_STATUS_CODES = frozenset({400, 413, 415, 422})
 _PAYLOAD_TOO_LARGE_STATUS = 413
 _INVALID_REQUEST_TEXT_PATTERN = re.compile(
-    r"error code: (?:400|413|415|422)\b|\bbad request\b|\binvalid_request_error\b|\binvalid_argument\b",
+    rf"error code: (?:{'|'.join(str(code) for code in sorted(_INVALID_REQUEST_STATUS_CODES))})\b"
+    r"|\bbad request\b|\binvalid_request_error\b|\binvalid_argument\b",
 )
 # Invalid-request errors that name credentials are not media failures; retrying
 # without media would fail identically.
@@ -270,10 +271,12 @@ def _no_media_retry_decision(media_inputs: MediaInputs) -> MediaRetryDecision:
 
 
 def _is_invalid_request_error(error: Exception | str, lowered_error_text: str) -> bool:
-    if isinstance(error, ModelProviderError) and error.status_code in _INVALID_REQUEST_STATUS_CODES:
-        return True
+    # Auth-worded failures are excluded regardless of evidence source: providers
+    # such as Google reject bad API keys with HTTP 400.
     if _AUTH_ERROR_TEXT_PATTERN.search(lowered_error_text):
         return False
+    if isinstance(error, ModelProviderError) and error.status_code in _INVALID_REQUEST_STATUS_CODES:
+        return True
     return bool(_INVALID_REQUEST_TEXT_PATTERN.search(lowered_error_text))
 
 
