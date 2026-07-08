@@ -55,8 +55,13 @@ def _runner_execution_mode(runtime_paths: RuntimePaths) -> str:
 
 
 def runner_uses_subprocess(runtime_paths: RuntimePaths) -> bool:
-    """Return whether the runner should dispatch through a subprocess."""
-    return _runner_execution_mode(runtime_paths) == "subprocess"
+    """Return whether the runner should dispatch through a per-request child process."""
+    return _runner_execution_mode(runtime_paths) in {"subprocess", "forkserver"}
+
+
+def runner_uses_forkserver(runtime_paths: RuntimePaths) -> bool:
+    """Return whether per-request children should fork from a warm template process."""
+    return _runner_execution_mode(runtime_paths) == "forkserver"
 
 
 def runner_subprocess_timeout_seconds(runtime_paths: RuntimePaths) -> float:

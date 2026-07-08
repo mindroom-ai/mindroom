@@ -659,6 +659,10 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.sandbox_forkserver"
+depends_on = ["mindroom.logging_config"]
+
+[[modules]]
 path = "mindroom.api.sandbox_protocol"
 depends_on = []
 
@@ -675,6 +679,7 @@ path = "mindroom.api.sandbox_runner"
 depends_on = [
     "mindroom.api.sandbox_env_assembly",
     "mindroom.api.sandbox_exec",
+    "mindroom.api.sandbox_forkserver",
     "mindroom.api.sandbox_protocol",
     "mindroom.api.sandbox_worker_prep",
     "mindroom.api.worker_responses",
