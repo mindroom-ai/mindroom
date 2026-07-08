@@ -130,6 +130,7 @@ Revisit after D2–D5 ship if history recovery in Matrix clients (not just agent
 
 ### D7: mindroom-cinny fork work (owning the other end)
 
+Implemented in mindroom-cinny PR #95 (verified-agent affordance, key-backup onboarding nudge, friendlier UTD copy, and the emergency-valve + js-sdk dependency-gate runbook notes).
 The fork already gives a quiet baseline (no per-message shields for other users' devices, encrypted DMs by default), so fork changes are polish and safety rails rather than prerequisites:
 
 1. Emergency valve: document `createRoom.defaultEncryption: false` in the hosted config runbook as the config-only rollback if an E2EE regression ever hits production chat.
@@ -143,7 +144,7 @@ The fork already gives a quiet baseline (no per-message shields for other users'
 1. Phase 1 (shipped, PR #1423): unconditional encrypted delivery, decrypt-failure logging and key requests.
 2. Phase 2 (implemented on the `e2ee-phase2-ux` branch, live-verified 2026-07-07): D3 room enablement (config + `!encrypt`; dashboard toggle deferred), D4 notices and `!e2ee`, D5 doctor checks and fresh-device fallback without cross-signing.
 3. Phase 3 (implemented; mindroom-nio fork PR #3 + mindroom wiring): D2 cross-signing bootstrap and re-signing, wired into agent login and live-verified (master + self-signing keys uploaded, live device signed) against local Synapse.
-4. Phase 4 (mindroom-cinny fork, after D2): D7 verified-agent affordance and key-backup onboarding; lift the js-sdk bump gate.
+4. Phase 4 (implemented; mindroom-cinny PR #95): D7 verified-agent affordance, key-backup onboarding nudge, and friendlier UTD copy, with the emergency valve and the js-sdk dependency gate documented in FORK_CHANGES. The gate is kept, not lifted: a js-sdk bump that tightens MSC4153 key-sharing defaults still waits until D2 is deployed fleet-wide.
 5. Phase 5 (optional): D6 key backup; flip `encrypt_managed_rooms` default after D2 soak.
 
 Phases 2 and 3 are independent and can proceed in parallel; Phase 4 depends on D2; only the default flip in Phase 5 depends on everything before it.
