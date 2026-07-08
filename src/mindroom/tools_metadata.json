@@ -196,8 +196,8 @@
         {
           "authored_override": true,
           "default": null,
-          "description": null,
-          "label": "OpenAI API Key",
+          "description": "When empty, OpenAI models use OPENAI_API_KEY and OpenRouter voice models use OPENROUTER_API_KEY.",
+          "label": "TTS API Key",
           "name": "api_key",
           "options": null,
           "placeholder": null,
@@ -208,7 +208,7 @@
         {
           "authored_override": true,
           "default": "gpt-4o-mini-tts",
-          "description": null,
+          "description": "Plain OpenAI model IDs use OpenAI; provider-prefixed IDs (e.g. hexgrad/kokoro-82m) route through OpenRouter.",
           "label": "TTS Model",
           "name": "model",
           "options": null,
@@ -220,7 +220,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "OpenAI-compatible speech endpoint (e.g. a local Kokoro server); leave empty to use OpenAI.",
+          "description": "OpenAI-compatible speech endpoint (e.g. a local Kokoro server); leave empty to use OpenAI or OpenRouter based on the model ID.",
           "label": "OpenAI-Compatible TTS Base URL",
           "name": "base_url",
           "options": null,
@@ -244,7 +244,7 @@
         {
           "authored_override": true,
           "default": "opus",
-          "description": "Audio format the TTS endpoint returns: aac, flac, mp3, opus, or wav. Non-opus formats require ffmpeg and ffprobe.",
+          "description": "Audio format the TTS endpoint returns: aac, flac, mp3, opus, or wav. Non-opus formats require ffmpeg and ffprobe. OpenRouter voice models always use mp3.",
           "label": "Audio Response Format",
           "name": "response_format",
           "options": null,

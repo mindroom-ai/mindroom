@@ -227,7 +227,20 @@ async def _run(
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path. Defaults the storage location to the selected config directory unless --storage-path is set.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Base directory for persistent MindRoom data (state, sessions, tracking)",
+    ),
+) -> None:
     """Check your environment for common issues.
 
     Runs connectivity, configuration, and credential checks in a single pass
@@ -235,7 +248,7 @@ def doctor() -> None:
     """
     from .doctor import doctor as doctor_command  # noqa: PLC0415
 
-    doctor_command()
+    doctor_command(config_path=config_path, storage_path=storage_path)
 
 
 @avatars_app.command("generate")

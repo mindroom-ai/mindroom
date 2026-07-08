@@ -327,10 +327,15 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 | `MINDROOM_SANDBOX_RUNNER_PORT` | Port the sandbox runner listens on | `8766` |
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to indicate runner mode | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Runner bearer token. Static runners use the shared primary token; Kubernetes dedicated workers receive a per-worker derived token. | _(required)_ |
-| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess` or `subprocess` | `inprocess` |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout | `120` |
+| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess`, `subprocess`, or `forkserver` | `inprocess` |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`) | `mindroom_data` next to config _(will fail if not writable)_ |
 | `MINDROOM_CONFIG_PATH` | Path to config.yaml (for plugin tool registration) | _(optional)_ |
+
+`subprocess` runs every non-shell tool call in a fresh `python -m mindroom.api.sandbox_runner` child that re-imports the runtime on each call.
+`forkserver` keeps one warm template process per interpreter that imports the runtime once and forks a fresh child per call, preserving per-call process isolation while removing the per-call import cost.
+Dedicated Docker and Kubernetes workers default to `forkserver`.
+If the warm template fails to start, dispatch falls back to spawn-per-call and retries the template after a cooldown.
 
 ## Execution modes
 
@@ -408,7 +413,8 @@ For non-Kubernetes deployments, point worker egress at a shared proxy you run yo
 
 The `agent_vault_access` tool lets a user ask their own agent for a link to manage that agent's vault.
 It resolves the caller's worker target to that worker's vault (`worker_id_for_key(worker_key, prefix)`, matching `agentVault.vaultNamePrefix`), grants the caller's Agent Vault account admin access to that vault through the API, and returns the gated UI link.
-It only self-grants for requester-isolated worker scopes (`user` or `user_agent`); shared worker vaults require operator-managed credentials.
+It only self-grants for requester-isolated worker scopes (`user` or `user_agent`).
+For shared worker scopes it returns the vault name and UI link without granting anything (`"access": "operator_managed"`): the link alone grants nothing because the UI enforces vault membership, and it is how the operator-designated admin discovers which vault backs the agent.
 Configure it per deployment:
 
 ```bash
@@ -418,6 +424,8 @@ MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL=https://example.com/agent-vault
 MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN=example.com
 MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX=agent-vault  # must match workers.kubernetes.agentVault.vaultNamePrefix
 ```
+
+Agents on a shared worker scope never reach the grant API, so for them only `MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL` (plus the matching vault name prefix) is required; the API URL, admin token, and email domain stay required for requester-isolated scopes.
 
 The tool maps a requester's Matrix localpart to `localpart@EMAIL_DOMAIN` for the account grant.
 That mapping only decides *UI management access*; it never changes which worker reaches which vault, so the runtime secret boundary stays the per-worker vault scope plus the in-pod proxy-role token.
@@ -437,7 +445,7 @@ It also proves garbage and missing proxy session tokens are refused.
 Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process.
 These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts.
-To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE=subprocess`.
+To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` is `subprocess` or `forkserver`.
 
 ## Workspace home contract
 

@@ -1166,7 +1166,7 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     env = run_call["environment"]
     assert isinstance(env, dict)
     assert env["MINDROOM_SANDBOX_RUNNER_MODE"] == "true"
-    assert env["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
+    assert env["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "forkserver"
     assert env["MINDROOM_SANDBOX_PROXY_TOKEN"] == _TEST_AUTH_TOKEN
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == _TEST_UNSCOPED_WORKER_KEY
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == "/app/worker"

@@ -13,6 +13,25 @@ This service is designed for hosted Matrix + chat deployments where users run
 MindRoom locally. Browser users authenticate with their Matrix access token.
 Paired local MindRoom installs receive client credentials that can request
 registration tokens for agent account creation.
+
+Namespace exemption: pairing always assigns each new connection a random
+namespace, and register-agent only accepts usernames shaped like
+``mindroom_<entity>_<namespace>``. The operator's own installs are the
+deliberate exception: they keep the plain ``mindroom_<entity>`` names. To mark
+such a trusted connection namespace-exempt, the operator stops the service,
+sets ``"namespace": ""`` on that connection in the persisted state file
+(``MINDROOM_PROVISIONING_STATE_PATH``, default
+``/var/lib/mindroom-local-provisioning/state.json``), and starts the service
+again. The paired install must also unset ``MINDROOM_NAMESPACE`` in its local
+``.env`` (``mindroom connect`` writes one during pairing) so the client builds
+plain usernames, and the exemption is per-connection, so re-pairing requires
+editing the state file again. The value must be exactly ``""``: ``null``, a removed key, or a
+whitespace-only string fails closed to a derived namespace that will not match
+the connection's original pairing namespace. An exempt connection skips only
+the namespace suffix check — usernames must still be valid Matrix localparts
+starting with ``mindroom_``. Exemption trusts that connection with the entire
+``mindroom_*`` username space, including usernames shaped like other
+connections' namespaced agents, so exempt only installs you fully control.
 """
 
 from __future__ import annotations
@@ -22,6 +41,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -53,6 +73,11 @@ RATE_LIMIT_STALE_SECONDS = 3600
 NAMESPACE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 NAMESPACE_LENGTH = 8
 MANAGED_AGENT_USERNAME_PREFIX = "mindroom_"
+MATRIX_LOCALPART_RE = re.compile(r"\A[-a-z0-9._=/+]+\Z")
+# The local MindRoom client (src/mindroom/matrix/provisioning.py) classifies
+# errors by these exact strings; a contract test keeps the two sides in sync.
+CONNECTION_REVOKED_DETAIL = "Connection revoked"
+NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
 PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
 
 
@@ -406,10 +431,16 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
 
     for item in payload.get("connections", []):
         connection_id = item["id"]
-        namespace = item.get("namespace")
-        if isinstance(namespace, str):
-            namespace = namespace.strip().lower()
-        if not isinstance(namespace, str) or not namespace:
+        raw_namespace = item.get("namespace")
+        # Only a literal "" (the operator-set exemption sentinel, see module
+        # docstring) may stay empty. Whitespace-only, null, and missing values
+        # fail closed to a derived namespace so a connection can never become
+        # namespace-exempt by accident.
+        if raw_namespace == "":
+            namespace = ""
+        elif isinstance(raw_namespace, str) and raw_namespace.strip():
+            namespace = raw_namespace.strip().lower()
+        else:
             namespace = _derive_namespace(connection_id)
         connection = LocalConnection(
             id=connection_id,
@@ -459,6 +490,21 @@ def _is_managed_agent_username_for_namespace(username: str, namespace: str) -> b
         and username.endswith(suffix)
         and len(username) > len(MANAGED_AGENT_USERNAME_PREFIX) + len(suffix)
     )
+
+
+def _is_username_permitted_for_connection(username: str, namespace: str) -> bool:
+    """Return whether a connection may register the requested agent username.
+
+    An empty namespace marks a namespace-exempt connection (operator-set, see
+    module docstring): the namespace suffix check is skipped, but the managed
+    agent prefix is still required. Localpart syntax is validated separately
+    in register_agent so it surfaces as 400, not 403.
+    """
+    if not namespace:
+        return username.startswith(MANAGED_AGENT_USERNAME_PREFIX) and len(username) > len(
+            MANAGED_AGENT_USERNAME_PREFIX,
+        )
+    return _is_managed_agent_username_for_namespace(username, namespace)
 
 
 def _expire_if_needed(session: PairSession, now: datetime) -> None:
@@ -513,7 +559,7 @@ def _require_local_client(
     if not hmac.compare_digest(expected_hash, provided_hash):
         raise HTTPException(status_code=401, detail="Invalid local client credentials")
     if connection.revoked_at:
-        raise HTTPException(status_code=403, detail="Connection revoked")
+        raise HTTPException(status_code=403, detail=CONNECTION_REVOKED_DETAIL)
     return connection
 
 
@@ -814,13 +860,21 @@ async def register_agent(
         )
         raise HTTPException(status_code=400, detail=msg)
 
+    # 400, not 403: clients treat 403 as an authorization problem, but a
+    # malformed localpart can only be fixed by changing the agent name.
+    if MATRIX_LOCALPART_RE.match(payload.username) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Requested username is not a valid Matrix localpart (allowed: a-z 0-9 . _ = / + -)",
+        )
+
     async with state.lock:
         connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
         _enforce_rate_limit_unlocked(state, key=f"register:agent:{connection.id}", limit=60, window_seconds=60)
-        if not _is_managed_agent_username_for_namespace(payload.username, connection.namespace):
+        if not _is_username_permitted_for_connection(payload.username, connection.namespace):
             raise HTTPException(
                 status_code=403,
-                detail="Requested username is outside this local connection namespace",
+                detail=NAMESPACE_MISMATCH_DETAIL,
             )
         connection.last_seen_at = now
         _persist_state_unlocked(state, config.state_path)

@@ -12886,13 +12886,17 @@ The retried prompt includes `[Inline media unavailable for this model]` to infor
 Agents can still reference the files via attachment IDs and tools.
 
 This fallback is transparent — no user action is required.
-It detects provider-specific error patterns such as unsupported media type, base64 field validation failures, and capability rejections.
+When the provider names the rejected media kind (for example "audio input is not supported"), only that kind is dropped and the model route immediately learns that it is unsupported.
+Any other invalid-request rejection (HTTP 400/413/415/422, or generic markers like `Error code: 400` in the error text) triggers one retry without media, so new providers degrade gracefully without MindRoom knowing their error wording.
+When such a retry succeeds, the model route learns that the dropped media kinds are unsupported, and later requests omit them up front instead of paying a failed API call.
+This learned capability state is process-local and resets on restart.
+Payload-size and context-overflow rejections still retry without media but never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
 
 ## Limitations
 
 - **Routing with multiple eligible responders** -- without an `@mention`, the router uses the image caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
-- **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error. If the model rejects the image entirely, the [media fallback](#media-fallback) retries without the inline image.
+- **Model support** -- vision input requires a model that supports it. Text-only models reject inline images, and the [media fallback](#media-fallback) retries without them so the agent still answers with a note that it cannot view the attachment.
 
 # Attachments
 
@@ -16130,10 +16134,15 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.m
 | `MINDROOM_SANDBOX_RUNNER_PORT` | Port the sandbox runner listens on | `8766` |
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to indicate runner mode | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Runner bearer token. Static runners use the shared primary token; Kubernetes dedicated workers receive a per-worker derived token. | _(required)_ |
-| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess` or `subprocess` | `inprocess` |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout | `120` |
+| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess`, `subprocess`, or `forkserver` | `inprocess` |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`) | `mindroom_data` next to config _(will fail if not writable)_ |
 | `MINDROOM_CONFIG_PATH` | Path to config.yaml (for plugin tool registration) | _(optional)_ |
+
+`subprocess` runs every non-shell tool call in a fresh `python -m mindroom.api.sandbox_runner` child that re-imports the runtime on each call.
+`forkserver` keeps one warm template process per interpreter that imports the runtime once and forks a fresh child per call, preserving per-call process isolation while removing the per-call import cost.
+Dedicated Docker and Kubernetes workers default to `forkserver`.
+If the warm template fails to start, dispatch falls back to spawn-per-call and retries the template after a cooldown.
 
 ## Execution modes
 
@@ -16211,7 +16220,8 @@ For non-Kubernetes deployments, point worker egress at a shared proxy you run yo
 
 The `agent_vault_access` tool lets a user ask their own agent for a link to manage that agent's vault.
 It resolves the caller's worker target to that worker's vault (`worker_id_for_key(worker_key, prefix)`, matching `agentVault.vaultNamePrefix`), grants the caller's Agent Vault account admin access to that vault through the API, and returns the gated UI link.
-It only self-grants for requester-isolated worker scopes (`user` or `user_agent`); shared worker vaults require operator-managed credentials.
+It only self-grants for requester-isolated worker scopes (`user` or `user_agent`).
+For shared worker scopes it returns the vault name and UI link without granting anything (`"access": "operator_managed"`): the link alone grants nothing because the UI enforces vault membership, and it is how the operator-designated admin discovers which vault backs the agent.
 Configure it per deployment:
 
 ```bash
@@ -16221,6 +16231,8 @@ MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL=https://example.com/agent-vault
 MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN=example.com
 MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX=agent-vault  # must match workers.kubernetes.agentVault.vaultNamePrefix
 ```
+
+Agents on a shared worker scope never reach the grant API, so for them only `MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL` (plus the matching vault name prefix) is required; the API URL, admin token, and email domain stay required for requester-isolated scopes.
 
 The tool maps a requester's Matrix localpart to `localpart@EMAIL_DOMAIN` for the account grant.
 That mapping only decides *UI management access*; it never changes which worker reaches which vault, so the runtime secret boundary stays the per-worker vault scope plus the in-pod proxy-role token.
@@ -16240,7 +16252,7 @@ It also proves garbage and missing proxy session tokens are refused.
 Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process.
 These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts.
-To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE=subprocess`.
+To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` is `subprocess` or `forkserver`.
 
 ## Workspace home contract
 
@@ -17442,7 +17454,12 @@ Runs a series of checks in one pass:
  so you can fix everything before running `mindroom run`.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
+│ --config        -c      PATH  Use this config file path. Defaults the storage location │
+│                               to the selected config directory unless --storage-path   │
+│                               is set.                                                  │
+│ --storage-path  -s      PATH  Base directory for persistent MindRoom data (state,      │
+│                               sessions, tracking)                                      │
+│ --help          -h            Show this message and exit.                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

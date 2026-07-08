@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Self
 
 import pytest
@@ -9,9 +10,12 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import scripts.local_mindroom_provisioning_service as provisioning
+from mindroom.matrix import provisioning as matrix_provisioning
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import httpx
 
 
 def _service_config(state_path: Path) -> provisioning.ServiceConfig:
@@ -56,8 +60,72 @@ def _invalid_managed_agent_username(case: str, namespace: str) -> str:
         return f"{_managed_agent_username('code', namespace)}x"
     if case == "wrong_prefix_for_namespace":
         return f"other_code_{namespace}"
+    if case == "plain_username_without_namespace":
+        return f"{provisioning.MANAGED_AGENT_USERNAME_PREFIX}foo"
+    if case == "invalid_localpart_for_namespace":
+        return _managed_agent_username("Foo", namespace)
     msg = f"Unknown invalid username case: {case}"
     raise ValueError(msg)
+
+
+def _pair_local_client(client: TestClient) -> dict[str, str]:
+    pair_code = client.post(
+        "/v1/local-mindroom/pair/start",
+        headers={"Authorization": "Bearer token-alice"},
+    ).json()["pair_code"]
+    complete = client.post(
+        "/v1/local-mindroom/pair/complete",
+        json={
+            "pair_code": pair_code,
+            "client_name": "alice-macbook",
+            "client_pubkey_or_fingerprint": "sha256:abc123",
+        },
+    )
+    assert complete.status_code == 200
+    return complete.json()
+
+
+def _set_connection_namespace(state_path: Path, connection_id: str, namespace: str | None) -> None:
+    """Edit the persisted state file the way an operator would (service stopped)."""
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    for item in payload["connections"]:
+        if item["id"] == connection_id:
+            if namespace is None:
+                item.pop("namespace", None)
+            else:
+                item["namespace"] = namespace
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _install_fake_register(monkeypatch: pytest.MonkeyPatch, register_calls: list[str]) -> None:
+    async def _fake_register(
+        config: provisioning.ServiceConfig,
+        payload: provisioning.RegisterAgentRequest,
+    ) -> provisioning.RegisterAgentResponse:
+        del config
+        register_calls.append(payload.username)
+        return provisioning.RegisterAgentResponse(
+            status="created",
+            user_id=f"@{payload.username}:mindroom.chat",
+        )
+
+    monkeypatch.setattr(provisioning, "_register_agent_with_matrix", _fake_register)
+
+
+def _post_register_agent(client: TestClient, complete: dict[str, str], username: str) -> httpx.Response:
+    return client.post(
+        "/v1/local-mindroom/register-agent",
+        json={
+            "homeserver": "https://mindroom.chat",
+            "username": username,
+            "password": "agent-pass-123",
+            "display_name": "CodeAgent",
+        },
+        headers={
+            "X-Local-MindRoom-Client-Id": complete["client_id"],
+            "X-Local-MindRoom-Client-Secret": complete["client_secret"],
+        },
+    )
 
 
 def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -237,17 +305,20 @@ def test_pair_status_rejects_missing_session_header(
 
 
 @pytest.mark.parametrize(
-    "invalid_username_case",
+    ("invalid_username_case", "expected_status"),
     [
-        "missing_entity_between_prefix_and_namespace",
-        "wrong_namespace_suffix",
-        "wrong_prefix_for_namespace",
+        ("missing_entity_between_prefix_and_namespace", 403),
+        ("wrong_namespace_suffix", 403),
+        ("wrong_prefix_for_namespace", 403),
+        ("plain_username_without_namespace", 403),
+        ("invalid_localpart_for_namespace", 400),
     ],
 )
 def test_register_agent_rejects_username_outside_connection_namespace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     invalid_username_case: str,
+    expected_status: int,
 ) -> None:
     """A local client must not register Matrix users outside its assigned namespace."""
     _patch_matrix_auth(monkeypatch)
@@ -296,8 +367,134 @@ def test_register_agent_rejects_username_outside_connection_namespace(
             },
         )
 
+        assert register.status_code == expected_status
+        if expected_status == 403:
+            assert register.json()["detail"] == "Requested username is outside this local connection namespace"
+        else:
+            assert "not a valid Matrix localpart" in register.json()["detail"]
+        assert register_calls == []
+
+
+def test_register_agent_allows_plain_username_for_namespace_exempt_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection with operator-set namespace "" may register plain mindroom_<entity> usernames."""
+    _patch_matrix_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    register_calls: list[str] = []
+    _install_fake_register(monkeypatch, register_calls)
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        complete = _pair_local_client(client)
+
+    _set_connection_namespace(state_path, complete["client_id"], "")
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        register = _post_register_agent(client, complete, "mindroom_foo")
+
+        assert register.status_code == 200
+        assert register.json()["status"] == "created"
+        assert register.json()["user_id"] == "@mindroom_foo:mindroom.chat"
+        assert register_calls == ["mindroom_foo"]
+
+
+@pytest.mark.parametrize(
+    ("username", "expected_status"),
+    [
+        ("other_foo", 403),  # missing managed prefix
+        ("mindroom_", 403),  # bare prefix without entity
+        ("mindroom_Foo", 400),  # invalid Matrix localpart (uppercase)
+    ],
+)
+def test_register_agent_namespace_exempt_connection_still_requires_managed_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    username: str,
+    expected_status: int,
+) -> None:
+    """Namespace-exempt connections still only get mindroom_-prefixed valid localparts."""
+    _patch_matrix_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    register_calls: list[str] = []
+    _install_fake_register(monkeypatch, register_calls)
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        complete = _pair_local_client(client)
+
+    _set_connection_namespace(state_path, complete["client_id"], "")
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        register = _post_register_agent(client, complete, username)
+
+        assert register.status_code == expected_status
+        assert register_calls == []
+
+
+@pytest.mark.parametrize("corrupt_namespace", [None, "null", " "], ids=["missing_key", "json_null", "whitespace"])
+def test_state_load_fails_closed_for_missing_or_blank_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corrupt_namespace: str | None,
+) -> None:
+    """Only a literal "" exempts; missing, null, or whitespace namespaces must fail closed to a derived one."""
+    _patch_matrix_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    register_calls: list[str] = []
+    _install_fake_register(monkeypatch, register_calls)
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        complete = _pair_local_client(client)
+
+    if corrupt_namespace == "null":
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        payload["connections"][0]["namespace"] = None
+        state_path.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        _set_connection_namespace(state_path, complete["client_id"], corrupt_namespace)
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        register = _post_register_agent(client, complete, "mindroom_foo")
         assert register.status_code == 403
         assert register_calls == []
+
+        listed = client.get(
+            "/v1/local-mindroom/connections",
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        derived = listed.json()["connections"][0]["namespace"]
+        assert isinstance(derived, str)
+        assert derived.strip() != ""
+
+
+def test_state_round_trip_preserves_empty_namespace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator-set empty namespace must survive load and re-persist cycles."""
+    _patch_matrix_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    register_calls: list[str] = []
+    _install_fake_register(monkeypatch, register_calls)
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        complete = _pair_local_client(client)
+
+    _set_connection_namespace(state_path, complete["client_id"], "")
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        listed = client.get(
+            "/v1/local-mindroom/connections",
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        assert listed.status_code == 200
+        assert listed.json()["connections"][0]["namespace"] == ""
+
+        # Registering updates last_seen_at and re-persists state to disk.
+        assert _post_register_agent(client, complete, "mindroom_foo").status_code == 200
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert [item["namespace"] for item in persisted["connections"]] == [""]
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        assert _post_register_agent(client, complete, "mindroom_bar").status_code == 200
 
 
 def test_register_agent_validates_homeserver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -447,3 +644,9 @@ async def test_register_agent_user_in_use_respects_matrix_server_name_override(
     result = await provisioning._register_agent_with_matrix(config, payload)
     assert result.status == "user_in_use"
     assert result.user_id == "@mindroom_code:mindroom.chat"
+
+
+def test_client_error_detail_constants_match_service() -> None:
+    """The runtime client classifies register-agent 403s by these exact strings."""
+    assert matrix_provisioning._CONNECTION_REVOKED_DETAIL == provisioning.CONNECTION_REVOKED_DETAIL
+    assert matrix_provisioning._NAMESPACE_MISMATCH_DETAIL == provisioning.NAMESPACE_MISMATCH_DETAIL

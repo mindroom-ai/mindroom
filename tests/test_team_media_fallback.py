@@ -47,6 +47,11 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import CompactionDecision, CompactionReplyOutcome, PreparedHistoryState
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.media_fallback import (
+    build_model_media_route,
+    reset_model_media_capability_cache,
+    unsupported_media_kinds_for_route,
+)
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.team_exact_members import (
@@ -348,6 +353,91 @@ async def test_team_response_retries_errored_plain_run_output_with_fresh_run_id(
     assert second_call.kwargs["run_id"] is not None
     assert second_call.kwargs["run_id"] != "run-123"
     assert callback_run_ids == [first_call.kwargs["run_id"], second_call.kwargs["run_id"]]
+
+
+@pytest.mark.asyncio
+async def test_team_generic_invalid_request_retry_teaches_route_after_success() -> None:
+    """A successful without-media retry after an unrecognized 400 teaches the route cache."""
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(
+        side_effect=[
+            Exception("Error code: 400 - completely new provider wording"),
+            TeamRunOutput(content="Recovered team response"),
+        ],
+    )
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(session_id=None),
+            media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+        )
+
+    assert "Recovered team response" in response
+    assert mock_team.arun.await_count == 2
+    route = build_model_media_route(mock_team.model)
+    assert unsupported_media_kinds_for_route(route) == frozenset({"audio"})
+    reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+async def test_team_generic_invalid_request_retry_failure_does_not_teach() -> None:
+    """When the without-media retry fails too, the route capability cache stays untouched."""
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(
+        side_effect=[
+            Exception("Error code: 400 - completely new provider wording"),
+            Exception("Error code: 400 - completely new provider wording"),
+        ],
+    )
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(session_id=None),
+            media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+        )
+
+    assert mock_team.arun.await_count == 2
+    assert "Recovered" not in response
+    route = build_model_media_route(mock_team.model)
+    assert unsupported_media_kinds_for_route(route) == frozenset()
 
 
 @pytest.mark.asyncio

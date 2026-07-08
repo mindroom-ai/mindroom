@@ -1120,7 +1120,7 @@ class KubernetesResourceManager:
         venv_path = f"{dedicated_root}/venv"
         env: list[dict[str, object]] = [
             {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"], "value": "true"},
-            {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], "value": "subprocess"},
+            {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], "value": "forkserver"},
             {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"], "value": str(self.config.worker_port)},
             {
                 "name": SANDBOX_STARTUP_MANIFEST_PATH_ENV,
@@ -1245,7 +1245,7 @@ class KubernetesResourceManager:
         process_env.update(
             {
                 SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
-                SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "subprocess",
+                SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "forkserver",
                 SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"]: str(self.config.worker_port),
                 "MINDROOM_CONFIG_PATH": str(config_path),
                 "MINDROOM_STORAGE_PATH": str(dedicated_root),

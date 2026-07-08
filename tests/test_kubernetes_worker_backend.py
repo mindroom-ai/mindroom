@@ -559,7 +559,7 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     assert handle.auth_token not in json.dumps(deployment)
     assert deployment["spec"]["template"]["metadata"]["annotations"][_ANNOTATION_RUNNER_TOKEN_HASH]
     assert deployment["spec"]["template"]["metadata"]["annotations"][_ANNOTATION_RUNNER_TOKEN_HASH] != handle.auth_token
-    assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
+    assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "forkserver"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
     manifest_path = env_values["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"]
     assert manifest_path is not None
@@ -1560,7 +1560,7 @@ def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifes
     assert env_values["MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"] == "45"
     assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS") == "45"
     assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_MODE") == "true"
-    assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "subprocess"
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "forkserver"
     assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_PORT") == "8766"
     assert env_names.count("MINDROOM_SANDBOX_PROXY_TOKEN") == 1
     assert env_values["MINDROOM_SANDBOX_PROXY_TOKEN"] is None

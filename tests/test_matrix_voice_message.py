@@ -451,6 +451,153 @@ async def test_matrix_voice_message_can_use_local_openai_compatible_tts(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_matrix_voice_message_routes_openrouter_models_through_openrouter(tmp_path: Path) -> None:
+    """Provider-prefixed model IDs should use OpenRouter's speech endpoint with OPENROUTER_API_KEY and mp3 audio."""
+    context = _context(tmp_path, thread_id=None)
+
+    def fake_secret(name: str, _runtime_paths: object) -> str | None:
+        return "sk-or-test" if name == "OPENROUTER_API_KEY" else None
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.get_secret_from_env", side_effect=fake_secret),
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+        patch(
+            "mindroom.custom_tools.matrix_voice_message.prepare_voice_audio_bytes",
+            new_callable=AsyncMock,
+            return_value=_prepared_voice_audio(),
+        ) as mock_voice_payload,
+        patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
+    ):
+        mock_openai.return_value.audio.speech.create.return_value = SimpleNamespace(content=b"mp3-bytes")
+        mock_send.return_value = "$voice-event"
+
+        result = await MatrixVoiceMessageTools(
+            model="hexgrad/kokoro-82m",
+            voice="alloy",
+        ).matrix_voice_message("openrouter speech")
+
+    mock_openai.assert_called_once_with(api_key="sk-or-test", base_url="https://openrouter.ai/api/v1")
+    mock_openai.return_value.audio.speech.create.assert_called_once_with(
+        model="hexgrad/kokoro-82m",
+        voice="alloy",
+        input="openrouter speech",
+        response_format="mp3",
+    )
+    assert mock_voice_payload.await_args.kwargs["response_format"] == "mp3"
+    payload = _payload(result)
+    assert payload["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_matrix_voice_message_openrouter_model_without_key_is_structured_error(tmp_path: Path) -> None:
+    """OpenRouter voice models without OPENROUTER_API_KEY should fail preflight with a targeted message."""
+    context = _context(tmp_path, thread_id=None)
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.get_secret_from_env", return_value=None),
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+    ):
+        result = await MatrixVoiceMessageTools(model="hexgrad/kokoro-82m").matrix_voice_message("hello")
+
+    mock_openai.assert_not_called()
+    payload = _payload(result)
+    assert payload["status"] == "error"
+    assert (
+        payload["message"]
+        == "OPENROUTER_API_KEY is required to use an OpenRouter voice model with matrix_voice_message."
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_voice_message_explicit_base_url_overrides_openrouter_model_routing(tmp_path: Path) -> None:
+    """An explicit base URL should win over OpenRouter model detection and keep the configured format."""
+    context = _context(tmp_path, thread_id=None)
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+        patch(
+            "mindroom.custom_tools.matrix_voice_message.prepare_voice_audio_bytes",
+            new_callable=AsyncMock,
+            return_value=_prepared_voice_audio(),
+        ),
+        patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
+    ):
+        mock_openai.return_value.audio.speech.create.return_value = SimpleNamespace(content=b"wav-bytes")
+        mock_send.return_value = "$voice-event"
+
+        result = await MatrixVoiceMessageTools(
+            model="hexgrad/kokoro",
+            base_url="http://pc.local:10201",
+            response_format="wav",
+        ).matrix_voice_message("local speech")
+
+    mock_openai.assert_called_once_with(api_key="sk-no-key-required", base_url="http://pc.local:10201/v1")
+    assert mock_openai.return_value.audio.speech.create.call_args.kwargs["response_format"] == "wav"
+    payload = _payload(result)
+    assert payload["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_matrix_voice_message_openrouter_base_url_uses_openrouter_key(tmp_path: Path) -> None:
+    """An explicit OpenRouter base URL should use OPENROUTER_API_KEY, not the local placeholder key."""
+    context = _context(tmp_path, thread_id=None)
+
+    def fake_secret(name: str, _runtime_paths: object) -> str | None:
+        return "sk-or-test" if name == "OPENROUTER_API_KEY" else None
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.get_secret_from_env", side_effect=fake_secret),
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+        patch(
+            "mindroom.custom_tools.matrix_voice_message.prepare_voice_audio_bytes",
+            new_callable=AsyncMock,
+            return_value=_prepared_voice_audio(),
+        ),
+        patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
+    ):
+        mock_openai.return_value.audio.speech.create.return_value = SimpleNamespace(content=b"mp3-bytes")
+        mock_send.return_value = "$voice-event"
+
+        result = await MatrixVoiceMessageTools(
+            model="mistralai/voxtral-mini-tts",
+            base_url="https://openrouter.ai/api/v1",
+        ).matrix_voice_message("openrouter speech")
+
+    mock_openai.assert_called_once_with(api_key="sk-or-test", base_url="https://openrouter.ai/api/v1")
+    assert mock_openai.return_value.audio.speech.create.call_args.kwargs["response_format"] == "mp3"
+    payload = _payload(result)
+    assert payload["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_matrix_voice_message_rejects_invalid_response_format_even_for_openrouter(tmp_path: Path) -> None:
+    """Misconfigured response formats should fail preflight before OpenRouter mp3 coercion hides them."""
+    context = _context(tmp_path, thread_id=None)
+
+    def fake_secret(name: str, _runtime_paths: object) -> str | None:
+        return "sk-or-test" if name == "OPENROUTER_API_KEY" else None
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.get_secret_from_env", side_effect=fake_secret),
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+    ):
+        result = await MatrixVoiceMessageTools(
+            model="hexgrad/kokoro-82m",
+            response_format="ogg",
+        ).matrix_voice_message("hello")
+
+    mock_openai.assert_not_called()
+    payload = _payload(result)
+    assert payload["status"] == "error"
+    assert payload["message"] == "response_format must be one of: aac, flac, mp3, opus, wav."
+
+
+@pytest.mark.asyncio
 async def test_matrix_voice_message_rejects_unknown_response_format(tmp_path: Path) -> None:
     """Unsupported response formats should fail preflight before any TTS call."""
     context = _context(tmp_path, thread_id=None)

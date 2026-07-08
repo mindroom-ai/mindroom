@@ -13,7 +13,7 @@ from agno.media import File
 from agno.models.message import Message
 from agno.models.metrics import Metrics
 from agno.models.openai import OpenAIChat
-from agno.models.response import ToolExecution
+from agno.models.response import ModelResponse, ToolExecution
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
     ModelRequestCompletedEvent,
@@ -1915,15 +1915,15 @@ class TestUserIdPassthrough:
                 self.client = None
                 self.async_client = None
 
-            async def ainvoke(self, *_args: object, **_kwargs: object) -> dict[str, str]:
-                return {"status": "ok"}
+            async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+                return ModelResponse(content="ok")
 
             async def ainvoke_stream(
                 self,
                 *_args: object,
                 **_kwargs: object,
-            ) -> AsyncIterator[dict[str, str]]:
-                yield {"status": "ok"}
+            ) -> AsyncIterator[ModelResponse]:
+                yield ModelResponse(content="ok")
 
         class _DeferredLoggingAgent:
             def __init__(self, model: _DeferredLoggingModel) -> None:
@@ -2116,8 +2116,10 @@ class TestUserIdPassthrough:
             ("Error code: 500 - audio input is not supported", True),
             ("Error code: 404 - No endpoints found that support input audio", True),
             ("[openclaw] Error: At most 0 audio(s) may be provided in one prompt.", True),
-            ("invalid_request_error: max_tokens must be <= 4096", False),
+            # Invalid-request-class evidence retries once even without media wording.
+            ("invalid_request_error: max_tokens must be <= 4096", True),
             ("Rate limit exceeded", False),
+            ("Error code: 500 - internal server error", False),
         ],
     )
     def test_retry_media_inputs_after_failure_error_matching(self, error_text: str, expected: bool) -> None:
@@ -2171,14 +2173,14 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     async def test_ai_response_does_not_retry_without_media_validation_match(self, tmp_path: Path) -> None:
-        """Non-media failures should not trigger inline-media retry even when media is present."""
+        """Failures outside the invalid-request class should not trigger inline-media retry."""
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "OpenAIChat"
         mock_agent.model.id = "test-model"
         mock_agent.name = "GeneralAgent"
         mock_agent.add_history_to_context = False
-        mock_agent.arun = AsyncMock(side_effect=Exception("invalid_request_error: max_tokens must be <= 4096"))
+        mock_agent.arun = AsyncMock(side_effect=Exception("Error code: 500 - upstream connect error"))
 
         document_file = File(
             filepath=str(tmp_path / "report.pdf"),

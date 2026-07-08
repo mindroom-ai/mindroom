@@ -505,7 +505,12 @@ Runs a series of checks in one pass:
  so you can fix everything before running `mindroom run`.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
+│ --config        -c      PATH  Use this config file path. Defaults the storage location │
+│                               to the selected config directory unless --storage-path   │
+│                               is set.                                                  │
+│ --storage-path  -s      PATH  Base directory for persistent MindRoom data (state,      │
+│                               sessions, tracking)                                      │
+│ --help          -h            Show this message and exit.                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

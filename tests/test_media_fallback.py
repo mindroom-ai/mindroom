@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
 from agno.media import Audio, Image
 from agno.models.message import Message
 from agno.models.openai import OpenAIChat
@@ -129,6 +130,205 @@ def test_generic_media_error_retries_without_caching() -> None:
 
     filtered = filter_media_inputs_for_route(route, media)
     assert filtered.media_inputs == media
+
+
+def test_text_only_content_error_teaches_all_present_kinds() -> None:
+    """Z.ai text-only models reject every non-text part; all present kinds are learned."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+
+    decision = retry_media_inputs_after_failure(
+        route,
+        "Error code: 400 - messages.content.type is invalid, allowed values: ['text']",
+        media,
+    )
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"audio", "image", "file", "video"})
+    assert decision.media_inputs == MediaInputs()
+
+    filtered = filter_media_inputs_for_route(route, media)
+    assert filtered.removed_kinds == frozenset({"audio", "image", "file", "video"})
+    assert filtered.media_inputs == MediaInputs()
+    reset_model_media_capability_cache()
+
+
+def test_text_only_content_error_teaches_only_present_kinds() -> None:
+    """Text-only errors must not disable media kinds that were never sent."""
+    reset_model_media_capability_cache()
+    media = MediaInputs(images=(MagicMock(name="image"),))
+    route = _route()
+
+    decision = retry_media_inputs_after_failure(
+        route,
+        "messages.content.type is invalid, allowed values: ['text']",
+        media,
+    )
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"image"})
+    assert unsupported_media_kinds_for_route(route) == frozenset({"image"})
+    reset_model_media_capability_cache()
+
+
+def test_content_part_type_error_retries_via_generic_gate() -> None:
+    """Z.ai bare content-part type errors carry the 400 marker the generic gate matches."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+
+    decision = retry_media_inputs_after_failure(
+        route,
+        "Error code: 400 - messages[12].content[0].type type error",
+        media,
+    )
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"audio", "image", "file", "video"})
+    assert decision.media_inputs == MediaInputs()
+
+    filtered = filter_media_inputs_for_route(route, media)
+    assert filtered.media_inputs == media
+    reset_model_media_capability_cache()
+
+
+def test_invalid_request_status_retries_and_teaches_only_on_success() -> None:
+    """Any 400-class provider exception retries without media; the cache learns on retry success."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+    error = ModelProviderError(message="Some brand new provider wording about content", status_code=400)
+
+    decision = retry_media_inputs_after_failure(route, error, media)
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"audio", "image", "file", "video"})
+    assert decision.media_inputs == MediaInputs()
+    assert filter_media_inputs_for_route(route, media).media_inputs == media
+
+    decision.record_retry_success()
+
+    assert unsupported_media_kinds_for_route(route) == frozenset({"audio", "image", "file", "video"})
+    reset_model_media_capability_cache()
+
+
+def test_invalid_request_text_marker_retries_and_teaches_only_on_success() -> None:
+    """Errored-run text with a generic 400 marker retries even for unknown provider prose."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+
+    decision = retry_media_inputs_after_failure(route, "Error code: 422 - unknown validation prose", media)
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"audio", "image", "file", "video"})
+    assert filter_media_inputs_for_route(route, media).media_inputs == media
+
+    decision.record_retry_success()
+
+    assert unsupported_media_kinds_for_route(route) == frozenset({"audio", "image", "file", "video"})
+    reset_model_media_capability_cache()
+
+
+def test_context_window_error_retries_but_never_teaches() -> None:
+    """Dropping media can shrink an overflowing prompt, so success must not teach capability."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+    error = ContextWindowExceededError(message="prompt is too long: 250000 tokens > 200000 maximum")
+
+    decision = retry_media_inputs_after_failure(route, error, media)
+
+    assert decision.should_retry is True
+    assert decision.teach_route_on_success is None
+
+    decision.record_retry_success()
+
+    assert unsupported_media_kinds_for_route(route) == frozenset()
+
+
+def test_context_window_text_never_teaches() -> None:
+    """Context-overflow vocabulary in errored-run text blocks teaching, not the retry."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+
+    decision = retry_media_inputs_after_failure(
+        route,
+        "Error code: 400 - maximum context length is 128000 tokens",
+        media,
+    )
+
+    assert decision.should_retry is True
+    assert decision.teach_route_on_success is None
+
+
+def test_payload_too_large_retries_but_never_teaches() -> None:
+    """Oversized-payload rejections are about size, not media capability."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+    error = ModelProviderError(message="Request Entity Too Large", status_code=413)
+
+    decision = retry_media_inputs_after_failure(route, error, media)
+
+    assert decision.should_retry is True
+    assert decision.teach_route_on_success is None
+
+    decision.record_retry_success()
+
+    assert unsupported_media_kinds_for_route(route) == frozenset()
+
+
+def test_auth_worded_invalid_request_does_not_retry() -> None:
+    """Credential failures phrased as 400s would fail identically without media on either path."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+
+    text_decision = retry_media_inputs_after_failure(
+        _route(),
+        "Error code: 400 - invalid api key provided",
+        media,
+    )
+    # Google rejects bad API keys with HTTP 400, so the status-code path needs the same exclusion.
+    exception_decision = retry_media_inputs_after_failure(
+        _route(),
+        ModelProviderError(message="API key not valid. Please pass a valid API key.", status_code=400),
+        media,
+    )
+
+    assert text_decision.should_retry is False
+    assert text_decision.media_inputs == media
+    assert exception_decision.should_retry is False
+    assert exception_decision.media_inputs == media
+
+
+def test_non_request_status_exception_does_not_retry() -> None:
+    """Server-side failures are not media evidence even when media was present."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    error = ModelProviderError(message="upstream connect error", status_code=502)
+
+    decision = retry_media_inputs_after_failure(_route(), error, media)
+
+    assert decision.should_retry is False
+
+
+def test_kind_specific_error_takes_precedence_over_generic_gate() -> None:
+    """A named kind on a 400 drops and teaches only that kind, not everything present."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+    error = ModelProviderError(message="audio input is not supported", status_code=400)
+
+    decision = retry_media_inputs_after_failure(route, error, media)
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"audio"})
+    assert decision.media_inputs.images == media.images
+    assert unsupported_media_kinds_for_route(route) == frozenset({"audio"})
+    reset_model_media_capability_cache()
 
 
 def test_openai_invalid_audio_format_error_retries_without_caching() -> None:

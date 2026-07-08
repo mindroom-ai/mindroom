@@ -26,6 +26,7 @@ from mindroom.claude_prompt_cache import (
     _prompt_cache_control,
     _PromptCacheClientProxy,
     _request_kwargs_with_prompt_cache_ladder,
+    _request_kwargs_with_replay_safe_tool_search_results,
     install_claude_deferred_tool_search,
     install_claude_prompt_cache_hook,
     native_tool_search_supported,
@@ -1065,6 +1066,15 @@ _TOOL_SEARCH_RESULT_BLOCK = {
         "tool_references": [{"type": "tool_reference", "tool_name": "get_weather"}],
     },
 }
+# The shape the SDK response capture actually persists: response-only fields
+# (citations/parsed_output/text) ride along and the request schema rejects
+# them with "Extra inputs are not permitted".
+_DIRTY_TOOL_SEARCH_RESULT_BLOCK = {
+    **_TOOL_SEARCH_RESULT_BLOCK,
+    "citations": None,
+    "parsed_output": None,
+    "text": "Found 1 tool",
+}
 
 
 def _anthropic_response(content: list[dict[str, object]]) -> AnthropicMessage:
@@ -1131,6 +1141,80 @@ def test_server_tool_blocks_replay_to_non_anthropic_provider_without_crashing() 
 
     assert formatted["role"] == "assistant"
     assert formatted["content"] == "I'll search for a weather tool."
+
+
+def test_replay_safe_tool_search_results_strips_response_only_fields() -> None:
+    """Replayed tool-search results must carry only request-schema fields."""
+    request_kwargs = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [dict(_DIRTY_TOOL_SEARCH_RESULT_BLOCK), {"type": "text", "text": "found it"}],
+            },
+        ],
+    }
+
+    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+
+    assert prepared["messages"][0]["content"][0] == _TOOL_SEARCH_RESULT_BLOCK
+    assert prepared["messages"][0]["content"][1] == {"type": "text", "text": "found it"}
+    assert "citations" in request_kwargs["messages"][0]["content"][0]
+    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+
+
+def _dirty_replay_messages() -> list[Message]:
+    """A conversation whose assistant turn replays a persisted dirty tool-search block."""
+    return [
+        Message(role="system", content="System prompt"),
+        Message(role="user", content="Find me a tool."),
+        Message(
+            role="assistant",
+            content="I'll search for a weather tool.",
+            provider_data={
+                "server_tool_blocks": [dict(_SERVER_TOOL_USE_BLOCK), dict(_DIRTY_TOOL_SEARCH_RESULT_BLOCK)],
+            },
+        ),
+        Message(role="user", content="Thanks, what did you find?"),
+    ]
+
+
+def _wire_tool_search_results(wire_messages: list[dict[str, object]]) -> list[object]:
+    return [
+        block
+        for message in wire_messages
+        for block in (message.get("content") or [])
+        if isinstance(block, dict) and block.get("type") == "tool_search_tool_result"
+    ]
+
+
+def test_prompt_cache_hook_sanitizes_replayed_tool_search_results() -> None:
+    """A persisted tool-search result with response-only fields must not reach the wire."""
+    model = _vertex_claude_model()
+    captured_kwargs = _install_fake_sync_client(model)
+    install_claude_prompt_cache_hook(model)
+
+    model.response(messages=_dirty_replay_messages(), compression_manager=None)
+
+    assert _wire_tool_search_results(captured_kwargs[0]["messages"]) == [_TOOL_SEARCH_RESULT_BLOCK]
+
+
+def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_tools() -> None:
+    """Sanitization must engage even when neither the ladder nor defer tagging does.
+
+    Pins the unconditional client proxying: a thread poisoned under a
+    tool-search model and continued via `!model` on a cache-disabled Claude
+    model with no deferred tools must still send schema-clean history, while
+    the disabled ladder stays inert.
+    """
+    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    captured_kwargs = _install_fake_sync_client(model)
+    install_claude_prompt_cache_hook(model)
+
+    model.response(messages=_dirty_replay_messages(), compression_manager=None)
+
+    wire_messages = captured_kwargs[0]["messages"]
+    assert _wire_tool_search_results(wire_messages) == [_TOOL_SEARCH_RESULT_BLOCK]
+    assert _count_cache_markers({"messages": list(wire_messages)}) == 0
 
 
 def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
