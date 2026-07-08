@@ -45,6 +45,17 @@ _OPENAI_AUDIO_FORMAT_VALUE_PATTERN = re.compile(
     r"invalid value: ['\"][^'\"]+['\"].*supported values are: ['\"]wav['\"] and ['\"]mp3['\"]",
 )
 _OPENAI_OUTPUT_FORMAT_PATTERN = re.compile(r"\boutput_format\b")
+# Z.ai text-only models reject any non-text content part without naming a media
+# kind ("messages.content.type is invalid, allowed values: ['text']"), so every
+# present kind is unsupported for the route.
+_TEXT_ONLY_CONTENT_TYPE_PATTERN = re.compile(
+    r"content(?:\[\d+\])?\.type is invalid, allowed values: \['text'\]",
+)
+# Z.ai reports content part types it cannot parse at all (e.g. OpenAI-style
+# "file" parts) as a bare type error on the message path.
+_CONTENT_PART_TYPE_ERROR_PATTERN = re.compile(
+    r"messages(?:\[\d+\])?\.content(?:\[\d+\])?\.type type error",
+)
 _MEDIA_KIND_PATTERN = r"audio|image|video|file|document"
 _INLINE_MEDIA_UNSUPPORTED_PATTERNS = (
     re.compile(rf"(?P<kind>{_MEDIA_KIND_PATTERN}) input is not supported"),
@@ -139,10 +150,11 @@ def retry_media_inputs_after_failure(
     """Decide whether and how one media-bearing request should retry.
 
     Explicit "kind is not supported" errors teach the route cache so later
-    requests pre-drop that kind; validation and ambiguous media errors retry
-    once without poisoning the cache. A kind can only be learned when it was
-    actually present in ``media_inputs`` or ``extra_present_kinds`` (media
-    pinned to thread-history messages in the run input).
+    requests pre-drop that kind; text-only content errors teach every present
+    kind; validation and ambiguous media errors retry once without poisoning
+    the cache. A kind can only be learned when it was actually present in
+    ``media_inputs`` or ``extra_present_kinds`` (media pinned to
+    thread-history messages in the run input).
     """
     present_kinds = media_inputs.kinds() | extra_present_kinds
     if not present_kinds:
@@ -154,6 +166,14 @@ def retry_media_inputs_after_failure(
         return _media_retry_decision_for_kinds(
             media_inputs,
             unsupported_kinds,
+            present_kinds=present_kinds,
+            cache_route=route,
+        )
+
+    if _TEXT_ONLY_CONTENT_TYPE_PATTERN.search(error_text.lower()):
+        return _media_retry_decision_for_kinds(
+            media_inputs,
+            present_kinds,
             present_kinds=present_kinds,
             cache_route=route,
         )
@@ -245,7 +265,11 @@ def _media_validation_kinds_from_error(error_text: str) -> frozenset[MediaKind]:
 
 
 def _is_ambiguous_media_error(error_text: str) -> bool:
-    return bool(_INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN.search(error_text.lower()))
+    lowered_error_text = error_text.lower()
+    return bool(
+        _INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN.search(lowered_error_text)
+        or _CONTENT_PART_TYPE_ERROR_PATTERN.search(lowered_error_text),
+    )
 
 
 def _canonical_media_kind(provider_kind: str) -> MediaKind | None:

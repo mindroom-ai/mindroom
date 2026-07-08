@@ -131,6 +131,66 @@ def test_generic_media_error_retries_without_caching() -> None:
     assert filtered.media_inputs == media
 
 
+def test_text_only_content_error_teaches_all_present_kinds() -> None:
+    """Z.ai text-only models reject every non-text part; all present kinds are learned."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+
+    decision = retry_media_inputs_after_failure(
+        route,
+        "Error code: 400 - messages.content.type is invalid, allowed values: ['text']",
+        media,
+    )
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"audio", "image", "file", "video"})
+    assert decision.media_inputs == MediaInputs()
+
+    filtered = filter_media_inputs_for_route(route, media)
+    assert filtered.removed_kinds == frozenset({"audio", "image", "file", "video"})
+    assert filtered.media_inputs == MediaInputs()
+    reset_model_media_capability_cache()
+
+
+def test_text_only_content_error_teaches_only_present_kinds() -> None:
+    """Text-only errors must not disable media kinds that were never sent."""
+    reset_model_media_capability_cache()
+    media = MediaInputs(images=(MagicMock(name="image"),))
+    route = _route()
+
+    decision = retry_media_inputs_after_failure(
+        route,
+        "messages.content.type is invalid, allowed values: ['text']",
+        media,
+    )
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"image"})
+    assert unsupported_media_kinds_for_route(route) == frozenset({"image"})
+    reset_model_media_capability_cache()
+
+
+def test_content_part_type_error_retries_without_caching() -> None:
+    """Z.ai bare content-part type errors drop media for the retry only."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+
+    decision = retry_media_inputs_after_failure(
+        route,
+        "Error code: 400 - messages[12].content[0].type type error",
+        media,
+    )
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"audio", "image", "file", "video"})
+    assert decision.media_inputs == MediaInputs()
+
+    filtered = filter_media_inputs_for_route(route, media)
+    assert filtered.media_inputs == media
+
+
 def test_openai_invalid_audio_format_error_retries_without_caching() -> None:
     """OpenAI audio format validation errors should drop audio for the retry only."""
     reset_model_media_capability_cache()
