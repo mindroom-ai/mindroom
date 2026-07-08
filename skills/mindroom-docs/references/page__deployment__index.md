@@ -34,7 +34,7 @@ For hosted multi-user private agents, also configure [Trusted Upstream Browser A
 
 ## Quick Start
 
-### Hosted Matrix + local MindRoom (simplest)
+### Hosted Matrix + local MindRoom (recommended)
 
 ```bash
 # Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
@@ -50,7 +50,7 @@ Generate the pair code in `https://chat.mindroom.chat` under:
 See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for the full walkthrough.
 If you want worker-routed execution tools like `coding`, `docker`, `file`, `python`, and `shell` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
-### Full Stack (recommended)
+### Full Stack Docker Compose (all-local alternative)
 
 ```bash
 git clone https://github.com/mindroom-ai/mindroom-stack
