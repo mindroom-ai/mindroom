@@ -9,6 +9,7 @@ from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.external_trigger_manager import ExternalTriggerManagerTools
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 
 if TYPE_CHECKING:
@@ -79,9 +80,11 @@ def _context(
 ) -> ToolRuntimeContext:
     return ToolRuntimeContext(
         agent_name="watcher",
-        room_id=room_id,
-        thread_id="$thread",
-        resolved_thread_id="$thread",
+        target=MessageTarget.resolve(
+            room_id=room_id,
+            thread_id="$thread",
+            reply_to_event_id=None,
+        ),
         requester_id=requester_id,
         client=cast("Any", _Client()),
         config=config or _config(),

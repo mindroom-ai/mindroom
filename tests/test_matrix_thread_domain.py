@@ -37,6 +37,7 @@ from mindroom.matrix.thread_membership import (
     resolve_related_event_thread_membership,
     thread_messages_thread_membership_access,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 
@@ -136,9 +137,11 @@ def _tool_context(
     )
     return ToolRuntimeContext(
         agent_name="general",
-        room_id=room_id,
-        thread_id=thread_id,
-        resolved_thread_id=thread_id,
+        target=MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
@@ -146,7 +149,6 @@ def _tool_context(
         conversation_cache=AsyncMock(),
         event_cache=make_event_cache_mock(),
         room=None,
-        reply_to_event_id=None,
         storage_path=runtime_root,
     )
 

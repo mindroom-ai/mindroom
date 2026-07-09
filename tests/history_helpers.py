@@ -47,6 +47,7 @@ from mindroom.history.types import (
 from mindroom.hooks import (
     HookRegistry,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import (
     FakeModel,
@@ -309,16 +310,19 @@ def _hook_runtime_context(
 ) -> ToolRuntimeContext:
     return ToolRuntimeContext(
         agent_name="test_agent",
-        room_id="!room:localhost",
-        thread_id=thread_id,
-        resolved_thread_id=thread_id,
+        target=MessageTarget(
+            room_id="!room:localhost",
+            source_thread_id=thread_id,
+            resolved_thread_id=thread_id,
+            reply_to_event_id=None,
+            session_id=session_id,
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
-        session_id=session_id,
         hook_registry=registry,
         correlation_id="corr-compaction",
     )

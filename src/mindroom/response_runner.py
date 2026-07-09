@@ -1189,7 +1189,6 @@ class ResponseRunner:
             resolved_target,
             user_id=requester_user_id,
             active_model_name=model_name,
-            session_id=session_id,
             attachment_ids=request.attachment_ids,
             correlation_id=response_identity.correlation_id,
             source_envelope=request.response_envelope,
@@ -1739,7 +1738,6 @@ class ResponseRunner:
             resolved_target,
             user_id=request.user_id,
             active_model_name=runtime_model.model_name,
-            session_id=session_id,
             attachment_ids=request.attachment_ids,
             correlation_id=request.correlation_id,
             source_envelope=request.response_envelope,
@@ -2351,7 +2349,6 @@ class ResponseRunner:
         execution_identity = self.deps.tool_runtime.build_execution_identity(
             target=resolved_target,
             user_id=request.user_id,
-            session_id=session_id,
         )
         reprioritize_auto_flush_sessions(
             self.deps.storage_path,

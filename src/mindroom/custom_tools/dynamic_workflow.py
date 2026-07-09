@@ -551,7 +551,7 @@ async def _aexecute_room_agent_participant(
         context,
         agent_name=agent_name,
         active_model_name=active_model_name,
-        session_id=session_id,
+        target=replace(context.target, session_id=session_id),
     )
     execution_identity = build_execution_identity_from_runtime_context(participant_context)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
@@ -680,7 +680,10 @@ async def _aexecute_ephemeral_agent_participant(
         context,
         config=run_config,
         active_model_name=model_name,
-        session_id=_participant_session_id(context, participant_id, run_scope=run_scope),
+        target=replace(
+            context.target,
+            session_id=_participant_session_id(context, participant_id, run_scope=run_scope),
+        ),
     )
     return await _arun_agent(participant_context, agent, prompt)
 

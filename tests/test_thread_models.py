@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
+from mindroom.message_target import MessageTarget
 from mindroom.thread_models import (
     _get_thread_model_override,
     _load_cache,
@@ -430,9 +431,11 @@ def _make_tool_context(*, thread_id: str | None = THREAD_ID) -> ToolRuntimeConte
     config = _config_with_models(Path(tempfile.mkdtemp()))
     return ToolRuntimeContext(
         agent_name="test_agent",
-        room_id=ROOM_ID,
-        thread_id=thread_id,
-        resolved_thread_id=thread_id,
+        target=MessageTarget.resolve(
+            room_id=ROOM_ID,
+            thread_id=thread_id,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,

@@ -15,6 +15,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolRuntimeContext
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
@@ -360,9 +361,11 @@ def test_live_skill_dispatch_context_rejects_mismatched_execution_identity() -> 
     runtime_paths = resolve_runtime_paths()
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id="$thread",
+            reply_to_event_id=None,
+        ),
         requester_id="@alice:example.org",
         client=AsyncMock(),
         config=config,

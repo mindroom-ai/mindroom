@@ -15,6 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_tags import ThreadTagsTools
 from mindroom.matrix.client_thread_history import RoomThreadsPageError
+from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsListing, ThreadTagsState
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -34,9 +35,11 @@ def _make_context(
     )
     return ToolRuntimeContext(
         agent_name="general",
-        room_id=room_id,
-        thread_id=thread_id,
-        resolved_thread_id=thread_id,
+        target=MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
@@ -44,7 +47,6 @@ def _make_context(
         conversation_cache=AsyncMock(),
         event_cache=make_event_cache_mock(),
         room=None,
-        reply_to_event_id=reply_to_event_id,
         storage_path=None,
     )
 

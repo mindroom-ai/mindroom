@@ -149,15 +149,11 @@ def _message_received_context(tmp_path: Path, *, plugin_name: str = "") -> Messa
         correlation_id="corr-hook-send",
         envelope=MessageEnvelope(
             source_event_id="$event",
-            room_id="!room:localhost",
             target=MessageTarget.resolve("!room:localhost", None, "$event"),
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="hello",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="code",
-            source_kind="message",
             origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         ),
     )
@@ -178,19 +174,15 @@ def _synthetic_envelope(*, agent_name: str = "code") -> MessageEnvelope:
     """Return a first-hop synthetic envelope from a message:received relay."""
     return MessageEnvelope(
         source_event_id="$hook-event",
-        room_id="!room:localhost",
         target=MessageTarget.resolve(
             "!room:localhost",
             "$thread",
             "$hook-event",
         ),
-        requester_id="@user:localhost",
-        sender_id="@mindroom_router:localhost",
         body="synthetic",
         attachment_ids=(),
         mentioned_agents=(agent_name,),
         agent_name=agent_name,
-        source_kind="hook_dispatch",
         hook_source="origin-plugin:message:received",
         message_received_depth=1,
         origin=message_origin(
@@ -1044,21 +1036,16 @@ def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path)
     target = MessageTarget.resolve("!room:localhost", None, event.event_id)
     expected = MessageEnvelope(
         source_event_id=event.event_id,
-        room_id="!room:localhost",
         target=target,
-        requester_id="@user:localhost",
-        sender_id=event.sender,
         body=event.body,
         attachment_ids=(),
         mentioned_agents=(),
         agent_name=bot.agent_name,
-        source_kind="message",
         origin=message_origin(sender_id=event.sender, requester_id="@user:localhost", source_kind="message"),
     )
     bot._conversation_resolver.build_message_envelope = MagicMock(return_value=expected)
 
     envelope = bot._conversation_resolver.build_message_envelope(
-        room_id="!room:localhost",
         event=event,
         requester_user_id="@user:localhost",
         context=context,
@@ -1067,7 +1054,6 @@ def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path)
 
     assert envelope is expected
     bot._conversation_resolver.build_message_envelope.assert_called_once_with(
-        room_id="!room:localhost",
         event=event,
         requester_user_id="@user:localhost",
         context=context,

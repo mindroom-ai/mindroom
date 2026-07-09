@@ -19,6 +19,7 @@ from mindroom.custom_tools import subagents as subagents_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.subagents import SubAgentsTools
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id, parse_session_id
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
@@ -111,9 +112,11 @@ def _make_context(
     conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name=agent_name,
-        room_id=room_id,
-        thread_id=thread_id,
-        resolved_thread_id=thread_id,
+        target=MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=None,
+        ),
         requester_id=requester_id,
         client=MagicMock(),
         config=effective_config,
@@ -121,7 +124,6 @@ def _make_context(
         event_cache=make_event_cache_mock(),
         conversation_cache=conversation_cache,
         room=room,
-        reply_to_event_id=None,
         storage_path=tmp_path,
     )
 
@@ -630,16 +632,22 @@ async def test_sessions_send_defaults_to_resolved_thread_session(
     """sessions_send should keep first-turn follow-ups in the canonical reply thread."""
     send_mock = AsyncMock(return_value="$evt")
     monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    base_context = _make_context(tmp_path, thread_id=None)
+    resolved_thread_id = "$resolved-thread:localhost"
     ctx = replace(
-        _make_context(tmp_path, thread_id=None),
-        resolved_thread_id="$resolved-thread:localhost",
+        base_context,
+        target=replace(
+            base_context.target,
+            resolved_thread_id=resolved_thread_id,
+            session_id=create_session_id(base_context.room_id, resolved_thread_id),
+        ),
     )
 
     with tool_runtime_context(ctx):
         payload = json.loads(await SubAgentsTools().sessions_send(message="hello"))
 
     assert payload["status"] == "ok"
-    assert payload["session_key"] == create_session_id(ctx.room_id, "$resolved-thread:localhost")
+    assert payload["session_key"] == create_session_id(ctx.room_id, resolved_thread_id)
     send_mock.assert_awaited_once_with(
         ctx,
         room_id=ctx.room_id,

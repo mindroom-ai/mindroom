@@ -286,15 +286,11 @@ def _policy_dispatch(
     target = MessageTarget.resolve(room.room_id, context.thread_id, source_event_id)
     envelope = MessageEnvelope(
         source_event_id=source_event_id,
-        room_id=room.room_id,
         target=target,
-        requester_id=requester_user_id,
-        sender_id=requester_user_id,
         body=body,
         attachment_ids=(),
         mentioned_agents=tuple(context.mentioned_agents),
         agent_name=bot.agent_name,
-        source_kind=source_kind,
         origin=message_origin(sender_id=requester_user_id, requester_id=requester_user_id, source_kind=source_kind),
     )
     return PreparedDispatch(
@@ -626,15 +622,11 @@ def _hook_envelope(
     resolved_target = target or MessageTarget.resolve(room_id, thread_id, source_event_id)
     return MessageEnvelope(
         source_event_id=source_event_id,
-        room_id=resolved_target.room_id,
         target=resolved_target,
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body=body,
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="calculator",
-        source_kind=MESSAGE_SOURCE_KIND,
         origin=message_origin(
             sender_id="@user:localhost",
             requester_id="@user:localhost",

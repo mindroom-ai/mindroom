@@ -15,6 +15,7 @@ from mindroom.custom_tools.matrix_voice_message import MatrixVoiceMessageTools, 
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
 from mindroom.matrix.voice_message import PreparedVoiceAudio
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -78,9 +79,11 @@ def _context(
     conversation_cache.notify_outbound_message = MagicMock()
     return ToolRuntimeContext(
         agent_name="general",
-        room_id=room_id,
-        thread_id=thread_id,
-        resolved_thread_id=thread_id,
+        target=MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:localhost",
         client=_mock_client(),
         config=config,

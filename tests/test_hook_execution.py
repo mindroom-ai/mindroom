@@ -35,6 +35,7 @@ from mindroom.hooks import (
 from mindroom.hooks.execution import emit, emit_collect, emit_final_response_transform, emit_transform
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.session_ids import create_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, emit_custom_event, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -83,15 +84,11 @@ def _envelope(
 ) -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$event",
-        room_id=room_id,
         target=MessageTarget.resolve(room_id, None, "$event"),
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body=body,
         attachment_ids=(),
         mentioned_agents=(),
         agent_name=agent_name,
-        source_kind="message",
         message_received_depth=message_received_depth,
         origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
     )
@@ -555,9 +552,13 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
     )
     tool_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:localhost",
-        thread_id=None,
-        resolved_thread_id="$event",
+        target=MessageTarget(
+            room_id="!room:localhost",
+            source_thread_id=None,
+            resolved_thread_id="$event",
+            reply_to_event_id=None,
+            session_id=create_session_id("!room:localhost", "$event"),
+        ),
         requester_id="@user:localhost",
         client=client,
         config=config,

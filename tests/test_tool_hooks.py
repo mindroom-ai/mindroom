@@ -49,6 +49,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.session_ids import create_session_id
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import ToolCallWorkflowOrigin, _shutdown_approval_store
 from mindroom.tool_system import tool_hooks
@@ -225,16 +226,19 @@ def _tool_runtime_context(
     config = _config(tmp_path, log_llm_requests=log_llm_requests)
     return ToolRuntimeContext(
         agent_name=agent_name,
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$resolved-thread",
+        target=MessageTarget(
+            room_id="!room:localhost",
+            source_thread_id="$thread",
+            resolved_thread_id="$resolved-thread",
+            reply_to_event_id=None,
+            session_id=_SESSION_ID,
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
-        session_id=_SESSION_ID,
         correlation_id="corr-runtime",
         hook_registry=hook_registry or HookRegistry.empty(),
         hook_message_sender=hook_message_sender,
@@ -1213,7 +1217,6 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
     execution_identity = bot._tool_runtime_support.build_execution_identity(
         target=target,
         user_id="@user:localhost",
-        session_id=target.session_id,
     )
     bridge = build_tool_hook_bridge(
         registry,
@@ -1345,7 +1348,6 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     execution_identity = bot._tool_runtime_support.build_execution_identity(
         target=target,
         user_id="@user:localhost",
-        session_id=target.session_id,
     )
     bridge = build_tool_hook_bridge(
         registry,
@@ -2848,7 +2850,6 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             execution_identity = bot._tool_runtime_support.build_execution_identity(
                 target=target,
                 user_id="@user:localhost",
-                session_id=target.session_id,
             )
             toolkit = next(tool for tool in bot.agent.tools if tool.name == "tool-hooks-runtime-demo")
             function = _first_function(toolkit)
@@ -2956,10 +2957,15 @@ async def test_emit_custom_event_ignores_raw_room_mode_thread_id(tmp_path: Path)
         seen_thread_ids.append(ctx.thread_id)
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [on_custom_event])])
+    base_context = _tool_runtime_context(tmp_path, hook_registry=registry)
     runtime_context = replace(
-        _tool_runtime_context(tmp_path, hook_registry=registry),
-        thread_id="$raw-thread",
-        resolved_thread_id=None,
+        base_context,
+        target=replace(
+            base_context.target,
+            source_thread_id="$raw-thread",
+            resolved_thread_id=None,
+            session_id=create_session_id(base_context.room_id, None),
+        ),
     )
 
     with tool_runtime_context(runtime_context):

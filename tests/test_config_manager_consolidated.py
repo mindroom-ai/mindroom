@@ -21,6 +21,7 @@ from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePath
 from mindroom.credential_policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.matrix.state import MatrixState
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import load_config_yaml, make_conversation_cache_mock, make_event_cache_mock, write_config_yaml
@@ -203,9 +204,11 @@ class TestConsolidatedConfigManager:
         room.members_synced = True
         runtime_context = ToolRuntimeContext(
             agent_name="present",
-            room_id=room.room_id,
-            thread_id=None,
-            resolved_thread_id=None,
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=None,
+            ),
             requester_id="@user:localhost",
             client=MagicMock(),
             config=config,

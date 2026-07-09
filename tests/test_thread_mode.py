@@ -585,7 +585,7 @@ class TestCreateSessionIdWithNoneThread:
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
 
-    def test_message_target_from_runtime_context_keeps_room_mode_thread_provenance(self) -> None:
+    def test_tool_runtime_context_keeps_room_mode_target_provenance(self) -> None:
         """Room-mode runtime targets should retain raw provenance only under the source-thread field."""
         config = _runtime_bound_config(
             Config(
@@ -598,20 +598,22 @@ class TestCreateSessionIdWithNoneThread:
         )
         runtime_context = ToolRuntimeContext(
             agent_name="assistant",
-            room_id="!room:localhost",
-            thread_id="$raw-thread",
-            resolved_thread_id=None,
+            target=MessageTarget(
+                room_id="!room:localhost",
+                source_thread_id="$raw-thread",
+                resolved_thread_id=None,
+                reply_to_event_id="$event456",
+                session_id=create_session_id("!room:localhost", None),
+            ),
             requester_id="@user:localhost",
             client=AsyncMock(),
             config=config,
             runtime_paths=runtime_paths_for(config),
             event_cache=make_event_cache_mock(),
             conversation_cache=make_conversation_cache_mock(),
-            reply_to_event_id="$event456",
-            session_id=create_session_id("!room:localhost", None),
         )
 
-        target = MessageTarget.from_runtime_context(runtime_context)
+        target = runtime_context.target
 
         assert target.source_thread_id == "$raw-thread"
         assert target.resolved_thread_id is None

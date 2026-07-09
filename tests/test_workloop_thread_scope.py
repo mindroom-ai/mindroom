@@ -50,6 +50,7 @@ from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling import ScheduledWorkflow
+from mindroom.session_ids import create_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -218,9 +219,13 @@ def _tool_context(
 ) -> ToolRuntimeContext:
     return ToolRuntimeContext(
         agent_name="code",
-        room_id=room_id,
-        thread_id=thread_id,
-        resolved_thread_id=resolved_thread_id,
+        target=MessageTarget(
+            room_id=room_id,
+            source_thread_id=thread_id,
+            resolved_thread_id=resolved_thread_id,
+            reply_to_event_id=None,
+            session_id=create_session_id(room_id, resolved_thread_id),
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=loaded.config,
@@ -228,7 +233,6 @@ def _tool_context(
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
         room=MagicMock(),
-        reply_to_event_id=None,
         storage_path=None,
     )
 
@@ -253,15 +257,11 @@ def _message_envelope(
         target = target.with_thread_root(resolved_thread_id)
     return MessageEnvelope(
         source_event_id="$event",
-        room_id=room_id,
         target=target,
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body=body,
         attachment_ids=(),
         mentioned_agents=(),
         agent_name=agent_name,
-        source_kind="message",
         origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
     )
 

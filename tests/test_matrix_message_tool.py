@@ -23,6 +23,8 @@ from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client import RoomThreadsPageError
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
+from mindroom.message_target import MessageTarget
+from mindroom.session_ids import create_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
@@ -106,9 +108,16 @@ def _make_context(
     conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name="general",
-        room_id=room_id,
-        thread_id=thread_id,
-        resolved_thread_id=thread_id if resolved_thread_id is _DEFAULT_RESOLVED_THREAD_ID else resolved_thread_id,
+        target=MessageTarget(
+            room_id=room_id,
+            source_thread_id=thread_id,
+            resolved_thread_id=thread_id if resolved_thread_id is _DEFAULT_RESOLVED_THREAD_ID else resolved_thread_id,
+            reply_to_event_id=reply_to_event_id,
+            session_id=create_session_id(
+                room_id,
+                thread_id if resolved_thread_id is _DEFAULT_RESOLVED_THREAD_ID else resolved_thread_id,
+            ),
+        ),
         requester_id="@user:localhost",
         client=client,
         config=config,
@@ -116,7 +125,6 @@ def _make_context(
         conversation_cache=conversation_cache,
         event_cache=make_event_cache_mock() if event_cache is _DEFAULT_EVENT_CACHE else event_cache,
         room=None,
-        reply_to_event_id=reply_to_event_id,
         storage_path=storage_path,
         attachment_ids=attachment_ids,
     )

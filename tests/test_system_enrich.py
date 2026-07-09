@@ -100,15 +100,11 @@ def _envelope(
 ) -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$event",
-        room_id=room_id,
         target=MessageTarget.resolve(room_id, "$thread", "$event"),
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body=body,
         attachment_ids=(),
         mentioned_agents=(),
         agent_name=agent_name,
-        source_kind=MESSAGE_SOURCE_KIND,
         origin=message_origin(
             sender_id="@user:localhost",
             requester_id="@user:localhost",

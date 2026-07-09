@@ -14,6 +14,8 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.todo import _thread_key
+from mindroom.message_target import MessageTarget
+from mindroom.session_ids import create_session_id
 from mindroom.tool_schema_cache import process_function_schema_for_prompt
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -50,9 +52,13 @@ def _tool_context(
 ) -> ToolRuntimeContext:
     return ToolRuntimeContext(
         agent_name=agent_name,
-        room_id=room_id,
-        thread_id=thread_id,
-        resolved_thread_id=resolved_thread_id,
+        target=MessageTarget(
+            room_id=room_id,
+            source_thread_id=thread_id,
+            resolved_thread_id=resolved_thread_id,
+            reply_to_event_id=None,
+            session_id=create_session_id(room_id, resolved_thread_id),
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
@@ -60,7 +66,6 @@ def _tool_context(
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
         room=MagicMock(),
-        reply_to_event_id=None,
         storage_path=None,
     )
 

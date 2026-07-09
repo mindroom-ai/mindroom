@@ -539,7 +539,6 @@ class TurnController:
             event_source=event.source,
         )
         envelope = self.deps.resolver.build_ingress_envelope(
-            room_id=room.room_id,
             event=event,
             requester_user_id=requester_user_id,
             target=target,
@@ -712,7 +711,6 @@ class TurnController:
             VOICE_SOURCE_KIND,
         }
         envelope = self.deps.resolver.build_ingress_envelope(
-            room_id=room.room_id,
             event=prepared_event,
             requester_user_id=requester_user_id,
             target=target,
@@ -1114,7 +1112,6 @@ class TurnController:
                 trust_internal_metadata=True,
             ).original_sender
         envelope = self.deps.resolver.build_message_envelope(
-            room_id=room.room_id,
             event=event,
             requester_user_id=requester_user_id,
             context=context,
@@ -1311,15 +1308,11 @@ class TurnController:
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         response_envelope = MessageEnvelope(
             source_event_id=source_event_id,
-            room_id=room.room_id,
             target=response_target,
-            requester_id=user_id,
-            sender_id=user_id,
             body=f"The user selected: {selection.selected_value}",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=self.deps.agent_name,
-            source_kind=MESSAGE_SOURCE_KIND,
             origin=classify_turn_origin(
                 transport_sender_id=user_id,
                 requester_id=user_id,
@@ -2156,7 +2149,6 @@ class TurnController:
         reservation_released_or_handed_off = False
         try:
             envelope = self.deps.resolver.build_ingress_envelope(
-                room_id=room.room_id,
                 event=cast("DispatchEvent", event),
                 requester_user_id=prechecked_event.requester_user_id,
                 target=voice_target,
@@ -2200,7 +2192,6 @@ class TurnController:
                 event_source=normalized_event.source,
             )
             envelope = self.deps.resolver.build_ingress_envelope(
-                room_id=room.room_id,
                 event=normalized_event,
                 requester_user_id=prechecked_event.requester_user_id,
                 target=normalized_target,
@@ -2305,7 +2296,6 @@ class TurnController:
                 event_source=fallback_event.source,
             )
             envelope = self.deps.resolver.build_ingress_envelope(
-                room_id=room.room_id,
                 event=fallback_event,
                 requester_user_id=requester_user_id,
                 target=target,

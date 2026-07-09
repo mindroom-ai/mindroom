@@ -1983,20 +1983,16 @@ class TestStreamingBehavior:
         )
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
-            room_id="!test:localhost",
             target=MessageTarget.resolve(
                 room_id="!test:localhost",
                 thread_id=None,
                 reply_to_event_id="$reply_plain:localhost",
                 thread_start_root_event_id="$thread_root:localhost",
             ),
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="Continue",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="helper",
-            source_kind=MESSAGE_SOURCE_KIND,
             origin=message_origin(
                 sender_id="@user:localhost",
                 requester_id="@user:localhost",
@@ -3859,15 +3855,11 @@ class TestStreamingBehavior:
         """A clean streamed success may replace the final visible text exactly once."""
         response_envelope = MessageEnvelope(
             source_event_id="$event123",
-            room_id="!test:localhost",
             target=MessageTarget.resolve("!test:localhost", None, "$event123"),
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="hello",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="helper",
-            source_kind=MESSAGE_SOURCE_KIND,
             origin=message_origin(
                 sender_id="@user:localhost",
                 requester_id="@user:localhost",
@@ -3974,15 +3966,11 @@ class TestStreamingBehavior:
         """Canonical final content must not rewrite the visible stream unless the hook changes it."""
         response_envelope = MessageEnvelope(
             source_event_id="$event123",
-            room_id="!test:localhost",
             target=MessageTarget.resolve("!test:localhost", None, "$event123"),
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="hello",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="helper",
-            source_kind=MESSAGE_SOURCE_KIND,
             origin=message_origin(
                 sender_id="@user:localhost",
                 requester_id="@user:localhost",
@@ -4073,15 +4061,11 @@ class TestStreamingBehavior:
         """No-op final transforms should keep interactive metadata when the canonical block matches visible text."""
         response_envelope = MessageEnvelope(
             source_event_id="$event123",
-            room_id="!test:localhost",
             target=MessageTarget.resolve("!test:localhost", None, "$event123"),
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="hello",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="helper",
-            source_kind=MESSAGE_SOURCE_KIND,
             origin=message_origin(
                 sender_id="@user:localhost",
                 requester_id="@user:localhost",

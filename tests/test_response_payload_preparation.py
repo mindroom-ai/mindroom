@@ -86,15 +86,11 @@ def _target(thread_id: str | None = None) -> MessageTarget:
 def _envelope(target: MessageTarget) -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$event",
-        room_id="!room:localhost",
         target=target,
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body="hello",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="general",
-        source_kind="message",
         origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
     )
 
