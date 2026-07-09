@@ -30,6 +30,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, AgentMatrixUser, login_agent_user
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
+    is_concrete_matrix_user_id,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
@@ -161,6 +162,16 @@ def _managed_room_should_be_encrypted(room_key: str, config: Config) -> bool:
     return config.matrix_room_access.encrypt_managed_rooms
 
 
+def _room_admin_user_ids(config: Config) -> list[str]:
+    """Return configured managed-room admins, skipping wildcard or placeholder entries."""
+    admin_ids = config.matrix_room_access.room_admins
+    concrete_ids = [user_id for user_id in admin_ids if is_concrete_matrix_user_id(user_id)]
+    skipped = sorted(set(admin_ids) - set(concrete_ids))
+    if skipped:
+        logger.warning("Skipping non-concrete room admin user IDs", user_ids=skipped)
+    return concrete_ids
+
+
 def _room_key_to_name(room_key: str) -> str:
     """Convert a room key to a human-readable room name.
 
@@ -255,6 +266,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
                 await ensure_room_name(client, room_id, explicit_room_name)
             await ensure_room_has_topic(client, room_id, room_key, topic_room_name, config, runtime_paths)
             await ensure_thread_tags_power_level(client, room_id)
+            await ensure_room_admin_power_levels(client, room_id, _room_admin_user_ids(config))
             if _managed_room_should_be_encrypted(room_key, config):
                 await ensure_room_encryption_enabled(client, room_id)
 
@@ -308,6 +320,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
         alias=alias_localpart,
         topic=topic,
         power_users=power_users or [],
+        admin_users=_room_admin_user_ids(config),
         encrypted=_managed_room_should_be_encrypted(room_key, config),
     )
 

@@ -43,6 +43,7 @@ async def invite_to_room(
 def _create_room_initial_state(
     client: nio.AsyncClient,
     power_users: list[str] | None,
+    admin_users: list[str] | None,
     *,
     encrypted: bool,
 ) -> list[dict[str, Any]]:
@@ -57,6 +58,8 @@ def _create_room_initial_state(
     users: dict[str, int] = {}
     if power_users:
         users.update(dict.fromkeys(power_users, _POWER_USER_POWER_LEVEL))
+    if admin_users:
+        users.update(dict.fromkeys(admin_users, _ROOM_ADMIN_POWER_LEVEL))
     if client.user_id:
         users[client.user_id] = _ROOM_ADMIN_POWER_LEVEL
     if users:
@@ -75,6 +78,7 @@ async def create_room(
     alias: str | None = None,
     topic: str | None = None,
     power_users: list[str] | None = None,
+    admin_users: list[str] | None = None,
     *,
     encrypted: bool = False,
 ) -> str | None:
@@ -84,7 +88,7 @@ async def create_room(
         room_config["alias"] = alias
     if topic:
         room_config["topic"] = topic
-    room_config["initial_state"] = _create_room_initial_state(client, power_users, encrypted=encrypted)
+    room_config["initial_state"] = _create_room_initial_state(client, power_users, admin_users, encrypted=encrypted)
 
     response = await client.room_create(**room_config)
     if isinstance(response, nio.RoomCreateResponse):

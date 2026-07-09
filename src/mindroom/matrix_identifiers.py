@@ -93,6 +93,13 @@ def room_alias_identifier_candidates(room_alias: str, runtime_paths: RuntimePath
     return identifiers
 
 
+def is_concrete_matrix_user_id(user_id: str) -> bool:
+    """Return whether this string is a concrete Matrix user ID (no wildcards or placeholders)."""
+    return (
+        user_id.startswith("@") and ":" in user_id and "*" not in user_id and "?" not in user_id and " " not in user_id
+    )
+
+
 def extract_server_name_from_homeserver(homeserver: str, runtime_paths: RuntimePaths) -> str:
     """Extract the Matrix server name from a homeserver URL."""
     if server_name := runtime_matrix_server_name(runtime_paths):

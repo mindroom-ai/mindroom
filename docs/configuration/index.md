@@ -526,6 +526,7 @@ matrix_room_access:
   invite_only_rooms: []            # Room keys/aliases/IDs that stay invite-only/private
   reconcile_existing_rooms: false  # Explicit migration of existing managed rooms
   encrypt_managed_rooms: false     # Enable Matrix E2EE on managed rooms (irreversible per room)
+  room_admins: []                  # Matrix user IDs granted admin power (100) in every managed room
 
 # Authorization (optional)
 authorization:

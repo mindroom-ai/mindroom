@@ -57,6 +57,15 @@ def test_matrix_room_access_defaults() -> None:
     assert config.matrix_room_access.publish_to_room_directory is False
     assert config.matrix_room_access.invite_only_rooms == []
     assert config.matrix_room_access.reconcile_existing_rooms is False
+    assert config.matrix_room_access.room_admins == []
+
+
+def test_matrix_room_access_rejects_duplicate_room_admins() -> None:
+    """Duplicate room admin user IDs should be rejected."""
+    with pytest.raises(ValueError, match="Duplicate room_admins"):
+        Config.model_validate(
+            {"matrix_room_access": {"room_admins": ["@admin:example.com", "@admin:example.com"]}},
+        )
 
 
 def test_matrix_room_access_yaml_null_uses_defaults(tmp_path: Path) -> None:
@@ -345,6 +354,116 @@ async def test_create_room_seeds_thread_tags_power_level(
     assert power_levels["users"]["@agent:example.com"] == 50
     assert power_levels["users"]["@router:example.com"] == 100
     invite_to_room.assert_awaited_once_with(mock_client, "!lobby:example.com", "@agent:example.com")
+
+
+@pytest.mark.asyncio
+async def test_create_room_seeds_room_admin_power_levels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Managed room creation should grant configured room admins power level 100 without inviting them."""
+    mock_client = AsyncMock()
+    mock_client.user_id = "@router:example.com"
+    mock_client.room_create.return_value = nio.RoomCreateResponse(room_id="!lobby:example.com")
+    invite_to_room = AsyncMock(return_value=True)
+    monkeypatch.setattr(matrix_room_admin, "invite_to_room", invite_to_room)
+
+    room_id = await matrix_client.create_room(
+        client=mock_client,
+        name="Lobby",
+        alias="lobby",
+        topic="topic",
+        power_users=["@agent:example.com"],
+        admin_users=["@admin:example.com", "@agent:example.com"],
+    )
+
+    assert room_id == "!lobby:example.com"
+    _, kwargs = mock_client.room_create.await_args
+    power_levels = kwargs["initial_state"][0]["content"]
+    assert power_levels["users"]["@admin:example.com"] == 100
+    assert power_levels["users"]["@agent:example.com"] == 100  # admin grant wins over power-user grant
+    assert power_levels["users"]["@router:example.com"] == 100
+    invite_to_room.assert_awaited_once_with(mock_client, "!lobby:example.com", "@agent:example.com")
+
+
+@pytest.mark.asyncio
+async def test_new_room_creation_passes_room_admins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """New managed rooms should seed concrete configured room admins at creation."""
+    config = _config_with_runtime_paths(
+        tmp_path,
+        matrix_room_access={
+            "room_admins": ["@admin:example.com", "@*:example.com", "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"],
+        },
+    )
+    mock_client = AsyncMock()
+    mock_client.homeserver = "https://example.com"
+    mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasError("not found", status_code="M_NOT_FOUND")
+
+    monkeypatch.setattr(matrix_state, "load_rooms", dict)
+    monkeypatch.setattr(matrix_rooms, "generate_room_topic_ai", AsyncMock(return_value="topic"))
+    create_room = AsyncMock(return_value="!lobby:example.com")
+    monkeypatch.setattr(matrix_rooms, "create_room", create_room)
+    monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
+
+    room_id = await matrix_rooms._ensure_room_exists(
+        client=mock_client,
+        room_key="lobby",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        room_name="Lobby",
+        power_users=[],
+    )
+
+    assert room_id == "!lobby:example.com"
+    _, kwargs = create_room.await_args
+    assert kwargs["admin_users"] == ["@admin:example.com"]
+
+
+@pytest.mark.asyncio
+async def test_existing_room_reconciliation_grants_room_admin_power(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Existing managed rooms should grant configured room admins power in any access mode."""
+    config = _config_with_runtime_paths(
+        tmp_path,
+        matrix_room_access={"room_admins": ["@admin:example.com"]},
+    )
+    mock_client = AsyncMock()
+    mock_client.homeserver = "https://example.com"
+    mock_client.rooms = {}
+    mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
+        room_alias="#lobby:example.com",
+        room_id="!lobby:example.com",
+        servers=["example.com"],
+    )
+
+    monkeypatch.setattr(matrix_state, "load_rooms", dict)
+    monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
+    monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=["!lobby:example.com"]))
+    monkeypatch.setattr(matrix_rooms, "ensure_room_name", AsyncMock(return_value=True))
+    monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
+    monkeypatch.setattr(matrix_rooms, "ensure_thread_tags_power_level", AsyncMock(return_value=True))
+    ensure_room_admin_power_levels = AsyncMock(return_value=True)
+    monkeypatch.setattr(matrix_rooms, "ensure_room_admin_power_levels", ensure_room_admin_power_levels)
+
+    room_id = await matrix_rooms._ensure_room_exists(
+        client=mock_client,
+        room_key="lobby",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        room_name="Lobby",
+        power_users=[],
+    )
+
+    assert room_id == "!lobby:example.com"
+    ensure_room_admin_power_levels.assert_awaited_once_with(
+        mock_client,
+        "!lobby:example.com",
+        ["@admin:example.com"],
+    )
 
 
 @pytest.mark.asyncio

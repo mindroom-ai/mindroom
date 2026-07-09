@@ -275,6 +275,15 @@ export interface VoiceConfig {
   intelligence: VoiceLLMConfig;
 }
 
+export interface MatrixRoomAccessConfig {
+  mode?: "single_user_private" | "multi_user";
+  multi_user_join_rule?: "public" | "knock";
+  publish_to_room_directory?: boolean;
+  invite_only_rooms?: string[];
+  reconcile_existing_rooms?: boolean;
+  room_admins?: string[]; // Matrix user IDs granted admin power (100) in every managed room
+}
+
 export interface Config {
   memory: MemoryConfig;
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
@@ -306,6 +315,7 @@ export interface Config {
   teams?: Record<string, TeamConfig>; // Teams configuration
   tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
+  matrix_room_access?: MatrixRoomAccessConfig; // Managed room access policy
 }
 
 export interface AgentPolicy {

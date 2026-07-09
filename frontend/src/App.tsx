@@ -29,6 +29,7 @@ import { CultureList } from "@/components/CultureList/CultureList";
 import { CultureEditor } from "@/components/CultureEditor/CultureEditor";
 import { RoomList } from "@/components/RoomList/RoomList";
 import { RoomEditor } from "@/components/RoomEditor/RoomEditor";
+import { RoomAdmins } from "@/components/RoomAdmins/RoomAdmins";
 import { ModelConfig } from "@/components/ModelConfig/ModelConfig";
 import { MemoryConfig } from "@/components/MemoryConfig/MemoryConfig";
 import { Knowledge } from "@/components/Knowledge/Knowledge";
@@ -718,20 +719,23 @@ function AppContent() {
               value="rooms"
               className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
             >
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
-                <div
-                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                    selectedRoomId ? "hidden lg:block" : "block"
-                  }`}
-                >
-                  <RoomList />
-                </div>
-                <div
-                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                    selectedRoomId ? "block" : "hidden lg:block"
-                  }`}
-                >
-                  <RoomEditor />
+              <div className="flex h-full flex-col gap-3 sm:gap-4">
+                <RoomAdmins />
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 flex-1 min-h-0">
+                  <div
+                    className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                      selectedRoomId ? "hidden lg:block" : "block"
+                    }`}
+                  >
+                    <RoomList />
+                  </div>
+                  <div
+                    className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                      selectedRoomId ? "block" : "hidden lg:block"
+                    }`}
+                  >
+                    <RoomEditor />
+                  </div>
                 </div>
               </div>
             </TabsContent>

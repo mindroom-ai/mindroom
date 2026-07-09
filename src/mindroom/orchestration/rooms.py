@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
+from mindroom.matrix_identifiers import is_concrete_matrix_user_id
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -14,16 +15,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _is_concrete_matrix_user_id(user_id: str) -> bool:
-    """Return whether this string is a concrete Matrix user ID."""
-    return (
-        user_id.startswith("@") and ":" in user_id and "*" not in user_id and "?" not in user_id and " " not in user_id
-    )
-
-
 def _filter_concrete_matrix_user_ids(user_ids: set[str], *, warning_message: str) -> set[str]:
     """Return inviteable Matrix user IDs and log skipped wildcard or placeholder entries."""
-    concrete_user_ids = {user_id for user_id in user_ids if _is_concrete_matrix_user_id(user_id)}
+    concrete_user_ids = {user_id for user_id in user_ids if is_concrete_matrix_user_id(user_id)}
     skipped = sorted(user_ids - concrete_user_ids)
     if skipped:
         logger.warning(warning_message, user_ids=skipped)

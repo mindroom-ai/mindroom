@@ -334,6 +334,7 @@ matrix_room_access:
   publish_to_room_directory: false
   invite_only_rooms: []  # Room keys that stay invite-only even in multi_user mode
   reconcile_existing_rooms: false  # Reconcile existing rooms on startup
+  room_admins: []  # Matrix user IDs granted admin power (100) in every managed room
 ```
 
 ## Matrix Space Configuration
