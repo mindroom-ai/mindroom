@@ -55,7 +55,6 @@ def test_model_route_includes_provider_model_and_base_url() -> None:
         "Rate limit exceeded",
         "Error code: 400 - invalid api key provided",
         ModelProviderError(message="Some brand new provider wording about content", status_code=400),
-        ModelProviderError(message="upstream connect error", status_code=502),
     ],
 )
 def test_any_failure_retries_without_media_and_teaches_on_success(error: Exception | str) -> None:
@@ -101,10 +100,15 @@ def test_no_media_present_never_retries() -> None:
         ContextWindowExceededError(message="prompt is too long: 250000 tokens > 200000 maximum"),
         "Error code: 400 - maximum context length is 128000 tokens",
         ModelProviderError(message="Request Entity Too Large", status_code=413),
+        # Transient failures can pass on the retry because the blip passed, so
+        # a lucky retry success must not disable media for the route.
+        ModelProviderError(message="upstream connect error", status_code=502),
+        ModelProviderError(message="model overloaded", status_code=503),
+        ModelProviderError(message="Too Many Requests", status_code=429),
     ],
 )
-def test_size_and_context_overflow_retries_but_never_teaches(error: Exception | str) -> None:
-    """Dropping media can shrink an oversized request, so success must not teach capability."""
+def test_size_context_and_transient_failures_retry_but_never_teach(error: Exception | str) -> None:
+    """Oversized requests and transient failures must not teach capability on retry success."""
     reset_model_media_capability_cache()
     media = _media_inputs()
     route = _route()
