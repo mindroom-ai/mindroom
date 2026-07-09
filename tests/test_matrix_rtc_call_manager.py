@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
@@ -12,9 +12,9 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.calls import CallsConfig
 from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths
 from mindroom.matrix_rtc.call_manager import CallManager, _build_call_instructions, maybe_build_call_manager
 from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps
+from mindroom.matrix_rtc.call_tools import CallAgentTooling
 from mindroom.matrix_rtc.events import (
     CALL_MEMBER_EVENT_TYPE,
     build_membership_content,
@@ -22,8 +22,11 @@ from mindroom.matrix_rtc.events import (
 )
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.voice_agent import VoiceAgentOptions
+from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.matrix_rtc.events import CallMember
 
 BOT_USER = "@helper:example.org"
@@ -113,15 +116,22 @@ def _config(*, enabled: bool = True) -> Config:
     )
 
 
-def _manager(client: AsyncMock, bridge: FakeBridge, config: Config | None = None) -> CallManager:
+def _manager(
+    client: AsyncMock,
+    bridge: FakeBridge,
+    tmp_path: Path,
+    config: Config | None = None,
+    tool_support: object | None = None,
+) -> CallManager:
     return CallManager(
         agent_name="helper",
         config=config or _config(),
         client=client,
-        runtime_paths=MagicMock(spec=RuntimePaths),
+        runtime_paths=test_runtime_paths(tmp_path),
         homeserver_url="https://matrix.example.org",
         ssl_verify=True,
         bridge_factory=lambda _identity, _e2ee: bridge,
+        tool_support=tool_support,  # type: ignore[arg-type]
     )
 
 
@@ -150,14 +160,19 @@ def _stub_join_externals(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.request_sfu_grant", fake_grant)
 
+    async def fake_tools(**_kwargs: object) -> CallAgentTooling:
+        return CallAgentTooling(tools=[], tool_names=(), instructions="You are Helper.")
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+
 
 @pytest.mark.asyncio
-async def test_manager_joins_call_when_remote_member_appears() -> None:
+async def test_manager_joins_call_when_remote_member_appears(tmp_path: Path) -> None:
     """Manager joins call when remote member appears."""
     client = _client()
     client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
     bridge = FakeBridge()
-    manager = _manager(client, bridge)
+    manager = _manager(client, bridge, tmp_path)
 
     await manager.on_room_event(_room(), _member_unknown_event())
 
@@ -175,11 +190,11 @@ async def test_manager_joins_call_when_remote_member_appears() -> None:
 
 
 @pytest.mark.asyncio
-async def test_manager_ignores_unrelated_event_types() -> None:
+async def test_manager_ignores_unrelated_event_types(tmp_path: Path) -> None:
     """Manager ignores unrelated event types."""
     client = _client()
     bridge = FakeBridge()
-    manager = _manager(client, bridge)
+    manager = _manager(client, bridge, tmp_path)
     event = nio.UnknownEvent(
         {"event_id": "$e2", "sender": "@alice:example.org", "origin_server_ts": 1_000},
         "io.mindroom.tool_approval_response",
@@ -192,12 +207,12 @@ async def test_manager_ignores_unrelated_event_types() -> None:
 
 
 @pytest.mark.asyncio
-async def test_manager_leaves_call_when_room_call_empties() -> None:
+async def test_manager_leaves_call_when_room_call_empties(tmp_path: Path) -> None:
     """Manager leaves call when room call empties."""
     client = _client()
     client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
     bridge = FakeBridge()
-    manager = _manager(client, bridge)
+    manager = _manager(client, bridge, tmp_path)
     await manager.on_room_event(_room(), _member_unknown_event())
     assert bridge.connected_grant is not None
 
@@ -219,13 +234,13 @@ async def test_manager_leaves_call_when_room_call_empties() -> None:
 
 
 @pytest.mark.asyncio
-async def test_manager_skips_join_without_openai_key(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_manager_skips_join_without_openai_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Manager skips join without openai key."""
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_secret_from_env", lambda _n, _p: None)
     client = _client()
     client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
     bridge = FakeBridge()
-    manager = _manager(client, bridge)
+    manager = _manager(client, bridge, tmp_path)
 
     await manager.on_room_event(_room(), _member_unknown_event())
 
@@ -233,12 +248,12 @@ async def test_manager_skips_join_without_openai_key(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_manager_shutdown_stops_sessions() -> None:
+async def test_manager_shutdown_stops_sessions(tmp_path: Path) -> None:
     """Manager shutdown stops sessions."""
     client = _client()
     client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
     bridge = FakeBridge()
-    manager = _manager(client, bridge)
+    manager = _manager(client, bridge, tmp_path)
     await manager.on_room_event(_room(), _member_unknown_event())
 
     await manager.shutdown()
@@ -249,10 +264,10 @@ async def test_manager_shutdown_stops_sessions() -> None:
     assert bridge.frame_keys == []
 
 
-def test_maybe_build_call_manager_respects_configuration() -> None:
+def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None:
     """Maybe build call manager respects configuration."""
     client = _client()
-    runtime_paths = MagicMock(spec=RuntimePaths)
+    runtime_paths = test_runtime_paths(tmp_path)
     disabled = maybe_build_call_manager(
         agent_name="helper",
         config=_config(enabled=False),
@@ -282,13 +297,21 @@ def test_maybe_build_call_manager_respects_configuration() -> None:
     assert isinstance(enabled, CallManager)
 
 
-def test_build_call_instructions_includes_role_and_voice_guidance() -> None:
-    """Build call instructions includes role and voice guidance."""
-    text = _build_call_instructions("helper", _config())
+def test_build_call_instructions_falls_back_to_config() -> None:
+    """Without a chat system prompt the config-derived fallback is used."""
+    text = _build_call_instructions("helper", _config(), None)
     assert "Helper" in text
     assert "Answer questions" in text
     assert "Be kind." in text
-    assert "speaking out loud" in text
+    assert "spoken" in text
+
+
+def test_build_call_instructions_prefers_chat_system_prompt() -> None:
+    """The agent's real chat system prompt wins, with the voice addendum appended."""
+    text = _build_call_instructions("helper", _config(), "CHAT SYSTEM PROMPT")
+    assert text.startswith("CHAT SYSTEM PROMPT")
+    assert "spoken" in text
+    assert "Answer questions" not in text
 
 
 def _member(user: str, device: str, created_ts: int = 0) -> CallMember:
@@ -370,3 +393,30 @@ async def test_session_installs_inbound_keys_on_bridge() -> None:
 
     assert bridge.frame_keys == [("@alice:example.org:ALICEDEV", b"A" * 16, 2)]
     await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_manager_passes_same_agent_tools_and_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The realtime session gets the chat agent's tools, prompt, and transcript hooks."""
+    sentinel_tool = object()
+
+    async def fake_build_call_tools(**_kwargs: object) -> CallAgentTooling:
+        return CallAgentTooling(tools=[sentinel_tool], tool_names=("magic",), instructions="CHAT PROMPT")
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_build_call_tools)
+    client = _client()
+    client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=object())
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    options = bridge.agent_options
+    assert options is not None
+    assert options.tools == (sentinel_tool,)
+    assert options.instructions.startswith("CHAT PROMPT")
+    assert options.on_conversation_turn is not None
+    assert options.on_tools_executed is not None

@@ -18,6 +18,11 @@ from typing import TYPE_CHECKING, Any
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from livekit.agents import AgentSession
+    from livekit.agents.voice.events import ConversationItemAddedEvent, FunctionToolsExecutedEvent
+
     from mindroom.matrix_rtc.focus import SfuGrant
 
 logger = get_logger(__name__)
@@ -46,6 +51,12 @@ class VoiceAgentOptions:
     api_key: str
     voice: str | None = None
     greeting_instructions: str | None = None
+    #: livekit function tools exposed to the realtime model (see call_tools.py).
+    tools: tuple[Any, ...] = ()
+    #: Called with (speaker, text) for every finalized conversation turn.
+    on_conversation_turn: Callable[[str, str], None] | None = None
+    #: Called with the executed tool names after each tool round.
+    on_tools_executed: Callable[[list[str]], None] | None = None
 
 
 class RealtimeVoiceBridge:
@@ -97,9 +108,34 @@ class RealtimeVoiceBridge:
             model = realtime.RealtimeModel(model=options.model, api_key=options.api_key)
         session = AgentSession(llm=model)
         self._session = session
-        await session.start(Agent(instructions=options.instructions), room=self._room)
+        self._register_session_listeners(session, options)
+        agent = Agent(instructions=options.instructions, tools=list(options.tools))
+        await session.start(agent, room=self._room)
         if options.greeting_instructions:
             session.generate_reply(instructions=options.greeting_instructions)
+
+    def _register_session_listeners(self, session: AgentSession, options: VoiceAgentOptions) -> None:
+        from livekit.agents.llm import ChatMessage  # noqa: PLC0415
+
+        on_turn = options.on_conversation_turn
+        if on_turn is not None:
+
+            def _on_item_added(event: ConversationItemAddedEvent) -> None:
+                item = event.item
+                if not isinstance(item, ChatMessage):
+                    return
+                text = item.text_content
+                if text:
+                    on_turn(str(item.role), text)
+
+            session.on("conversation_item_added", _on_item_added)
+        on_tools = options.on_tools_executed
+        if on_tools is not None:
+
+            def _on_tools_executed(event: FunctionToolsExecutedEvent) -> None:
+                on_tools([call.name for call in event.function_calls])
+
+            session.on("function_tools_executed", _on_tools_executed)
 
     async def aclose(self) -> None:
         """Tear down the agent session and leave the SFU."""

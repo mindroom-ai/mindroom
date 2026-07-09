@@ -100,6 +100,8 @@ class CallSessionDeps:
     agent_options: VoiceAgentOptions
     livekit_service_url: str
     clock_ms: Callable[[], int] = lambda: int(time.time() * 1000)
+    #: Awaited once after the session fully stopped (transcript finalization).
+    on_stopped: Callable[[], Coroutine[None, None, None]] | None = None
 
 
 @dataclass
@@ -175,6 +177,8 @@ class CallSession:
         self._tasks.clear()
         await self._clear_membership()
         await self.deps.bridge.aclose()
+        if self.deps.on_stopped is not None:
+            await self.deps.on_stopped()
         logger.info("call_left", room_id=self.room_id, identity=self.local_identity)
 
     async def _distribute_keys(self, members: list[CallMember]) -> None:
