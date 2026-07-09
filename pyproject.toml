@@ -42,7 +42,7 @@ dependencies = [
   "mcp[cli]>=1.12.4",
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
-  "mindroom-nio[e2e]>=0.26",
+  "mindroom-nio[e2e]>=0.27",
   "openai",
   "pydantic>=2",
   "pydantic-settings>=2.10.1",
