@@ -43,6 +43,8 @@ from mindroom.constants import (
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
+    MINDROOM_REPLAY_STATE_INTERRUPTED,
+    MINDROOM_REPLAY_STATE_METADATA_KEY,
 )
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.metadata_merge import deep_merge_metadata
@@ -61,6 +63,11 @@ _COMPACTED_RUN_ID_RETENTION_LIMIT = 1_024
 # history, so their source events must stay eligible for unseen-thread-context
 # re-inclusion on the next turn.
 MODEL_HISTORY_EXCLUDED_RUN_STATUSES = frozenset({RunStatus.paused, RunStatus.cancelled, RunStatus.error})
+
+
+def is_model_history_visible_run(run: RunOutput | TeamRunOutput) -> bool:
+    """Return whether Agno includes one top-level run in persisted model history."""
+    return run.parent_run_id is None and run.status not in MODEL_HISTORY_EXCLUDED_RUN_STATUSES
 
 
 def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> AgentSession | TeamSession:
@@ -235,7 +242,7 @@ def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: Histor
     for run in session.runs or []:
         if not isinstance(run, (RunOutput, TeamRunOutput)):
             continue
-        if run.status in MODEL_HISTORY_EXCLUDED_RUN_STATUSES:
+        if not is_model_history_visible_run(run):
             continue
         if _scope_for_run(run) != scope:
             continue
@@ -247,10 +254,37 @@ def seen_event_ids_for_runs(runs: Iterable[RunOutput | TeamRunOutput]) -> set[st
     """Return Matrix event ids represented by history-visible runs' metadata."""
     seen_event_ids: set[str] = set()
     for run in runs:
-        if run.status in MODEL_HISTORY_EXCLUDED_RUN_STATUSES:
+        if not is_model_history_visible_run(run):
             continue
         seen_event_ids.update(_run_seen_event_ids(run))
     return seen_event_ids
+
+
+def scope_has_recovered_interrupted_event(
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    event_id: str,
+) -> bool:
+    """Return whether visible history recovered or superseded one interrupted source event."""
+    if event_id in _read_preserved_scope_seen_event_ids(session, scope):
+        return True
+    interrupted_source_seen = False
+    for run in session.runs or []:
+        if not isinstance(run, (RunOutput, TeamRunOutput)):
+            continue
+        if not is_model_history_visible_run(run) or _scope_for_run(run) != scope:
+            continue
+        metadata = run.metadata
+        is_interrupted_replay = (
+            isinstance(metadata, dict)
+            and metadata.get(MINDROOM_REPLAY_STATE_METADATA_KEY) == MINDROOM_REPLAY_STATE_INTERRUPTED
+        )
+        if is_interrupted_replay:
+            interrupted_source_seen = interrupted_source_seen or event_id in _run_seen_event_ids(run)
+            continue
+        if interrupted_source_seen or event_id in _run_seen_event_ids(run):
+            return True
+    return False
 
 
 def _run_seen_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:

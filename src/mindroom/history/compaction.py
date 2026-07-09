@@ -21,6 +21,7 @@ from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, prompt
 from mindroom.history.storage import (
     MODEL_HISTORY_EXCLUDED_RUN_STATUSES,
     compacted_run_ids_with,
+    is_model_history_visible_run,
     record_compaction_chunk,
     remove_runs_by_id,
     seen_event_ids_for_runs,
@@ -1060,9 +1061,7 @@ def _completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOu
     return [
         run
         for run in session.runs or []
-        if isinstance(run, (RunOutput, TeamRunOutput))
-        and run.parent_run_id is None
-        and run.status not in MODEL_HISTORY_EXCLUDED_RUN_STATUSES
+        if isinstance(run, (RunOutput, TeamRunOutput)) and is_model_history_visible_run(run)
     ]
 
 

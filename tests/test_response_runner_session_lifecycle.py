@@ -200,6 +200,67 @@ async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
 
 
 @pytest.mark.asyncio
+async def test_sync_restart_retry_skips_generation_when_later_run_recovered_source(tmp_path: Path) -> None:
+    """The post-lock retry gate prevents a duplicate reply after a newer turn recovers its source."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    request = _response_request(
+        reply_to_event_id="$source",
+        thread_id="$thread-root",
+        user_id="@alice:localhost",
+    )
+    target = request.response_envelope.target
+    recovered_run = RunOutput(
+        run_id="recovered-run",
+        agent_id="general",
+        status=RunStatus.completed,
+        metadata={"matrix_seen_event_ids": ["$newer-source"]},
+    )
+    interrupted_run = RunOutput(
+        run_id="interrupted-run",
+        agent_id="general",
+        status=RunStatus.completed,
+        metadata={
+            "matrix_seen_event_ids": ["$source"],
+            "mindroom_replay_state": "interrupted",
+        },
+    )
+    storage = _SessionStorage(
+        AgentSession(
+            session_id=target.session_id,
+            agent_id="general",
+            runs=[interrupted_run, recovered_run],
+            created_at=1,
+            updated_at=1,
+        ),
+    )
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+        history_storage=storage,
+        message_target=target,
+    )
+    lock_acquired = MagicMock()
+    retry_request = replace(
+        request,
+        on_lifecycle_lock_acquired=lock_acquired,
+        sync_restart_retry_source_event_id="$source",
+    )
+
+    with patch("mindroom.response_runner.ai_response", new=AsyncMock()) as mock_ai_response:
+        response_event_id = await coordinator.generate_response(retry_request)
+
+    assert response_event_id is None
+    lock_acquired.assert_called_once_with()
+    mock_ai_response.assert_not_awaited()
+    coordinator.deps.delivery_gateway.deps.response_hooks.emit_after_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_process_and_respond_propagates_before_response_cancellation_to_runner(
     tmp_path: Path,
 ) -> None:

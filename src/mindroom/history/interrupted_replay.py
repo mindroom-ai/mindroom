@@ -20,6 +20,8 @@ from mindroom.constants import (
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+    MINDROOM_REPLAY_STATE_INTERRUPTED,
+    MINDROOM_REPLAY_STATE_METADATA_KEY,
 )
 from mindroom.history.storage import new_scope_session
 from mindroom.tool_system.events import (
@@ -36,9 +38,7 @@ if TYPE_CHECKING:
 
     from mindroom.history.runtime import ScopeSessionContext
 
-_INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
 _ORIGINAL_STATUS_KEY = "mindroom_original_status"
-_INTERRUPTED_REPLAY_STATE = "interrupted"
 _TRACE_METADATA_KEYS = (
     "room_id",
     "thread_id",
@@ -161,7 +161,7 @@ def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[st
         {
             MATRIX_SEEN_EVENT_IDS_METADATA_KEY: list(snapshot.seen_event_ids),
             _ORIGINAL_STATUS_KEY: snapshot.original_status.value.lower(),
-            _INTERRUPTED_REPLAY_STATE_KEY: _INTERRUPTED_REPLAY_STATE,
+            MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
         },
     )
     if snapshot.source_event_id is not None:

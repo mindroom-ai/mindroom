@@ -113,6 +113,52 @@ async def test_team_response_returns_fallback_notice_when_retry_is_also_empty() 
 
 
 @pytest.mark.asyncio
+async def test_team_response_does_not_preserve_seen_ids_for_double_empty_run() -> None:
+    """An empty turn with no model-visible run leaves its Matrix events unseen."""
+    orchestrator, _config = _make_orchestrator()
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(side_effect=[_empty_team_run("team-run-1"), _empty_team_run("team-run-2")])
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2], patch("mindroom.teams._persist_bound_seen_event_ids") as persist_seen:
+        await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Say something.",
+            turn_recorder=TurnRecorder(user_message="Say something."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(session_id="session-1", reply_to_event_id="$source"),
+        )
+
+    persist_seen.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_team_response_does_not_preserve_seen_ids_for_paused_run() -> None:
+    """Paused runs are absent from Agno model history and cannot consume Matrix events."""
+    orchestrator, _config = _make_orchestrator()
+    mock_team = _make_test_team()
+    paused_run = TeamRunOutput(content="Approval required", run_id="team-run-1", session_id="session-1")
+    paused_run.status = RunStatus.paused
+    mock_team.arun = AsyncMock(return_value=paused_run)
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2], patch("mindroom.teams._persist_bound_seen_event_ids") as persist_seen:
+        await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Run the action.",
+            turn_recorder=TurnRecorder(user_message="Run the action."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(session_id="session-1", reply_to_event_id="$source"),
+        )
+
+    persist_seen.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_team_response_stream_yields_fallback_notice_when_retry_is_also_empty() -> None:
     """The streaming empty-run guard retries once, then yields the notice chunk."""
     orchestrator, config = _make_orchestrator()

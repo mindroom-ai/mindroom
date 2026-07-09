@@ -60,7 +60,7 @@ from mindroom.history.runtime import (
     open_bound_scope_session_context,
     resolve_bound_team_scope_context,
 )
-from mindroom.history.storage import update_scope_seen_event_ids
+from mindroom.history.storage import MODEL_HISTORY_EXCLUDED_RUN_STATUSES, update_scope_seen_event_ids
 from mindroom.hooks import render_system_enrichment_block
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
@@ -2183,13 +2183,6 @@ async def team_response(  # noqa: C901, PLR0915
             )
         if pending_retry_decision is not None:
             pending_retry_decision.record_retry_success()
-        if ctx.reply_to_event_id:
-            _persist_bound_seen_event_ids(
-                scope_context=run.scope_context,
-                session_id=ctx.session_id,
-                event_ids=_run_metadata_seen_event_ids(run_metadata),
-            )
-
         response_session_id: str | None = None
         response_run_id: str | None = None
         response_output_tokens: int | None = None
@@ -2217,6 +2210,18 @@ async def team_response(  # noqa: C901, PLR0915
             )
             team_response_text = str(response)
             has_visible_output = bool(team_response_text)
+
+        if (
+            ctx.reply_to_event_id
+            and isinstance(response, (TeamRunOutput, RunOutput))
+            and response.status not in MODEL_HISTORY_EXCLUDED_RUN_STATUSES
+            and not is_empty_run
+        ):
+            _persist_bound_seen_event_ids(
+                scope_context=run.scope_context,
+                session_id=ctx.session_id,
+                event_ids=_run_metadata_seen_event_ids(run_metadata),
+            )
 
         logger.info(
             "team_response_preview",

@@ -581,6 +581,27 @@ async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(conf
 
 
 @pytest.mark.asyncio
+async def test_sync_restart_retry_carries_source_event_for_post_lock_dedup(config: Config, tmp_path: Path) -> None:
+    """A queued retry identifies its source so the runner can atomically suppress stale work."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("please recover this response")
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    initial_request = harness.runner.requests[0]
+    assert initial_request.sync_restart_retry_source_event_id is None
+    assert initial_request.on_sync_restart_cancelled is not None
+
+    initial_request.on_sync_restart_cancelled()
+    await harness.controller.deps.restart_retry.flush()
+
+    assert len(harness.runner.requests) == 2
+    assert harness.runner.requests[1].sync_restart_retry_source_event_id == event.event_id
+
+
+@pytest.mark.asyncio
 async def test_command_turn_records_terminal_outcome_through_turn_store(config: Config, tmp_path: Path) -> None:
     """A ``!command`` turn executes on the router and records a terminal TurnStore outcome.
 

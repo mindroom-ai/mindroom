@@ -1563,6 +1563,7 @@ class TurnController:
                     dispatch_started_at=time.monotonic(),
                     handled_turn=handled_turn,
                     matrix_run_metadata=matrix_run_metadata,
+                    sync_restart_retry_source_event_id=event.event_id,
                 )
 
             self.deps.restart_retry.register(event.event_id, retry)
@@ -1586,6 +1587,7 @@ class TurnController:
         matrix_run_metadata: dict[str, Any] | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
+        sync_restart_retry_source_event_id: str | None = None,
     ) -> None:
         """Execute one final response path for a prepared dispatch action."""
         if room.room_id != dispatch.target.room_id:
@@ -1688,6 +1690,7 @@ class TurnController:
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                             on_sync_restart_cancelled=register_sync_restart_retry,
                             on_deferred_outcome_handled=record_deferred_outcome,
+                            sync_restart_retry_source_event_id=sync_restart_retry_source_event_id,
                         ),
                         team_agents=action.form_team.eligible_members,
                         team_mode=team_mode.value,
@@ -1710,6 +1713,7 @@ class TurnController:
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                             on_sync_restart_cancelled=register_sync_restart_retry,
                             on_deferred_outcome_handled=record_deferred_outcome,
+                            sync_restart_retry_source_event_id=sync_restart_retry_source_event_id,
                         ),
                     )
             except PostLockRequestPreparationError as error:

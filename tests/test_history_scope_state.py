@@ -17,11 +17,14 @@ from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
+    MINDROOM_REPLAY_STATE_INTERRUPTED,
+    MINDROOM_REPLAY_STATE_METADATA_KEY,
 )
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
     read_scope_state,
     record_compaction_chunk,
+    scope_has_recovered_interrupted_event,
     seen_event_ids_for_runs,
     set_force_compaction_state,
     update_scope_seen_event_ids,
@@ -125,6 +128,58 @@ def test_seen_event_ids_for_runs_skip_runs_agno_history_drops(tmp_path: Path, ex
     dropped.metadata = {"matrix_seen_event_ids": ["orphaned-question"]}
 
     assert seen_event_ids_for_runs([completed, dropped]) == {"answered-question"}
+
+
+def test_seen_event_ids_skip_child_runs_agno_history_drops(tmp_path: Path) -> None:
+    """Child-run metadata cannot consume events that Agno omits from top-level model history."""
+    _make_config(tmp_path)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    completed = _completed_run("run-1")
+    completed.metadata = {"matrix_seen_event_ids": ["answered-question"]}
+    child = _completed_run("run-2")
+    child.parent_run_id = completed.run_id
+    child.metadata = {"matrix_seen_event_ids": ["orphaned-question"]}
+    session = _session("session-1", runs=[completed, child])
+
+    assert read_scope_seen_event_ids(session, scope) == {"answered-question"}
+    assert seen_event_ids_for_runs([completed, child]) == {"answered-question"}
+
+
+def test_sync_restart_recovery_ignores_interrupted_replay_until_later_visible_run(tmp_path: Path) -> None:
+    """The synthetic interrupted replay must not suppress its own live retry."""
+    _make_config(tmp_path)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    interrupted = _completed_run("interrupted")
+    interrupted.metadata = {
+        "matrix_seen_event_ids": ["source-event"],
+        MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
+    }
+    session = _session("session-1", runs=[interrupted])
+
+    assert scope_has_recovered_interrupted_event(session, scope, "source-event") is False
+
+    child = _completed_run("child")
+    child.parent_run_id = interrupted.run_id
+    child.metadata = {"matrix_seen_event_ids": ["newer-child-event"]}
+    session.runs = [interrupted, child]
+
+    assert scope_has_recovered_interrupted_event(session, scope, "source-event") is False
+
+    recovered = _completed_run("recovered")
+    recovered.metadata = {"matrix_seen_event_ids": ["newer-event"]}
+    session.runs = [interrupted, recovered]
+
+    assert scope_has_recovered_interrupted_event(session, scope, "source-event") is True
+
+
+def test_sync_restart_recovery_includes_compaction_preserved_seen_events(tmp_path: Path) -> None:
+    """A recovered run stays authoritative after compaction removes its run row."""
+    _make_config(tmp_path)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session("session-1")
+    update_scope_seen_event_ids(session, scope, ["source-event"])
+
+    assert scope_has_recovered_interrupted_event(session, scope, "source-event") is True
 
 
 def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:

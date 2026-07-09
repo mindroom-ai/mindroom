@@ -21,7 +21,11 @@ from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_A
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
-from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
+from mindroom.history.storage import (
+    has_pending_force_compaction_scope,
+    read_scope_state,
+    scope_has_recovered_interrupted_event,
+)
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_visible_messages import replace_visible_message
@@ -269,6 +273,7 @@ class ResponseRequest:
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
     on_sync_restart_cancelled: Callable[[], None] | None = None
     on_deferred_outcome_handled: Callable[[str], None] | None = None
+    sync_restart_retry_source_event_id: str | None = None
 
     @property
     def room_id(self) -> str:
@@ -820,6 +825,57 @@ class ResponseRunner:
                         exception_type=error.__class__.__name__,
                     )
 
+    def _sync_restart_retry_was_superseded(
+        self,
+        request: ResponseRequest,
+        *,
+        session_id: str,
+        scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> bool:
+        """Return whether a later visible run already recovered this retry's source event."""
+        source_event_id = request.sync_restart_retry_source_event_id
+        if source_event_id is None:
+            return False
+
+        storage = None
+        try:
+            storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
+            session = storage.get_session(session_id, self.deps.state_writer.session_type_for_scope(scope))
+            if not isinstance(session, AgentSession | TeamSession):
+                return False
+        except Exception as error:
+            self.deps.logger.warning(
+                "sync_restart_retry_history_check_failed",
+                session_id=session_id,
+                scope=scope.key,
+                source_event_id=source_event_id,
+                exception_type=error.__class__.__name__,
+            )
+            return False
+        else:
+            superseded = scope_has_recovered_interrupted_event(session, scope, source_event_id)
+            if superseded:
+                self.deps.logger.info(
+                    "Skipping sync-restart retry recovered by a later turn",
+                    session_id=session_id,
+                    scope=scope.key,
+                    source_event_id=source_event_id,
+                )
+            return superseded
+        finally:
+            if storage is not None:
+                try:
+                    storage.close()
+                except Exception as error:
+                    self.deps.logger.warning(
+                        "sync_restart_retry_history_storage_close_failed",
+                        session_id=session_id,
+                        scope=scope.key,
+                        source_event_id=source_event_id,
+                        exception_type=error.__class__.__name__,
+                    )
+
     async def _refresh_model_history_after_lock(
         self,
         request: ResponseRequest,
@@ -940,10 +996,20 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
-    ) -> ResponseRequest:
+        session_scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> ResponseRequest | None:
         """Run the shared post-lock request preparation for one locked turn."""
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
+        request = self._request_with_locked_target(request, resolved_target)
+        if self._sync_restart_retry_was_superseded(
+            request,
+            session_id=resolved_target.session_id,
+            scope=session_scope,
+            execution_identity=execution_identity,
+        ):
+            return None
         request = await self._prepare_request_after_lock(request)
         request = self._request_with_locked_target(request, resolved_target)
         if request.pipeline_timing is not None:
@@ -1266,9 +1332,27 @@ class ResponseRunner:
                 resolved_target=resolved_target,
                 response_kind="team",
             )
-        request = await self._begin_locked_turn(request, resolved_target=resolved_target)
-        team_request = replace(team_request, request=request)
         requester_user_id = request.user_id or ""
+        session_id = resolved_target.session_id
+        execution_identity = self.deps.tool_runtime.build_execution_identity(
+            target=resolved_target,
+            user_id=request.user_id,
+            session_id=session_id,
+        )
+        session_scope = self.deps.state_writer.team_history_scope(
+            list(team_request.team_agents),
+            requester_user_id=execution_identity.requester_id,
+        )
+        prepared_request = await self._begin_locked_turn(
+            request,
+            resolved_target=resolved_target,
+            session_scope=session_scope,
+            execution_identity=execution_identity,
+        )
+        if prepared_request is None:
+            return None
+        request = prepared_request
+        team_request = replace(team_request, request=request)
         _memory_prompt, _memory_thread_history, prepared_prompt, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,
@@ -1326,7 +1410,6 @@ class ResponseRunner:
             else resolved_target.with_thread_root(request.thread_id)
         )
         delivery_request_base = resolved_request
-        session_id = resolved_target.session_id
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=requester_user_id,
@@ -1344,10 +1427,6 @@ class ResponseRunner:
         self.deps.runtime.config.assert_team_agents_supported(
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
             allow_direct_private_agents=allow_direct_private_agents,
-        )
-        session_scope = self.deps.state_writer.team_history_scope(
-            list(team_request.team_agents),
-            requester_user_id=execution_identity.requester_id,
         )
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
@@ -2416,7 +2495,22 @@ class ResponseRunner:
                 resolved_target=resolved_target,
                 response_kind="ai",
             )
-        request = await self._begin_locked_turn(request, resolved_target=resolved_target)
+        session_id = resolved_target.session_id
+        execution_identity = self.deps.tool_runtime.build_execution_identity(
+            target=resolved_target,
+            user_id=request.user_id,
+            session_id=session_id,
+        )
+        session_scope = self.deps.state_writer.history_scope()
+        prepared_request = await self._begin_locked_turn(
+            request,
+            resolved_target=resolved_target,
+            session_scope=session_scope,
+            execution_identity=execution_identity,
+        )
+        if prepared_request is None:
+            return None
+        request = prepared_request
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,
@@ -2432,12 +2526,6 @@ class ResponseRunner:
             model_prompt=model_prompt_text,
             thread_history=model_thread_history,
             media=request.media or MediaInputs(),
-        )
-
-        session_id = resolved_target.session_id
-        execution_identity = self.deps.tool_runtime.build_execution_identity(
-            target=resolved_target,
-            user_id=request.user_id,
         )
         reprioritize_auto_flush_sessions(
             self.deps.storage_path,
