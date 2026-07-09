@@ -1538,7 +1538,7 @@ class TurnController:
             ),
         )
 
-    def _build_sync_restart_retry_registrar(
+    def _build_response_settlement_callbacks(
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
@@ -1548,8 +1548,8 @@ class TurnController:
         *,
         handled_turn: HandledTurnState,
         matrix_run_metadata: dict[str, Any] | None,
-    ) -> Callable[[], None]:
-        """Build the callback that queues a one-shot re-dispatch after stall recovery."""
+    ) -> tuple[Callable[[], None], Callable[[str], None]]:
+        """Build callbacks for sync-restart retry and deferred handled recording."""
 
         def register_sync_restart_retry() -> None:
             async def retry() -> None:
@@ -1567,7 +1567,10 @@ class TurnController:
 
             self.deps.restart_retry.register(event.event_id, retry)
 
-        return register_sync_restart_retry
+        def record_deferred_outcome(response_event_id: str) -> None:
+            self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+
+        return register_sync_restart_retry, record_deferred_outcome
 
     async def _execute_response_action(  # noqa: C901, PLR0912
         self,
@@ -1647,7 +1650,7 @@ class TurnController:
                 context_ready_monotonic=context_ready_monotonic,
             )
 
-            register_sync_restart_retry = self._build_sync_restart_retry_registrar(
+            register_sync_restart_retry, record_deferred_outcome = self._build_response_settlement_callbacks(
                 room,
                 event,
                 dispatch,
@@ -1684,6 +1687,7 @@ class TurnController:
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                             on_sync_restart_cancelled=register_sync_restart_retry,
+                            on_deferred_outcome_handled=record_deferred_outcome,
                         ),
                         team_agents=action.form_team.eligible_members,
                         team_mode=team_mode.value,
@@ -1705,6 +1709,7 @@ class TurnController:
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                             on_sync_restart_cancelled=register_sync_restart_retry,
+                            on_deferred_outcome_handled=record_deferred_outcome,
                         ),
                     )
             except PostLockRequestPreparationError as error:
