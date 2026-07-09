@@ -12883,8 +12883,9 @@ When a call starts in a room, the configured agent:
 4. In encrypted rooms, distributes its media frame key over encrypted to-device messages and installs the other participants' keys, following the same per-sender key rotation policy as Element Call.
 5. Runs an OpenAI realtime session on the call audio until everyone else leaves.
 
-The voice agent uses the configured display name, role, and instructions with a spoken-style addendum.
-Voice calls do not expose agent tools because MatrixRTC media does not identify an individual speaker as an authenticated Matrix requester, so MindRoom cannot safely apply requester-scoped authorization or credentials.
+The voice agent is the same agent you chat with: it carries the agent's regular system prompt (with a spoken-style addendum) and the same tools it has in text conversations.
+Tool calls run in the configured agent's room-scoped runtime context.
+MatrixRTC does not identify an individual speaker as a Matrix requester, so calls requiring `tool_approval` are refused with a spoken explanation instead of executing.
 
 The agent leaves the call (and clears its membership state event) when the last other participant leaves, or when the bot shuts down.
 
@@ -12945,7 +12946,6 @@ When the call ends, the agent appends a one-line summary with the transcript loc
 
 - Audio only: the agent neither publishes nor consumes video and screen shares.
 - Legacy 1:1 `m.call.*` calls (non-MatrixRTC) are not supported.
-- Agent tools are unavailable in calls.
 
 # Image Messages
 

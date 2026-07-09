@@ -19,6 +19,7 @@ import nio
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.call_session import CallJoinError, CallSession, CallSessionDeps, required_device_id
+from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
     CALL_MEMBER_EVENT_TYPE,
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.matrix_rtc.call_session import VoiceBridgeLike
     from mindroom.matrix_rtc.focus import SfuGrant
+    from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 
 logger = get_logger(__name__)
 
@@ -60,8 +62,10 @@ _VOICE_STYLE_ADDENDUM = (
 )
 
 
-def _build_call_instructions(agent_name: str, config: Config) -> str:
-    """Compose realtime-agent instructions from the agent's authored configuration."""
+def _build_call_instructions(agent_name: str, config: Config, chat_system_prompt: str | None) -> str:
+    """Compose realtime-agent instructions, preferring the chat system prompt."""
+    if chat_system_prompt:
+        return f"{chat_system_prompt}\n\n{_VOICE_STYLE_ADDENDUM}"
     agent = config.agents[agent_name]
     parts = [f"You are {agent.display_name}, an AI assistant."]
     if agent.role:
@@ -79,6 +83,7 @@ def maybe_build_call_manager(
     runtime_paths: RuntimePaths,
     homeserver_url: str,
     ssl_verify: bool,
+    tool_support: ToolRuntimeSupport | None = None,
 ) -> CallManager | None:
     """Build a call manager when this agent is configured for voice calls."""
     if not config.calls.enabled or agent_name not in config.calls.agents:
@@ -99,6 +104,7 @@ def maybe_build_call_manager(
         runtime_paths=runtime_paths,
         homeserver_url=homeserver_url,
         ssl_verify=ssl_verify,
+        tool_support=tool_support,
     )
 
 
@@ -115,6 +121,7 @@ class CallManager:
         homeserver_url: str,
         ssl_verify: bool,
         bridge_factory: Callable[[str, bool], VoiceBridgeLike] = _default_bridge_factory,
+        tool_support: ToolRuntimeSupport | None = None,
     ) -> None:
         self._agent_name = agent_name
         self._config = config
@@ -123,6 +130,7 @@ class CallManager:
         self._homeserver_url = homeserver_url
         self._ssl_verify = ssl_verify
         self._bridge_factory = bridge_factory
+        self._tool_support = tool_support
         self._key_transport = ToDeviceFrameKeyTransport(client)
         self._sessions: dict[str, CallSession] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -205,6 +213,7 @@ class CallManager:
         if service_url is None:
             logger.warning("call_join_skipped_no_livekit_service", room_id=room_id, agent=self._agent_name)
             return
+        tooling = await self._build_tooling(room_id)
         transcript = CallTranscript.start(
             agent_name=self._agent_name,
             config=self._config,
@@ -213,12 +222,14 @@ class CallManager:
             room_display_name=room.display_name or room_id,
         )
         options = VoiceAgentOptions(
-            instructions=_build_call_instructions(self._agent_name, self._config),
+            instructions=_build_call_instructions(self._agent_name, self._config, tooling.instructions),
             model=self._config.calls.model,
             api_key=api_key,
             voice=self._config.calls.voice,
             greeting_instructions="Briefly greet the participants and let them know you joined the call.",
+            tools=tuple(tooling.tools),
             on_conversation_turn=transcript.record,
+            on_tools_executed=transcript.record_tool_use,
         )
         try:
             session = CallSession(
@@ -252,6 +263,22 @@ class CallManager:
             return
         self._sessions[room_id] = session
         logger.info("call_session_started", room_id=room_id, agent=self._agent_name)
+
+    async def _build_tooling(self, room_id: str) -> CallAgentTooling:
+        """Build agent tools for the voice session's agent-scoped context."""
+        if self._tool_support is None:
+            return CallAgentTooling(tools=[], tool_names=())
+        try:
+            return await build_call_tools(
+                agent_name=self._agent_name,
+                config=self._config,
+                runtime_paths=self._runtime_paths,
+                tool_support=self._tool_support,
+                room_id=room_id,
+            )
+        except Exception as error:
+            logger.warning("call_tools_build_failed", agent=self._agent_name, room_id=room_id, error=str(error))
+            return CallAgentTooling(tools=[], tool_names=())
 
     async def _resolve_service_url(self) -> str | None:
         if self._config.calls.livekit_service_url:

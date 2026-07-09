@@ -16,6 +16,7 @@ from mindroom.config.calls import CallsConfig
 from mindroom.config.main import Config
 from mindroom.matrix_rtc.call_manager import CallManager, _build_call_instructions, maybe_build_call_manager
 from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps
+from mindroom.matrix_rtc.call_tools import CallAgentTooling
 from mindroom.matrix_rtc.events import (
     CALL_MEMBER_EVENT_TYPE,
     DEFAULT_MEMBERSHIP_EXPIRES_MS,
@@ -131,6 +132,7 @@ def _manager(
     bridge: FakeBridge,
     tmp_path: Path,
     config: Config | None = None,
+    tool_support: object | None = None,
 ) -> CallManager:
     return CallManager(
         agent_name="helper",
@@ -140,6 +142,7 @@ def _manager(
         homeserver_url="https://matrix.example.org",
         ssl_verify=True,
         bridge_factory=lambda _identity, _e2ee: bridge,
+        tool_support=tool_support,  # type: ignore[arg-type]
     )
 
 
@@ -167,6 +170,11 @@ def _stub_join_externals(monkeypatch: pytest.MonkeyPatch) -> None:
         return GRANT
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.request_sfu_grant", fake_grant)
+
+    async def fake_tools(**_kwargs: object) -> CallAgentTooling:
+        return CallAgentTooling(tools=[], tool_names=(), instructions="You are Helper.")
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
 
 
 @pytest.mark.asyncio
@@ -337,12 +345,20 @@ def test_maybe_build_call_manager_survives_missing_livekit_package(
 
 
 def test_build_call_instructions_falls_back_to_config() -> None:
-    """Voice instructions are derived from the agent configuration."""
-    text = _build_call_instructions("helper", _config())
+    """Without a chat system prompt the config-derived fallback is used."""
+    text = _build_call_instructions("helper", _config(), None)
     assert "Helper" in text
     assert "Answer questions" in text
     assert "Be kind." in text
     assert "spoken" in text
+
+
+def test_build_call_instructions_prefers_chat_system_prompt() -> None:
+    """The agent chat prompt wins, with voice guidance appended."""
+    text = _build_call_instructions("helper", _config(), "CHAT SYSTEM PROMPT")
+    assert text.startswith("CHAT SYSTEM PROMPT")
+    assert "spoken" in text
+    assert "Answer questions" not in text
 
 
 def _member(user: str, device: str, created_ts: int = 0) -> CallMember:
@@ -427,19 +443,30 @@ async def test_session_installs_inbound_keys_on_bridge() -> None:
 
 
 @pytest.mark.asyncio
-async def test_manager_passes_authored_instructions_and_transcript_hook(tmp_path: Path) -> None:
-    """The realtime session gets the agent's authored instructions and transcript hook."""
+async def test_manager_passes_same_agent_tools_and_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The realtime session gets chat tools, prompt, and transcript hooks."""
+    sentinel_tool = object()
+
+    async def fake_build_call_tools(**_kwargs: object) -> CallAgentTooling:
+        return CallAgentTooling(tools=[sentinel_tool], tool_names=("magic",), instructions="CHAT PROMPT")
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_build_call_tools)
     client = _client()
     client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
     bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path)
+    manager = _manager(client, bridge, tmp_path, tool_support=object())
 
     await manager.on_room_event(_room(), _member_unknown_event())
 
     options = bridge.agent_options
     assert options is not None
-    assert "Answer questions" in options.instructions
+    assert options.tools == (sentinel_tool,)
+    assert options.instructions.startswith("CHAT PROMPT")
     assert options.on_conversation_turn is not None
+    assert options.on_tools_executed is not None
 
 
 @pytest.mark.asyncio

@@ -339,6 +339,7 @@ visibility = [
     "mindroom.approval_inbound",
     "mindroom.approval_transport",
     "mindroom.bot",
+    "mindroom.matrix_rtc.call_tools",
     "mindroom.orchestrator",
     "mindroom.tool_system.tool_hooks",
 ]
@@ -2098,11 +2099,23 @@ depends_on = [
     "mindroom.credentials_sync",
     "mindroom.logging_config",
     "mindroom.matrix_rtc.call_session",
+    "mindroom.matrix_rtc.call_tools",
     "mindroom.matrix_rtc.events",
     "mindroom.matrix_rtc.focus",
     "mindroom.matrix_rtc.key_transport",
     "mindroom.matrix_rtc.transcript",
     "mindroom.matrix_rtc.voice_agent",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.call_tools"
+depends_on = [
+    "mindroom.agents",
+    "mindroom.logging_config",
+    "mindroom.message_target",
+    "mindroom.session_ids",
+    "mindroom.tool_approval",
+    "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]

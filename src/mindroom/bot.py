@@ -1382,6 +1382,7 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 homeserver_url=constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
                 ssl_verify=constants.runtime_matrix_ssl_verify(self.runtime_paths),
+                tool_support=self._tool_runtime_support,
             )
             if self._call_manager is not None:
                 client.add_event_callback(
