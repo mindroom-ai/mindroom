@@ -1337,7 +1337,6 @@ class ResponseRunner:
         execution_identity = self.deps.tool_runtime.build_execution_identity(
             target=resolved_target,
             user_id=request.user_id,
-            session_id=session_id,
         )
         session_scope = self.deps.state_writer.team_history_scope(
             list(team_request.team_agents),
@@ -1721,8 +1720,8 @@ class ResponseRunner:
                             run_id=response_run_id,
                             is_team=True,
                             response_event_id=(
-                                final_delivery_outcome.event_id
-                                if final_delivery_outcome is not None
+                                progress.delivery_outcome.event_id
+                                if progress.delivery_outcome is not None
                                 else progress.tracked_event_id
                             ),
                         )
@@ -1750,7 +1749,7 @@ class ResponseRunner:
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
                 original_status=(
-                    RunStatus.cancelled if stream_transport_outcome.terminal_status == "cancelled" else RunStatus.error
+                    RunStatus.cancelled if transport_outcome.terminal_status == "cancelled" else RunStatus.error
                 ),
             )
             await self._persist_interrupted_recorder_off_loop(
@@ -2499,7 +2498,6 @@ class ResponseRunner:
         execution_identity = self.deps.tool_runtime.build_execution_identity(
             target=resolved_target,
             user_id=request.user_id,
-            session_id=session_id,
         )
         session_scope = self.deps.state_writer.history_scope()
         prepared_request = await self._begin_locked_turn(
