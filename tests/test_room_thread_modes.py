@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -17,7 +17,6 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
-from mindroom.durable_write import _override_load_cache
 from mindroom.handled_turns import HandledTurnState
 from mindroom.message_target import MessageTarget
 from mindroom.room_thread_modes import (
@@ -28,9 +27,6 @@ from mindroom.room_thread_modes import (
     set_room_thread_mode_override,
 )
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 ROOM_ID = "!room:localhost"
 
@@ -117,7 +113,6 @@ def test_room_thread_mode_store_ignores_corrupt_file(tmp_path: Path) -> None:
     path.write_text("not json", encoding="utf-8")
 
     assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) is None
-    assert _override_load_cache[path] == (path.stat().st_mtime_ns, {})
 
     set_room_thread_mode_override(
         runtime_paths,
@@ -176,8 +171,18 @@ def test_room_thread_mode_store_removes_temp_file_when_replace_fails(
         mode="thread",
         set_by="@admin:localhost",
     )
+    real_read_text = Path.read_text
+    read_count = 0
+
+    def tracked_read_text(read_path: Path, *args: object, **kwargs: object) -> str:
+        nonlocal read_count
+        if read_path == path:
+            read_count += 1
+        return real_read_text(read_path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", tracked_read_text)
     assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) == "thread"
-    cached = _override_load_cache[path]
+    assert read_count == 1
 
     def fail_room_mode_replace(_temp_path: Path, target: Path) -> None:
         if target == path:
@@ -195,8 +200,8 @@ def test_room_thread_mode_store_removes_temp_file_when_replace_fails(
         )
 
     assert not list(path.parent.glob("*.tmp"))
-    assert _override_load_cache[path] == cached
     assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) == "thread"
+    assert read_count == 1
 
 
 def test_get_entity_thread_mode_prefers_runtime_room_override(tmp_path: Path) -> None:

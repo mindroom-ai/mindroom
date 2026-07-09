@@ -87,7 +87,7 @@ def set_thread_model_override(
 ) -> None:
     """Persist one thread's model override, replacing any previous one."""
     path = _store_path(runtime_paths)
-    overrides = dict(_load_overrides(path))
+    overrides = _load_overrides(path)
     overrides[thread_id] = {
         "model": model_name,
         "room_id": room_id,
@@ -100,7 +100,7 @@ def set_thread_model_override(
 def clear_thread_model_override(runtime_paths: RuntimePaths, thread_id: str) -> bool:
     """Remove one thread's model override; return whether one was present."""
     path = _store_path(runtime_paths)
-    overrides = dict(_load_overrides(path))
+    overrides = _load_overrides(path)
     if thread_id not in overrides:
         return False
     del overrides[thread_id]

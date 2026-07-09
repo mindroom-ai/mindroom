@@ -19,7 +19,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
-from mindroom.durable_write import _override_load_cache
 from mindroom.thread_models import (
     _get_thread_model_override,
     _store_path,
@@ -69,16 +68,26 @@ def test_store_roundtrip(tmp_path: Path) -> None:
     assert clear_thread_model_override(runtime_paths, THREAD_ID) is False
 
 
-def test_store_ignores_corrupt_file(tmp_path: Path) -> None:
+def test_store_ignores_corrupt_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A corrupt store file should read as empty and be replaced on write."""
     runtime_paths = test_runtime_paths(tmp_path)
     path = _store_path(runtime_paths)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("not json", encoding="utf-8")
 
+    parse_calls = 0
+    real_loads = json.loads
+
+    def tracked_loads(payload: str) -> object:
+        nonlocal parse_calls
+        parse_calls += 1
+        return real_loads(payload)
+
+    monkeypatch.setattr("mindroom.durable_write.json.loads", tracked_loads)
+
     assert _get_thread_model_override(runtime_paths, THREAD_ID) is None
-    # The corrupt parse result is cached so repeat reads skip re-parsing.
-    assert _override_load_cache[path] == (path.stat().st_mtime_ns, {})
+    assert _get_thread_model_override(runtime_paths, THREAD_ID) is None
+    assert parse_calls == 1
 
     set_thread_model_override(
         runtime_paths,
@@ -88,6 +97,7 @@ def test_store_ignores_corrupt_file(tmp_path: Path) -> None:
         set_by="@user:localhost",
     )
     assert _get_thread_model_override(runtime_paths, THREAD_ID) == "large"
+    assert parse_calls == 2
 
 
 def test_store_prunes_oldest_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -130,7 +140,6 @@ def test_store_invalidates_cached_records_when_mtime_changes(tmp_path: Path) -> 
     os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
 
     assert _get_thread_model_override(runtime_paths, THREAD_ID) == "default"
-    assert _override_load_cache[path][0] == path.stat().st_mtime_ns
 
 
 def test_resolve_runtime_model_prefers_thread_override(tmp_path: Path) -> None:

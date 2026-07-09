@@ -94,7 +94,7 @@ def set_room_thread_mode_override(
 ) -> None:
     """Persist one room's thread mode override, replacing any previous one."""
     path = _store_path(runtime_paths)
-    overrides = dict(_load_overrides(path))
+    overrides = _load_overrides(path)
     overrides[room_id] = {
         "mode": mode,
         "set_by": set_by,
@@ -106,7 +106,7 @@ def set_room_thread_mode_override(
 def clear_room_thread_mode_override(runtime_paths: RuntimePaths, room_id: str) -> bool:
     """Remove one room's thread mode override; return whether one was present."""
     path = _store_path(runtime_paths)
-    overrides = dict(_load_overrides(path))
+    overrides = _load_overrides(path)
     if room_id not in overrides:
         return False
     del overrides[room_id]

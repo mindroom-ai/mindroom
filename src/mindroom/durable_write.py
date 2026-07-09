@@ -28,7 +28,9 @@ def write_json_file_durable(
 ) -> None:
     """Write JSON through fsynced temp file, bind-mount-safe replace, and directory fsync."""
     directory = temp_dir or path.parent
-    directory.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if directory != path.parent:
+        directory.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
         with NamedTemporaryFile(
@@ -63,7 +65,7 @@ def load_cached_override_records(
         return {}
     cached = _override_load_cache.get(path)
     if cached is not None and cached[0] == mtime_ns:
-        return cached[1]
+        return _copy_override_records(cached[1])
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
@@ -76,7 +78,12 @@ def load_cached_override_records(
         if isinstance(record_id, str) and isinstance(record, dict) and is_valid(record_id, record)
     }
     _override_load_cache[path] = (mtime_ns, records)
-    return records
+    return _copy_override_records(records)
+
+
+def _copy_override_records(records: dict[str, OverrideRecord]) -> dict[str, OverrideRecord]:
+    """Return mutable records without exposing the cache's nested dictionaries."""
+    return {record_id: record.copy() for record_id, record in records.items()}
 
 
 def write_bounded_override_records(
