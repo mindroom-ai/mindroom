@@ -75,6 +75,10 @@ class CompactionSummaryOutputLimitError(RuntimeError):
     """Raised when the summary response reaches the configured output-token cap."""
 
 
+class _CompactionSummaryEmptyResultError(RuntimeError):
+    """Raised when the summary model returns a success response with no text."""
+
+
 @dataclass(frozen=True)
 class SummaryRetryPolicy:
     """Explicit budget-shrink policy for failed compaction summary calls.
@@ -96,8 +100,15 @@ class SummaryRetryPolicy:
         return any(fragment in message for fragment in _RETRYABLE_PROVIDER_ERROR_FRAGMENTS)
 
     def retry_budget(self, *, attempt: int, budget: int, error: Exception) -> int | None:
-        """Return the next smaller input budget, or None when the policy gives up."""
-        if attempt >= self.max_attempts or not self.should_shrink(error):
+        """Return the input budget for the next attempt, or None when the policy gives up."""
+        if attempt >= self.max_attempts:
+            return None
+        if isinstance(error, _CompactionSummaryEmptyResultError):
+            # Shrinking does not fix an empty response: the provider fault is
+            # transient (a byte-identical input has been observed to fail
+            # fast-empty and then summarize fine), so re-issue unchanged.
+            return budget
+        if not self.should_shrink(error):
             return None
         smaller_budget = max(self.floor_tokens, budget // self.shrink_divisor)
         if smaller_budget >= budget:
@@ -258,8 +269,12 @@ async def generate_compaction_summary(
     raw_text = response.content if isinstance(response.content, str) else ""
     normalized_text = _normalize_compaction_summary_text(raw_text)
     if not normalized_text:
-        msg = "summary generation returned no result"
-        raise RuntimeError(msg)
+        msg = (
+            "summary generation returned no result "
+            f"(output_tokens={_response_output_tokens(response)}, "
+            f"has_reasoning={bool(response.reasoning_content or response.redacted_reasoning_content)})"
+        )
+        raise _CompactionSummaryEmptyResultError(msg)
     if _summary_response_likely_truncated(response, output_token_limit=summary_output_limit):
         msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
         raise CompactionSummaryOutputLimitError(msg)
