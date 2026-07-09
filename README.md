@@ -33,6 +33,7 @@ https://github.com/user-attachments/assets/1f121c89-5418-4f42-bdfe-fb9de0fecd03
 - **Plugins & hooks** — drop-in [plugins](docs/plugins.md) add custom tools, skills, and OAuth providers, and a typed [event-hook system](docs/hooks.md) (per-hook timeouts, fault isolation) lets them observe and transform messages; reload plugins at runtime with `!reload-plugins`.
 - **Hot reload & restart-safe** — `config.yaml` and plugin changes apply live without bringing down the stack, and conversations resume seamlessly after a restart: session history and turn state are durable on disk, so agents pick up where they left off without double-replying.
 - **Web dashboard** — create and configure agents, teams, models, tools, credentials, and knowledge bases by clicking instead of editing YAML; chat stays in your Matrix client.
+- **Enterprise deployment** — the same runtime scales from a laptop to multi-tenant Kubernetes with Helm charts, isolated execution workers, and egress approval for locked-down environments.
 
 What it looks like:
 
@@ -71,6 +72,18 @@ Together: [They review architecture, sharing context from both organizations]
 Two AI agents from different companies collaborating — impossible with app-bound assistants.
 
 </details>
+
+## How It Compares to OpenClaw and Hermes
+
+[OpenClaw](https://github.com/openclaw/openclaw) and [Hermes Agent](https://github.com/nousresearch/hermes-agent) are self-hosted assistants that pipe an agent into chat apps you already use.
+MindRoom plays in the same space but makes different architectural bets:
+
+- **Multi-agent and multi-user by default.** Both are personal-first: one owner talking to their assistant. In MindRoom every agent is a real Matrix user, so you run a fleet of specialists and teams, share them with family, a project, or a whole company, and scope access per user and per room.
+- **An AI-native interface on an open protocol.** With WhatsApp, Signal, or Telegram as the front end, you rent UX from platforms that were never designed for agents and can cut bots off at any time. MindRoom's home is Matrix, with [Element](https://github.com/mindroom-ai/mindroom-element) and [Cinny](https://github.com/mindroom-ai/mindroom-cinny) forks tuned for AI: collapsible tool-call traces, model metadata on every response, streaming with in-place edits, response cancellation, and first-class threads. Bridges to those apps are additive, not the foundation.
+- **Sandboxing with real secrets isolation.** Execution tools (shell, Python, coding) can run in isolated container workers with no access to the primary process's secrets — your agent uses credentialed tools (Gmail, GitHub, ...) while the code it executes can never read those credentials. Per-tool [approval rules](docs/configuration/index.md) and [egress approval](docs/deployment/approved-egress.md) add human-in-the-loop control.
+- **Batteries included.** 100+ built-in tool integrations with typed configuration, OAuth flows, and automatic dependency installation — plus OpenClaw-compatible skills on top.
+
+Coming from OpenClaw? MindRoom [imports OpenClaw workspaces](docs/openclaw.md) (`SOUL.md`, `MEMORY.md`, skills) and ships an `openclaw_compat` tool preset.
 
 ## Quick Start
 
@@ -241,7 +254,7 @@ Teams, cultures, per-room models, context compaction, history controls, and memo
 - **Local stack** — `mindroom local-stack-setup` bootstraps a local Synapse + Cinny via Docker.
 - **Hosted Matrix** — run only the backend locally and pair with [chat.mindroom.chat](https://chat.mindroom.chat) ([guide](docs/deployment/hosted-matrix.md)).
 - **Docker** — single-container runtime ([guide](docs/deployment/docker.md)).
-- **Kubernetes** — Helm charts for large-scale and multi-tenant deployments ([guide](docs/deployment/kubernetes.md)).
+- **Kubernetes** — Helm charts for enterprise-scale, multi-tenant deployments ([guide](docs/deployment/kubernetes.md)).
 - **NixOS LXC (Incus)** — the author's favorite for personal use: [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) provisions a persistent, agent-controlled NixOS container with the full stack, which the agent can rebuild and manage itself while the host controls what it sees.
 - **Bridges** — connect Slack, Telegram, WhatsApp, and more via [docs/deployment/bridges](docs/deployment/bridges).
 
