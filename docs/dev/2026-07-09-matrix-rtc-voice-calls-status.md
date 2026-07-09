@@ -1,6 +1,6 @@
 # MatrixRTC Voice Calls — Living Status Doc
 
-Last updated: 2026-07-09 (afternoon).
+Last updated: 2026-07-09 (evening).
 This is the single source of truth for the voice-call effort; update it with every meaningful change.
 
 ## Goal
@@ -13,7 +13,7 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
 
 | Repo | PR | State | Contents |
 |------|----|-------|----------|
-| mindroom-ai/mindroom | [#1452](https://github.com/mindroom-ai/mindroom/pull/1452) | draft, branch `matrix-rtc-voice-calls` | `src/mindroom/matrix_rtc/` package: call manager/session, Element Call wire formats, lk-jwt exchange, frame-key rotation, livekit-agents media bridge (`matrix_calls` extra), in-call tools, transcripts + daily memory, PL0 power-level fix, `calls:` config, docs, ~50 tests + live smoke harness |
+| mindroom-ai/mindroom | [#1452](https://github.com/mindroom-ai/mindroom/pull/1452) | draft, branch `matrix-rtc-voice-calls`; `origin/main` merged in 2026-07-09 (E2EE #1423 etc.), mergeable, nio pin `>=0.27` | `src/mindroom/matrix_rtc/` package: call manager/session, Element Call wire formats, lk-jwt exchange, frame-key rotation, livekit-agents media bridge (`matrix_calls` extra), in-call tools, transcripts + daily memory, PL0 power-level fix, `calls:` config, docs, ~50 tests + live smoke harness |
 | mindroom-ai/mindroom-nio | [#5](https://github.com/mindroom-ai/mindroom-nio/pull/5) | **merged**, released as [0.27.0](https://github.com/mindroom-ai/mindroom-nio/releases/tag/0.27.0) on PyPI; pin bumped in #1452 | Surface unknown decrypted olm to-device events as `UnknownToDeviceEvent` (required to receive Element Call frame keys in encrypted rooms) |
 | basnijholt/dotfiles | [#69](https://github.com/basnijholt/dotfiles/pull/69) | **merged**, deployed to prod + mindroom LXC | LiveKit SFU + lk-jwt-service on `hetzner-matrix`, Caddy path routing under `mindroom.chat/livekit/*`, `rtc_foci` in well-known, agenix `livekit-keys.age`, `--extra matrix_calls` in the LXC uv wrapper |
 | mindroom-ai/mindroom-tuwunel | none needed | — | Fork already implements the OpenID `request_token` + federation userinfo routes the stack needs; MSC4140 delayed events are missing (upstream [tuwunel#178](https://github.com/matrix-construct/tuwunel/issues/178)) but that only causes stale rosters after client crashes, not join failures |
@@ -34,11 +34,12 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
 | Well-known discovery, OpenID → LiveKit JWT | ✅ live | `tests/manual/matrix_rtc_live_smoke.py` against prod (all stages PASS) |
 | SFU signaling + WebRTC media relay | ✅ live | two Matrix-authed participants, bot subscribed to caller's audio track |
 | Real `CallManager` joins a call, publishes membership | ✅ live | job-tmp `live_botcall_test.py`; found + fixed the PL0 bug (below) |
-| E2EE frame-key exchange | ✅ real olm crypto | `tests/test_matrix_rtc_e2ee_roundtrip.py` (skips until nio#5 is pinned; PASS against patched nio) |
+| E2EE frame-key exchange | ✅ real olm crypto | `tests/test_matrix_rtc_e2ee_roundtrip.py` — active since the nio 0.27 pin bump (no longer skipped), passes in the normal suite |
 | In-call tools, same-agent prompt, transcripts, daily memory | ✅ unit tests | `tests/test_matrix_rtc_call_tools.py`, `..._transcript.py`, `..._call_manager.py` |
 | gpt-realtime endpoint/model wiring | ✅ live probe | WS to `wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1` reached session layer; previously failed only on the placeholder key |
 | gpt-realtime agent actually speaking in a call | ✅ live | `tests/manual/scratch/live_agent_speaking_test.py`: real CallManager + real key; agent greeted aloud, understood a spoken question, ran the real `multiply` calculator tool, spoke "The result is 345", transcript + daily memory written (all 6 legs PASS) |
-| Human joins call from prod Cinny | ✅ live | Root cause was the fork's service worker hijacking the widget iframe (see below); fix deployed to prod (release `20260709-080409`, cinny#96) and validated headless with the SW active: full join to the SFU websocket, in-call UI rendered. Caveat: Cloudflare caches `/sw.js` (max-age 14400), so clients get the fixed SW when that TTL lapses (~17:25 UTC on 2026-07-09) |
+| Human joins call from prod Cinny | ✅ live | Root cause was the fork's service worker hijacking the widget iframe (see below); fix deployed to prod (release `20260709-080409`, cinny#96) and validated headless with the SW active: full join to the SFU websocket, in-call UI rendered. Cloudflare's cached `/sw.js` refreshed the same hour, so real browsers have the fix |
+| **Real agent (Mind/openclaw) speaks with the user in a prod call** | ✅ user-validated | 2026-07-09: user created a Cinny Voice Room, invited Mind, Mind joined and held a spoken conversation (after fixing the placeholder `OPENAI_API_KEY` in `~/.mindroom-chat/.env` — the join succeeded but the realtime session got `invalid_api_key` until the real key was installed and the service restarted) |
 
 ## Bugs found by live testing (fixed)
 
@@ -47,6 +48,17 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
 2. **Stock nio drops unknown decrypted olm events**, so encrypted frame keys never reach callbacks — fixed by nio#5 (validated via the real-olm round-trip test).
 3. **In-call tools were exposed to the realtime model with empty parameter schemas** — agno toolkit functions only build their JSON schema in `process_entrypoint()`, which nothing on the call path invoked, so the model called tools with no arguments and had to guess from error strings.
    Fixed in `call_tools._wrap_agno_function` (now processes the entrypoint before reading `function.parameters`), pinned by a unit test.
+4. **Enabling calls without the `matrix_calls` extra crashed the whole agent at startup** — `find_spec("livekit.rtc")` raises `ModuleNotFoundError` (instead of returning `None`) when the parent `livekit` package is missing, so `matrix_calls_dependencies_available()` blew up `AgentBot.start()` instead of logging the dependencies-missing warning. Found during the first real deployment; fixed in `voice_agent.py` (commit `33b92df46`), pinned by a unit test.
+
+## Deployed agent backend (mindroom-chat on the `mindroom` LXC)
+
+- `/srv/mindroom` main = host-local main + merge of `matrix-rtc-voice-calls` (merge `33f2ddcc6` + crash fix `33b92df46`; rollback branch `backup-pre-rtc-20260709`, deploy branch `rtc-deploy`).
+- `~/.mindroom-chat/config.yaml`: `calls: {enabled: true, agents: [openclaw]}` (backup `.bak-20260709-voice-calls`); Mind ("openclaw") is the calls agent.
+- Real `OPENAI_API_KEY` in `~/.mindroom-chat/.env` (was the old placeholder; backup `.env.bak-20260709-openai-key`).
+- `--extra matrix_calls` in the shared uv wrapper (dotfiles, merged via #69): the service's own `uv run` sync prunes manually-synced extras, so the extra must be part of the requested set.
+- Call-membership PL0 reconciled across all 26 managed rooms at boot.
+- **Lag vs the PR branch**: the host snapshot predates the nio 0.27 pin bump, so it still runs mindroom-nio 0.25.2 — encrypted-room hearing is NOT active there until the next deploy (unencrypted rooms, including Cinny Voice Rooms created with encryption off, work fully).
+- Prompt parity finding from live use: the voice agent gets Mind's real chat system prompt (51k chars, rendered identically) + all 23 tools, but `defaults.max_preload_chars` (50k) truncates ~37k chars of Mind's context (USER.md among the casualties) — this affects chat too; chat masks it with thread history, a cold call session doesn't. Open decision: raise the cap and/or strengthen the voice addendum against gpt-realtime's privacy-caginess.
 
 ## RESOLVED: prod Cinny “stuck on Joining” (2026-07-09)
 
@@ -70,9 +82,11 @@ LiveKit DTLS-timeout warnings in earlier server logs were teardown noise from sh
 ## Remaining work
 
 - [x] Fix the prod Cinny browser join — root-caused (service worker app-shell fallback hijacked the widget iframe), fixed in cinny#96, deployed to prod, live-validated 2026-07-09.
-- [ ] Merge cinny#96 into `dev` (prod currently runs the fix branch build, which is `dev` + that one commit).
+- [x] Merge cinny#96 into `dev` — merged 2026-07-09 (with the review follow-up: `?` accepted as a boundary in the denylist regex). Prod still serves the earlier branch build, which is behaviorally identical for the real bug; the next regular Cinny deploy picks up `dev`.
 - [x] Run the full agent-speaking test with the real OpenAI key (bot joins, greets, answers, calls a tool; transcript + daily memory written) — PASS 2026-07-09, see validation matrix.
 - [x] Deploy the mindroom branch to the backend serving `mindroom.chat` agents — done 2026-07-09: merged `matrix-rtc-voice-calls` into the `mindroom` LXC host's `/srv/mindroom` main (merge commit `33f2ddcc6`, rollback branch `backup-pre-rtc-20260709`), added `calls: {enabled: true, agents: [openclaw]}` to `~/.mindroom-chat/config.yaml` (backup `.bak-20260709-voice-calls`), and added `--extra matrix_calls` to the shared uv wrapper in the host's dotfiles (`nixos-rebuild switch` applied; change also pushed to dotfiles branch `matrix-rtc-backend`, PR #69). The service's own `uv run` sync prunes manually-synced extras, so the wrapper flag is required. Deploy also caught a real bug (fixed on the PR branch, commit `33b92df46`): `matrix_calls_dependencies_available` crashed agent startup via `find_spec("livekit.rtc")` raising when livekit was absent. Verified: `mindroom-chat` healthy, openclaw bot up, livekit importable in the service venv, call-membership PL0 reconciled across 26 managed rooms.
 - [x] Merge + release mindroom-nio#5, bump the pin in mindroom — done 2026-07-09: mindroom-nio 0.27.0 on PyPI, pin `>=0.27.0` in #1452, the real-olm E2EE round-trip test now runs (40/40 matrix_rtc tests pass).
+- [ ] Redeploy `mindroom-chat` from the updated branch (or after #1452 merges) to pick up mindroom-nio 0.27.0 — activates encrypted-room hearing on the live agents.
+- [ ] Decide on the Mind prompt-truncation follow-ups (raise `defaults.max_preload_chars` beyond 50k so USER.md/memory survive; optionally harden the voice-call addendum against gpt-realtime's "can't reveal memories" reflexes).
 - [ ] Lab deployment (separate RTC backend on the `mindroom` incus host) once prod is done.
-- [ ] Un-draft and merge the three PRs.
+- [ ] Un-draft and merge mindroom#1452 — the last open PR (nio#5, dotfiles#69, cinny#96 all merged); conflicts with `origin/main` resolved 2026-07-09, GitHub reports mergeable.
