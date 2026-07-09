@@ -59,7 +59,7 @@ _COMPACTED_RUN_ID_RETENTION_LIMIT = 1_024
 # Agno's history builder drops these run statuses, so their source events are
 # not represented in model-visible history and must stay eligible for
 # unseen-thread-context re-inclusion on the next turn.
-_MODEL_HISTORY_EXCLUDED_RUN_STATUSES = frozenset({RunStatus.paused, RunStatus.cancelled, RunStatus.error})
+MODEL_HISTORY_EXCLUDED_RUN_STATUSES = frozenset({RunStatus.paused, RunStatus.cancelled, RunStatus.error})
 
 
 def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> AgentSession | TeamSession:
@@ -234,7 +234,7 @@ def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: Histor
     for run in session.runs or []:
         if not isinstance(run, (RunOutput, TeamRunOutput)):
             continue
-        if run.status in _MODEL_HISTORY_EXCLUDED_RUN_STATUSES:
+        if run.status in MODEL_HISTORY_EXCLUDED_RUN_STATUSES:
             continue
         if _scope_for_run(run) != scope:
             continue

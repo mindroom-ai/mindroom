@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.summary import SessionSummary
 from agno.utils.message import filter_tool_calls
@@ -20,6 +19,7 @@ from pydantic import BaseModel
 
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, prompt_roles_for_history_storage
 from mindroom.history.storage import (
+    MODEL_HISTORY_EXCLUDED_RUN_STATUSES,
     compacted_run_ids_with,
     record_compaction_chunk,
     remove_runs_by_id,
@@ -1045,11 +1045,12 @@ def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str]:
 
 def _completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
     """Return completed top-level runs that can contribute to persisted replay."""
-    skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
     return [
         run
         for run in session.runs or []
-        if isinstance(run, (RunOutput, TeamRunOutput)) and run.parent_run_id is None and run.status not in skip_statuses
+        if isinstance(run, (RunOutput, TeamRunOutput))
+        and run.parent_run_id is None
+        and run.status not in MODEL_HISTORY_EXCLUDED_RUN_STATUSES
     ]
 
 
