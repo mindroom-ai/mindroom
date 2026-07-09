@@ -562,6 +562,28 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_call_agents(self) -> Config:
+        """Ensure call agents exist and no two are configured for one room."""
+        unknown_agents = sorted(set(self.calls.agents) - set(self.agents))
+        if unknown_agents:
+            msg = f"calls.agents references unknown agent(s): {', '.join(unknown_agents)}"
+            raise ValueError(msg)
+
+        agents_by_room: dict[str, list[str]] = {}
+        for agent_name in self.calls.agents:
+            for room in self.agents[agent_name].rooms:
+                agents_by_room.setdefault(room, []).append(agent_name)
+        conflicts = [
+            f"{room} ({', '.join(sorted(agent_names))})"
+            for room, agent_names in sorted(agents_by_room.items())
+            if len(agent_names) > 1
+        ]
+        if conflicts:
+            msg = "calls.agents configures multiple agents for room(s): " + "; ".join(conflicts)
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_agent_reply_permissions(self) -> Config:
         """Ensure per-agent reply permissions reference known entities."""
         known_entities = set(self.agents) | set(self.teams) | {ROUTER_AGENT_NAME}

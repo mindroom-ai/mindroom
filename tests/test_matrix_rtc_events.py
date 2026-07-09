@@ -10,7 +10,6 @@ from mindroom.matrix_rtc.events import (
     DEFAULT_MEMBERSHIP_EXPIRES_MS,
     build_key_to_device_content,
     build_membership_content,
-    livekit_service_url_from_foci,
     membership_state_key,
     parse_key_to_device_content,
     parse_membership_event,
@@ -48,7 +47,6 @@ def test_membership_content_round_trip() -> None:
     assert member.created_ts == 1_000
     assert not member.is_expired(1_000 + DEFAULT_MEMBERSHIP_EXPIRES_MS - 1)
     assert member.is_expired(1_000 + DEFAULT_MEMBERSHIP_EXPIRES_MS)
-    assert livekit_service_url_from_foci([member]) == SERVICE_URL
 
 
 def test_membership_content_matches_element_call_shape() -> None:

@@ -39,7 +39,7 @@ async def test_failed_otk_claim_is_surfaced_and_does_not_abort_send() -> None:
     client.device_store = {"@alice:example.org": {}}
 
     transport = ToDeviceFrameKeyTransport(client)
-    await transport.send_key(
+    delivered = await transport.send_key(
         room_id=ROOM_ID,
         key_base64="a2V5a2V5a2V5a2V5a2V5a2U=",
         key_index=0,
@@ -48,3 +48,4 @@ async def test_failed_otk_claim_is_surfaced_and_does_not_abort_send() -> None:
 
     client.keys_claim.assert_awaited_once()
     client.to_device.assert_not_awaited()
+    assert delivered == []

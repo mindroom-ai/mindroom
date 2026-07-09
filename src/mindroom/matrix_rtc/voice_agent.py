@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from livekit.agents import AgentSession
-    from livekit.agents.voice.events import ConversationItemAddedEvent, FunctionToolsExecutedEvent
+    from livekit.agents.voice.events import ConversationItemAddedEvent
 
     from mindroom.matrix_rtc.focus import SfuGrant
 
@@ -56,12 +56,8 @@ class VoiceAgentOptions:
     api_key: str
     voice: str | None = None
     greeting_instructions: str | None = None
-    #: livekit function tools exposed to the realtime model (see call_tools.py).
-    tools: tuple[Any, ...] = ()
     #: Called with (speaker, text) for every finalized conversation turn.
     on_conversation_turn: Callable[[str, str], None] | None = None
-    #: Called with the executed tool names after each tool round.
-    on_tools_executed: Callable[[list[str]], None] | None = None
 
 
 class RealtimeVoiceBridge:
@@ -114,7 +110,7 @@ class RealtimeVoiceBridge:
         session = AgentSession(llm=model)
         self._session = session
         self._register_session_listeners(session, options)
-        agent = Agent(instructions=options.instructions, tools=list(options.tools))
+        agent = Agent(instructions=options.instructions)
         await session.start(agent, room=self._room)
         if options.greeting_instructions:
             session.generate_reply(instructions=options.greeting_instructions)
@@ -134,21 +130,16 @@ class RealtimeVoiceBridge:
                     on_turn(str(item.role), text)
 
             session.on("conversation_item_added", _on_item_added)
-        on_tools = options.on_tools_executed
-        if on_tools is not None:
-
-            def _on_tools_executed(event: FunctionToolsExecutedEvent) -> None:
-                on_tools([call.name for call in event.function_calls])
-
-            session.on("function_tools_executed", _on_tools_executed)
 
     async def aclose(self) -> None:
         """Tear down the agent session and leave the SFU."""
         session = self._session
         self._session = None
-        if session is not None:
-            await session.aclose()
         room = self._room
         self._room = None
-        if room is not None:
-            await room.disconnect()
+        try:
+            if session is not None:
+                await session.aclose()
+        finally:
+            if room is not None:
+                await room.disconnect()

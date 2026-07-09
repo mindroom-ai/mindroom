@@ -16,8 +16,8 @@ When a call starts in a room, the configured agent:
 4. In encrypted rooms, distributes its media frame key over encrypted to-device messages and installs the other participants' keys, following the same per-sender key rotation policy as Element Call.
 5. Runs an OpenAI realtime session on the call audio until everyone else leaves.
 
-The voice agent is the same agent you chat with: it carries the agent's regular system prompt (with a spoken-style addendum) and the same tools it has in text conversations.
-Tool calls run under the room's tool runtime context and respect your `tool_approval` rules; calls that would require approval are refused with a spoken explanation instead of executing.
+The voice agent uses the configured display name, role, and instructions with a spoken-style addendum.
+Voice calls do not expose agent tools because MatrixRTC media does not identify an individual speaker as an authenticated Matrix requester, so MindRoom cannot safely apply requester-scoped authorization or credentials.
 
 The agent leaves the call (and clears its membership state event) when the last other participant leaves, or when the bot shuts down.
 
@@ -33,7 +33,7 @@ calls:
 ```
 
 Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`) and an `OPENAI_API_KEY` in your credentials.
-Configure at most one calls-enabled agent per room; multiple agents in the same call will answer over each other.
+MindRoom enforces at most one calls-enabled agent per room.
 
 ## Server requirements
 
@@ -52,6 +52,8 @@ Your Matrix deployment needs the standard Element Call backend:
 ```
 
 Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/livekit/docs/self-hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables all of it with `matrix_rtc_enabled: true`.
+
+MindRoom uses this configured or homeserver-discovered service URL only and never trusts a call member's advertised URL when exchanging its OpenID token.
 
 The room's power levels must allow members to send `org.matrix.msc3401.call.member` state events (Element Call-capable clients set this up when they create rooms).
 
@@ -76,3 +78,4 @@ When the call ends, the agent appends a one-line summary with the transcript loc
 
 - Audio only: the agent neither publishes nor consumes video and screen shares.
 - Legacy 1:1 `m.call.*` calls (non-MatrixRTC) are not supported.
+- Agent tools are unavailable in calls.

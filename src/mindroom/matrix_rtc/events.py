@@ -9,7 +9,7 @@ as plain dict transforms.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 CALL_MEMBER_EVENT_TYPE = "org.matrix.msc3401.call.member"
@@ -34,7 +34,6 @@ class CallMember:
     created_ts: int
     expires_ms: int
     membership_id: str
-    foci_preferred: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
     def is_expired(self, now_ms: int) -> bool:
         """Whether the membership state event has outlived its validity window."""
@@ -104,26 +103,13 @@ def parse_membership_event(event_source: dict[str, Any]) -> CallMember | None:
     membership_id = content.get("membershipID")
     if not isinstance(membership_id, str) or not membership_id:
         membership_id = f"{sender}:{device_id}"
-    raw_foci = content.get("foci_preferred")
-    foci = tuple(f for f in raw_foci if isinstance(f, dict)) if isinstance(raw_foci, list) else ()
     return CallMember(
         user_id=sender,
         device_id=device_id,
         created_ts=created_ts,
         expires_ms=expires,
         membership_id=membership_id,
-        foci_preferred=foci,
     )
-
-
-def livekit_service_url_from_foci(members: list[CallMember]) -> str | None:
-    """First LiveKit service URL advertised by an existing call member."""
-    for member in members:
-        for focus in member.foci_preferred:
-            url = focus.get("livekit_service_url")
-            if focus.get("type") == "livekit" and isinstance(url, str) and url:
-                return url
-    return None
 
 
 @dataclass(frozen=True)

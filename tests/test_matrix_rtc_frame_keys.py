@@ -170,6 +170,12 @@ def test_receive_rejects_invalid_base64() -> None:
     assert manager.receive(bad, now_ms=0) is None
 
 
+def test_receive_rejects_wrong_length_key() -> None:
+    """MatrixRTC frame keys are exactly 16 bytes."""
+    manager = _manager()
+    assert manager.receive(_received(b"A" * 15, 0, sent_ts=1), now_ms=0) is None
+
+
 def test_malformed_key_does_not_poison_the_dedup_filter() -> None:
     """A bad payload must not block a later valid key with an older sent_ts."""
     manager = _manager()

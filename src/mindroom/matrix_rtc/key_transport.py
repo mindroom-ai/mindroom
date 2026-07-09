@@ -44,21 +44,21 @@ class ToDeviceFrameKeyTransport:
         key_base64: str,
         key_index: int,
         targets: list[CallMember],
-    ) -> None:
-        """Olm-encrypt our frame key to each target device and send it."""
+    ) -> list[CallMember]:
+        """Olm-encrypt our frame key and return each target that received it."""
         client = self._client
         olm = client.olm
         if olm is None:
             logger.warning("call_key_send_skipped_no_olm", room_id=room_id)
-            return
+            return []
         own_user = client.user_id
         own_device = client.device_id
         if own_device is None:
             logger.warning("call_key_send_skipped_no_device_id", room_id=room_id)
-            return
+            return []
         recipients = [t for t in targets if not (t.user_id == own_user and t.device_id == own_device)]
         if not recipients:
-            return
+            return []
 
         missing = olm.get_missing_sessions(sorted({t.user_id for t in recipients}))
         if missing:
@@ -80,6 +80,7 @@ class ToDeviceFrameKeyTransport:
             device_id=own_device,
             sent_ts=int(time.time() * 1000),
         )
+        delivered: list[CallMember] = []
         for target in recipients:
             device = client.device_store[target.user_id].get(target.device_id)
             if device is None:
@@ -120,6 +121,9 @@ class ToDeviceFrameKeyTransport:
                     device_id=target.device_id,
                     error=str(response.message),
                 )
+                continue
+            delivered.append(target)
+        return delivered
 
     def parse_incoming(self, event: nio.UnknownToDeviceEvent, *, room_id: str) -> ReceivedFrameKey | None:
         """Parse a decrypted call-key to-device event for the given room."""

@@ -20,7 +20,7 @@ class CallsConfig(BaseModel):
     voice: str | None = Field(default=None, description="Realtime model voice preset")
     agents: list[str] = Field(
         default_factory=list,
-        description="Agents allowed to join calls in their rooms (at most one per room should be configured)",
+        description="Agents allowed to join calls in their rooms (at most one per room)",
     )
     livekit_service_url: str | None = Field(
         default=None,

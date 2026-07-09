@@ -511,7 +511,7 @@ voice:
 # Voice calls via Element Call / MatrixRTC (optional)
 calls:
   enabled: false                   # Default: false
-  agents: []                       # Agents allowed to join calls in their rooms
+  agents: []                       # Agents allowed to join calls in their rooms (at most one per room)
   model: gpt-realtime-2.1          # OpenAI realtime speech-to-speech model
   voice: null                      # Optional realtime voice preset
   livekit_service_url: null        # Optional override for .well-known discovery

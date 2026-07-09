@@ -16,9 +16,9 @@ from mindroom.config.calls import CallsConfig
 from mindroom.config.main import Config
 from mindroom.matrix_rtc.call_manager import CallManager, _build_call_instructions, maybe_build_call_manager
 from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps
-from mindroom.matrix_rtc.call_tools import CallAgentTooling
 from mindroom.matrix_rtc.events import (
     CALL_MEMBER_EVENT_TYPE,
+    DEFAULT_MEMBERSHIP_EXPIRES_MS,
     build_membership_content,
     membership_state_key,
 )
@@ -70,11 +70,19 @@ class FakeKeyTransport:
     def __init__(self) -> None:
         self.sent: list[dict] = []
 
-    async def send_key(self, *, room_id: str, key_base64: str, key_index: int, targets: list[CallMember]) -> None:
+    async def send_key(
+        self,
+        *,
+        room_id: str,
+        key_base64: str,
+        key_index: int,
+        targets: list[CallMember],
+    ) -> list[CallMember]:
         """Record one key distribution."""
         self.sent.append(
             {"room_id": room_id, "key_base64": key_base64, "key_index": key_index, "targets": targets},
         )
+        return targets
 
 
 def _client() -> AsyncMock:
@@ -123,7 +131,6 @@ def _manager(
     bridge: FakeBridge,
     tmp_path: Path,
     config: Config | None = None,
-    tool_support: object | None = None,
 ) -> CallManager:
     return CallManager(
         agent_name="helper",
@@ -133,7 +140,6 @@ def _manager(
         homeserver_url="https://matrix.example.org",
         ssl_verify=True,
         bridge_factory=lambda _identity, _e2ee: bridge,
-        tool_support=tool_support,  # type: ignore[arg-type]
     )
 
 
@@ -161,11 +167,6 @@ def _stub_join_externals(monkeypatch: pytest.MonkeyPatch) -> None:
         return GRANT
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.request_sfu_grant", fake_grant)
-
-    async def fake_tools(**_kwargs: object) -> CallAgentTooling:
-        return CallAgentTooling(tools=[], tool_names=(), instructions="You are Helper.")
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
 
 
 @pytest.mark.asyncio
@@ -322,20 +323,12 @@ def test_maybe_build_call_manager_survives_missing_livekit_package(
 
 
 def test_build_call_instructions_falls_back_to_config() -> None:
-    """Without a chat system prompt the config-derived fallback is used."""
-    text = _build_call_instructions("helper", _config(), None)
+    """Voice instructions are derived from the agent configuration."""
+    text = _build_call_instructions("helper", _config())
     assert "Helper" in text
     assert "Answer questions" in text
     assert "Be kind." in text
     assert "spoken" in text
-
-
-def test_build_call_instructions_prefers_chat_system_prompt() -> None:
-    """The agent's real chat system prompt wins, with the voice addendum appended."""
-    text = _build_call_instructions("helper", _config(), "CHAT SYSTEM PROMPT")
-    assert text.startswith("CHAT SYSTEM PROMPT")
-    assert "spoken" in text
-    assert "Answer questions" not in text
 
 
 def _member(user: str, device: str, created_ts: int = 0) -> CallMember:
@@ -420,30 +413,37 @@ async def test_session_installs_inbound_keys_on_bridge() -> None:
 
 
 @pytest.mark.asyncio
-async def test_manager_passes_same_agent_tools_and_prompt(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The realtime session gets the chat agent's tools, prompt, and transcript hooks."""
-    sentinel_tool = object()
-
-    async def fake_build_call_tools(**_kwargs: object) -> CallAgentTooling:
-        return CallAgentTooling(tools=[sentinel_tool], tool_names=("magic",), instructions="CHAT PROMPT")
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_build_call_tools)
+async def test_manager_passes_authored_instructions_and_transcript_hook(tmp_path: Path) -> None:
+    """The realtime session gets the agent's authored instructions and transcript hook."""
     client = _client()
     client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
     bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path, tool_support=object())
+    manager = _manager(client, bridge, tmp_path)
 
     await manager.on_room_event(_room(), _member_unknown_event())
 
     options = bridge.agent_options
     assert options is not None
-    assert options.tools == (sentinel_tool,)
-    assert options.instructions.startswith("CHAT PROMPT")
+    assert "Answer questions" in options.instructions
     assert options.on_conversation_turn is not None
-    assert options.on_tools_executed is not None
+
+
+@pytest.mark.asyncio
+async def test_manager_never_uses_a_remote_member_foci_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A remote participant cannot choose where the bot sends its OpenID token."""
+    config = Config(
+        agents={"helper": AgentConfig(display_name="Helper")},
+        models={},
+        calls=CallsConfig(enabled=True, agents=["helper"]),
+    )
+
+    async def no_discovery(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.discover_livekit_service_url", no_discovery)
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
+
+    assert await manager._resolve_service_url() is None
 
 
 @pytest.mark.asyncio
@@ -599,3 +599,68 @@ async def test_membership_refresh_retries_the_same_window_after_failure(
     assert session._refresh_iteration == 2
     # The second sleep is the short retry delay, not a full refresh window.
     assert sleeps[1] == pytest.approx(60.0)
+    assert [call.args[2]["expires"] for call in client.room_put_state.await_args_list] == [
+        2 * DEFAULT_MEMBERSHIP_EXPIRES_MS,
+        2 * DEFAULT_MEMBERSHIP_EXPIRES_MS,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_retries_members_that_did_not_receive_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A skipped to-device send remains eligible until delivery succeeds."""
+
+    class RetryTransport(FakeKeyTransport):
+        async def send_key(
+            self,
+            *,
+            room_id: str,
+            key_base64: str,
+            key_index: int,
+            targets: list[CallMember],
+        ) -> list[CallMember]:
+            await super().send_key(
+                room_id=room_id,
+                key_base64=key_base64,
+                key_index=key_index,
+                targets=targets,
+            )
+            return [] if len(self.sent) == 1 else targets
+
+    real_sleep = asyncio.sleep
+
+    async def immediate_sleep(_seconds: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", immediate_sleep)
+    bridge = FakeBridge()
+    transport = RetryTransport()
+    session = _session(_client(), bridge, transport, [1_000])
+    alice = _member("@alice:example.org", "ALICEDEV")
+
+    await session._distribute_keys([alice])
+    for _ in range(10):
+        if len(transport.sent) == 2:
+            break
+        await real_sleep(0)
+
+    assert len(transport.sent) == 2
+    await session.stop()
+
+
+def test_calls_config_rejects_unknown_agents() -> None:
+    """Call configuration may reference only declared agents."""
+    with pytest.raises(ValueError, match=r"calls\.agents references unknown agent"):
+        Config(models={}, calls=CallsConfig(enabled=True, agents=["missing"]))
+
+
+def test_calls_config_rejects_agents_sharing_a_room() -> None:
+    """Two call agents cannot both join the same configured room."""
+    with pytest.raises(ValueError, match=r"calls\.agents configures multiple agents for room"):
+        Config(
+            models={},
+            agents={
+                "one": AgentConfig(display_name="One", rooms=["voice"]),
+                "two": AgentConfig(display_name="Two", rooms=["voice"]),
+            },
+            calls=CallsConfig(enabled=True, agents=["one", "two"]),
+        )

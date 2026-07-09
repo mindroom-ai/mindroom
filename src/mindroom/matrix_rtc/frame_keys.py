@@ -134,9 +134,13 @@ class FrameKeyManager:
             apply_after_ms=_USE_KEY_DELAY_MS,
         )
 
-    def mark_distributed(self, distribution: _KeyDistribution) -> None:
-        """Record a successful send so the targets are not re-sent the key."""
-        for member in distribution.targets:
+    def mark_distributed(
+        self,
+        distribution: _KeyDistribution,
+        delivered: tuple[CallMember, ...] | None = None,
+    ) -> None:
+        """Record successful sends so unavailable targets are retried later."""
+        for member in distribution.targets if delivered is None else delivered:
             share = _SharedWith(user_id=member.user_id, device_id=member.device_id, membership_ts=member.created_ts)
             if share not in self._shared_with:
                 self._shared_with.append(share)
@@ -157,7 +161,7 @@ class FrameKeyManager:
             key = base64.b64decode(received.key_base64, validate=True)
         except ValueError:
             return None
-        if not key:
+        if len(key) != _KEY_SIZE_BYTES:
             return None
         # Record the dedup timestamp only for keys that validate, so a
         # malformed payload cannot poison the filter against a good retry.

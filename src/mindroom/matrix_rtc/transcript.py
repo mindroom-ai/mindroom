@@ -110,14 +110,6 @@ class CallTranscript:
         self._pending.append(f"- `{stamp}` **{speaker}**: {text}\n")
         self._schedule_flush()
 
-    def record_tool_use(self, tool_names: list[str]) -> None:
-        """Record executed tool calls."""
-        if not tool_names:
-            return
-        stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
-        self._pending.append(f"- `{stamp}` *tools used: {', '.join(tool_names)}*\n")
-        self._schedule_flush()
-
     def _schedule_flush(self) -> None:
         try:
             loop = asyncio.get_running_loop()

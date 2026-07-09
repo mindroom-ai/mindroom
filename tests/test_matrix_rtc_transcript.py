@@ -44,14 +44,12 @@ async def test_transcript_writes_turns_incrementally(tmp_path: Path) -> None:
     transcript = _transcript(tmp_path)
     transcript.record("user", "Hello agent")
     transcript.record("assistant", "Hi! How can I help?")
-    transcript.record_tool_use(["shell"])
     await asyncio.sleep(0.05)
 
     content = transcript.path.read_text()
     assert "# Voice call in Lobby" in content
     assert "**user**: Hello agent" in content
     assert "**assistant**: Hi! How can I help?" in content
-    assert "tools used: shell" in content
     assert transcript._turns == 2
 
 
