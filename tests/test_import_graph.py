@@ -1,9 +1,11 @@
 """Import-graph regression tests for slim entry points (#1436).
 
-Importing the tool registry, config layer, or sandbox runner must not import
-any provider SDK (or the nio matrix client); those load on first model or tool
-construction. Each probe runs in a subprocess so the assertion sees exactly
-what the import graph pulls in.
+Importing the tool registry, config layer, sandbox runner, or the primary
+runtime must not import any provider SDK; those load on first model or tool
+construction. Slim entry points additionally must not import the nio matrix
+client or the mcp SDK, which the primary runtime genuinely needs at boot.
+Each probe runs in a subprocess so the assertion sees exactly what the import
+graph pulls in.
 """
 
 from __future__ import annotations
@@ -14,17 +16,16 @@ import sys
 
 import pytest
 
-_BANNED_IMPORT_ROOTS = (
+_PROVIDER_SDK_ROOTS = (
     "anthropic",
     "boto3",
     "cerebras",
     "google.genai",
     "groq",
-    "mcp",
-    "nio",
     "ollama",
     "openai",
 )
+_SLIM_ONLY_ROOTS = ("mcp", "nio")
 
 _PROBE_TEMPLATE = """
 import importlib, json, sys
@@ -40,6 +41,19 @@ print(json.dumps(loaded))
 """
 
 
+def _assert_probe_clean(module: str, roots: tuple[str, ...]) -> None:
+    probe = _PROBE_TEMPLATE.format(module=module, roots=roots)
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    loaded = json.loads(result.stdout)
+    assert loaded == [], f"importing {module} pulled in banned modules: {loaded}"
+
+
 @pytest.mark.parametrize(
     "module",
     [
@@ -53,13 +67,9 @@ print(json.dumps(loaded))
 )
 def test_slim_entry_points_do_not_import_provider_sdks(module: str) -> None:
     """Slim entry points must keep provider SDKs and the matrix client unimported."""
-    probe = _PROBE_TEMPLATE.format(module=module, roots=_BANNED_IMPORT_ROOTS)
-    result = subprocess.run(
-        [sys.executable, "-c", probe],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=120,
-    )
-    loaded = json.loads(result.stdout)
-    assert loaded == [], f"importing {module} pulled in banned modules: {loaded}"
+    _assert_probe_clean(module, _PROVIDER_SDK_ROOTS + _SLIM_ONLY_ROOTS)
+
+
+def test_primary_runtime_does_not_import_provider_sdks() -> None:
+    """The orchestrator import (mindroom run) loads no provider SDK; only configured ones load later."""
+    _assert_probe_clean("mindroom.orchestrator", _PROVIDER_SDK_ROOTS)

@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import nio
 from agno.agent import Agent
-from agno.models.vertexai.claude import Claude as VertexAIClaude
 from pydantic import BaseModel, Field
 
 from mindroom import model_loading
@@ -21,6 +20,7 @@ from mindroom.entity_resolution import resolve_room_scoped_model_override
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.model_instance_checks import isinstance_of_loaded
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 logger = get_logger(__name__)
+_VERTEXAI_CLAUDE_CLASS = ("agno.models.vertexai.claude", "Claude")
 THREAD_SUMMARY_MAX_LENGTH = 300
 _MARKDOWN_LINK_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)|\[([^\]]+)\]\([^)]+\)")
 _MARKDOWN_CODE_BLOCK_RE = re.compile(r"```(?:[^\n`]*)\n?(.*?)```", re.DOTALL)
@@ -86,12 +87,12 @@ def _configure_summary_model_temperature(
     model_name: str,
 ) -> None:
     """Prepare the summary model's temperature setting for one request."""
-    if isinstance(model, VertexAIClaude):
-        # Vertex Claude's rawPredict helper rejects a temperature field entirely.
-        model.temperature = None
-        return
     if isinstance(model, _SupportsTemperature):
-        model.temperature = summary_temperature
+        if isinstance_of_loaded(model, _VERTEXAI_CLAUDE_CLASS):
+            # Vertex Claude's rawPredict helper rejects a temperature field entirely.
+            model.temperature = None
+        else:
+            model.temperature = summary_temperature
         return
     if summary_temperature is None:
         return

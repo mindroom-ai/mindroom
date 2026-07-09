@@ -3,19 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from agno.exceptions import ContextWindowExceededError, ModelProviderError
-from agno.models.anthropic import Claude
-from agno.models.azure.openai_chat import AzureOpenAI
-from agno.models.cerebras import Cerebras
-from agno.models.deepseek import DeepSeek
-from agno.models.google import Gemini
-from agno.models.groq import Groq
-from agno.models.ollama import Ollama
-from agno.models.openai import OpenAIChat, OpenAIResponses
-from agno.models.openrouter import OpenRouter
-from agno.models.vertexai.claude import Claude as VertexAIClaude
 
 from mindroom.media_inputs import MediaInputs, MediaKind
 
@@ -208,37 +198,54 @@ def _without_media_kinds(media_inputs: MediaInputs, kinds: frozenset[MediaKind])
     )
 
 
+# The effective endpoint is dispatched on which endpoint attribute the model
+# exposes, not on its class, so this module never imports provider model
+# classes (and through them provider SDKs) just to route media errors (#1436).
+# Azure models keep the endpoint in azure_endpoint, Ollama in host, most
+# OpenAI-compatible providers in base_url, and Claude/Gemini only carry
+# client_params.
+@runtime_checkable
+class _HasAzureEndpoint(Protocol):
+    azure_endpoint: str | None
+    base_url: object
+    client_params: Mapping[str, object] | None
+
+
+@runtime_checkable
+class _HasHost(Protocol):
+    host: str | None
+    client_params: Mapping[str, object] | None
+
+
+@runtime_checkable
+class _HasBaseUrl(Protocol):
+    base_url: object
+    client_params: Mapping[str, object] | None
+
+
+@runtime_checkable
+class _HasClientParams(Protocol):
+    client_params: Mapping[str, object] | None
+
+
 def _route_endpoint(model: Model) -> str | None:
-    if isinstance(model, AzureOpenAI):
+    if isinstance(model, _HasAzureEndpoint):
         return _route_endpoint_text(
             model.azure_endpoint,
-            model.base_url,
+            str(model.base_url) if model.base_url is not None else None,
             _client_params_endpoint(model.client_params),
         )
-    if isinstance(model, Ollama):
+    if isinstance(model, _HasHost):
         return _route_endpoint_text(
             model.host,
             _client_params_endpoint(model.client_params),
         )
-    # VertexAIClaude subclasses the Anthropic Claude model but exposes a base_url,
-    # so it must be matched here, before the Claude/Gemini branch below.
-    if isinstance(
-        model,
-        (
-            VertexAIClaude,
-            Cerebras,
-            DeepSeek,
-            Groq,
-            OpenAIChat,
-            OpenAIResponses,
-            OpenRouter,
-        ),
-    ):
+    if isinstance(model, _HasBaseUrl):
         return _route_endpoint_text(
             str(model.base_url) if model.base_url is not None else None,
             _client_params_endpoint(model.client_params),
         )
-    if isinstance(model, (Claude, Gemini)):
+    if isinstance(model, _HasClientParams):
         return _client_params_endpoint(model.client_params)
     return None
 
