@@ -13,6 +13,7 @@ from mindroom.matrix.client_room_admin import (
     add_room_to_space,
     create_room,
     create_space,  # noqa: F401
+    ensure_call_member_power_level,
     ensure_managed_room_power_levels,
     ensure_room_admin_power_levels,
     ensure_room_directory_visibility,  # noqa: F401
@@ -43,6 +44,7 @@ __all__ = [
     "add_room_to_space",
     "create_room",
     "edit_message_result",
+    "ensure_call_member_power_level",
     "ensure_managed_room_power_levels",
     "ensure_room_admin_power_levels",
     "get_joined_rooms",

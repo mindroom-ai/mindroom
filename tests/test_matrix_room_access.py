@@ -351,6 +351,8 @@ async def test_create_room_seeds_thread_tags_power_level(
     assert power_levels["users_default"] == 0
     assert power_levels["state_default"] == 50
     assert power_levels["events"][THREAD_TAGS_EVENT_TYPE] == 0
+    # Element Call membership must be publishable by regular members (PL0).
+    assert power_levels["events"]["org.matrix.msc3401.call.member"] == 0
     assert _SCHEDULED_TASK_EVENT_TYPE not in power_levels["events"]
     assert power_levels["users"]["@agent:example.com"] == 50
     assert power_levels["users"]["@router:example.com"] == 100
@@ -626,6 +628,48 @@ async def test_ensure_managed_room_power_levels_idempotent() -> None:
     )
 
     result = await matrix_client.ensure_managed_room_power_levels(mock_client, "!room:example.com")
+
+    assert result is True
+    mock_client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_call_member_power_level_lowers_default() -> None:
+    """Call membership must become PL0 so regular members can join calls."""
+    mock_client = AsyncMock()
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"events": {"m.room.name": 50}, "state_default": 50, "users": {"@router:example.com": 100}},
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id="!room:example.com",
+    )
+    mock_client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state"},
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.ensure_call_member_power_level(mock_client, "!room:example.com")
+
+    assert result is True
+    _, kwargs = mock_client.room_put_state.await_args
+    events = kwargs["content"]["events"]
+    assert events["org.matrix.msc3401.call.member"] == 0
+    # existing overrides are preserved
+    assert events["m.room.name"] == 50
+
+
+@pytest.mark.asyncio
+async def test_ensure_call_member_power_level_idempotent() -> None:
+    """Reconciliation should skip writes when call membership is already PL0."""
+    mock_client = AsyncMock()
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"events": {"org.matrix.msc3401.call.member": 0}, "state_default": 50},
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.ensure_call_member_power_level(mock_client, "!room:example.com")
 
     assert result is True
     mock_client.room_put_state.assert_not_awaited()

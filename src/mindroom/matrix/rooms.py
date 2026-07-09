@@ -16,6 +16,7 @@ from mindroom.matrix.client_room_admin import (
     add_room_to_space,
     create_room,
     create_space,
+    ensure_call_member_power_level,
     ensure_managed_room_power_levels,
     ensure_room_admin_power_levels,
     ensure_room_directory_visibility,
@@ -227,6 +228,8 @@ async def _reconcile_joined_existing_room(
     await ensure_managed_room_power_levels(client, room_id, admin_user_ids)
     if _managed_room_should_be_encrypted(room_key, config):
         await ensure_room_encryption_enabled(client, room_id)
+    if config.calls.enabled:
+        await ensure_call_member_power_level(client, room_id)
 
     if config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.reconcile_existing_rooms:
         await _configure_managed_room_access(

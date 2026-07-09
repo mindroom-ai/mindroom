@@ -25,6 +25,14 @@ _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _DEFAULT_USER_POWER_LEVEL = 0
 _POWER_USER_POWER_LEVEL = 50
 
+# Element Call membership state event (deployed MSC3401 flavor). Regular room
+# members must be able to publish it to join a call, so it is pinned to PL0 —
+# the same convention Element uses for call-capable rooms. Mirrors
+# ``mindroom.matrix_rtc.events.CALL_MEMBER_EVENT_TYPE`` (kept as a literal here
+# to avoid a core -> matrix_rtc dependency).
+_CALL_MEMBER_EVENT_TYPE = "org.matrix.msc3401.call.member"
+_CALL_MEMBER_POWER_LEVEL = 0
+
 
 async def invite_to_room(
     client: nio.AsyncClient,
@@ -53,6 +61,7 @@ def _create_room_initial_state(
         "state_default": _DEFAULT_STATE_EVENT_POWER_LEVEL,
         "events": {
             THREAD_TAGS_EVENT_TYPE: _THREAD_TAGS_POWER_LEVEL,
+            _CALL_MEMBER_EVENT_TYPE: _CALL_MEMBER_POWER_LEVEL,
         },
     }
     users: dict[str, int] = {}
@@ -139,12 +148,16 @@ async def ensure_room_encryption_enabled(client: nio.AsyncClient, room_id: str) 
     return False
 
 
-def _with_thread_tags_power_level(power_levels_content: dict[str, Any]) -> dict[str, Any]:
-    """Return power-level content with the thread-tags override applied."""
+def _with_event_power_level(
+    power_levels_content: dict[str, Any],
+    event_type: str,
+    power_level: int,
+) -> dict[str, Any]:
+    """Return power-level content with one event-type override applied."""
     next_content = dict(power_levels_content)
     existing_events = power_levels_content.get("events")
     next_events = dict(existing_events) if isinstance(existing_events, dict) else {}
-    next_events[THREAD_TAGS_EVENT_TYPE] = _THREAD_TAGS_POWER_LEVEL
+    next_events[event_type] = power_level
     next_content["events"] = next_events
     return next_content
 
@@ -177,7 +190,7 @@ async def ensure_managed_room_power_levels(
         return False
     current_content = current_response.content
 
-    desired_content = _with_thread_tags_power_level(current_content)
+    desired_content = _with_event_power_level(current_content, THREAD_TAGS_EVENT_TYPE, _THREAD_TAGS_POWER_LEVEL)
     concrete_admin_ids = {user_id for user_id in admin_user_ids if user_id}
     if concrete_admin_ids:
         desired_content = _with_room_admin_power_levels(desired_content, concrete_admin_ids)
@@ -210,6 +223,93 @@ async def ensure_managed_room_power_levels(
         hint="Ensure the service account is joined and can update m.room.power_levels.",
     )
     return False
+
+
+async def _ensure_event_power_level(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    event_type: str,
+    power_level: int,
+    label: str,
+) -> bool:
+    """Ensure managed rooms allow PL``power_level`` users to send ``event_type``."""
+    current_response = await client.room_get_state_event(room_id, _POWER_LEVELS_EVENT_TYPE)
+    if not isinstance(current_response, nio.RoomGetStateEventResponse):
+        logger.error(
+            f"Failed to read room power levels for {label} reconciliation",
+            room_id=room_id,
+            error=_describe_matrix_response_error(current_response),
+        )
+        return False
+    if not isinstance(current_response.content, dict):
+        logger.error(
+            "Room power levels state has unexpected content shape",
+            room_id=room_id,
+            content=current_response.content,
+        )
+        return False
+    current_content = current_response.content
+
+    desired_content = _with_event_power_level(current_content, event_type, power_level)
+    if desired_content == current_content:
+        logger.debug(
+            f"{label} power level already configured",
+            room_id=room_id,
+            event_type=event_type,
+            power_level=power_level,
+        )
+        return True
+
+    response = await client.room_put_state(
+        room_id=room_id,
+        event_type=_POWER_LEVELS_EVENT_TYPE,
+        content=desired_content,
+    )
+    if isinstance(response, nio.RoomPutStateResponse):
+        logger.info(
+            f"Updated room power levels for {label}",
+            room_id=room_id,
+            event_type=event_type,
+            power_level=power_level,
+        )
+        return True
+
+    logger.error(
+        f"Failed to update room power levels for {label}",
+        room_id=room_id,
+        error=_describe_matrix_response_error(response),
+        hint="Ensure the service account is joined and can update m.room.power_levels.",
+    )
+    return False
+
+
+async def ensure_thread_tags_power_level(
+    client: nio.AsyncClient,
+    room_id: str,
+) -> bool:
+    """Ensure managed rooms allow PL0 users to send the thread-tags state event."""
+    return await _ensure_event_power_level(
+        client,
+        room_id,
+        event_type=THREAD_TAGS_EVENT_TYPE,
+        power_level=_THREAD_TAGS_POWER_LEVEL,
+        label="thread tags",
+    )
+
+
+async def ensure_call_member_power_level(
+    client: nio.AsyncClient,
+    room_id: str,
+) -> bool:
+    """Ensure managed rooms allow PL0 members to publish Element Call membership."""
+    return await _ensure_event_power_level(
+        client,
+        room_id,
+        event_type=_CALL_MEMBER_EVENT_TYPE,
+        power_level=_CALL_MEMBER_POWER_LEVEL,
+        label="call membership",
+    )
 
 
 def _with_room_admin_power_levels(
@@ -662,6 +762,7 @@ __all__ = [
     "add_room_to_space",
     "create_room",
     "create_space",
+    "ensure_call_member_power_level",
     "ensure_managed_room_power_levels",
     "ensure_room_admin_power_levels",
     "ensure_room_directory_visibility",
