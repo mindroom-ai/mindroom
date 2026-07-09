@@ -14,7 +14,7 @@
 **AI agents that live in your chat rooms.**
 
 MindRoom is an open-source multi-agent runtime built on [Matrix](https://matrix.org/).
-You define agents in a YAML file or in the web dashboard; MindRoom gives each one a Matrix account, and they respond in threads in any Matrix client (Element, Cinny, FluffyChat, ...).
+You define agents in a YAML file or in the web dashboard; MindRoom gives each one a Matrix account, and you talk to them in threads in the [MindRoom chat client](https://github.com/mindroom-ai/mindroom-cinny) — or any other Matrix client you already use.
 Because Matrix bridges to other platforms, the same agents also work in Slack, Telegram, Discord, WhatsApp, IRC, and email — with the same persistent memory everywhere.
 Self-host the whole stack, or run only the MindRoom backend locally and pair it with hosted Matrix at [chat.mindroom.chat](https://chat.mindroom.chat).
 
@@ -147,7 +147,7 @@ See the [macOS app guide](docs/installation/macos-app.md) for setup, updates, an
 
 ### First steps
 
-In any Matrix client:
+In the MindRoom chat client (hosted at [chat.mindroom.chat](https://chat.mindroom.chat), or bundled with the local stack):
 
 ```
 You: @assistant What can you do?
@@ -286,7 +286,7 @@ By building on it, MindRoom inherits instead of reimplements:
 - **Agents**: Python, built on [Agno](https://agno.dev/) and [mindroom-nio](https://github.com/mindroom-ai/mindroom-nio)
 - **AI models**: Anthropic, OpenAI, Google, Ollama, Bedrock, or any OpenAI-compatible endpoint
 - **Memory**: Mem0 + ChromaDB vector storage, persistent on disk
-- **UI**: web dashboard for administration; any Matrix client for chat
+- **UI**: web dashboard for administration; the [MindRoom chat client](https://github.com/mindroom-ai/mindroom-cinny) (or any Matrix client) for chat
 
 See [docs/architecture](docs/architecture) for internals.
 
