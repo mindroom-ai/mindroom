@@ -87,18 +87,24 @@ async def register(localpart: str) -> tuple[str, str, str]:
     """Token-register a throwaway user; returns (user_id, device_id, access_token)."""
     pw = uuid.uuid4().hex
     async with httpx.AsyncClient(base_url=HOMESERVER, timeout=30.0) as h:
-        s = (await h.post("/_matrix/client/v3/register", json={"username": localpart, "password": pw})).json()[
-            "session"
-        ]
+        session_response = await h.post("/_matrix/client/v3/register", json={"username": localpart, "password": pw})
+        session_body = session_response.json()
+        session = session_body.get("session")
+        if not isinstance(session, str):
+            msg = f"registration did not start (status={session_response.status_code}, body={session_body})"
+            raise TypeError(msg)
         r = await h.post(
             "/_matrix/client/v3/register",
             json={
                 "username": localpart,
                 "password": pw,
-                "auth": {"type": "m.login.registration_token", "token": REG_TOKEN, "session": s},
+                "auth": {"type": "m.login.registration_token", "token": REG_TOKEN, "session": session},
             },
         )
     b = r.json()
+    if not all(isinstance(b.get(field), str) for field in ("user_id", "device_id", "access_token")):
+        msg = f"registration did not complete (status={r.status_code}, body={b})"
+        raise TypeError(msg)
     return b["user_id"], b["device_id"], b["access_token"]
 
 
@@ -192,13 +198,13 @@ async def caller_start_call(
             json=content,
         )
         put.raise_for_status()
-        oid = (
-            await h.post(
-                f"/_matrix/client/v3/user/{user_id}/openid/request_token",
-                params={"access_token": token},
-                json={},
-            )
-        ).json()
+        openid_response = await h.post(
+            f"/_matrix/client/v3/user/{user_id}/openid/request_token",
+            params={"access_token": token},
+            json={},
+        )
+        openid_response.raise_for_status()
+        oid = openid_response.json()
     grant = await request_sfu_grant(
         SERVICE_URL,
         room_id=room_id,
@@ -249,19 +255,24 @@ async def main() -> int:  # noqa: PLR0915
 
     log("== create room, bot joins ==")
     async with httpx.AsyncClient(base_url=HOMESERVER, timeout=30.0) as h:
-        room_id = (
-            await h.post(
-                "/_matrix/client/v3/createRoom",
-                params={"access_token": caller_tok},
-                json={
-                    "name": f"speaktest-{SUFFIX}",
-                    "invite": [bot_id],
-                    "preset": "public_chat",
-                    "power_level_content_override": {"events": {CALL_MEMBER_EVENT_TYPE: 0}},
-                },
-            )
-        ).json()["room_id"]
-        await h.post(f"/_matrix/client/v3/rooms/{room_id}/join", params={"access_token": bot_tok}, json={})
+        create_response = await h.post(
+            "/_matrix/client/v3/createRoom",
+            params={"access_token": caller_tok},
+            json={
+                "name": f"speaktest-{SUFFIX}",
+                "invite": [bot_id],
+                "preset": "public_chat",
+                "power_level_content_override": {"events": {CALL_MEMBER_EVENT_TYPE: 0}},
+            },
+        )
+        create_response.raise_for_status()
+        room_id = create_response.json()["room_id"]
+        join_response = await h.post(
+            f"/_matrix/client/v3/rooms/{room_id}/join",
+            params={"access_token": bot_tok},
+            json={},
+        )
+        join_response.raise_for_status()
     log(f"  room={room_id}")
 
     log("== caller starts the call (mic publishing silence) ==")
@@ -348,59 +359,70 @@ async def main() -> int:  # noqa: PLR0915
     room_obj = nio.MatrixRoom(room_id=room_id, own_user_id=bot_id)
     room_obj.encrypted = False
     event = nio.UnknownEvent({"event_id": "$evt", "sender": caller_id, "origin_server_ts": 1}, CALL_MEMBER_EVENT_TYPE)
-    await asyncio.wait_for(manager.on_room_event(room_obj, event), timeout=120)
-    log("  [bot] call join path completed (agent session started)")
+    manager_shutdown = False
+    try:
+        await asyncio.wait_for(manager.on_room_event(room_obj, event), timeout=120)
+        log("  [bot] call join path completed (agent session started)")
 
-    results: dict[str, bool] = {}
+        results: dict[str, bool] = {}
 
-    log("== leg 1: greeting audio from the agent ==")
-    results["greeting_audio"] = await wait_for(lambda: meter.voiced >= 20, 45, "greeting audio")
-    log(f"  bot audio: frames={meter.frames} voiced={meter.voiced} peak_rms={meter.peak_rms:.0f}")
+        log("== leg 1: greeting audio from the agent ==")
+        results["greeting_audio"] = await wait_for(lambda: meter.voiced >= 20, 45, "greeting audio")
+        log(f"  bot audio: frames={meter.frames} voiced={meter.voiced} peak_rms={meter.peak_rms:.0f}")
 
-    transcript_dir = paths.storage_root / "calls" / AGENT
+        transcript_dir = paths.storage_root / "calls" / AGENT
 
-    def transcript_text() -> str:
-        files = list(transcript_dir.glob("*.md")) if transcript_dir.exists() else []
-        return files[0].read_text(encoding="utf-8") if files else ""
+        def transcript_text() -> str:
+            files = list(transcript_dir.glob("*.md")) if transcript_dir.exists() else []
+            return files[0].read_text(encoding="utf-8") if files else ""
 
-    log("== leg 2: caller asks the calculator question ==")
-    voiced_before_answer = meter.voiced
-    caller_audio.say(question_pcm)
-    await wait_for(lambda: not caller_audio.speaking, 30, "question audio to finish playing")
-    log("  question spoken; waiting for tool call + spoken answer")
+        log("== leg 2: caller asks the calculator question ==")
+        voiced_before_answer = meter.voiced
+        caller_audio.say(question_pcm)
+        await wait_for(lambda: not caller_audio.speaking, 30, "question audio to finish playing")
+        log("  question spoken; waiting for tool call + spoken answer")
 
-    def answer_present() -> bool:
-        text = transcript_text().lower()
-        return "345" in text or ("forty-five" in text and "three hundred" in text) or "forty five" in text
+        def answer_present() -> bool:
+            text = transcript_text().lower().replace("-", " ")
+            return "345" in text or ("three hundred" in text and "forty five" in text)
 
-    results["tool_called"] = await wait_for(
-        lambda: "tools used" in transcript_text() and "multiply" in transcript_text(),
-        75,
-        "tool use in transcript",
-    )
-    results["answer_spoken"] = await wait_for(lambda: meter.voiced > voiced_before_answer + 20, 30, "answer audio")
-    results["answer_text"] = await wait_for(answer_present, 30, "the answer 345 in the transcript")
+        results["tool_called"] = await wait_for(
+            lambda: "tools used" in transcript_text() and "multiply" in transcript_text(),
+            75,
+            "tool use in transcript",
+        )
+        results["answer_spoken"] = await wait_for(lambda: meter.voiced > voiced_before_answer + 20, 30, "answer audio")
+        results["answer_text"] = await wait_for(answer_present, 30, "the answer 345 in the transcript")
 
-    log("== shutdown: finalize transcript + daily memory ==")
-    await manager.shutdown()
-    await asyncio.sleep(1)
+        log("== shutdown: finalize transcript + daily memory ==")
+        await manager.shutdown()
+        manager_shutdown = True
+        await asyncio.sleep(1)
 
-    text = transcript_text()
-    results["transcript_written"] = bool(text) and "**user**" in text and "**assistant**" in text
-    log("---- transcript ----")
-    log(text or "  (empty)")
-    log("--------------------")
+        text = transcript_text()
+        results["transcript_written"] = bool(text) and "**user**" in text and "**assistant**" in text
+        log("---- transcript ----")
+        log(text or "  (empty)")
+        log("--------------------")
 
-    daily_hits = [p for p in paths.storage_root.rglob("*.md") if "Joined a voice call" in p.read_text(encoding="utf-8")]
-    results["daily_memory"] = bool(daily_hits)
-    if daily_hits:
-        log(f"  daily memory entry: {daily_hits[0]}")
-
-    pump_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await pump_task
-    await caller_room.disconnect()
-    await bot_client.close()
+        transcript_root = transcript_dir.resolve()
+        daily_hits = [
+            path
+            for path in paths.storage_root.rglob("*.md")
+            if transcript_root not in path.resolve().parents
+            and "Joined a voice call" in path.read_text(encoding="utf-8")
+        ]
+        results["daily_memory"] = bool(daily_hits)
+        if daily_hits:
+            log(f"  daily memory entry: {daily_hits[0]}")
+    finally:
+        if not manager_shutdown:
+            await manager.shutdown()
+        pump_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pump_task
+        await caller_room.disconnect()
+        await bot_client.close()
 
     log("\n==== RESULTS ====")
     for name, ok in results.items():
