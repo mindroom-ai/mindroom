@@ -4,47 +4,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from agno.exceptions import ContextWindowExceededError, ModelProviderError
 
 from mindroom.media_inputs import MediaInputs, MediaKind
-from mindroom.model_instance_checks import isinstance_of_loaded
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from agno.models.anthropic import Claude
-    from agno.models.azure.openai_chat import AzureOpenAI
     from agno.models.base import Model
-    from agno.models.cerebras.cerebras import Cerebras
-    from agno.models.deepseek.deepseek import DeepSeek
-    from agno.models.google import Gemini
-    from agno.models.groq.groq import Groq
-    from agno.models.ollama import Ollama
-    from agno.models.openai import OpenAIChat, OpenAIResponses
-    from agno.models.openrouter.openrouter import OpenRouter
-    from agno.models.vertexai.claude import Claude as VertexAIClaude
-
-# Route dispatch checks model classes without importing them (a model instance
-# can only exist once its provider module is imported), so this module never
-# pulls provider SDKs into the runtime import graph (#1436). Paths name each
-# class's concrete defining module.
-_AZURE_OPENAI_CLASS = ("agno.models.azure.openai_chat", "AzureOpenAI")
-_OLLAMA_CLASS = ("agno.models.ollama.chat", "Ollama")
-_BASE_URL_MODEL_CLASSES = (
-    ("agno.models.vertexai.claude", "Claude"),
-    ("agno.models.cerebras.cerebras", "Cerebras"),
-    ("agno.models.deepseek.deepseek", "DeepSeek"),
-    ("agno.models.groq.groq", "Groq"),
-    ("agno.models.openai.chat", "OpenAIChat"),
-    ("agno.models.openai.responses", "OpenAIResponses"),
-    ("agno.models.openrouter.openrouter", "OpenRouter"),
-)
-_CLIENT_PARAMS_MODEL_CLASSES = (
-    ("agno.models.anthropic.claude", "Claude"),
-    ("agno.models.google.gemini", "Gemini"),
-)
 
 __all__ = [
     "MediaRetryDecision",
@@ -357,34 +326,55 @@ def _without_media_kinds(media_inputs: MediaInputs, kinds: frozenset[MediaKind])
     )
 
 
+# The effective endpoint is dispatched on which endpoint attribute the model
+# exposes, not on its class, so this module never imports provider model
+# classes (and through them provider SDKs) just to route media errors (#1436).
+# Azure models keep the endpoint in azure_endpoint, Ollama in host, most
+# OpenAI-compatible providers in base_url, and Claude/Gemini only carry
+# client_params.
+@runtime_checkable
+class _HasAzureEndpoint(Protocol):
+    azure_endpoint: str | None
+    base_url: object
+    client_params: Mapping[str, object] | None
+
+
+@runtime_checkable
+class _HasHost(Protocol):
+    host: str | None
+    client_params: Mapping[str, object] | None
+
+
+@runtime_checkable
+class _HasBaseUrl(Protocol):
+    base_url: object
+    client_params: Mapping[str, object] | None
+
+
+@runtime_checkable
+class _HasClientParams(Protocol):
+    client_params: Mapping[str, object] | None
+
+
 def _route_endpoint(model: Model) -> str | None:
-    if isinstance_of_loaded(model, _AZURE_OPENAI_CLASS):
-        azure_model = cast("AzureOpenAI", model)
+    if isinstance(model, _HasAzureEndpoint):
         return _route_endpoint_text(
-            azure_model.azure_endpoint,
-            azure_model.base_url,
-            _client_params_endpoint(azure_model.client_params),
+            model.azure_endpoint,
+            str(model.base_url) if model.base_url is not None else None,
+            _client_params_endpoint(model.client_params),
         )
-    if isinstance_of_loaded(model, _OLLAMA_CLASS):
-        ollama_model = cast("Ollama", model)
+    if isinstance(model, _HasHost):
         return _route_endpoint_text(
-            ollama_model.host,
-            _client_params_endpoint(ollama_model.client_params),
+            model.host,
+            _client_params_endpoint(model.client_params),
         )
-    # VertexAIClaude subclasses the Anthropic Claude model but exposes a base_url,
-    # so it must be matched here, before the Claude/Gemini branch below.
-    if isinstance_of_loaded(model, *_BASE_URL_MODEL_CLASSES):
-        base_url_model = cast(
-            "VertexAIClaude | Cerebras | DeepSeek | Groq | OpenAIChat | OpenAIResponses | OpenRouter",
-            model,
-        )
+    if isinstance(model, _HasBaseUrl):
         return _route_endpoint_text(
-            str(base_url_model.base_url) if base_url_model.base_url is not None else None,
-            _client_params_endpoint(base_url_model.client_params),
+            str(model.base_url) if model.base_url is not None else None,
+            _client_params_endpoint(model.client_params),
         )
-    if isinstance_of_loaded(model, *_CLIENT_PARAMS_MODEL_CLASSES):
-        claude_or_gemini = cast("Claude | Gemini", model)
-        return _client_params_endpoint(claude_or_gemini.client_params)
+    if isinstance(model, _HasClientParams):
+        return _client_params_endpoint(model.client_params)
     return None
 
 
