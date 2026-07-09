@@ -12883,6 +12883,9 @@ When a call starts in a room, the configured agent:
 4. In encrypted rooms, distributes its media frame key over encrypted to-device messages and installs the other participants' keys, following the same per-sender key rotation policy as Element Call.
 5. Runs an OpenAI realtime session on the call audio until everyone else leaves.
 
+The voice agent is the same agent you chat with: it carries the agent's regular system prompt (with a spoken-style addendum) and the same tools it has in text conversations.
+Tool calls run under the room's tool runtime context and respect your `tool_approval` rules; calls that would require approval are refused with a spoken explanation instead of executing.
+
 The agent leaves the call (and clears its membership state event) when the last other participant leaves, or when the bot shuts down.
 
 ## Configuration
@@ -12931,10 +12934,14 @@ MindRoom sends its own frame key this way, so participants can always hear the a
 Hearing the participants in an encrypted room additionally requires a mindroom-nio release that surfaces unknown decrypted to-device events ([mindroom-nio#5](https://github.com/mindroom-ai/mindroom-nio/pull/5)); without it the agent joins but cannot decrypt inbound audio.
 Calls in unencrypted rooms need none of this and work with plain SFU media.
 
+## Transcripts and memory
+
+Every call writes a markdown transcript incrementally: agents with a private workspace keep it in `calls/` inside their workspace (readable through their file tools later), other agents under `<storage>/calls/<agent>/`.
+When the call ends, the agent appends a one-line summary with the transcript location to its daily memory.
+
 ## Limitations
 
 - Audio only: the agent neither publishes nor consumes video and screen shares.
-- The agent's chat tools are not yet available during calls; the realtime session only carries the agent's role and instructions.
 - Legacy 1:1 `m.call.*` calls (non-MatrixRTC) are not supported.
 
 # Image Messages
