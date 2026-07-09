@@ -133,6 +133,7 @@ def test_room_thread_mode_store_drops_invalid_records(tmp_path: Path) -> None:
             {
                 ROOM_ID: {"mode": "invalid", "set_at": "2026-06-17T00:00:00+00:00"},
                 "!other:localhost": {"mode": "room", "set_at": 12345},
+                "!container:localhost": {"mode": [], "set_at": "2026-06-17T00:00:00+00:00"},
             },
         ),
         encoding="utf-8",
@@ -140,6 +141,7 @@ def test_room_thread_mode_store_drops_invalid_records(tmp_path: Path) -> None:
 
     assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) is None
     assert _get_room_thread_mode_override(runtime_paths, "!other:localhost") is None
+    assert _get_room_thread_mode_override(runtime_paths, "!container:localhost") is None
 
 
 def test_room_thread_mode_store_detects_file_created_after_missing_read(tmp_path: Path) -> None:

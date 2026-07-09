@@ -31,7 +31,8 @@ def _store_path(runtime_paths: RuntimePaths) -> Path:
 
 def _is_valid_override(_room_id: str, record: dict[object, object]) -> bool:
     """Return whether one persisted room-mode record has the required shape."""
-    return record.get("mode") in _VALID_ROOM_THREAD_MODES and isinstance(record.get("set_at", ""), str)
+    mode = record.get("mode")
+    return isinstance(mode, str) and mode in _VALID_ROOM_THREAD_MODES and isinstance(record.get("set_at", ""), str)
 
 
 def _load_overrides(path: Path) -> dict[str, OverrideRecord]:
