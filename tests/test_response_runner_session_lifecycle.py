@@ -31,6 +31,10 @@ from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import (
+    MINDROOM_REPLAY_STATE_INTERRUPTED,
+    MINDROOM_REPLAY_STATE_METADATA_KEY,
+)
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.turn_recorder import TurnRecorder
@@ -223,7 +227,7 @@ async def test_sync_restart_retry_skips_generation_when_later_run_recovered_sour
         status=RunStatus.completed,
         metadata={
             "matrix_seen_event_ids": ["$source"],
-            "mindroom_replay_state": "interrupted",
+            MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
         },
     )
     storage = _SessionStorage(
