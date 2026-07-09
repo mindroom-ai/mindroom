@@ -220,27 +220,27 @@ class CallManager:
             greeting_instructions="Briefly greet the participants and let them know you joined the call.",
             on_conversation_turn=transcript.record,
         )
-        session = CallSession(
-            room_id=room_id,
-            e2ee_enabled=room.encrypted,
-            deps=CallSessionDeps(
-                client=self._client,
-                bridge=self._bridge_factory(
-                    f"{self._client.user_id}:{required_device_id(self._client)}",
-                    room.encrypted,
-                ),
-                key_transport=self._key_transport,
-                fetch_grant=lambda: self._fetch_grant(room_id, service_url),
-                agent_options=options,
-                livekit_service_url=service_url,
-                on_stopped=lambda: transcript.finalize(
-                    config=self._config,
-                    runtime_paths=self._runtime_paths,
-                    storage_path=self._runtime_paths.storage_root,
-                ),
-            ),
-        )
         try:
+            session = CallSession(
+                room_id=room_id,
+                e2ee_enabled=room.encrypted,
+                deps=CallSessionDeps(
+                    client=self._client,
+                    bridge=self._bridge_factory(
+                        f"{self._client.user_id}:{required_device_id(self._client)}",
+                        room.encrypted,
+                    ),
+                    key_transport=self._key_transport,
+                    fetch_grant=lambda: self._fetch_grant(room_id, service_url),
+                    agent_options=options,
+                    livekit_service_url=service_url,
+                    on_stopped=lambda: transcript.finalize(
+                        config=self._config,
+                        runtime_paths=self._runtime_paths,
+                        storage_path=self._runtime_paths.storage_root,
+                    ),
+                ),
+            )
             await session.start(members)
         except (CallJoinError, httpx.HTTPError, ValueError) as error:
             logger.warning("call_join_failed", room_id=room_id, agent=self._agent_name, error=str(error))

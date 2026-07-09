@@ -251,6 +251,20 @@ async def test_manager_skips_join_without_openai_key(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
+async def test_manager_handles_missing_device_id_as_a_join_failure(tmp_path: Path) -> None:
+    """A not-yet-initialized Matrix client must not crash the event callback."""
+    client = _client()
+    client.device_id = None
+    client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert bridge.connected_grant is None
+
+
+@pytest.mark.asyncio
 async def test_manager_shutdown_stops_sessions(tmp_path: Path) -> None:
     """Manager shutdown stops sessions."""
     client = _client()

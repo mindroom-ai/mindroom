@@ -53,7 +53,11 @@ def log(msg: str) -> None:
 
 async def _register(http: httpx.AsyncClient, username: str, password: str, reg_token: str) -> tuple[str, str, str]:
     start = await http.post("/_matrix/client/v3/register", json={"username": username, "password": password})
-    session = start.json()["session"]
+    start_body = start.json()
+    session = start_body.get("session")
+    if not isinstance(session, str):
+        msg = f"registration did not start (status={start.status_code}, body={start_body})"
+        raise TypeError(msg)
     resp = await http.post(
         "/_matrix/client/v3/register",
         json={
