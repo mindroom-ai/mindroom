@@ -1766,8 +1766,9 @@ async def test_cleanup_scans_past_lookback_page_for_old_terminal_interruption(tm
 
 @pytest.mark.asyncio
 async def test_cleanup_stops_at_lookback_page_when_auto_resume_disabled(tmp_path: Path) -> None:
-    """Default startup cleanup must not full-scan busy rooms when no resume relay will be queued."""
+    """Opted-out startup cleanup must not full-scan busy rooms when no resume relay will be queued."""
     config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = False
     client = _make_client()
     client.rooms = _joined_room_cache()
     client.room_messages = AsyncMock(

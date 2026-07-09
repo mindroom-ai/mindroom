@@ -319,7 +319,7 @@ class DefaultsConfig(BaseModel):
     )
     show_stop_button: bool = Field(default=True, description="Whether to automatically show stop button on messages")
     auto_resume_after_restart: bool = Field(
-        default=False,
+        default=True,
         description="Whether restart cleanup should post a real system message to resume interrupted threaded conversations",
     )
     learning: bool = Field(default=True, description="Default Agno Learning setting")
