@@ -35,11 +35,16 @@ _RATCHET_WINDOW_SIZE = 10
 
 def matrix_calls_dependencies_available() -> bool:
     """Whether the optional ``matrix_calls`` extra is installed."""
-    return (
-        importlib.util.find_spec("livekit.rtc") is not None
-        and importlib.util.find_spec("livekit.agents") is not None
-        and importlib.util.find_spec("livekit.plugins.openai") is not None
-    )
+    # find_spec("livekit.rtc") raises (rather than returning None) when the
+    # parent "livekit" package itself is missing.
+    try:
+        return (
+            importlib.util.find_spec("livekit.rtc") is not None
+            and importlib.util.find_spec("livekit.agents") is not None
+            and importlib.util.find_spec("livekit.plugins.openai") is not None
+        )
+    except ModuleNotFoundError:
+        return False
 
 
 @dataclass(frozen=True)

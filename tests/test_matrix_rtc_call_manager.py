@@ -297,6 +297,28 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
     assert isinstance(enabled, CallManager)
 
 
+def test_maybe_build_call_manager_survives_missing_livekit_package(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A missing livekit package disables calls instead of crashing agent startup."""
+
+    def raising_find_spec(_name: str) -> None:
+        msg = "No module named 'livekit'"
+        raise ModuleNotFoundError(msg)
+
+    monkeypatch.setattr("importlib.util.find_spec", raising_find_spec)
+    manager = maybe_build_call_manager(
+        agent_name="helper",
+        config=_config(),
+        client=_client(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        homeserver_url="https://matrix.example.org",
+        ssl_verify=True,
+    )
+    assert manager is None
+
+
 def test_build_call_instructions_falls_back_to_config() -> None:
     """Without a chat system prompt the config-derived fallback is used."""
     text = _build_call_instructions("helper", _config(), None)
