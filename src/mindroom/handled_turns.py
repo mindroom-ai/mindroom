@@ -272,7 +272,7 @@ class TurnRecordCodec:
 
     @staticmethod
     def from_run_metadata(metadata: Mapping[str, object]) -> TurnRecord | None:
-        """Parse the canonical recoverable facts from current-version Agno metadata."""
+        """Parse current Agno metadata, using response linkage as terminal-delivery evidence."""
         if metadata.get(constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY) != TurnRecordCodec.schema_version():
             return None
         anchor_event_id = metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY)
@@ -284,10 +284,12 @@ class TurnRecordCodec:
             if isinstance(raw_source_event_ids, list)
             else (anchor_event_id,)
         ) or (anchor_event_id,)
+        response_event_id = _string_or_none(metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY))
         return TurnRecord.create(
             source_event_ids,
             anchor_event_id=anchor_event_id,
-            response_event_id=_string_or_none(metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)),
+            response_event_id=response_event_id,
+            completed=response_event_id is not None,
             source_event_prompts=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)),
             source_event_metadata=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_METADATA_KEY)),
             response_owner=_string_or_none(metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)),

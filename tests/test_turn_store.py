@@ -136,6 +136,31 @@ def test_run_metadata_with_empty_normalized_sources_falls_back_to_anchor() -> No
     assert parsed.source_event_ids == ("$anchor",)
 
 
+def test_undelivered_run_repairs_as_incomplete_and_remains_retryable(tmp_path: Path) -> None:
+    """A persisted run without Matrix response linkage must not become a handled turn."""
+    store = _store(tmp_path)
+    metadata = TurnRecordCodec.to_run_metadata(
+        TurnRecord.create(["$event"], response_owner="agent"),
+    )
+    metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = "$event"
+    recovery_record = TurnRecordCodec.from_run_metadata(metadata)
+
+    assert recovery_record is not None
+    loaded = _load_with_recovery(
+        store,
+        original_event_id="$event",
+        recovery_record=recovery_record,
+    )
+
+    assert loaded is not None
+    assert not loaded.completed
+    repaired = store.get_turn_record("$event")
+    assert repaired is not None
+    assert not repaired.completed
+    assert repaired.response_owner == "agent"
+    assert not store.is_handled("$event")
+
+
 def test_load_turn_uses_ledger_identity_and_outcome_then_backfills_missing_context(tmp_path: Path) -> None:
     """Ledger facts should win field-by-field while absent optional context comes from run metadata."""
     store = _store(tmp_path)
