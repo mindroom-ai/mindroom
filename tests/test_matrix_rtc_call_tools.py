@@ -117,6 +117,23 @@ async def test_wrapped_tool_reports_failures_to_the_model(
     assert "database on fire" in result
 
 
+def test_wrap_processes_unprocessed_toolkit_function_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Toolkit functions start with an empty schema; wrapping must build the real one."""
+
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    # Simulate an agno toolkit function before entrypoint processing.
+    function = Function(name="add", description="Add two numbers", entrypoint=add)
+    assert function.parameters == {"type": "object", "properties": {}, "required": []}
+    _wrap(function, tmp_path, monkeypatch)
+    assert set(function.parameters["properties"]) == {"a", "b"}
+    assert set(function.parameters["required"]) == {"a", "b"}
+
+
 @pytest.mark.asyncio
 async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     tmp_path: Path,

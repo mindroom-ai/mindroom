@@ -154,6 +154,9 @@ def _wrap_agno_function(
     """Wrap one agno function as a livekit raw function tool."""
     from livekit.agents import llm  # noqa: PLC0415
 
+    # Toolkit functions carry an empty parameters schema until processed;
+    # without this the realtime model sees zero-argument tools.
+    function.process_entrypoint()
     parameters = function.parameters if isinstance(function.parameters, dict) else {}
     if not parameters:
         parameters = {"type": "object", "properties": {}}

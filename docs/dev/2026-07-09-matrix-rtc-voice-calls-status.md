@@ -1,6 +1,6 @@
 # MatrixRTC Voice Calls — Living Status Doc
 
-Last updated: 2026-07-09 (morning).
+Last updated: 2026-07-09 (afternoon).
 This is the single source of truth for the voice-call effort; update it with every meaningful change.
 
 ## Goal
@@ -37,7 +37,7 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
 | E2EE frame-key exchange | ✅ real olm crypto | `tests/test_matrix_rtc_e2ee_roundtrip.py` (skips until nio#5 is pinned; PASS against patched nio) |
 | In-call tools, same-agent prompt, transcripts, daily memory | ✅ unit tests | `tests/test_matrix_rtc_call_tools.py`, `..._transcript.py`, `..._call_manager.py` |
 | gpt-realtime endpoint/model wiring | ✅ live probe | WS to `wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1` reached session layer; previously failed only on the placeholder key |
-| gpt-realtime agent actually speaking in a call | ⬜ unblocked, not yet run | real OpenAI key provided 2026-07-09 and saved to `~/.mindroom/.env` |
+| gpt-realtime agent actually speaking in a call | ✅ live | `tests/manual/scratch/live_agent_speaking_test.py`: real CallManager + real key; agent greeted aloud, understood a spoken question, ran the real `multiply` calculator tool, spoke "The result is 345", transcript + daily memory written (all 6 legs PASS) |
 | Human joins call from prod Cinny | 🔶 in progress | see “Current investigation” |
 
 ## Bugs found by live testing (fixed)
@@ -45,6 +45,8 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
 1. **PL0 members could not publish call membership** — `org.matrix.msc3401.call.member` defaults to state PL 50; Element pins it to 0 in call rooms.
    Fixed in #1452: `create_room` seeds the override and `ensure_call_member_power_level` reconciles managed rooms when `calls.enabled`.
 2. **Stock nio drops unknown decrypted olm events**, so encrypted frame keys never reach callbacks — fixed by nio#5 (validated via the real-olm round-trip test).
+3. **In-call tools were exposed to the realtime model with empty parameter schemas** — agno toolkit functions only build their JSON schema in `process_entrypoint()`, which nothing on the call path invoked, so the model called tools with no arguments and had to guess from error strings.
+   Fixed in `call_tools._wrap_agno_function` (now processes the entrypoint before reading `function.parameters`), pinned by a unit test.
 
 ## Current investigation: prod Cinny “stuck on Joining” (2026-07-09)
 
@@ -61,13 +63,14 @@ LiveKit DTLS-timeout warnings observed in server logs during earlier Python test
 ## Test assets
 
 - Committed: `tests/manual/matrix_rtc_live_smoke.py` (register → well-known → OpenID → JWT → SFU connect, needs `REG_TOKEN`).
+- Committed: `tests/manual/scratch/live_agent_speaking_test.py` (the full loop: synthetic caller speaks a TTS question into the SFU, real CallManager agent greets, answers, runs a real tool; checks audio energy, transcript, and daily memory; needs `MINDROOM_REG_TOKEN` + `OPENAI_API_KEY`).
 - Job scratch (`~/.claude/jobs/147b583c/tmp/`): `live_botcall_test.py` (real CallManager in a live call), `live_bridge_test.py` (RealtimeVoiceBridge + optional realtime agent), `e2ee_framekey_test.py` (real-olm round trip).
 - Sandbox quirk: aiohttp/nio needs `SSL_CERT_FILE=$(python -c 'import certifi;print(certifi.where())')`; use `MATRIX_SSL_VERIFY=false` for a local bot run.
 
 ## Remaining work
 
 - [ ] Fix the prod Cinny browser join (current investigation above).
-- [ ] Run the full agent-speaking test with the real OpenAI key (bot joins, greets, answers, calls a tool; transcript + daily memory written).
+- [x] Run the full agent-speaking test with the real OpenAI key (bot joins, greets, answers, calls a tool; transcript + daily memory written) — PASS 2026-07-09, see validation matrix.
 - [ ] Deploy the mindroom branch to the backend serving `mindroom.chat` agents (`mindroom-chat` service on the LXC host) or merge + release, so real agents (not test harnesses) join calls.
 - [ ] Merge + release mindroom-nio#5, bump the pin in mindroom (activates the E2EE round-trip test and encrypted-room hearing).
 - [ ] Lab deployment (separate RTC backend on the `mindroom` incus host) once prod is done.
