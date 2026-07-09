@@ -556,6 +556,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             assert ai_kwargs["media"] == MediaInputs()
             assert ai_ctx.reply_to_event_id == f"$test_event2:{domain}"
             assert ai_kwargs["show_tool_calls"] is True
+            assert ai_kwargs["collect_streamed_response"] is True
             assert ai_kwargs["tool_trace_collector"] == []
             assert ai_kwargs["run_metadata_collector"] == {}
 
