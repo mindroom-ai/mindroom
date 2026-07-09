@@ -17,12 +17,12 @@ import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.plugin_imports as plugin_module
 import mindroom.tool_system.plugins as plugins_module
 import mindroom.tools  # noqa: F401
-from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
+from mindroom.config.main import Config, ConfigRuntimeValidationError, RuntimeConfig, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
-from mindroom.tool_system.plugins import get_configured_plugin_roots, load_plugins, reload_plugins
+from mindroom.tool_system.plugins import PluginReloadResult, get_configured_plugin_roots, load_plugins
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
-def _bind_runtime_paths(config: Config, config_path: Path) -> Config:
+def _bind_runtime_paths(config: Config, config_path: Path) -> RuntimeConfig:
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=config_path.parent / "mindroom_data",
@@ -41,6 +41,21 @@ def _bind_runtime_paths(config: Config, config_path: Path) -> Config:
         },
     )
     return bind_runtime_paths(config, runtime_paths)
+
+
+def _reload_plugins(
+    config: RuntimeConfig,
+    runtime_paths: RuntimePaths,
+    *,
+    skip_broken_plugins: bool = False,
+) -> PluginReloadResult:
+    """Prepare and apply one plugin snapshot for loader-level tests."""
+    prepared = plugins_module.prepare_plugin_reload(
+        config,
+        runtime_paths,
+        skip_broken_plugins=skip_broken_plugins,
+    )
+    return plugins_module.apply_prepared_plugin_reload(prepared, cancel_existing_tasks=True)
 
 
 def _minimal_runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -2514,11 +2529,11 @@ async def test_reload_plugins_invalidates_helper_modules_under_plugin_root(tmp_p
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
     try:
-        initial = reload_plugins(config, runtime_paths_for(config))
+        initial = _reload_plugins(config, runtime_paths_for(config))
         assert await initial.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)[0].callback(None) == "before"
 
         (plugin_root / "helper.py").write_text("VALUE = 'after'\n", encoding="utf-8")
-        reloaded = reload_plugins(config, runtime_paths_for(config))
+        reloaded = _reload_plugins(config, runtime_paths_for(config))
 
         assert await reloaded.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)[0].callback(None) == "after"
     finally:
@@ -2575,7 +2590,7 @@ def test_reload_plugins_invalidates_cached_oauth_providers(tmp_path: Path) -> No
         assert initial["plugin_oauth_reload"].display_name == "before"
 
         display_path.write_text("after\n", encoding="utf-8")
-        reload_plugins(config, runtime_paths)
+        _reload_plugins(config, runtime_paths)
         reloaded = load_oauth_providers(config, runtime_paths)
 
         assert reloaded["plugin_oauth_reload"].display_name == "after"
@@ -2685,7 +2700,7 @@ async def test_reload_plugins_cancels_module_global_tasks_once(tmp_path: Path) -
     shared_task = asyncio.create_task(asyncio.Event().wait())
     extra_task = asyncio.create_task(asyncio.Event().wait())
     try:
-        reload_plugins(config, runtime_paths)
+        _reload_plugins(config, runtime_paths)
         hooks_path = (plugin_root / "hooks.py").resolve()
         hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
         helper_module = sys.modules[
@@ -2695,7 +2710,7 @@ async def test_reload_plugins_cancels_module_global_tasks_once(tmp_path: Path) -
         hooks_module._snooze_tasks = {"shared": shared_task, "extra": extra_task}
         helper_module._AUTO_POKE_TASK = shared_task
 
-        result = reload_plugins(config, runtime_paths)
+        result = _reload_plugins(config, runtime_paths)
         await asyncio.sleep(0)
 
         assert result.cancelled_task_count == 2
@@ -2740,14 +2755,14 @@ async def test_reload_plugins_cancels_tasks_for_removed_plugins(tmp_path: Path) 
     original_modules = set(sys.modules)
     task = asyncio.create_task(asyncio.Event().wait())
     try:
-        initial = reload_plugins(config_with_plugin, runtime_paths)
+        initial = _reload_plugins(config_with_plugin, runtime_paths)
         assert initial.active_plugin_names == ("removed-task-plugin",)
 
         hooks_path = (plugin_root / "hooks.py").resolve()
         hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
         hooks_module._AUTO_POKE_TASK = task
 
-        removed = reload_plugins(config_without_plugin, runtime_paths)
+        removed = _reload_plugins(config_without_plugin, runtime_paths)
         await asyncio.sleep(0)
 
         assert removed.active_plugin_names == ()
@@ -2794,13 +2809,13 @@ def test_reload_plugins_raises_when_configured_plugin_becomes_invalid(tmp_path: 
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
     try:
-        initial = reload_plugins(config, runtime_paths_for(config))
+        initial = _reload_plugins(config, runtime_paths_for(config))
         assert initial.active_plugin_names == ("broken-reload",)
 
         hooks_path.unlink()
 
         with pytest.raises(plugin_module.PluginValidationError, match="Plugin hooks module not found"):
-            reload_plugins(config, runtime_paths_for(config))
+            _reload_plugins(config, runtime_paths_for(config))
     finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
@@ -2850,14 +2865,14 @@ def test_failed_strict_tool_plugin_reload_preserves_previous_live_registry(tmp_p
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
     try:
-        initial = reload_plugins(config, runtime_paths_for(config))
+        initial = _reload_plugins(config, runtime_paths_for(config))
         assert initial.active_plugin_names == ("reload_tool",)
         assert get_tool_by_name("reload_plugin_tool", runtime_paths_for(config), worker_target=None).name == "reload"
 
         tools_path.write_text("raise ImportError('reload failure')\n", encoding="utf-8")
 
         with pytest.raises(plugin_module.PluginValidationError, match="reload failure"):
-            reload_plugins(config, runtime_paths_for(config))
+            _reload_plugins(config, runtime_paths_for(config))
 
         assert get_tool_by_name("reload_plugin_tool", runtime_paths_for(config), worker_target=None).name == "reload"
     finally:
@@ -2904,7 +2919,7 @@ def test_reload_plugins_skip_broken_plugins_keeps_healthy_plugin_when_explicit_p
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
     try:
-        result = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
+        result = _reload_plugins(config, runtime_paths, skip_broken_plugins=True)
 
         assert result.active_plugin_names == ("good",)
         assert [hook.plugin_name for hook in result.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == ["good"]

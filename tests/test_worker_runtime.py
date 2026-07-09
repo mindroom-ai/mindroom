@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.tool_system import metadata as metadata_module
 from mindroom.tool_system.metadata import ToolValidationInfo
 from mindroom.workers import runtime as workers_runtime_module
 
@@ -157,6 +158,41 @@ def test_serialized_kubernetes_worker_validation_snapshot_clear_recomputes(
     )
 
     assert calls == 2
+
+
+def test_worker_snapshot_clear_preserves_runtime_config_tool_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker serialization invalidation must not discard an immutable runtime config's catalog binding."""
+    runtime_paths = _runtime_paths(tmp_path)
+    compute_calls = 0
+    dummy_state = metadata_module._ResolvedToolState({}, {}, {})
+
+    def counted_compute(*_args: object, **_kwargs: object) -> metadata_module._ResolvedToolState:
+        nonlocal compute_calls
+        compute_calls += 1
+        return dummy_state
+
+    monkeypatch.setattr(metadata_module, "_compute_resolved_tool_state_for_runtime", counted_compute)
+    metadata_module.clear_resolved_tool_state_cache()
+    try:
+        config = RuntimeConfig.from_authored(
+            Config(defaults={"tools": []}),
+            runtime_paths,
+            tolerate_plugin_load_errors=True,
+        )
+
+        workers_runtime_module.clear_worker_validation_snapshot_cache()
+        metadata_module.resolved_tool_metadata_for_runtime(
+            runtime_paths,
+            config,
+            tolerate_plugin_load_errors=True,
+        )
+
+        assert compute_calls == 1
+    finally:
+        metadata_module.clear_resolved_tool_state_cache()
 
 
 def test_serialized_kubernetes_worker_validation_snapshot_returns_independent_copies(

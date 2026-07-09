@@ -79,6 +79,18 @@ class ApiState:
 
 
 @dataclass(frozen=True)
+class PreparedRuntimeConfigPublish:
+    """Slow runtime-config publication inputs prepared before the atomic swap."""
+
+    runtime_config: RuntimeConfig
+    runtime_paths: constants.RuntimePaths
+    observed_generation: int
+    validated_payload: dict[str, Any]
+    source_fingerprint: str
+    source_files: frozenset[Path] | None
+
+
+@dataclass(frozen=True)
 class ExternalTriggerRuntime:
     """Runtime objects needed to deliver accepted external triggers."""
 
@@ -791,12 +803,12 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
     return result.success
 
 
-def _publish_runtime_config_into_app(
+def prepare_runtime_config_publish(
     runtime_config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     api_app: FastAPI,
-) -> bool:
-    """Publish one already-validated runtime config into one API app's committed cache."""
+) -> PreparedRuntimeConfigPublish:
+    """Prepare filesystem-dependent inputs for publishing one runtime config."""
     initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
     validated_payload = runtime_config.authored_model_dump()
@@ -804,34 +816,50 @@ def _publish_runtime_config_into_app(
         runtime_paths,
         validated_payload,
     )
+    return PreparedRuntimeConfigPublish(
+        runtime_config=runtime_config,
+        runtime_paths=runtime_paths,
+        observed_generation=snapshot.generation,
+        validated_payload=validated_payload,
+        source_fingerprint=source_fingerprint,
+        source_files=source_files,
+    )
+
+
+def publish_prepared_runtime_config_into_app(
+    prepared: PreparedRuntimeConfigPublish,
+    api_app: FastAPI,
+) -> bool:
+    """Atomically publish one prepared runtime config into an API app."""
+    initial_state = require_api_state(api_app)
     with initial_state.config_lock:
         current_state = require_api_state(api_app)
         current = current_state.snapshot
-        if current.runtime_paths != runtime_paths:
+        if current.runtime_paths != prepared.runtime_paths:
             logger.info(
                 "Discarding stale API config publish after runtime swap",
-                publish_config_path=str(runtime_paths.config_path),
+                publish_config_path=str(prepared.runtime_paths.config_path),
                 active_config_path=str(current.runtime_paths.config_path),
             )
             return False
-        same_config = current.config_data == validated_payload
-        if current.generation != snapshot.generation and not same_config:
+        same_config = current.config_data == prepared.validated_payload
+        if current.generation != prepared.observed_generation and not same_config:
             logger.info(
                 "Discarding stale API config publish after config changed",
-                publish_config_path=str(runtime_paths.config_path),
+                publish_config_path=str(prepared.runtime_paths.config_path),
             )
             return False
-        same_source = source_fingerprint == current.source_fingerprint
+        same_source = prepared.source_fingerprint == current.source_fingerprint
         current_state.snapshot = _published_snapshot(
             current,
             increment_generation=not (same_source or same_config),
-            config_data=validated_payload,
-            runtime_config=runtime_config,
+            config_data=prepared.validated_payload,
+            runtime_config=prepared.runtime_config,
             config_load_result=ConfigLoadResult(success=True),
-            source_fingerprint=source_fingerprint,
+            source_fingerprint=prepared.source_fingerprint,
             # A publish that cannot be tied to disk keeps the last known source
             # set so the watcher still covers the previous include files.
-            source_files=source_files if source_files is not None else current.source_files,
+            source_files=prepared.source_files if prepared.source_files is not None else current.source_files,
         )
     return True
 

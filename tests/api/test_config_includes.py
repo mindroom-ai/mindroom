@@ -236,7 +236,8 @@ class TestIncludeAwareSnapshots:
         assert result.success
         assert runtime_config is not None
 
-        assert config_lifecycle._publish_runtime_config_into_app(runtime_config, split_runtime_paths, api_app) is True
+        prepared = config_lifecycle.prepare_runtime_config_publish(runtime_config, split_runtime_paths, api_app)
+        assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, api_app) is True
 
         snapshot = _snapshot(api_app)
         assert snapshot.source_fingerprint == fingerprint

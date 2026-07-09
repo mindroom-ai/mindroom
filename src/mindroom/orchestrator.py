@@ -71,15 +71,14 @@ from mindroom.startup_maintenance import StartupMaintenanceController
 from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.catalog import (
     bind_resolved_tool_state_cache,
+    clear_resolved_tool_state_cache,
     resolved_tool_validation_snapshot_for_runtime,
 )
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
-    deactivate_plugins,
     load_plugins,
     prepare_plugin_reload,
-    reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 from mindroom.workers.runtime import clear_worker_validation_snapshot_cache, shutdown_primary_worker_manager
@@ -221,7 +220,7 @@ class _MultiAgentOrchestrator:
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _plugin_reload_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     plugin_watch: PluginWatchState = field(init=False)
@@ -257,6 +256,7 @@ class _MultiAgentOrchestrator:
             in_flight_response_count=self.in_flight_response_count,
             load_initial_config=self._load_initial_config,
             apply_update_plan=self._apply_config_update_plan,
+            update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
             runtime_paths=self.runtime_paths,
@@ -754,22 +754,25 @@ class _MultiAgentOrchestrator:
         if not self.running:
             msg = "Plugin reload unavailable until startup finishes."
             raise RuntimeError(msg)
-        async with self._plugin_reload_lock:
+        async with self._config_update_lock:
             config = self._require_config()
             logger.info(
                 "Reloading plugins",
                 source=source,
                 changed_paths=[str(path) for path in changed_paths],
             )
+            self.plugin_watch.refresh(config)
             try:
                 authored_config = Config.model_validate(config.authored_model_dump())
                 tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
                     self.runtime_paths,
                     authored_config,
+                    tolerate_plugin_load_errors=True,
                 )
                 refreshed_config = RuntimeConfig.from_authored(
                     authored_config,
                     self.runtime_paths,
+                    tolerate_plugin_load_errors=True,
                     source_files=config.source_files,
                     tool_validation_snapshot=tool_validation_snapshot,
                 )
@@ -777,20 +780,20 @@ class _MultiAgentOrchestrator:
                     self.runtime_paths,
                     authored_config,
                     refreshed_config,
+                    tolerate_plugin_load_errors=True,
                 )
-                result = reload_plugins(refreshed_config, self.runtime_paths)
-                self.plugin_watch.refresh(refreshed_config)
-                await self._external_trigger_runtime.sync_api_config_snapshot(refreshed_config)
+                prepared_plugin_reload = prepare_plugin_reload(refreshed_config, self.runtime_paths)
+                prepared_api_snapshot = await self._external_trigger_runtime.prepare_api_config_snapshot(
+                    refreshed_config,
+                )
             except Exception:
-                recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
-                    config,
-                    self.runtime_paths,
-                )
-                self._activate_hook_registry(recovery_result.hook_registry)
-                clear_worker_validation_snapshot_cache()
-                self.plugin_watch.refresh(config)
-                logger.warning(warning_message, source=source, **warning_kwargs)
+                logger.warning("Plugin reload failed; previous runtime snapshot retained", source=source)
                 raise
+            self._external_trigger_runtime.publish_prepared_api_config_snapshot(prepared_api_snapshot)
+            result = apply_prepared_plugin_reload(
+                prepared_plugin_reload,
+                cancel_existing_tasks=True,
+            )
             self.config = refreshed_config
             for bot in self.agent_bots.values():
                 bot.config = refreshed_config
@@ -812,30 +815,29 @@ class _MultiAgentOrchestrator:
         changed_server_ids: set[str],
     ) -> set[str]:
         """Stage and commit plugin changes without interleaving live reloads."""
-        async with self._plugin_reload_lock:
-            prepared_plugin_roots, prepared_plugin_root_snapshots = self.plugin_watch.capture(new_config)
-            prepared_plugin_reload = prepare_plugin_reload(
-                new_config,
-                self.runtime_paths,
-                skip_broken_plugins=True,
-            )
-            pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
-                current_config,
-                new_config,
-                changed_server_ids,
-            )
-            self.config = new_config
-            new_hook_registry = apply_prepared_plugin_reload(
-                prepared_plugin_reload,
-                cancel_existing_tasks=True,
-            ).hook_registry
-            self.plugin_watch.replace_snapshots(
-                prepared_plugin_roots,
-                prepared_plugin_root_snapshots,
-            )
-            self._activate_hook_registry(new_hook_registry)
-            clear_worker_validation_snapshot_cache()
-            return pre_stopped_mcp_entities
+        prepared_plugin_roots, prepared_plugin_root_snapshots = self.plugin_watch.capture(new_config)
+        prepared_plugin_reload = prepare_plugin_reload(
+            new_config,
+            self.runtime_paths,
+            skip_broken_plugins=True,
+        )
+        pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
+            current_config,
+            new_config,
+            changed_server_ids,
+        )
+        self.config = new_config
+        new_hook_registry = apply_prepared_plugin_reload(
+            prepared_plugin_reload,
+            cancel_existing_tasks=True,
+        ).hook_registry
+        self.plugin_watch.replace_snapshots(
+            prepared_plugin_roots,
+            prepared_plugin_root_snapshots,
+        )
+        self._activate_hook_registry(new_hook_registry)
+        clear_worker_validation_snapshot_cache()
+        return pre_stopped_mcp_entities
 
     async def _start_entities_once(
         self,
@@ -1274,6 +1276,7 @@ class _MultiAgentOrchestrator:
         async with self._mcp_catalog_change_lock:
             if not self.running or self.config is None:
                 return
+            clear_resolved_tool_state_cache()
             clear_worker_validation_snapshot_cache()
             changed_entities = self.config.get_entities_referencing_tools({mcp_tool_name(server_id)})
             if not changed_entities:
@@ -1730,26 +1733,6 @@ class _MultiAgentOrchestrator:
         await asyncio.gather(*stop_tasks)
         await self._close_runtime_support_services()
         logger.info("All agent bots stopped")
-
-
-def _recover_failed_plugin_reload(
-    config: RuntimeConfig,
-    runtime_paths: RuntimePaths,
-) -> tuple[PluginReloadResult, str, dict[str, object]]:
-    """Return the fail-broken recovery result after one strict reload failure."""
-    try:
-        recovery_result = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
-    except Exception as degraded_error:
-        return (
-            deactivate_plugins(),
-            "Plugin reload failed; all plugins deactivated",
-            {"degraded_error": str(degraded_error)},
-        )
-    return (
-        recovery_result,
-        "Plugin reload failed; active plugin set degraded",
-        {"active_plugins": list(recovery_result.active_plugin_names)},
-    )
 
 
 async def _handle_config_change(orchestrator: _MultiAgentOrchestrator) -> None:

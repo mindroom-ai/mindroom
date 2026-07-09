@@ -116,12 +116,9 @@ def _worker_validation_snapshot_cache_key(
 
 
 def clear_worker_validation_snapshot_cache() -> None:
-    """Clear cached worker validation snapshots and per-config resolved tool state."""
-    from mindroom.tool_system.catalog import clear_resolved_tool_state_cache  # noqa: PLC0415
-
+    """Clear serialized worker snapshots without invalidating resolved runtime configs."""
     with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
         _WORKER_VALIDATION_SNAPSHOT_CACHE.clear()
-    clear_resolved_tool_state_cache()
 
 
 def serialized_kubernetes_worker_validation_snapshot(

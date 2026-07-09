@@ -165,16 +165,24 @@ async def test_runtime_coordinator_sync_api_config_snapshot_runs_for_policy_chan
     """Coordinator publishes API snapshots even when no authored trigger records exist."""
     config = _config()
     coordinator = ExternalTriggerRuntimeCoordinator(runtime_paths=_runtime_paths(tmp_path))
+    prepared = MagicMock()
 
-    with patch(
-        "mindroom.orchestration.external_trigger_runtime.asyncio.to_thread",
-        new=AsyncMock(return_value=True),
-    ) as mock_to_thread:
+    with (
+        patch(
+            "mindroom.orchestration.external_trigger_runtime.asyncio.to_thread",
+            new=AsyncMock(return_value=prepared),
+        ) as mock_to_thread,
+        patch(
+            "mindroom.api.config_lifecycle.publish_prepared_runtime_config_into_app",
+            return_value=True,
+        ) as mock_publish,
+    ):
         await coordinator.sync_api_config_snapshot(config)
 
     mock_to_thread.assert_awaited_once_with(
-        api_main.config_lifecycle._publish_runtime_config_into_app,
+        api_main.config_lifecycle.prepare_runtime_config_publish,
         config,
         coordinator.runtime_paths,
         api_main.app,
     )
+    mock_publish.assert_called_once_with(prepared, api_main.app)

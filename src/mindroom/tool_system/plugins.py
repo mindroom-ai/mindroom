@@ -83,6 +83,7 @@ class _PreparedPluginReload:
     active_plugin_names: tuple[str, ...]
     tool_registry_snapshot: Any
     plugin_skill_roots: tuple[Path, ...]
+    previous_package_roots: frozenset[str]
 
 
 def _hook_display_name(callback: HookCallback) -> str:
@@ -102,19 +103,6 @@ def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
         if plugin.tools_module_path is not None
     ]
     synchronize_plugin_tools(active_tool_modules)
-
-
-def deactivate_plugins() -> PluginReloadResult:
-    """Clear live plugin-derived tools, skills, and hooks."""
-    with locked_tool_registry_state():
-        _sync_loaded_plugin_tools([])
-        set_plugin_skill_roots([])
-        _clear_oauth_provider_cache_after_plugin_change()
-    return PluginReloadResult(
-        hook_registry=HookRegistry.empty(),
-        active_plugin_names=(),
-        cancelled_task_count=0,
-    )
 
 
 def load_plugins(
@@ -245,6 +233,7 @@ def prepare_plugin_reload(
                 active_plugin_names=tuple(plugin.name for plugin in plugins),
                 tool_registry_snapshot=capture_tool_registry_snapshot(),
                 plugin_skill_roots=tuple(get_plugin_skill_roots()),
+                previous_package_roots=frozenset(package_roots),
             )
         finally:
             restore_tool_registry_snapshot(previous_snapshot)
@@ -260,35 +249,12 @@ def apply_prepared_plugin_reload(
     """Commit one previously prepared plugin runtime snapshot."""
     with locked_tool_registry_state():
         if cancel_existing_tasks:
-            package_roots = {
-                cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
-            }
-            cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
+            cancelled_task_count = _cancel_plugin_module_tasks(set(prepared_reload.previous_package_roots))
         restore_tool_registry_snapshot(prepared_reload.tool_registry_snapshot)
         set_plugin_skill_roots(prepared_reload.plugin_skill_roots)
     return PluginReloadResult(
         hook_registry=prepared_reload.hook_registry,
         active_plugin_names=prepared_reload.active_plugin_names,
-        cancelled_task_count=cancelled_task_count,
-    )
-
-
-def reload_plugins(
-    config: RuntimeConfig,
-    runtime_paths: RuntimePaths,
-    *,
-    skip_broken_plugins: bool = False,
-) -> PluginReloadResult:
-    """Tear down the live plugin runtime and rebuild it from the current config."""
-    package_roots = {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
-    cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
-    prepared_reload = prepare_plugin_reload(
-        config,
-        runtime_paths,
-        skip_broken_plugins=skip_broken_plugins,
-    )
-    return apply_prepared_plugin_reload(
-        prepared_reload,
         cancelled_task_count=cancelled_task_count,
     )
 

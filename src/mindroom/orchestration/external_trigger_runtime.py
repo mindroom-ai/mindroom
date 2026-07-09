@@ -12,6 +12,7 @@ from mindroom.matrix.client_room_admin import get_joined_rooms
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    from mindroom.api.config_lifecycle import PreparedRuntimeConfigPublish
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
@@ -94,23 +95,47 @@ class ExternalTriggerRuntimeCoordinator:
             snapshot.resolved_room_id in router_joined_room_ids and snapshot.resolved_room_id in target_joined_room_ids
         )
 
-    async def sync_api_config_snapshot(
+    async def prepare_api_config_snapshot(
         self,
         new_config: RuntimeConfig,
-    ) -> None:
-        """Publish the current config to the bundled API before binding trigger runtime."""
+    ) -> PreparedRuntimeConfigPublish | None:
+        """Prepare the slow inputs for one bundled-API config publication."""
         if not self.api_enabled:
-            return
+            return None
         from mindroom.api import main as api_main  # noqa: PLC0415
+        from mindroom.api.config_lifecycle import prepare_runtime_config_publish  # noqa: PLC0415
 
         api_main.initialize_api_app(api_main.app, self.runtime_paths)
-        published = await asyncio.to_thread(
-            api_main.config_lifecycle._publish_runtime_config_into_app,
+        return await asyncio.to_thread(
+            prepare_runtime_config_publish,
             new_config,
             self.runtime_paths,
+            api_main.app,
+        )
+
+    def publish_prepared_api_config_snapshot(
+        self,
+        prepared: PreparedRuntimeConfigPublish | None,
+    ) -> None:
+        """Publish one prepared bundled-API config snapshot without yielding."""
+        if prepared is None:
+            return
+        from mindroom.api import main as api_main  # noqa: PLC0415
+        from mindroom.api.config_lifecycle import publish_prepared_runtime_config_into_app  # noqa: PLC0415
+
+        published = publish_prepared_runtime_config_into_app(
+            prepared,
             api_main.app,
         )
         if not published:
             self.unbind()
             message = "Failed to publish external trigger API config snapshot"
             raise RuntimeError(message)
+
+    async def sync_api_config_snapshot(
+        self,
+        new_config: RuntimeConfig,
+    ) -> None:
+        """Publish the current config to the bundled API before binding trigger runtime."""
+        prepared = await self.prepare_api_config_snapshot(new_config)
+        self.publish_prepared_api_config_snapshot(prepared)

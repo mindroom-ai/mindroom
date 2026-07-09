@@ -286,7 +286,8 @@ def test_trigger_invalidated_by_current_config_returns_404_before_replay_claim(
     """Stored triggers that no longer target configured rooms are hidden as not found."""
     runtime_paths = trigger_api.runtime_paths
     config = _write_runtime_config(runtime_paths.config_path, research_rooms=[])
-    assert config_lifecycle._publish_runtime_config_into_app(config, runtime_paths, api_main.app)
+    prepared = config_lifecycle.prepare_runtime_config_publish(config, runtime_paths, api_main.app)
+    assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, api_main.app)
 
     response = _post_signed(trigger_api, nonce="stale-target")
 
@@ -458,7 +459,8 @@ def test_policy_caps_apply_at_request_time(
     _create_record(runtime_paths, initial_config, _public_key_b64(private_key))
 
     lowered_config = _write_runtime_config(config_path, max_body_bytes=1024)
-    assert config_lifecycle._publish_runtime_config_into_app(lowered_config, runtime_paths, api_main.app)
+    prepared = config_lifecycle.prepare_runtime_config_publish(lowered_config, runtime_paths, api_main.app)
+    assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, api_main.app)
     ready_snapshots: list[TriggerDeliverySnapshot] = []
     _bind_runtime(ready_snapshots)
     monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
@@ -481,7 +483,8 @@ def test_owner_permission_removed_blocks_delivery_before_replay_claim(
     """Current authorization is checked before replay state is touched."""
     runtime_paths = trigger_api.runtime_paths
     config = _write_runtime_config(runtime_paths.config_path, owner_authorized=False)
-    assert config_lifecycle._publish_runtime_config_into_app(config, runtime_paths, api_main.app)
+    prepared = config_lifecycle.prepare_runtime_config_publish(config, runtime_paths, api_main.app)
+    assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, api_main.app)
     _bind_runtime(trigger_api.ready_snapshots)
 
     response = _post_signed(trigger_api)
