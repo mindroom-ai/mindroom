@@ -14,7 +14,7 @@
 **AI agents that live in your chat rooms.**
 
 MindRoom is an open-source multi-agent runtime built on [Matrix](https://matrix.org/).
-You define agents in a YAML file; MindRoom gives each one a Matrix account, and they respond in threads in any Matrix client (Element, Cinny, FluffyChat, ...).
+You define agents in a YAML file or in the web dashboard; MindRoom gives each one a Matrix account, and they respond in threads in any Matrix client (Element, Cinny, FluffyChat, ...).
 Because Matrix bridges to other platforms, the same agents also work in Slack, Telegram, Discord, WhatsApp, IRC, and email — with the same persistent memory everywhere.
 Self-host the whole stack, or run only the MindRoom backend locally and pair it with hosted Matrix at [chat.mindroom.chat](https://chat.mindroom.chat).
 
@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/1f121c89-5418-4f42-bdfe-fb9de0fecd03
 - **Voice** — transcription of Matrix voice messages, and text-to-speech tools via OpenAI, Groq, ElevenLabs, and Cartesia.
 - **Streaming responses** — agents type into the room with progressive edits, visible tool traces, and cancellation.
 - **Hot reload** — edit `config.yaml` and affected agents restart gracefully without bringing down the stack.
-- **Web dashboard** — manage agents, credentials, and knowledge bases in the browser; chat stays in your Matrix client.
+- **Web dashboard** — create and configure agents, teams, models, tools, credentials, and knowledge bases by clicking instead of editing YAML; chat stays in your Matrix client.
 
 What it looks like:
 
@@ -182,7 +182,8 @@ Plain replies that never reach threaded context still stay plain replies.
 ## Configuration
 
 Everything lives in `config.yaml`: agents, teams, models, rooms, knowledge bases, voice, memory, and authorization.
-The file is hot-reloaded, so edits take effect without a restart.
+The web dashboard edits the same file, so you can point-and-click instead of writing YAML.
+Either way, changes are hot-reloaded and take effect without a restart.
 
 ```yaml
 agents:
