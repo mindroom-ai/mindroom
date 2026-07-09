@@ -269,3 +269,6 @@ _.exactly_one_of_title_or_sub_template  # unused method (src/mindroom/custom_too
 _.resolve_worker_target  # plugin-facing API method (src/mindroom/tool_system/runtime_context.py)
 _._naive_execute_at_is_utc  # unused method (src/mindroom/scheduling.py)
 _.turn_count  # read in tests/test_matrix_rtc_transcript.py (src/mindroom/matrix_rtc/transcript.py)
+AudioInput  # type-only SDK interface for the custom MatrixRTC audio stream
+_.on_attached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)
+_.on_detached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)

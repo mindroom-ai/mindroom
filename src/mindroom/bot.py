@@ -1321,6 +1321,44 @@ class AgentBot:
             return
         raise PermanentMatrixStartupError(self._runtime_support_injection_error())
 
+    def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
+        """Build the optional call manager and wire its Matrix callbacks."""
+        self._call_manager = maybe_build_call_manager(
+            agent_name=self.agent_name,
+            config=self.config,
+            client=client,
+            runtime_paths=self.runtime_paths,
+            homeserver_url=constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+            ssl_verify=constants.runtime_matrix_ssl_verify(self.runtime_paths),
+            tool_support=self._tool_runtime_support,
+        )
+        if self._call_manager is None:
+            return
+        client.add_event_callback(
+            _create_task_wrapper(
+                self._call_manager.on_room_event,
+                owner=self._runtime_view,
+                on_error=self._mark_callback_failed,
+            ),
+            nio.UnknownEvent,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(
+                self._call_manager.on_room_membership_event,
+                owner=self._runtime_view,
+                on_error=self._mark_callback_failed,
+            ),
+            nio.RoomMemberEvent,
+        )
+        client.add_to_device_callback(
+            _create_task_wrapper(  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
+                self._call_manager.on_to_device_event,
+                owner=self._runtime_view,
+                on_error=self._mark_callback_failed,
+            ),
+            nio.UnknownToDeviceEvent,
+        )
+
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         self._validate_runtime_support_injection_contract_for_startup()
@@ -1390,32 +1428,7 @@ class AgentBot:
                 ),
                 nio.MegolmEvent,
             )
-            self._call_manager = maybe_build_call_manager(
-                agent_name=self.agent_name,
-                config=self.config,
-                client=client,
-                runtime_paths=self.runtime_paths,
-                homeserver_url=constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
-                ssl_verify=constants.runtime_matrix_ssl_verify(self.runtime_paths),
-                tool_support=self._tool_runtime_support,
-            )
-            if self._call_manager is not None:
-                client.add_event_callback(
-                    _create_task_wrapper(
-                        self._call_manager.on_room_event,
-                        owner=self._runtime_view,
-                        on_error=self._mark_callback_failed,
-                    ),
-                    nio.UnknownEvent,
-                )
-                client.add_to_device_callback(
-                    _create_task_wrapper(  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
-                        self._call_manager.on_to_device_event,
-                        owner=self._runtime_view,
-                        on_error=self._mark_callback_failed,
-                    ),
-                    nio.UnknownToDeviceEvent,
-                )
+            self._register_call_manager_callbacks(client)
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 

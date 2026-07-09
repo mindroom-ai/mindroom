@@ -101,6 +101,7 @@ async def build_call_tools(
             execution_identity,
             session_id=session_id,
             include_interactive_questions=False,
+            eager_deferred_tools=True,
         ),
     )
     instructions = await asyncio.to_thread(_render_system_prompt, agent, session_id)

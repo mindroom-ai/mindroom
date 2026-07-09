@@ -196,9 +196,15 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         def get_system_message(self, _session: object) -> SimpleNamespace:
             return SimpleNamespace(content="THE CHAT SYSTEM PROMPT")
 
+    create_kwargs: dict[str, object] = {}
+
+    def fake_create_agent(*_args: object, **kwargs: object) -> FakeAgnoAgent:
+        create_kwargs.update(kwargs)
+        return FakeAgnoAgent()
+
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
-        lambda *_args, **_kwargs: FakeAgnoAgent(),
+        fake_create_agent,
     )
     tool_support = SimpleNamespace(
         build_context=lambda *_a, **_k: _context(),
@@ -214,6 +220,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     assert tooling.tool_names == ("add",)
     assert len(tooling.tools) == 1
     assert tooling.instructions == "THE CHAT SYSTEM PROMPT"
+    assert create_kwargs["eager_deferred_tools"] is True
 
 
 @pytest.mark.asyncio

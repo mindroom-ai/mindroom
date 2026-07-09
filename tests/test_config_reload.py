@@ -1716,6 +1716,36 @@ def test_config_update_plan_restarts_call_agents_when_authorization_changes() ->
     assert plan.entities_to_restart == {"general"}
 
 
+def test_config_update_plan_restarts_call_agents_for_captured_policy_changes() -> None:
+    """Call tool closures are rebuilt when any captured config policy changes."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            calls=CallsConfig(enabled=True, agents=["general"]),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            calls=CallsConfig(enabled=True, agents=["general"]),
+            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+
+
 def test_config_update_plan_stops_call_agents_when_calls_are_disabled() -> None:
     """Disabling calls restarts former call agents so their managers shut down."""
     old_config = _runtime_bound_config(

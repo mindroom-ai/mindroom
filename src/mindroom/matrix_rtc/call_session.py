@@ -63,6 +63,10 @@ def required_device_id(client: nio.AsyncClient) -> str:
 class VoiceBridgeLike(Protocol):
     """Media-plane surface the session drives (see ``RealtimeVoiceBridge``)."""
 
+    def set_participant_identities(self, participant_identities: frozenset[str]) -> None:
+        """Restrict media input and output to the current Matrix call roster."""
+        ...
+
     async def connect(self, grant: SfuGrant) -> None:
         """Connect to the SFU with the granted credentials."""
         ...
@@ -144,6 +148,7 @@ class CallSession:
     async def start(self, members: list[CallMember]) -> None:
         """Join the call: connect media, publish membership, distribute keys."""
         self._members = members
+        self._sync_bridge_participants()
         grant = await self.deps.fetch_grant()
         try:
             await self.deps.bridge.connect(grant)
@@ -171,9 +176,12 @@ class CallSession:
 
     async def on_members_changed(self, members: list[CallMember]) -> None:
         """React to remote membership changes (key rotation/sharing)."""
-        if self._stopped or not self.e2ee_enabled:
+        if self._stopped:
             return
         self._members = members
+        self._sync_bridge_participants()
+        if not self.e2ee_enabled:
+            return
         # A roster change is a fresh delivery opportunity: restart the backoff.
         self._key_retry_attempt = 0
         await self._distribute_keys()
@@ -290,6 +298,12 @@ class CallSession:
 
     def _apply_own_key(self, key: bytes, key_index: int) -> None:
         self.deps.bridge.set_frame_key(self.local_identity, key, key_index)
+
+    def _sync_bridge_participants(self) -> None:
+        """Apply the authoritative Matrix call roster to the SFU bridge."""
+        self.deps.bridge.set_participant_identities(
+            frozenset(f"{member.user_id}:{member.device_id}" for member in self._members),
+        )
 
     async def _apply_own_key_later(self, key: bytes, key_index: int, delay_ms: int) -> None:
         await asyncio.sleep(delay_ms / 1000)

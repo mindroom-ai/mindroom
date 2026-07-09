@@ -172,6 +172,23 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
     assert call_manager.reconcile_joined_rooms.await_count == 2
 
 
+def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Path) -> None:
+    """Call admission is rechecked for call-state and underlying room-member changes."""
+    bot = _agent_bot(tmp_path)
+    client = MagicMock(spec=nio.AsyncClient)
+    call_manager = MagicMock()
+
+    with patch("mindroom.bot.maybe_build_call_manager", return_value=call_manager):
+        bot._register_call_manager_callbacks(client)
+
+    assert bot._call_manager is call_manager
+    assert [call.args[1] for call in client.add_event_callback.call_args_list] == [
+        nio.UnknownEvent,
+        nio.RoomMemberEvent,
+    ]
+    client.add_to_device_callback.assert_called_once_with(ANY, nio.UnknownToDeviceEvent)
+
+
 @pytest.mark.asyncio
 async def test_installed_runtime_cache_support_runs_fire_and_forget_sync_cache_writes(tmp_path: Path) -> None:
     """The shared test runtime helper must preserve the coordinator's synchronous queue contract."""
