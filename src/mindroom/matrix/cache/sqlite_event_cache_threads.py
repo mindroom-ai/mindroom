@@ -26,31 +26,27 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
-from .event_cache import ThreadCacheState
+from .event_cache_events import event_id_for_cache, serialize_cacheable_events, serialize_cached_event
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_event_cache_events import (
     delete_cached_events,
     delete_event_edit_rows,
     delete_event_thread_rows,
-    event_id_for_cache,
     event_or_original_is_redacted,
     filter_cacheable_events,
-    serialize_cacheable_events,
-    serialize_cached_event,
     write_lookup_index_rows,
+)
+from .thread_cache_state import (
+    ThreadCacheStateRow,
+    can_revalidate_after_incremental_update,
+    thread_cache_state_changed_after,
+    thread_cache_state_row,
 )
 
 if TYPE_CHECKING:
     import aiosqlite
 
-
-_INCREMENTAL_THREAD_REVALIDATION_REASONS = frozenset(
-    {
-        "live_thread_mutation",
-        "sync_thread_mutation",
-        "outbound_thread_mutation",
-    },
-)
+    from .event_cache import ThreadCacheState
 
 
 async def load_thread_events(
@@ -104,7 +100,7 @@ async def _load_thread_cache_state_row(
     *,
     room_id: str,
     thread_id: str,
-) -> tuple[float | None, float | None, str | None, float | None, str | None] | None:
+) -> ThreadCacheStateRow | None:
     """Return one raw thread-cache-state row joined with room invalidation state."""
     cursor = await db.execute(
         """
@@ -125,15 +121,7 @@ async def _load_thread_cache_state_row(
     )
     row = await cursor.fetchone()
     await cursor.close()
-    if row is None or all(value is None for value in row):
-        return None
-    return (
-        None if row[0] is None else float(row[0]),
-        None if row[1] is None else float(row[1]),
-        row[2] if isinstance(row[2], str) else None,
-        None if row[3] is None else float(row[3]),
-        row[4] if isinstance(row[4], str) else None,
-    )
+    return thread_cache_state_row(row)
 
 
 async def load_thread_cache_state(
@@ -150,13 +138,7 @@ async def load_thread_cache_state(
     )
     if row is None:
         return None
-    return ThreadCacheState(
-        validated_at=row[0],
-        invalidated_at=row[1],
-        invalidation_reason=row[2],
-        room_invalidated_at=row[3],
-        room_invalidation_reason=row[4],
-    )
+    return row.as_public_state()
 
 
 async def _store_thread_events_locked(
@@ -277,21 +259,6 @@ async def _replace_thread_locked(
     )
 
 
-def _thread_cache_state_changed_after(
-    cache_state_row: tuple[float | None, float | None, str | None, float | None, str | None] | None,
-    *,
-    fetch_started_at: float,
-) -> bool:
-    """Return whether this thread or room cache state changed after one fetch began."""
-    if cache_state_row is None:
-        return False
-    validated_at, invalidated_at, _invalidation_reason, room_invalidated_at, _room_invalidation_reason = cache_state_row
-    return any(
-        timestamp is not None and timestamp > fetch_started_at
-        for timestamp in (validated_at, invalidated_at, room_invalidated_at)
-    )
-
-
 async def replace_thread_locked_if_not_newer(
     db: aiosqlite.Connection,
     *,
@@ -307,7 +274,7 @@ async def replace_thread_locked_if_not_newer(
         room_id=room_id,
         thread_id=thread_id,
     )
-    if _thread_cache_state_changed_after(cache_state_row, fetch_started_at=fetch_started_at):
+    if thread_cache_state_changed_after(cache_state_row, fetch_started_at=fetch_started_at):
         return False
     await _replace_thread_locked(
         db,
@@ -447,16 +414,7 @@ async def revalidate_thread_after_incremental_update_locked(
         room_id=room_id,
         thread_id=thread_id,
     )
-    if row is None:
-        return False
-    validated_at, invalidated_at, invalidation_reason, room_invalidated_at, _room_invalidation_reason = row
-    can_revalidate = (
-        validated_at is not None
-        and invalidated_at is not None
-        and invalidation_reason in _INCREMENTAL_THREAD_REVALIDATION_REASONS
-        and not (room_invalidated_at is not None and room_invalidated_at >= validated_at)
-    )
-    if not can_revalidate:
+    if not can_revalidate_after_incremental_update(row):
         return False
     await db.execute(
         """

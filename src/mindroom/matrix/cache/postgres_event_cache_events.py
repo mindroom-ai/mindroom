@@ -3,71 +3,24 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.event_info import EventInfo
-
+from .event_cache_events import (
+    CachedEventRow,
+    SerializedCachedEvent,
+    batch_redaction_candidate_ids,
+    cache_rows_were_deleted,
+    event_edit_rows,
+    event_redaction_candidate_ids,
+    event_thread_rows,
+    filter_redacted_events,
+    redaction_removal_event_ids,
+    serialize_cacheable_events,
+)
 from .postgres_cursor import fetchall, fetchone, rowcount
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
-
-
-_EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
-
-
-@dataclass(frozen=True, slots=True)
-class _SerializedCachedEvent:
-    """One normalized cached event plus its serialized storage row."""
-
-    event_id: str
-    origin_server_ts: int
-    event_json: str
-    event: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class _CachedEventRow:
-    """One cached event payload plus the time its visible row was written."""
-
-    event: dict[str, Any]
-    cached_at: float | None
-
-
-def event_id_for_cache(event: dict[str, Any]) -> str:
-    """Return the required event ID from one normalized cached event."""
-    event_id = event.get("event_id")
-    if isinstance(event_id, str) and event_id:
-        return event_id
-    msg = "Cached Matrix event is missing event_id"
-    raise ValueError(msg)
-
-
-def _event_timestamp_for_cache(event: dict[str, Any]) -> int:
-    """Return the required origin-server timestamp from one normalized cached event."""
-    timestamp = event.get("origin_server_ts")
-    if isinstance(timestamp, int) and not isinstance(timestamp, bool):
-        return timestamp
-    msg = f"Cached Matrix event {event_id_for_cache(event)} is missing origin_server_ts"
-    raise ValueError(msg)
-
-
-def serialize_cached_event(event_id: str, event: dict[str, Any]) -> _SerializedCachedEvent:
-    """Serialize one normalized cached event for PostgreSQL writes."""
-    return _SerializedCachedEvent(
-        event_id=event_id,
-        origin_server_ts=_event_timestamp_for_cache(event),
-        event_json=json.dumps(event, separators=(",", ":")),
-        event=event,
-    )
-
-
-def serialize_cacheable_events(
-    cacheable_events: list[tuple[str, dict[str, Any]]],
-) -> list[_SerializedCachedEvent]:
-    """Serialize one batch of normalized cacheable events."""
-    return [serialize_cached_event(event_id, event) for event_id, event in cacheable_events]
 
 
 async def load_event(
@@ -172,7 +125,7 @@ async def load_latest_edit_row(
     namespace: str,
     room_id: str,
     original_event_id: str,
-) -> _CachedEventRow | None:
+) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
     row = await fetchone(
         db,
@@ -192,7 +145,7 @@ async def load_latest_edit_row(
     )
     if row is None:
         return None
-    return _CachedEventRow(
+    return CachedEventRow(
         event=json.loads(row[0]),
         cached_at=None if row[1] is None else float(row[1]),
     )
@@ -293,7 +246,7 @@ async def redact_event_locked(
         room_id,
         original_event_id=event_id,
     )
-    removed_event_ids = list(dict.fromkeys([event_id, *dependent_edit_ids]))
+    removed_event_ids = redaction_removal_event_ids(event_id, dependent_edit_ids)
     deleted_thread_rows = await _delete_room_thread_events(
         db,
         namespace,
@@ -320,7 +273,12 @@ async def redact_event_locked(
         room_id,
         event_ids=removed_event_ids,
     )
-    return deleted_thread_rows > 0 or deleted_event_rows > 0 or deleted_edit_rows > 0 or deleted_thread_index_rows > 0
+    return cache_rows_were_deleted(
+        deleted_thread_rows,
+        deleted_event_rows,
+        deleted_edit_rows,
+        deleted_thread_index_rows,
+    )
 
 
 async def event_or_original_is_redacted(
@@ -332,16 +290,12 @@ async def event_or_original_is_redacted(
     event: dict[str, Any],
 ) -> bool:
     """Return whether this event or its edited original was durably redacted."""
-    event_info = EventInfo.from_event(event)
-    candidate_ids = {event_id}
-    if event_info.is_edit and isinstance(event_info.original_event_id, str):
-        candidate_ids.add(event_info.original_event_id)
     return bool(
         await _redacted_event_ids_for_candidates(
             db,
             namespace,
             room_id,
-            event_ids=candidate_ids,
+            event_ids=event_redaction_candidate_ids(event_id, event),
         ),
     )
 
@@ -353,31 +307,13 @@ async def filter_cacheable_events(
     room_events: list[tuple[str, dict[str, Any]]],
 ) -> list[tuple[str, dict[str, Any]]]:
     """Drop events that target durable redaction tombstones before persisting them."""
-    candidate_ids: set[str] = set()
-    for event_id, event_data in room_events:
-        candidate_ids.add(event_id)
-        event_info = EventInfo.from_event(event_data)
-        if event_info.is_edit and isinstance(event_info.original_event_id, str):
-            candidate_ids.add(event_info.original_event_id)
     redacted_event_ids = await _redacted_event_ids_for_candidates(
         db,
         namespace,
         room_id,
-        event_ids=candidate_ids,
+        event_ids=batch_redaction_candidate_ids(room_events),
     )
-    if not redacted_event_ids:
-        return room_events
-
-    cacheable_events: list[tuple[str, dict[str, Any]]] = []
-    for event_id, event_data in room_events:
-        event_info = EventInfo.from_event(event_data)
-        original_event_id = event_info.original_event_id if event_info.is_edit else None
-        if event_id in redacted_event_ids:
-            continue
-        if isinstance(original_event_id, str) and original_event_id in redacted_event_ids:
-            continue
-        cacheable_events.append((event_id, event_data))
-    return cacheable_events
+    return filter_redacted_events(room_events, redacted_event_ids=redacted_event_ids)
 
 
 async def write_lookup_index_rows(
@@ -385,7 +321,7 @@ async def write_lookup_index_rows(
     *,
     namespace: str,
     room_id: str,
-    serialized_events: list[_SerializedCachedEvent],
+    serialized_events: list[SerializedCachedEvent],
     cached_at: float,
     thread_id: str | None = None,
 ) -> None:
@@ -414,11 +350,7 @@ async def write_lookup_index_rows(
             ),
         )
 
-    edit_rows = [
-        row
-        for row in (_edit_cache_row(namespace, room_id, event.event) for event in serialized_events)
-        if row is not None
-    ]
+    edit_rows = event_edit_rows(room_id, serialized_events)
     for row in edit_rows:
         await db.execute(
             """
@@ -429,20 +361,12 @@ async def write_lookup_index_rows(
                 original_event_id = excluded.original_event_id,
                 origin_server_ts = excluded.origin_server_ts
             """,
-            row,
+            (namespace, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts),
         )
 
-    thread_rows = (
-        [(namespace, room_id, event.event_id, thread_id) for event in serialized_events]
-        if thread_id is not None
-        else [
-            row
-            for row in (_event_thread_row(namespace, room_id, event.event) for event in serialized_events)
-            if row is not None
-        ]
-    )
+    thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
     if thread_rows:
-        for row in _with_thread_root_self_rows(thread_rows):
+        for row in thread_rows:
             await db.execute(
                 """
                 INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
@@ -450,7 +374,7 @@ async def write_lookup_index_rows(
                 ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
                     thread_id = excluded.thread_id
                 """,
-                row,
+                (namespace, row.room_id, row.event_id, row.thread_id),
             )
 
 
@@ -544,61 +468,6 @@ async def delete_event_edit_rows(
     return deleted_rows
 
 
-def _event_thread_row(
-    namespace: str,
-    room_id: str,
-    event: dict[str, Any],
-) -> tuple[str, str, str, str] | None:
-    """Return one durable event-to-thread mapping row when thread membership is explicit."""
-    event_id = event.get("event_id")
-    if not isinstance(event_id, str) or not event_id:
-        return None
-    event_info = EventInfo.from_event(event)
-    thread_id = event_info.thread_id
-    if not isinstance(thread_id, str):
-        thread_id = event_info.thread_id_from_edit
-    if not isinstance(thread_id, str) or not thread_id:
-        return None
-    return namespace, room_id, event_id, thread_id
-
-
-def _with_thread_root_self_rows(
-    thread_rows: list[tuple[str, str, str, str]],
-) -> list[tuple[str, str, str, str]]:
-    """Ensure any learned thread membership also records the root's own lookup row."""
-    if not thread_rows:
-        return thread_rows
-    return list(
-        dict.fromkeys(
-            [
-                *thread_rows,
-                *(
-                    (namespace, room_id, thread_id, thread_id)
-                    for namespace, room_id, _event_id, thread_id in thread_rows
-                ),
-            ],
-        ),
-    )
-
-
-def _edit_cache_row(namespace: str, room_id: str, event: dict[str, Any]) -> tuple[str, str, str, str, int] | None:
-    """Return one edit-index row for a cached event when it is an edit."""
-    if event.get("type") not in _EDITABLE_EVENT_TYPES:
-        return None
-
-    event_info = EventInfo.from_event(event)
-    if not event_info.is_edit or not isinstance(event_info.original_event_id, str):
-        return None
-
-    return (
-        namespace,
-        event_id_for_cache(event),
-        room_id,
-        event_info.original_event_id,
-        _event_timestamp_for_cache(event),
-    )
-
-
 async def _delete_room_thread_events(
     db: AsyncConnection,
     namespace: str,
@@ -643,7 +512,7 @@ async def _redacted_event_ids_for_candidates(
     namespace: str,
     room_id: str,
     *,
-    event_ids: set[str],
+    event_ids: frozenset[str],
 ) -> frozenset[str]:
     """Return the subset of candidate event IDs that are durably tombstoned."""
     if not event_ids:
