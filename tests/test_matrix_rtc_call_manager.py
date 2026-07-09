@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -11,15 +12,19 @@ import aiohttp
 import nio
 import pytest
 
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.calls import CallsConfig
 from mindroom.config.main import Config
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_manager import CallManager, _build_call_instructions, maybe_build_call_manager
 from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps
 from mindroom.matrix_rtc.call_tools import CallAgentTooling
 from mindroom.matrix_rtc.events import (
+    CALL_ENCRYPTION_KEYS_EVENT_TYPE,
     CALL_MEMBER_EVENT_TYPE,
     DEFAULT_MEMBERSHIP_EXPIRES_MS,
+    build_key_to_device_content,
     build_membership_content,
     membership_state_key,
 )
@@ -117,8 +122,16 @@ def _remote_member_event(user: str = "@alice:example.org", device: str = "ALICED
 
 def _config(*, enabled: bool = True) -> Config:
     return Config(
-        agents={"helper": AgentConfig(display_name="Helper", role="Answer questions", instructions=["Be kind."])},
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                role="Answer questions",
+                instructions=["Be kind."],
+                rooms=[ROOM_ID],
+            ),
+        },
         models={},
+        authorization=AuthorizationConfig(global_users=["@alice:example.org"]),
         calls=CallsConfig(
             enabled=enabled,
             agents=["helper"],
@@ -146,8 +159,8 @@ def _manager(
     )
 
 
-def _room(*, encrypted: bool = False) -> nio.MatrixRoom:
-    room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id=BOT_USER)
+def _room(*, encrypted: bool = False, room_id: str = ROOM_ID) -> nio.MatrixRoom:
+    room = nio.MatrixRoom(room_id=room_id, own_user_id=BOT_USER)
     room.encrypted = encrypted
     return room
 
@@ -157,6 +170,27 @@ def _member_unknown_event() -> nio.UnknownEvent:
         {"event_id": "$e1", "sender": "@alice:example.org", "origin_server_ts": 1_000},
         CALL_MEMBER_EVENT_TYPE,
     )
+
+
+def _frame_key_event(*, room_id: str = ROOM_ID, user_id: str = "@alice:example.org") -> nio.UnknownToDeviceEvent:
+    """Build one decrypted inbound Element Call frame key event."""
+    key_base64 = base64.b64encode(b"A" * 16).decode("ascii")
+    event = nio.UnknownToDeviceEvent.from_dict(
+        {
+            "type": CALL_ENCRYPTION_KEYS_EVENT_TYPE,
+            "sender": user_id,
+            "content": build_key_to_device_content(
+                key_base64=key_base64,
+                key_index=2,
+                room_id=room_id,
+                member_id=f"{user_id}:ALICEDEV",
+                device_id="ALICEDEV",
+                sent_ts=1_500,
+            ),
+        },
+    )
+    assert isinstance(event, nio.UnknownToDeviceEvent)
+    return event
 
 
 @pytest.fixture(autouse=True)
@@ -218,6 +252,49 @@ async def test_manager_ignores_unrelated_event_types(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_manager_ignores_calls_outside_agent_rooms(tmp_path: Path) -> None:
+    """Call events in dynamically joined rooms cannot activate this agent."""
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    await manager.on_room_event(_room(room_id="!other:example.org"), _member_unknown_event())
+
+    client.room_get_state.assert_not_awaited()
+    assert bridge.connected_grant is None
+
+
+@pytest.mark.asyncio
+async def test_manager_rejects_unauthorized_call_members(tmp_path: Path) -> None:
+    """A participant must pass normal room authorization before the agent joins."""
+    client = _client()
+    client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
+    bridge = FakeBridge()
+    config = _config()
+    config.authorization = AuthorizationConfig()
+    manager = _manager(client, bridge, tmp_path, config)
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert bridge.connected_grant is None
+
+
+@pytest.mark.asyncio
+async def test_manager_rejects_members_denied_by_agent_reply_permissions(tmp_path: Path) -> None:
+    """Per-agent reply permissions also gate whole-call admission."""
+    client = _client()
+    client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
+    bridge = FakeBridge()
+    config = _config()
+    config.authorization.agent_reply_permissions = {"helper": ["@other:example.org"]}
+    manager = _manager(client, bridge, tmp_path, config)
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert bridge.connected_grant is None
+
+
+@pytest.mark.asyncio
 async def test_manager_leaves_call_when_room_call_empties(tmp_path: Path) -> None:
     """Manager leaves call when room call empties."""
     client = _client()
@@ -242,6 +319,38 @@ async def test_manager_leaves_call_when_room_call_empties(tmp_path: Path) -> Non
     final_args, final_kwargs = client.room_put_state.await_args_list[-1]
     assert final_args[2] == {}
     assert final_kwargs["state_key"] == membership_state_key(BOT_USER, BOT_DEVICE)
+
+
+@pytest.mark.asyncio
+async def test_manager_leaves_when_a_denied_member_joins(tmp_path: Path) -> None:
+    """An active agent leaves rather than sharing a call with a denied participant."""
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    client.room_get_state.return_value = nio.RoomGetStateResponse(
+        [_remote_member_event(), _remote_member_event(user="@mallory:example.org", device="MALLORYDEV")],
+        ROOM_ID,
+    )
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert bridge.closed
+
+
+@pytest.mark.asyncio
+async def test_manager_reconciles_active_calls_after_sync(tmp_path: Path) -> None:
+    """Initial full-state calls are discovered even without a timeline event."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    await manager.reconcile_joined_rooms()
+
+    assert bridge.connected_grant is GRANT
 
 
 @pytest.mark.asyncio
@@ -287,6 +396,29 @@ async def test_manager_shutdown_stops_sessions(tmp_path: Path) -> None:
     # Events after shutdown must not start new sessions.
     await manager.on_room_event(_room(), _member_unknown_event())
     assert bridge.frame_keys == []
+
+
+@pytest.mark.asyncio
+async def test_manager_shutdown_continues_after_a_session_stop_failure(tmp_path: Path) -> None:
+    """One broken call teardown cannot leak another active call."""
+    client = _client()
+    first_bridge = FakeBridge()
+    second_bridge = FakeBridge()
+
+    async def failed_finalizer() -> None:
+        msg = "finalizer failed"
+        raise RuntimeError(msg)
+
+    first = _plain_session(client, first_bridge, on_stopped=failed_finalizer)
+    second = _plain_session(client, second_bridge)
+    second.room_id = "!other:example.org"
+    manager = _manager(client, FakeBridge(), tmp_path)
+    manager._sessions = {first.room_id: first, second.room_id: second}
+
+    await manager.shutdown()
+
+    assert first_bridge.closed
+    assert second_bridge.closed
 
 
 def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None:
@@ -467,6 +599,65 @@ async def test_manager_passes_same_agent_tools_and_prompt(
     assert options.instructions.startswith("CHAT PROMPT")
     assert options.on_conversation_turn is not None
     assert options.on_tools_executed is not None
+
+
+@pytest.mark.asyncio
+async def test_manager_replays_a_key_received_before_startup_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A to-device key preceding full-state call discovery remains available."""
+
+    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
+        return targets
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
+    client = _client()
+    client.rooms = {ROOM_ID: _room(encrypted=True)}
+    client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    await manager.on_to_device_event(_frame_key_event())
+    await manager.reconcile_joined_rooms()
+
+    assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
+
+
+@pytest.mark.asyncio
+async def test_manager_replays_a_key_received_while_starting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A key received after call membership publication is applied once the bridge is ready."""
+
+    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
+        return targets
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
+    client = _client()
+    client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    agent_starting = asyncio.Event()
+    release_agent = asyncio.Event()
+
+    async def blocked_start_agent(options: VoiceAgentOptions) -> None:
+        bridge.agent_options = options
+        agent_starting.set()
+        await release_agent.wait()
+
+    bridge.start_agent = blocked_start_agent  # type: ignore[method-assign]
+    join_task = asyncio.create_task(manager.on_room_event(_room(encrypted=True), _member_unknown_event()))
+    await asyncio.wait_for(agent_starting.wait(), timeout=1)
+
+    await manager.on_to_device_event(_frame_key_event())
+    assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) not in bridge.frame_keys
+
+    release_agent.set()
+    await join_task
+
+    assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
 
 
 @pytest.mark.asyncio
@@ -694,6 +885,21 @@ def test_calls_config_rejects_unknown_agents() -> None:
         Config(models={}, calls=CallsConfig(enabled=True, agents=["missing"]))
 
 
+def test_calls_config_rejects_requester_private_agents() -> None:
+    """Voice calls cannot safely materialize requester-private state."""
+    with pytest.raises(ValueError, match=r"calls\.agents cannot reference requester-private agent"):
+        Config(
+            models={},
+            agents={
+                "private": AgentConfig(
+                    display_name="Private",
+                    private=AgentPrivateConfig(per="user_agent"),
+                ),
+            },
+            calls=CallsConfig(enabled=True, agents=["private"]),
+        )
+
+
 def test_calls_config_rejects_agents_sharing_a_room() -> None:
     """Two call agents cannot both join the same configured room."""
     with pytest.raises(ValueError, match=r"calls\.agents configures multiple agents for room"):
@@ -750,3 +956,23 @@ async def test_key_distribution_retry_backs_off_and_gives_up(
     for _ in range(50):
         await real_sleep(0)
     assert len(transport.sent) > 4
+
+
+def test_calls_config_rejects_agents_sharing_a_resolved_room(tmp_path: Path) -> None:
+    """Alias and room-ID spellings cannot activate two call agents in one room."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("voice", ROOM_ID, "#voice:example.org", "Voice")
+    state.save(runtime_paths=runtime_paths)
+
+    with pytest.raises(ValueError, match=r"calls\.agents configures multiple agents for room"):
+        Config.validate_with_runtime(
+            {
+                "agents": {
+                    "one": {"display_name": "One", "rooms": ["voice"]},
+                    "two": {"display_name": "Two", "rooms": [ROOM_ID]},
+                },
+                "calls": {"enabled": True, "agents": ["one", "two"]},
+            },
+            runtime_paths,
+        )

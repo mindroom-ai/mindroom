@@ -296,6 +296,8 @@ class AgentBot:
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _startup_thread_prewarm_task: asyncio.Task[None] | None
+    _call_manager: CallManager | None
+    _calls_reconcile_pending: bool
     _room_member_callback_registered: bool
     _room_member_join_hooks_armed: bool
     _turn_controller: TurnController
@@ -343,6 +345,7 @@ class AgentBot:
         self._deferred_overdue_task_drain_task = None
         self._startup_thread_prewarm_task = None
         self._call_manager: CallManager | None = None
+        self._calls_reconcile_pending = False
 
         async def send_room_lifecycle_response(
             *,
@@ -917,6 +920,8 @@ class AgentBot:
 
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after joins and across restarts."""
+        if self._call_manager is not None:
+            self._calls_reconcile_pending = True
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 
@@ -991,6 +996,7 @@ class AgentBot:
         own startup timeout for the pre-first-response window.
         """
         self._sync_shutting_down = False
+        self._calls_reconcile_pending = self._call_manager is not None
         mark_matrix_sync_loop_started(self.agent_name)
 
     def reset_watchdog_clock(self) -> None:
@@ -1262,6 +1268,15 @@ class AgentBot:
         except Exception:
             self._mark_callback_failed()
             raise
+        if self._calls_reconcile_pending:
+            self._calls_reconcile_pending = False
+            call_manager = self._call_manager
+            if call_manager is not None:
+                create_background_task(
+                    call_manager.reconcile_joined_rooms(),
+                    name=f"matrix_rtc_reconcile_{self.agent_name}",
+                    owner=self._runtime_view,
+                )
 
     async def _on_sync_error(self, _response: nio.SyncError) -> None:
         """Update the watchdog clock on sync errors without marking cache state fresh."""
@@ -1490,6 +1505,7 @@ class AgentBot:
 
         call_manager = self._call_manager
         self._call_manager = None
+        self._calls_reconcile_pending = False
         if call_manager is not None:
             await call_manager.shutdown()
 

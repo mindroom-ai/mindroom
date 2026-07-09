@@ -92,11 +92,10 @@ async def test_frame_key_round_trips_through_real_olm() -> None:
         assert isinstance(decrypted, nio.UnknownToDeviceEvent)
         assert decrypted.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE
 
-        received = transport.parse_incoming(decrypted, room_id=ROOM)
-        assert received is not None
+        parsed = transport.parse_incoming(decrypted)
+        assert parsed is not None
+        room_id, received = parsed
+        assert room_id == ROOM
         assert received.key_base64 == KEY_B64
         assert received.key_index == 5
         assert received.claimed_device_id == "BOTDEV"
-
-        # A key addressed to a different room must not be accepted for this session.
-        assert transport.parse_incoming(decrypted, room_id="!other:example.org") is None

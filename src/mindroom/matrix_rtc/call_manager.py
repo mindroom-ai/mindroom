@@ -3,8 +3,8 @@
 The manager consumes the bot's sync callbacks (custom state events and
 decrypted to-device events), reconciles the room's call membership state,
 and starts or stops one ``CallSession`` per room. Reconciliation always
-re-reads the room state from the homeserver, so a bot that restarts
-mid-call recovers as soon as any call event arrives.
+re-reads the room state from the homeserver, both on call events and after
+each sync-loop start, so a bot recovers calls already active at startup.
 """
 
 from __future__ import annotations
@@ -16,7 +16,9 @@ from typing import TYPE_CHECKING
 import httpx
 import nio
 
+from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply
 from mindroom.credentials_sync import get_secret_from_env
+from mindroom.entity_resolution import configured_routable_entity_names_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.call_session import CallJoinError, CallSession, CallSessionDeps, required_device_id
 from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools
@@ -25,6 +27,7 @@ from mindroom.matrix_rtc.events import (
     CALL_MEMBER_EVENT_TYPE,
     RTC_NOTIFICATION_EVENT_TYPE,
     CallMember,
+    ReceivedFrameKey,
     parse_membership_event,
 )
 from mindroom.matrix_rtc.focus import OpenIDToken, discover_livekit_service_url, request_sfu_grant
@@ -133,34 +136,61 @@ class CallManager:
         self._tool_support = tool_support
         self._key_transport = ToDeviceFrameKeyTransport(client)
         self._sessions: dict[str, CallSession] = {}
+        self._pending_keys: dict[str, list[ReceivedFrameKey]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._shutting_down = False
 
     async def on_room_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Sync callback for custom room events (call membership, ring)."""
-        if event.type not in _CALL_EVENT_TYPES or self._shutting_down:
+        if event.type not in _CALL_EVENT_TYPES or self._shutting_down or not self._is_configured_call_room(room):
             return
         await self._reconcile(room)
 
     async def on_to_device_event(self, event: nio.ToDeviceEvent) -> None:
         """Sync callback for decrypted call frame-key to-device events."""
-        if not isinstance(event, nio.UnknownToDeviceEvent) or event.type != CALL_ENCRYPTION_KEYS_EVENT_TYPE:
+        if (
+            not isinstance(event, nio.UnknownToDeviceEvent)
+            or event.type != CALL_ENCRYPTION_KEYS_EVENT_TYPE
+            or self._shutting_down
+        ):
             return
-        for session in self._sessions.values():
-            received = self._key_transport.parse_incoming(event, room_id=session.room_id)
-            if received is not None:
-                session.on_key_received(received)
-                return
+        parsed = self._key_transport.parse_incoming(event)
+        if parsed is None:
+            return
+        room_id, received = parsed
+        if not self._is_configured_call_room_id(room_id) or not self._is_authorized_call_member(
+            received.user_id,
+            room_id,
+        ):
+            return
+        session = self._sessions.get(room_id)
+        if session is not None:
+            session.on_key_received(received)
+            return
+        self._pending_keys.setdefault(room_id, []).append(received)
+
+    async def reconcile_joined_rooms(self) -> None:
+        """Reconcile configured calls after a successful Matrix sync response."""
+        if self._shutting_down:
+            return
+        rooms = [room for room in self._client.rooms.values() if self._is_configured_call_room(room)]
+        await asyncio.gather(*(self._reconcile(room) for room in rooms))
 
     async def shutdown(self) -> None:
         """Leave every active call."""
         self._shutting_down = True
+        self._pending_keys.clear()
         sessions = list(self._sessions.values())
         self._sessions.clear()
         for session in sessions:
-            await session.stop()
+            try:
+                await session.stop()
+            except Exception as error:
+                logger.warning("call_session_shutdown_failed", room_id=session.room_id, error=str(error))
 
     async def _reconcile(self, room: nio.MatrixRoom) -> None:
+        if not self._is_configured_call_room(room):
+            return
         room_id = room.room_id
         lock = self._locks.setdefault(room_id, asyncio.Lock())
         async with lock:
@@ -172,6 +202,12 @@ class CallManager:
                 # and wait for the next call event to reconcile again.
                 return
             session = self._sessions.get(room_id)
+            if not self._members_are_authorized(members, room_id):
+                self._pending_keys.pop(room_id, None)
+                if session is not None:
+                    self._sessions.pop(room_id, None)
+                    await session.stop()
+                return
             if session is None:
                 if members:
                     await self._join(room, members)
@@ -179,8 +215,56 @@ class CallManager:
             if members:
                 await session.on_members_changed(members)
             else:
+                self._pending_keys.pop(room_id, None)
                 self._sessions.pop(room_id, None)
                 await session.stop()
+
+    def _is_configured_call_room(self, room: nio.MatrixRoom) -> bool:
+        """Return whether this agent is configured to join calls in ``room``."""
+        room_alias = room.canonical_alias
+        room_aliases = (room_alias,) if isinstance(room_alias, str) and room_alias else ()
+        return self._agent_name in configured_routable_entity_names_for_room(
+            self._config,
+            room.room_id,
+            self._runtime_paths,
+            room_aliases=room_aliases,
+        )
+
+    def _is_configured_call_room_id(self, room_id: str) -> bool:
+        """Return whether this agent is configured to join calls in ``room_id``."""
+        return self._agent_name in configured_routable_entity_names_for_room(
+            self._config,
+            room_id,
+            self._runtime_paths,
+        )
+
+    def _is_authorized_call_member(self, user_id: str, room_id: str) -> bool:
+        """Return whether a participant may hear and invoke this voice agent."""
+        return is_authorized_sender(
+            user_id,
+            self._config,
+            room_id,
+            self._runtime_paths,
+        ) and is_sender_allowed_for_agent_reply(
+            user_id,
+            self._agent_name,
+            self._config,
+            self._runtime_paths,
+        )
+
+    def _members_are_authorized(self, members: list[CallMember], room_id: str) -> bool:
+        """Require every call participant to be eligible for this agent."""
+        for member in members:
+            if self._is_authorized_call_member(member.user_id, room_id):
+                continue
+            logger.warning(
+                "call_join_skipped_unauthorized_member",
+                room_id=room_id,
+                agent=self._agent_name,
+                user_id=member.user_id,
+            )
+            return False
+        return True
 
     async def _fetch_remote_members(self, room_id: str) -> list[CallMember] | None:
         """Current, unexpired call members in the room, excluding ourselves.
@@ -231,6 +315,7 @@ class CallManager:
             on_conversation_turn=transcript.record,
             on_tools_executed=transcript.record_tool_use,
         )
+        started = False
         try:
             session = CallSession(
                 room_id=room_id,
@@ -253,15 +338,22 @@ class CallManager:
                 ),
             )
             await session.start(members)
+            started = True
         except (CallJoinError, httpx.HTTPError, ValueError) as error:
             logger.warning("call_join_failed", room_id=room_id, agent=self._agent_name, error=str(error))
             return
+        finally:
+            if not started:
+                self._pending_keys.pop(room_id, None)
         if self._shutting_down:
             # shutdown() ran while the join was in flight and cannot see this
             # session yet; stop it instead of leaking a live SFU connection.
+            self._pending_keys.pop(room_id, None)
             await session.stop()
             return
         self._sessions[room_id] = session
+        for received in self._pending_keys.pop(room_id, ()):
+            session.on_key_received(received)
         logger.info("call_session_started", room_id=room_id, agent=self._agent_name)
 
     async def _build_tooling(self, room_id: str) -> CallAgentTooling:

@@ -1353,6 +1353,7 @@ depends_on = [
     "mindroom.git_urls",
     "mindroom.history.types",
     "mindroom.logging_config",
+    "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
     "mindroom.mcp.config",
     "mindroom.prompt_templates",
@@ -2096,7 +2097,9 @@ depends_on = ["mindroom.matrix_rtc.call_manager"]
 [[modules]]
 path = "mindroom.matrix_rtc.call_manager"
 depends_on = [
+    "mindroom.authorization",
     "mindroom.credentials_sync",
+    "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix_rtc.call_session",
     "mindroom.matrix_rtc.call_tools",

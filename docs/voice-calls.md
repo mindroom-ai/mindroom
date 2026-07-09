@@ -27,7 +27,7 @@ The agent leaves the call (and clears its membership state event) when the last 
 ```yaml
 calls:
   enabled: true
-  agents: [assistant]        # which agents may join calls in their rooms
+  agents: [assistant]        # shared agents that may join calls in their configured rooms
   model: gpt-realtime-2.1    # OpenAI realtime model
   voice: marin               # optional voice preset
   # livekit_service_url: https://rtc.example.org   # override .well-known discovery
@@ -35,6 +35,8 @@ calls:
 
 Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`) and an `OPENAI_API_KEY` in your credentials.
 MindRoom enforces at most one calls-enabled agent per room.
+Calls only join rooms configured for that agent and only while every call participant passes the normal room and per-agent reply permissions.
+Requester-private agents cannot join calls because MatrixRTC cannot bind each spoken turn to a Matrix requester.
 
 ## Server requirements
 

@@ -146,6 +146,33 @@ async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> None:
+    """Calls reconcile after each sync-loop's first successful response."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+    call_manager = MagicMock()
+    call_manager.reconcile_joined_rooms = AsyncMock()
+    bot._call_manager = call_manager
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch.object(bot, "_maybe_start_startup_thread_prewarm"),
+        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+    ):
+        bot.mark_sync_loop_started()
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        bot.mark_sync_loop_started()
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert call_manager.reconcile_joined_rooms.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_installed_runtime_cache_support_runs_fire_and_forget_sync_cache_writes(tmp_path: Path) -> None:
     """The shared test runtime helper must preserve the coordinator's synchronous queue contract."""
     bot = _agent_bot(tmp_path)
