@@ -304,6 +304,32 @@ def test_blocking_errored_attempt_returns_user_text() -> None:
     assert result == "friendly error"
 
 
+def test_blocking_errored_attempt_persists_zero_output_replay() -> None:
+    """A zero-output errored attempt still persists a replay carrying the turn's events."""
+    log = _AdapterLog()
+
+    async def _attempt(run: TurnRunState, _c: DynamicContinuationRunState) -> ErroredAttempt:
+        run.run_metadata = {"room_id": "!room", "matrix_seen_event_ids": ["$user_msg"]}
+        return ErroredAttempt("friendly error")
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert result == "friendly error"
+    assert len(log.persisted) == 1
+    snapshot = log.persisted[0]
+    assert snapshot.session_id == "session-1"
+    assert snapshot.run_id == "run-1"
+    assert snapshot.partial_text == ""
+    assert snapshot.run_metadata == {"room_id": "!room", "matrix_seen_event_ids": ["$user_msg"]}
+
+
 def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:
     """A cancelled attempt without recorder persists one standalone replay and raises."""
     log = _AdapterLog()

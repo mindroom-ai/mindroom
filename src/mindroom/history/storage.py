@@ -56,9 +56,10 @@ _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
 _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
 _COMPACTED_RUN_ID_RETENTION_LIMIT = 1_024
-# Agno's history builder drops these run statuses, so their source events are
-# not represented in model-visible history and must stay eligible for
-# unseen-thread-context re-inclusion on the next turn.
+# Mirrors the skip_statuses default of agno's AgentSession.get_messages /
+# TeamSession.get_messages: runs with these statuses never render in model
+# history, so their source events must stay eligible for unseen-thread-context
+# re-inclusion on the next turn.
 MODEL_HISTORY_EXCLUDED_RUN_STATUSES = frozenset({RunStatus.paused, RunStatus.cancelled, RunStatus.error})
 
 
@@ -243,9 +244,11 @@ def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: Histor
 
 
 def seen_event_ids_for_runs(runs: Iterable[RunOutput | TeamRunOutput]) -> set[str]:
-    """Return Matrix event ids already represented by run metadata."""
+    """Return Matrix event ids represented by history-visible runs' metadata."""
     seen_event_ids: set[str] = set()
     for run in runs:
+        if run.status in MODEL_HISTORY_EXCLUDED_RUN_STATUSES:
+            continue
         seen_event_ids.update(_run_seen_event_ids(run))
     return seen_event_ids
 

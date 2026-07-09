@@ -1925,29 +1925,31 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
             run_error = state.user_error or state.stream_exception
             if run_error is not None:
-                if state.assistant_text or state.completed_tools or state.pending_tools:
-                    interrupted_tools = [pending.trace_entry for pending in state.pending_tools]
-                    if turn_recorder is not None:
-                        turn_state.record_interrupted(
-                            turn_recorder,
-                            run_metadata=run.run_metadata,
-                            assistant_text=state.assistant_text,
-                            completed_tools=state.completed_tools,
-                            interrupted_tools=interrupted_tools,
-                        )
-                    elif not run.standalone_replay_persisted:
-                        persist_interrupted_replay(
-                            scope_context=run.scope_context,
-                            session_id=session_id,
-                            run_id=attempt.attempt_run_id or str(uuid4()),
-                            user_message=prompt,
-                            partial_text=state.assistant_text,
-                            completed_tools=turn_state.completed_tools_for(state.completed_tools),
-                            interrupted_tools=interrupted_tools,
-                            run_metadata=run.run_metadata,
-                            is_team=False,
-                        )
-                        run.standalone_replay_persisted = True
+                # Record even a zero-output failure: agno drops the error run
+                # from model history, so the replay run is the only history
+                # carrier of the user's message.
+                interrupted_tools = [pending.trace_entry for pending in state.pending_tools]
+                if turn_recorder is not None:
+                    turn_state.record_interrupted(
+                        turn_recorder,
+                        run_metadata=run.run_metadata,
+                        assistant_text=state.assistant_text,
+                        completed_tools=state.completed_tools,
+                        interrupted_tools=interrupted_tools,
+                    )
+                elif not run.standalone_replay_persisted:
+                    persist_interrupted_replay(
+                        scope_context=run.scope_context,
+                        session_id=session_id,
+                        run_id=attempt.attempt_run_id or str(uuid4()),
+                        user_message=prompt,
+                        partial_text=state.assistant_text,
+                        completed_tools=turn_state.completed_tools_for(state.completed_tools),
+                        interrupted_tools=interrupted_tools,
+                        run_metadata=run.run_metadata,
+                        is_team=False,
+                    )
+                    run.standalone_replay_persisted = True
                 yield get_user_friendly_error_message(run_error, agent_name)
                 yield AttemptResolved(HandledAttempt())
                 return

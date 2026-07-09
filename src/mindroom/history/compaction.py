@@ -1016,11 +1016,17 @@ def _agent_session_history_messages(
     limit: int | None,
 ) -> list[Message]:
     skip_roles = _history_skip_roles(history_settings)
+    skip_statuses = list(MODEL_HISTORY_EXCLUDED_RUN_STATUSES)
     if history_settings.policy.mode == "runs":
-        return session.get_messages(agent_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
+        return session.get_messages(
+            agent_id=scope_id,
+            last_n_runs=limit,
+            skip_roles=skip_roles,
+            skip_statuses=skip_statuses,
+        )
     if history_settings.policy.mode == "messages":
-        return session.get_messages(agent_id=scope_id, limit=limit, skip_roles=skip_roles)
-    return session.get_messages(agent_id=scope_id, skip_roles=skip_roles)
+        return session.get_messages(agent_id=scope_id, limit=limit, skip_roles=skip_roles, skip_statuses=skip_statuses)
+    return session.get_messages(agent_id=scope_id, skip_roles=skip_roles, skip_statuses=skip_statuses)
 
 
 def _team_session_history_messages(
@@ -1031,11 +1037,17 @@ def _team_session_history_messages(
     limit: int | None,
 ) -> list[Message]:
     skip_roles = _history_skip_roles(history_settings)
+    skip_statuses = list(MODEL_HISTORY_EXCLUDED_RUN_STATUSES)
     if history_settings.policy.mode == "runs":
-        return session.get_messages(team_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
+        return session.get_messages(
+            team_id=scope_id,
+            last_n_runs=limit,
+            skip_roles=skip_roles,
+            skip_statuses=skip_statuses,
+        )
     if history_settings.policy.mode == "messages":
-        return session.get_messages(team_id=scope_id, limit=limit, skip_roles=skip_roles)
-    return session.get_messages(team_id=scope_id, skip_roles=skip_roles)
+        return session.get_messages(team_id=scope_id, limit=limit, skip_roles=skip_roles, skip_statuses=skip_statuses)
+    return session.get_messages(team_id=scope_id, skip_roles=skip_roles, skip_statuses=skip_statuses)
 
 
 def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str]:

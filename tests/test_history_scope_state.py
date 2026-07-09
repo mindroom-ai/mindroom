@@ -22,6 +22,7 @@ from mindroom.history.storage import (
     read_scope_seen_event_ids,
     read_scope_state,
     record_compaction_chunk,
+    seen_event_ids_for_runs,
     set_force_compaction_state,
     update_scope_seen_event_ids,
     write_scope_state,
@@ -111,6 +112,19 @@ def test_scope_seen_event_ids_skip_runs_agno_history_drops(tmp_path: Path, exclu
     session = _session("session-1", runs=[completed, dropped])
 
     assert read_scope_seen_event_ids(session, scope) == {"answered-question"}
+
+
+@pytest.mark.parametrize("excluded_status", [RunStatus.cancelled, RunStatus.error, RunStatus.paused])
+def test_seen_event_ids_for_runs_skip_runs_agno_history_drops(tmp_path: Path, excluded_status: RunStatus) -> None:
+    """Preserved-state writers must never record excluded-status runs' event ids as seen."""
+    _make_config(tmp_path)
+    completed = _completed_run("run-1")
+    completed.metadata = {"matrix_seen_event_ids": ["answered-question"]}
+    dropped = _completed_run("run-2")
+    dropped.status = excluded_status
+    dropped.metadata = {"matrix_seen_event_ids": ["orphaned-question"]}
+
+    assert seen_event_ids_for_runs([completed, dropped]) == {"answered-question"}
 
 
 def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:

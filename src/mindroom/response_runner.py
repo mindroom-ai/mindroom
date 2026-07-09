@@ -612,8 +612,13 @@ class ResponseRunner:
         recorder: TurnRecorder,
         accumulated_text: str,
         tool_trace: Sequence[ToolTraceEntry],
-    ) -> bool:
-        """Capture canonical interrupted replay state from one failed stream delivery."""
+    ) -> None:
+        """Capture canonical interrupted replay state from one failed stream delivery.
+
+        Records even when no partial output exists: a zero-output interruption is
+        exactly the case where the replay run is the only history carrier of the
+        user's message (agno drops the cancelled/error run itself).
+        """
         partial_text = clean_partial_reply_text(strip_visible_tool_markers(accumulated_text))
         completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
         if not partial_text:
@@ -622,15 +627,12 @@ class ResponseRunner:
             completed_tools = list(recorder.completed_tools)
         if not interrupted_tools:
             interrupted_tools = list(recorder.interrupted_tools)
-        if not partial_text and not completed_tools and not interrupted_tools:
-            return False
         recorder.record_interrupted(
             run_metadata=recorder.run_metadata,
             assistant_text=partial_text,
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
         )
-        return True
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
@@ -1635,6 +1637,16 @@ class ResponseRunner:
                         response_event_id=progress.tracked_event_id,
                     )
                     raise
+                if team_turn_recorder.outcome == "interrupted":
+                    await self._persist_interrupted_recorder_off_loop(
+                        recorder=team_turn_recorder,
+                        session_scope=session_scope,
+                        session_id=session_id,
+                        execution_identity=tool_dispatch.execution_identity,
+                        run_id=response_run_id,
+                        is_team=True,
+                        response_event_id=final_delivery_outcome.event_id,
+                    )
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark_first_visible_reply("final")
                     request.pipeline_timing.mark("response_complete")
@@ -1654,20 +1666,20 @@ class ResponseRunner:
             else:
                 self.deps.logger.exception("Error in team streaming response", error=str(error.error))
             progress.track_event(error.event_id)
-            if self._record_stream_delivery_error(
+            self._record_stream_delivery_error(
                 recorder=team_turn_recorder,
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
-            ):
-                await self._persist_interrupted_recorder_off_loop(
-                    recorder=team_turn_recorder,
-                    session_scope=session_scope,
-                    session_id=session_id,
-                    execution_identity=tool_dispatch.execution_identity,
-                    run_id=response_run_id,
-                    is_team=True,
-                    response_event_id=progress.tracked_event_id,
-                )
+            )
+            await self._persist_interrupted_recorder_off_loop(
+                recorder=team_turn_recorder,
+                session_scope=session_scope,
+                session_id=session_id,
+                execution_identity=tool_dispatch.execution_identity,
+                run_id=response_run_id,
+                is_team=True,
+                response_event_id=progress.tracked_event_id,
+            )
             return await self.deps.delivery_gateway.finalize_streamed_response(
                 FinalizeStreamedResponseRequest(
                     target=delivery_target,
@@ -2185,6 +2197,16 @@ class ResponseRunner:
                 response_event_id=request.existing_event_id,
             )
             raise
+        if turn_recorder.outcome == "interrupted":
+            await self._persist_interrupted_recorder_off_loop(
+                recorder=turn_recorder,
+                session_scope=session_scope,
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                is_team=False,
+                response_event_id=delivery.event_id,
+            )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
@@ -2276,20 +2298,20 @@ class ResponseRunner:
             else:
                 self.deps.logger.exception("Error in streaming response", error=str(error.error))
             tool_trace[:] = error.tool_trace
-            if self._record_stream_delivery_error(
+            self._record_stream_delivery_error(
                 recorder=turn_recorder,
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
-            ):
-                await self._persist_interrupted_recorder_off_loop(
-                    recorder=turn_recorder,
-                    session_scope=session_scope,
-                    session_id=runtime.session_id,
-                    execution_identity=runtime.tool_dispatch.execution_identity,
-                    run_id=run_id,
-                    is_team=False,
-                    response_event_id=error.event_id,
-                )
+            )
+            await self._persist_interrupted_recorder_off_loop(
+                recorder=turn_recorder,
+                session_scope=session_scope,
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                is_team=False,
+                response_event_id=error.event_id,
+            )
             response_extra_content = _merge_response_extra_content(
                 run_metadata_content,
                 request.attachment_ids,

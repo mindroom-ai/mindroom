@@ -1145,7 +1145,7 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
         ],
     )
 
-    assert coordinator._record_stream_delivery_error(
+    coordinator._record_stream_delivery_error(
         recorder=recorder,
         accumulated_text="Partial answer\n\n**[Response interrupted by an error: boom]**",
         tool_trace=[],
@@ -1155,6 +1155,36 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
     assert snapshot.partial_text == "Partial answer"
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
     assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
+
+
+def test_record_stream_delivery_error_records_zero_output_interruption(
+    tmp_path: Path,
+) -> None:
+    """A turn killed before any visible output still records a replayable interruption."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    recorder = TurnRecorder(user_message="Please summarize the thread")
+    recorder.set_run_metadata({"matrix_seen_event_ids": ["$user_msg"]})
+
+    coordinator._record_stream_delivery_error(
+        recorder=recorder,
+        accumulated_text="",
+        tool_trace=[],
+    )
+
+    assert recorder.outcome == "interrupted"
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.user_message == "Please summarize the thread"
+    assert snapshot.partial_text == ""
+    assert snapshot.seen_event_ids == ("$user_msg",)
 
 
 @pytest.mark.asyncio

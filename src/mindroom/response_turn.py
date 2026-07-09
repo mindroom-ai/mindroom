@@ -606,6 +606,35 @@ def _settle_blocking_attempt(
         raise build_cancelled_error(resolution.reason)
     if isinstance(resolution, ErroredAttempt):
         _publish_run_metadata(sinks, resolution.metadata_content)
+        # A failed attempt's run is dropped from agno history, so record the
+        # interruption to keep the user's message replayable even with zero
+        # partial output.
+        run.turn_state.record_interrupted(
+            sinks.turn_recorder,
+            run_metadata=run.run_metadata,
+            assistant_text="",
+            completed_tools=[],
+            interrupted_tools=[],
+        )
+        if (
+            sinks.turn_recorder is None
+            and adapter.persist_standalone_replay is not None
+            and not run.standalone_replay_persisted
+        ):
+            adapter.persist_standalone_replay(
+                run.scope_context,
+                StandaloneReplaySnapshot(
+                    session_id=ctx.session_id,
+                    run_id=ctx.run_id or str(uuid4()),
+                    partial_text="",
+                    completed_tools=run.turn_state.completed_tools_for([]),
+                    interrupted_tools=[],
+                    run_metadata=run.run_metadata
+                    if run.run_metadata is not None
+                    else _fallback_matrix_run_metadata(ctx, run),
+                ),
+            )
+            run.standalone_replay_persisted = True
         return resolution.user_message_text
     settle = _settle_completed_attempt(
         ctx,

@@ -547,7 +547,11 @@ def test_same_target_batch_reservation_consumes_all_pending_messages(tmp_path: P
 
 @contextmanager
 def _open_scope(storage: _FakeStorage) -> object:
-    yield SimpleNamespace(storage=storage, session=storage.session)
+    yield SimpleNamespace(
+        storage=storage,
+        session=storage.session,
+        scope=HistoryScope(kind="agent", scope_id="general"),
+    )
 
 
 class _PrelockBarrierLock:
