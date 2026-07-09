@@ -1775,7 +1775,7 @@ async def test_team_response_with_turn_recorder_defers_interrupted_persistence_t
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
-    assert snapshot.seen_event_ids == ("e1",)
+    assert snapshot.run_metadata["matrix_seen_event_ids"] == ["e1"]
 
 
 @pytest.mark.asyncio
@@ -1830,7 +1830,7 @@ async def test_team_response_with_turn_recorder_preserves_unseen_event_ids_on_ca
 
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
-    assert snapshot.seen_event_ids == ("e1", "e2")
+    assert snapshot.run_metadata["matrix_seen_event_ids"] == ["e1", "e2"]
 
 
 @pytest.mark.asyncio

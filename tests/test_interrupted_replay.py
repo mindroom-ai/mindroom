@@ -100,11 +100,11 @@ def test_build_interrupted_replay_run_creates_completed_agent_run_with_summary_a
                 args_preview="file_name=main.py",
             ),
         ),
-        seen_event_ids=("e1", "e2"),
-        source_event_id="e1",
-        source_event_ids=(),
-        source_event_prompts=(),
-        response_event_id="$reply",
+        run_metadata={
+            "matrix_event_id": "e1",
+            "matrix_response_event_id": "$reply",
+            "matrix_seen_event_ids": ["e1", "e2"],
+        },
     )
 
     run = _build_interrupted_replay_run(
@@ -143,11 +143,7 @@ def test_interrupted_replay_content_contains_no_raw_tool_trace() -> None:
             ),
         ),
         interrupted_tools=(),
-        seen_event_ids=(),
-        source_event_id=None,
-        source_event_ids=(),
-        source_event_prompts=(),
-        response_event_id=None,
+        run_metadata={},
     )
 
     run = _build_interrupted_replay_run(
@@ -175,11 +171,11 @@ def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata() ->
         partial_text="Half done",
         completed_tools=(),
         interrupted_tools=(),
-        seen_event_ids=("e1", "e2"),
-        source_event_id="e1",
-        source_event_ids=(),
-        source_event_prompts=(),
-        response_event_id="$reply",
+        run_metadata={
+            "matrix_event_id": "e1",
+            "matrix_response_event_id": "$reply",
+            "matrix_seen_event_ids": ["e1", "e2"],
+        },
     )
 
     run = _build_interrupted_replay_run(
@@ -323,8 +319,7 @@ def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
 
     assert snapshot.user_message == "Please continue"
     assert snapshot.partial_text == "Half done"
-    assert snapshot.seen_event_ids == ("e1",)
-    assert snapshot.source_event_id == "e1"
+    assert snapshot.run_metadata == {"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]}
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
     assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
 
@@ -363,7 +358,7 @@ def test_turn_recorder_record_helpers_capture_completed_and_interrupted_turns() 
 
     snapshot = recorder.interrupted_snapshot()
     assert recorder.outcome == "interrupted"
-    assert snapshot.source_event_id == "e2"
+    assert snapshot.run_metadata == {"matrix_event_id": "e2", "matrix_seen_event_ids": ["e2"]}
     assert snapshot.partial_text == "Still working"
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
     assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]

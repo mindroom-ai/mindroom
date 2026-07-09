@@ -2090,10 +2090,10 @@ def test_load_turn_keeps_ledger_anchor_for_interactive_selection(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_after_restart(
+async def test_handle_message_edit_recovers_missing_ledger_row_from_interrupted_run_after_restart(
     tmp_path: Path,
 ) -> None:
-    """A restarted bot should regenerate against the visible interrupted reply when persistence provides it."""
+    """A persisted interrupted run should repair a missing ledger row with full response context."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -2113,15 +2113,8 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
-    _record_handled_turn(
-        bot._turn_store,
-        ["$original:example.com"],
-        response_event_id="$partial-response:example.com",
-        source_event_prompts={"$original:example.com": "original question"},
-        response_owner="test_agent",
-        history_scope=_agent_history_scope("test_agent"),
-        conversation_target=MessageTarget.resolve("!test:example.com", None, "$original:example.com"),
-    )
+    history_scope = _agent_history_scope("test_agent")
+    conversation_target = MessageTarget.resolve("!test:example.com", None, "$original:example.com")
 
     storage = MagicMock()
     storage.get_session.return_value = AgentSession(
@@ -2140,6 +2133,11 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
                         "matrix_source_event_prompts": {
                             "$original:example.com": "original question",
                         },
+                        **_run_response_context_metadata(
+                            response_owner="test_agent",
+                            history_scope=history_scope,
+                            conversation_target=conversation_target,
+                        ),
                     },
                     response_event_id="$partial-response:example.com",
                 ),
@@ -2218,6 +2216,11 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
     assert request.existing_event_id == "$partial-response:example.com"
     assert request.response_envelope.target.reply_to_event_id == "$original:example.com"
     assert _response_event_id(bot, "$original:example.com") == "$partial-response:example.com"
+    repaired = bot._turn_store.get_turn_record("$original:example.com")
+    assert repaired is not None
+    assert repaired.response_owner == "test_agent"
+    assert repaired.history_scope == history_scope
+    assert repaired.conversation_target == conversation_target
 
 
 @pytest.mark.asyncio

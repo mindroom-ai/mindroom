@@ -1126,6 +1126,14 @@ class TestUserIdPassthrough:
         persisted_run = cast("RunOutput", persisted_session.runs[0])
         assert persisted_run.status is RunStatus.completed
         assert persisted_run.metadata == {
+            AI_RUN_METADATA_KEY: {
+                "version": 1,
+                "compaction": {
+                    "decision": "none",
+                    "outcome": "none",
+                    "reason": "unclassified",
+                },
+            },
             "reply_to_event_id": "e1",
             "correlation_id": "e1",
             "tools_schema": [],
@@ -1302,7 +1310,7 @@ class TestUserIdPassthrough:
         assert snapshot.user_message == "test"
         assert snapshot.partial_text == "Half done"
         assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
-        assert snapshot.seen_event_ids == ("e1",)
+        assert snapshot.run_metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] == ["e1"]
 
     @pytest.mark.asyncio
     async def test_ai_response_returns_friendly_error_for_error_status(self, tmp_path: Path) -> None:
