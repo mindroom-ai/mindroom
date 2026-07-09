@@ -515,6 +515,11 @@ class HandledTurnLedger:
                 invalid_event_ids.append(event_id if isinstance(event_id, str) else repr(event_id))
                 continue
             records[event_id] = record
+        rehydrated_records = {
+            source_event_id: record for record in records.values() for source_event_id in record.source_event_ids
+        }
+        rehydrated_records.update(records)
+        records = rehydrated_records
         if invalid_event_ids and not records:
             self._quarantine_with_warning("invalid event entries", invalid_event_ids=invalid_event_ids)
         elif invalid_event_ids:

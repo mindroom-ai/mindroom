@@ -789,11 +789,11 @@ def test_quarantines_ledger_file_with_invalid_event_entry(temp_dir: Path) -> Non
     assert json.loads(quarantined_files[0].read_text(encoding="utf-8")) == invalid_payload
 
 
-def test_partial_invalid_ledger_preserves_valid_records_on_next_persist(temp_dir: Path) -> None:
-    """Lazy loading a mixed ledger should not lose valid records on the next write."""
+def test_partial_invalid_coalesced_ledger_rehydrates_and_persists_valid_group(temp_dir: Path) -> None:
+    """A surviving coalesced row should restore its invalid sibling before the next write."""
     responses_file = temp_dir / "partial_bad_entry_responded.json"
     valid_record = TurnRecord.create(
-        ["$valid"],
+        ["$valid", "$invalid"],
         response_event_id="$valid-response",
         timestamp=time.time(),
     )
@@ -812,14 +812,17 @@ def test_partial_invalid_ledger_preserves_valid_records_on_next_persist(temp_dir
     tracker = HandledTurnLedger("partial_bad_entry", base_path=temp_dir)
 
     assert tracker.has_responded("$valid")
+    assert tracker.has_responded("$invalid")
     _record_handled_turn(tracker, ["$new"], response_event_id="$new-response")
     tracker.flush()
 
     reloaded = _reload_ledger("partial_bad_entry", temp_dir)
     reloaded.warm()
     assert reloaded.has_responded("$valid")
+    assert reloaded.has_responded("$invalid")
     assert reloaded.has_responded("$new")
     assert _get_response_event_id(reloaded, "$valid") == "$valid-response"
+    assert _get_response_event_id(reloaded, "$invalid") == "$valid-response"
     assert _get_response_event_id(reloaded, "$new") == "$new-response"
     assert not list(temp_dir.glob("partial_bad_entry_responded.json.corrupt-*"))
 
