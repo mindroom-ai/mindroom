@@ -267,6 +267,7 @@ class ResponseRequest:
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
     on_sync_restart_cancelled: Callable[[], None] | None = None
+    on_deferred_outcome_handled: Callable[[str], None] | None = None
 
     @property
     def room_id(self) -> str:
@@ -912,9 +913,6 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         final_outcome: FinalDeliveryOutcome,
-        *,
-        delivery_cancelled: bool,
-        delivery_failure_reason: str | None,
     ) -> None:
         """Tell the dispatcher when stall recovery interrupted a marked-handled turn.
 
@@ -924,13 +922,11 @@ class ResponseRunner:
         turns are recovered by that replay instead; retrying them too would
         answer twice.
         """
-        delivery_cancelled = delivery_cancelled or final_outcome.terminal_status == "cancelled"
-        delivery_failure_reason = delivery_failure_reason or final_outcome.failure_reason
-        if request.on_sync_restart_cancelled is None or not delivery_cancelled:
+        if request.on_sync_restart_cancelled is None or final_outcome.terminal_status != "cancelled":
             return
         if not final_outcome.mark_handled:
             return
-        if cancel_source_from_failure_reason(delivery_failure_reason) != "sync_restart":
+        if cancel_source_from_failure_reason(final_outcome.failure_reason) != "sync_restart":
             return
         request.on_sync_restart_cancelled()
 
@@ -1069,7 +1065,7 @@ class ResponseRunner:
             )
             raise
 
-    async def _run_and_settle_locked_response(
+    async def _run_and_settle_locked_response(  # noqa: C901
         self,
         request: ResponseRequest,
         *,
@@ -1161,13 +1157,12 @@ class ResponseRunner:
             post_response_outcome=build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
-        self._notify_sync_restart_cancelled(
-            request,
-            final_outcome,
-            delivery_cancelled=progress.cancelled,
-            delivery_failure_reason=progress.failure_reason,
-        )
+        self._notify_sync_restart_cancelled(request, final_outcome)
         if deferred_error is not None:
+            if final_outcome.mark_handled and request.on_deferred_outcome_handled is not None:
+                response_event_id = final_outcome.final_visible_event_id
+                assert response_event_id is not None
+                request.on_deferred_outcome_handled(response_event_id)
             raise deferred_error
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
 

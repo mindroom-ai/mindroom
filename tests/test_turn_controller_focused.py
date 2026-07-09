@@ -88,6 +88,7 @@ class _RecordingResponseRunner:
     """
 
     response_event_id: str | None = "$response:localhost"
+    deferred_sync_restart_error: asyncio.CancelledError | None = None
     requests: list[ResponseRequest] = field(default_factory=list)
     team_requests: list[ResponseRequest] = field(default_factory=list)
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
@@ -121,6 +122,13 @@ class _RecordingResponseRunner:
         self.requests.append(request)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
+        if self.deferred_sync_restart_error is not None:
+            assert self.response_event_id is not None
+            assert request.on_sync_restart_cancelled is not None
+            assert request.on_deferred_outcome_handled is not None
+            request.on_sync_restart_cancelled()
+            request.on_deferred_outcome_handled(self.response_event_id)
+            raise self.deferred_sync_restart_error
         return self.response_event_id
 
     async def generate_team_response_helper(
@@ -205,6 +213,7 @@ class _Harness:
     runner: _RecordingResponseRunner
     gateway: _RecordingDeliveryGateway
     turn_store: TurnStore
+    restart_retry: SyncRestartRetryQueue
     gate: CoalescingGate
     gate_batches: list[CoalescedBatch]
     conversation_cache: AsyncMock
@@ -316,6 +325,7 @@ def _build_harness(
     )
     runner = _RecordingResponseRunner()
     gateway = _RecordingDeliveryGateway()
+    restart_retry = SyncRestartRetryQueue()
     controller_ref: list[TurnController] = []
     gate_batches: list[CoalescedBatch] = []
 
@@ -356,7 +366,7 @@ def _build_harness(
             coalescing_gate=gate,
             edit_regenerator=_UnusedEditRegenerator(),
             ingress=ingress_validator,
-            restart_retry=SyncRestartRetryQueue(),
+            restart_retry=restart_retry,
         ),
     )
     controller_ref.append(controller)
@@ -366,6 +376,7 @@ def _build_harness(
         runner=runner,
         gateway=gateway,
         turn_store=turn_store,
+        restart_retry=restart_retry,
         gate=gate,
         gate_batches=gate_batches,
         conversation_cache=conversation_cache,
@@ -549,6 +560,24 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     assert metadata is not None
     assert metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] == "general"
     assert harness.turn_store.is_handled(event.event_id) is True
+
+
+@pytest.mark.asyncio
+async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(config: Config, tmp_path: Path) -> None:
+    """A queued retry must not race normal replay of the same visibly settled source turn."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
+    room = _room_with_members(config, "general")
+    event = _text_event("please survive the sync restart")
+
+    with pytest.raises(asyncio.CancelledError, match="sync_restart"):
+        await harness.deliver(room, event)
+
+    assert harness.restart_retry.has_pending
+    assert harness.turn_store.is_handled(event.event_id) is True
+    record = harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert record.response_event_id == "$response:localhost"
 
 
 @pytest.mark.asyncio
