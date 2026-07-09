@@ -13,15 +13,13 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-_OPENAI_EMBEDDING_DIMENSIONS = OPENAI_EMBEDDING_DIMENSIONS
-_DEFAULT_SENTENCE_TRANSFORMERS_MODEL = SENTENCE_TRANSFORMERS_DEFAULT
 _SENTENCE_TRANSFORMERS_DEPENDENCIES = ["sentence-transformers"]
 _SENTENCE_TRANSFORMERS_EXTRA = "sentence_transformers"
 
 
 def _default_dimensions(model: str) -> int | None:
     """Return the default dimensions for models that support the parameter."""
-    return _OPENAI_EMBEDDING_DIMENSIONS.get(model)
+    return OPENAI_EMBEDDING_DIMENSIONS.get(model)
 
 
 def effective_knowledge_embedder_signature(
@@ -75,7 +73,7 @@ def ensure_sentence_transformers_dependencies(runtime_paths: RuntimePaths) -> No
 
 def create_sentence_transformers_embedder(
     runtime_paths: RuntimePaths,
-    model: str = _DEFAULT_SENTENCE_TRANSFORMERS_MODEL,
+    model: str = SENTENCE_TRANSFORMERS_DEFAULT,
     *,
     dimensions: int | None = None,
 ) -> Embedder:

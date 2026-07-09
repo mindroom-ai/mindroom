@@ -49,10 +49,10 @@ model with no deferred tools can still replay poisoned history.
 
 from __future__ import annotations
 
-import sys
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
+from mindroom.model_instance_checks import isinstance_of_loaded
 
 if TYPE_CHECKING:
     from agno.models.anthropic import Claude as AnthropicClaude
@@ -89,15 +89,17 @@ def native_tool_search_supported(provider: str, model_id: str) -> bool:
     return not model_id.startswith(TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES)
 
 
+_ANTHROPIC_CLAUDE_CLASS = ("agno.models.anthropic.claude", "Claude")
+
+
 def as_anthropic_claude(model: object) -> AnthropicClaude | None:
     """Narrow one model to Agno's Claude without importing the anthropic SDK.
 
-    A Claude instance can only exist once ``agno.models.anthropic`` is
-    imported, so probing ``sys.modules`` keeps non-Claude runtimes from paying
+    A Claude instance can only exist once ``agno.models.anthropic.claude`` is
+    imported, so the loaded-class check keeps non-Claude runtimes from paying
     the anthropic import just to no-op these hooks (#1436).
     """
-    module = sys.modules.get("agno.models.anthropic")
-    if module is None or not isinstance(model, module.Claude):
+    if not isinstance_of_loaded(model, _ANTHROPIC_CLAUDE_CLASS):
         return None
     return cast("AnthropicClaude", model)
 

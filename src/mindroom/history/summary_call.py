@@ -35,25 +35,22 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
 from mindroom.cancellation import request_task_cancel
+from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
 from mindroom.logging_config import get_logger
-from mindroom.model_instance_checks import isinstance_of_loaded
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
-    from agno.models.anthropic import Claude
     from agno.models.base import Model
     from agno.models.response import ModelResponse
 
 logger = get_logger(__name__)
-
-_ANTHROPIC_CLAUDE_CLASS = ("agno.models.anthropic.claude", "Claude")
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 
@@ -119,14 +116,14 @@ def configure_summary_model(model: Model, *, timeout_seconds: float | None = Non
     Mutating the instance is safe: ``get_model_instance`` builds a fresh model per
     call and compaction loads its own instance per run.
     """
-    if not isinstance_of_loaded(model, _ANTHROPIC_CLAUDE_CLASS):
+    claude_model = as_anthropic_claude(model)
+    if claude_model is None:
         logger.debug(
             "Compaction summary model tuning skipped",
             model_type=type(model).__name__,
             reason="provider_specific_tuning_only_defined_for_claude",
         )
         return model
-    claude_model = cast("Claude", model)
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     claude_model.cache_system_prompt = False
     claude_model.extended_cache_time = False
@@ -282,9 +279,8 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
 
 
 def _summary_output_token_limit(model: Model) -> int | None:
-    if isinstance_of_loaded(model, _ANTHROPIC_CLAUDE_CLASS):
-        return cast("Claude", model).max_tokens
-    return None
+    claude_model = as_anthropic_claude(model)
+    return claude_model.max_tokens if claude_model is not None else None
 
 
 def _summary_response_likely_truncated(response: ModelResponse, *, output_token_limit: int | None) -> bool:

@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 logger = get_logger(__name__)
+_VERTEXAI_CLAUDE_CLASS = ("agno.models.vertexai.claude", "Claude")
 THREAD_SUMMARY_MAX_LENGTH = 300
 _MARKDOWN_LINK_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)|\[([^\]]+)\]\([^)]+\)")
 _MARKDOWN_CODE_BLOCK_RE = re.compile(r"```(?:[^\n`]*)\n?(.*?)```", re.DOTALL)
@@ -86,7 +87,7 @@ def _configure_summary_model_temperature(
     model_name: str,
 ) -> None:
     """Prepare the summary model's temperature setting for one request."""
-    if isinstance_of_loaded(model, ("agno.models.vertexai.claude", "Claude")):
+    if isinstance_of_loaded(model, _VERTEXAI_CLAUDE_CLASS):
         # Vertex Claude's rawPredict helper rejects a temperature field entirely.
         cast("_SupportsTemperature", model).temperature = None
         return

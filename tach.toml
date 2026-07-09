@@ -33,7 +33,16 @@ depends_on = [
     "mindroom.credentials_sync",
     "mindroom.embeddings",
     "mindroom.model_defaults",
+    "mindroom.openai_embedder",
 ]
+
+[[modules]]
+path = "mindroom.model_instance_checks"
+depends_on = []
+
+[[modules]]
+path = "mindroom.openai_embedder"
+depends_on = ["mindroom.model_defaults"]
 
 [[modules]]
 path = "mindroom.path_globs"
@@ -950,6 +959,7 @@ depends_on = [
 path = "mindroom.history.summary_call"
 depends_on = [
     "mindroom.cancellation",
+    "mindroom.claude_prompt_cache",
     "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.timing",
@@ -2482,6 +2492,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
+    "mindroom.model_instance_checks",
     "mindroom.model_loading",
 ]
 
