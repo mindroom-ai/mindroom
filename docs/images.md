@@ -86,6 +86,7 @@ Any failure of a media-bearing request triggers one retry without media — no e
 When the retry succeeds, the model route learns that the dropped media kinds are unsupported, and later requests omit them up front instead of paying a failed API call.
 This learned capability state is process-local and resets on restart.
 Payload-size and context-overflow rejections never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
+Transient failures (HTTP 5xx and 429 status codes on the provider exception) also never teach, since their retry can succeed simply because the outage or rate limit passed.
 
 ## Limitations
 

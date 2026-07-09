@@ -37,6 +37,8 @@ __all__ = [
 
 _INLINE_MEDIA_FALLBACK_MARKER = "[Inline media unavailable for this model]"
 _PAYLOAD_TOO_LARGE_STATUS = 413
+_RATE_LIMIT_STATUS = 429
+_SERVER_ERROR_STATUS = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,11 +181,18 @@ def _capability_teaching_blocked(error: Exception | str, lowered_error_text: str
     """Report when a retry success would not prove the media kinds unsupported.
 
     Payload-size and context-overflow rejections shrink below the limit once
-    media is dropped, so a successful retry says nothing about capability.
+    media is dropped, and transient failures (5xx outages, 429 rate limits)
+    can pass on the retry because the blip passed — in both cases a
+    successful retry says nothing about media capability. Status codes come
+    from the exception object, never from provider error prose; streamed run
+    errors arrive as bare text without a status and stay eligible to teach.
     """
     if isinstance(error, ContextWindowExceededError):
         return True
-    if isinstance(error, ModelProviderError) and error.status_code == _PAYLOAD_TOO_LARGE_STATUS:
+    if isinstance(error, ModelProviderError) and (
+        error.status_code in (_PAYLOAD_TOO_LARGE_STATUS, _RATE_LIMIT_STATUS)
+        or error.status_code >= _SERVER_ERROR_STATUS
+    ):
         return True
     if f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in lowered_error_text:
         return True
