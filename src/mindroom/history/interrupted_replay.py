@@ -64,6 +64,7 @@ class InterruptedReplaySnapshot:
     source_event_prompts: tuple[tuple[str, str], ...]
     response_event_id: str | None
     trace_metadata: dict[str, Any] = field(default_factory=dict)
+    original_status: RunStatus = RunStatus.cancelled
 
 
 def _normalized_string_tuple(values: object) -> tuple[str, ...]:
@@ -135,7 +136,11 @@ def _render_interruption_summary(snapshot: InterruptedReplaySnapshot) -> str:
     if snapshot.interrupted_tools:
         names = ", ".join(entry.tool_name for entry in snapshot.interrupted_tools)
         details.append(f"{len(snapshot.interrupted_tools)} tool call(s) were still running: {names}")
-    summary = "(turn interrupted by the user before completion"
+    summary = (
+        "(turn failed before completion"
+        if snapshot.original_status is RunStatus.error
+        else "(turn interrupted by the user before completion"
+    )
     if details:
         summary += "; " + "; ".join(details)
     return summary + ")"
@@ -155,7 +160,7 @@ def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[st
     metadata.update(
         {
             MATRIX_SEEN_EVENT_IDS_METADATA_KEY: list(snapshot.seen_event_ids),
-            _ORIGINAL_STATUS_KEY: "cancelled",
+            _ORIGINAL_STATUS_KEY: snapshot.original_status.value.lower(),
             _INTERRUPTED_REPLAY_STATE_KEY: _INTERRUPTED_REPLAY_STATE,
         },
     )
@@ -214,6 +219,7 @@ def build_interrupted_replay_snapshot(
     interrupted_tools: Sequence[ToolTraceEntry],
     run_metadata: Mapping[str, object] | None,
     response_event_id: str | None = None,
+    original_status: RunStatus = RunStatus.cancelled,
 ) -> InterruptedReplaySnapshot:
     """Build one canonical interrupted replay snapshot from trusted runtime state."""
     metadata = run_metadata if isinstance(run_metadata, Mapping) else {}
@@ -236,6 +242,7 @@ def build_interrupted_replay_snapshot(
             raw_response_event_id if isinstance(raw_response_event_id, str) and raw_response_event_id else None
         ),
         trace_metadata=trace_metadata,
+        original_status=original_status,
     )
 
 
@@ -292,6 +299,7 @@ def persist_interrupted_replay(
     interrupted_tools: Sequence[ToolTraceEntry],
     run_metadata: Mapping[str, object] | None,
     is_team: bool,
+    original_status: RunStatus = RunStatus.cancelled,
 ) -> None:
     """Persist one interrupted top-level turn from trusted runtime state."""
     if scope_context is None:
@@ -309,6 +317,7 @@ def persist_interrupted_replay(
             interrupted_tools=interrupted_tools,
             run_metadata=run_metadata,
             response_event_id=None,
+            original_status=original_status,
         ),
         is_team=is_team,
     )

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from agno.run.base import RunStatus
+
 from mindroom.history.interrupted_replay import InterruptedReplaySnapshot, build_interrupted_replay_snapshot
 
 if TYPE_CHECKING:
@@ -26,6 +28,7 @@ class TurnRecorder:
     interrupted_tools: list[ToolTraceEntry] = field(default_factory=list)
     outcome: str = "pending"
     interrupted_persisted: bool = False
+    interruption_status: RunStatus = RunStatus.cancelled
 
     def set_run_metadata(self, metadata: dict[str, Any] | None) -> None:
         """Replace the current Matrix run metadata snapshot."""
@@ -86,21 +89,23 @@ class TurnRecorder:
         assistant_text: str,
         completed_tools: Sequence[ToolTraceEntry],
         interrupted_tools: Sequence[ToolTraceEntry],
+        original_status: RunStatus = RunStatus.cancelled,
     ) -> None:
         """Record one interrupted top-level turn."""
         self.set_run_metadata(dict(run_metadata) if run_metadata is not None else None)
         self.set_assistant_text(assistant_text)
         self.set_completed_tools(list(completed_tools))
         self.set_interrupted_tools(list(interrupted_tools))
-        self.mark_interrupted()
+        self.mark_interrupted(original_status=original_status)
 
     def mark_completed(self) -> None:
         """Record successful completion."""
         self.outcome = "completed"
 
-    def mark_interrupted(self) -> None:
+    def mark_interrupted(self, *, original_status: RunStatus = RunStatus.cancelled) -> None:
         """Record interruption."""
         self.outcome = "interrupted"
+        self.interruption_status = original_status
 
     def interrupted_snapshot(self) -> InterruptedReplaySnapshot:
         """Build one canonical interrupted snapshot from the recorded facts."""
@@ -111,6 +116,7 @@ class TurnRecorder:
             interrupted_tools=self.interrupted_tools,
             run_metadata=self.run_metadata,
             response_event_id=self.response_event_id,
+            original_status=self.interruption_status,
         )
 
     def claim_interrupted_persistence(self) -> bool:

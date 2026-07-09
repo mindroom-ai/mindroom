@@ -2583,10 +2583,16 @@ async def team_response_stream(  # noqa: C901, PLR0915
             )
 
         def _record_interrupted_team_turn() -> None:
-            """Mark partial team work interrupted on an errored run, mirroring the agent path."""
+            """Record an errored team turn, including failures with no partial output."""
             _sync_live_turn_recorder()
-            if turn_recorder.assistant_text or turn_recorder.completed_tools or turn_recorder.interrupted_tools:
-                run.turn_state.record_interrupted_from_recorder(turn_recorder, run_metadata=run_metadata)
+            run.turn_state.record_interrupted(
+                turn_recorder,
+                run_metadata=run_metadata,
+                assistant_text=turn_recorder.assistant_text,
+                completed_tools=turn_recorder.completed_tools,
+                interrupted_tools=turn_recorder.interrupted_tools,
+                original_status=RunStatus.error,
+            )
 
         async def _capture_stream_interrupt(stream: AsyncIterator[Any]) -> AsyncGenerator[Any, None]:
             """Record partial work interrupted when the model stream itself raises.

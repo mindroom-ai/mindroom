@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.run.base import RunStatus
 
 from mindroom.bot import AgentBot
 from mindroom.delivery_gateway import DeliveryGateway
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.response_runner import ResponseRequest
 
 
@@ -166,9 +168,22 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
 
     finalize_requests: list[object] = []
     effect_outcomes: list[object] = []
+    turn_recorders: list[TurnRecorder] = []
 
     async def fake_post_effects(final_outcome: object, *_args: object) -> None:
         effect_outcomes.append(final_outcome)
+
+    async def errored_team_response(*_args: object, **kwargs: object) -> str:
+        recorder = cast("TurnRecorder", kwargs["turn_recorder"])
+        recorder.record_interrupted(
+            run_metadata=None,
+            assistant_text="",
+            completed_tools=[],
+            interrupted_tools=[],
+            original_status=RunStatus.error,
+        )
+        turn_recorders.append(recorder)
+        return "Team error"
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -176,7 +191,7 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
             "mindroom.response_lifecycle.apply_post_response_effects",
             new=AsyncMock(side_effect=fake_post_effects),
         ),
-        patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=errored_team_response)),
         patch("mindroom.response_runner.typing_indicator", _noop_typing),
     ):
         coordinator = _build_response_runner(
@@ -199,10 +214,17 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
             AsyncMock(side_effect=lambda req: finalize_requests.append(req)),
         )
         _set_gateway_method(coordinator.deps.delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
-        with patch.object(
-            ResponseRunner,
-            "run_cancellable_response",
-            new=AsyncMock(side_effect=_run_response_function_directly),
+        with (
+            patch.object(
+                ResponseRunner,
+                "run_cancellable_response",
+                new=AsyncMock(side_effect=_run_response_function_directly),
+            ),
+            patch.object(
+                coordinator,
+                "_persist_interrupted_recorder_off_loop",
+                new=AsyncMock(),
+            ) as mock_persist,
         ):
             await coordinator.generate_team_response_helper(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
@@ -215,6 +237,9 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
     assert len(effect_outcomes) == 1
     assert effect_outcomes[0].terminal_status == "error"
     assert "delivery pipe burst" in str(effect_outcomes[0].failure_reason)
+    assert len(turn_recorders) == 1
+    assert turn_recorders[0].interruption_status is RunStatus.error
+    mock_persist.assert_awaited_once()
 
 
 @pytest.mark.asyncio

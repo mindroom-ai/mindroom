@@ -225,6 +225,19 @@ async def auto_resume_interrupted_threads(
     resumed_count = 0
     for index, interrupted_thread in enumerate(selected_threads):
         try:
+            if await _has_newer_human_thread_activity(
+                interrupted_thread,
+                conversation_cache=conversation_cache,
+                config=config,
+                runtime_paths=runtime_paths,
+            ):
+                logger.info(
+                    "Skipped auto-resume after newer human thread activity",
+                    room_id=interrupted_thread.room_id,
+                    thread_id=interrupted_thread.thread_id,
+                    target_event_id=interrupted_thread.target_event_id,
+                )
+                continue
             content = _build_auto_resume_content(
                 interrupted_thread,
                 config=config,
@@ -265,6 +278,37 @@ async def auto_resume_interrupted_threads(
             await asyncio.sleep(delay)
 
     return resumed_count
+
+
+async def _has_newer_human_thread_activity(
+    interrupted_thread: InterruptedThread,
+    *,
+    conversation_cache: ConversationCacheProtocol | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether a human sent a newer message before restart recovery ran."""
+    if conversation_cache is None or interrupted_thread.thread_id is None or interrupted_thread.timestamp_ms <= 0:
+        return False
+    try:
+        history = await conversation_cache.get_thread_history(
+            interrupted_thread.room_id,
+            interrupted_thread.thread_id,
+            caller_label="auto_resume_after_restart",
+        )
+        internal_sender_ids = current_internal_sender_ids(config, runtime_paths)
+    except Exception as exc:
+        logger.warning(
+            "Failed to check newer thread activity before auto-resume",
+            room_id=interrupted_thread.room_id,
+            thread_id=interrupted_thread.thread_id,
+            error=str(exc),
+        )
+        return False
+    return any(
+        message.timestamp > interrupted_thread.timestamp_ms and message.sender not in internal_sender_ids
+        for message in history
+    )
 
 
 async def _cleanup_room_stale_streaming_messages(

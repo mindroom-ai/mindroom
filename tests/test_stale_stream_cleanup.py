@@ -863,6 +863,62 @@ async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_auto_resume_skips_thread_with_newer_human_activity(tmp_path: Path) -> None:
+    """A human follow-up that already restarted the conversation should suppress the recovery relay."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = AsyncMock(spec=nio.AsyncClient)
+    conversation_cache = AsyncMock()
+    conversation_cache.get_thread_history.return_value = [
+        ResolvedVisibleMessage.synthetic(
+            sender=BOT_USER_ID,
+            body="Interrupted response",
+            event_id="$target",
+            timestamp=100,
+            thread_id="$threaded",
+        ),
+        ResolvedVisibleMessage.synthetic(
+            sender=USER_ID,
+            body="Please continue",
+            event_id="$new-user-message",
+            timestamp=200,
+            thread_id="$threaded",
+        ),
+    ]
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$threaded",
+            target_event_id="$target",
+            partial_text="Interrupted response",
+            agent_name="test_agent",
+            original_sender_id=USER_ID,
+            timestamp_ms=100,
+        ),
+    ]
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message_result",
+        new=AsyncMock(return_value=delivered_matrix_event("$resume")),
+    ) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_cache=conversation_cache,
+        )
+
+    assert resumed_count == 0
+    mock_send.assert_not_awaited()
+    conversation_cache.get_thread_history.assert_awaited_once_with(
+        ROOM_ID,
+        "$threaded",
+        caller_label="auto_resume_after_restart",
+    )
+
+
+@pytest.mark.asyncio
 async def test_edit_stale_message_records_outbound_edit_when_successful(tmp_path: Path) -> None:
     """Restart cleanup edits should write through the outbound edit event."""
     config = _make_config(tmp_path)

@@ -619,7 +619,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "Team hello\n\n(turn interrupted by the user before completion)"),
+        ("assistant", "Team hello\n\n(turn failed before completion)"),
     ]
 
 
@@ -706,7 +706,7 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
     assert assistant_text.count("run_shell_command") == 1
     assert assistant_text == (
         "🤝 **Team Response** (General):\n\nTeam hello\n\n"
-        "(turn interrupted by the user before completion; "
+        "(turn failed before completion; "
         "1 tool call(s) had completed: run_shell_command)"
     )
 
@@ -1149,6 +1149,7 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
         recorder=recorder,
         accumulated_text="Partial answer\n\n**[Response interrupted by an error: boom]**",
         tool_trace=[],
+        original_status=RunStatus.error,
     )
 
     snapshot = recorder.interrupted_snapshot()
@@ -1178,6 +1179,7 @@ def test_record_stream_delivery_error_records_zero_output_interruption(
         recorder=recorder,
         accumulated_text="",
         tool_trace=[],
+        original_status=RunStatus.error,
     )
 
     assert recorder.outcome == "interrupted"
@@ -1680,6 +1682,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
                     assistant_text="Team partial",
                     completed_tools=[],
                     interrupted_tools=[],
+                    original_status=RunStatus.error,
                 )
 
             return fake_stream()
@@ -1699,7 +1702,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "Team partial\n\n(turn interrupted by the user before completion)"),
+        ("assistant", "Team partial\n\n(turn failed before completion)"),
     ]
 
 

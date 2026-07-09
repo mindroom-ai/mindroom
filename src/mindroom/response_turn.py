@@ -24,6 +24,8 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
 
+from agno.run.base import RunStatus
+
 from mindroom import ai_runtime
 from mindroom.ai_turn_state import AITurnState
 from mindroom.cancellation import build_cancelled_error
@@ -320,6 +322,7 @@ class StandaloneReplaySnapshot:
     completed_tools: list[ToolTraceEntry]
     interrupted_tools: list[ToolTraceEntry]
     run_metadata: dict[str, Any] | None
+    original_status: RunStatus = RunStatus.cancelled
 
 
 @dataclass(frozen=True)
@@ -615,6 +618,7 @@ def _settle_blocking_attempt(
             assistant_text="",
             completed_tools=[],
             interrupted_tools=[],
+            original_status=RunStatus.error,
         )
         if (
             sinks.turn_recorder is None
@@ -632,6 +636,7 @@ def _settle_blocking_attempt(
                     run_metadata=run.run_metadata
                     if run.run_metadata is not None
                     else _fallback_matrix_run_metadata(ctx, run),
+                    original_status=RunStatus.error,
                 ),
             )
             run.standalone_replay_persisted = True

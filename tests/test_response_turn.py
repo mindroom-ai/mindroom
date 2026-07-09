@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from agno.models.response import ToolExecution
+from agno.run.base import RunStatus
 
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.response_turn import (
@@ -48,6 +49,7 @@ class _FakeTurnRecorder:
     assistant_text: str = ""
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     interrupted_tools: list[ToolTraceEntry] = field(default_factory=list)
+    interruption_status: RunStatus = RunStatus.cancelled
     completed_calls: list[dict[str, Any]] = field(default_factory=list)
     interrupted_calls: list[dict[str, Any]] = field(default_factory=list)
     synced_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -94,13 +96,16 @@ class _FakeTurnRecorder:
         assistant_text: str,
         completed_tools: Sequence[ToolTraceEntry],
         interrupted_tools: Sequence[ToolTraceEntry],
+        original_status: RunStatus = RunStatus.cancelled,
     ) -> None:
+        self.interruption_status = original_status
         self.interrupted_calls.append(
             {
                 "run_metadata": run_metadata,
                 "assistant_text": assistant_text,
                 "completed_tools": list(completed_tools),
                 "interrupted_tools": list(interrupted_tools),
+                "original_status": original_status,
             },
         )
 
@@ -328,6 +333,7 @@ def test_blocking_errored_attempt_persists_zero_output_replay() -> None:
     assert snapshot.run_id == "run-1"
     assert snapshot.partial_text == ""
     assert snapshot.run_metadata == {"room_id": "!room", "matrix_seen_event_ids": ["$user_msg"]}
+    assert snapshot.original_status is RunStatus.error
 
 
 def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:

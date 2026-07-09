@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import uuid4
 
 from agno.db.base import SessionType
+from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
@@ -612,6 +613,7 @@ class ResponseRunner:
         recorder: TurnRecorder,
         accumulated_text: str,
         tool_trace: Sequence[ToolTraceEntry],
+        original_status: RunStatus,
     ) -> None:
         """Capture canonical interrupted replay state from one failed stream delivery.
 
@@ -632,6 +634,7 @@ class ResponseRunner:
             assistant_text=partial_text,
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
+            original_status=original_status,
         )
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
@@ -1627,26 +1630,23 @@ class ResponseRunner:
                         ),
                     )
                 except asyncio.CancelledError:
-                    await self._persist_interrupted_recorder_off_loop(
-                        recorder=team_turn_recorder,
-                        session_scope=session_scope,
-                        session_id=session_id,
-                        execution_identity=tool_dispatch.execution_identity,
-                        run_id=response_run_id,
-                        is_team=True,
-                        response_event_id=progress.tracked_event_id,
-                    )
+                    self._ensure_recorder_interrupted(team_turn_recorder)
                     raise
-                if team_turn_recorder.outcome == "interrupted":
-                    await self._persist_interrupted_recorder_off_loop(
-                        recorder=team_turn_recorder,
-                        session_scope=session_scope,
-                        session_id=session_id,
-                        execution_identity=tool_dispatch.execution_identity,
-                        run_id=response_run_id,
-                        is_team=True,
-                        response_event_id=final_delivery_outcome.event_id,
-                    )
+                finally:
+                    if team_turn_recorder.outcome == "interrupted":
+                        await self._persist_interrupted_recorder_off_loop(
+                            recorder=team_turn_recorder,
+                            session_scope=session_scope,
+                            session_id=session_id,
+                            execution_identity=tool_dispatch.execution_identity,
+                            run_id=response_run_id,
+                            is_team=True,
+                            response_event_id=(
+                                final_delivery_outcome.event_id
+                                if final_delivery_outcome is not None
+                                else progress.tracked_event_id
+                            ),
+                        )
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark_first_visible_reply("final")
                     request.pipeline_timing.mark("response_complete")
@@ -1670,6 +1670,9 @@ class ResponseRunner:
                 recorder=team_turn_recorder,
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
+                original_status=(
+                    RunStatus.cancelled if stream_transport_outcome.terminal_status == "cancelled" else RunStatus.error
+                ),
             )
             await self._persist_interrupted_recorder_off_loop(
                 recorder=team_turn_recorder,
@@ -2174,6 +2177,7 @@ class ResponseRunner:
         )
         if on_delivery_started is not None:
             on_delivery_started(request.existing_event_id)
+        delivery: FinalDeliveryOutcome | None = None
         try:
             delivery = await self.deps.delivery_gateway.deliver_final(
                 FinalDeliveryRequest(
@@ -2187,26 +2191,19 @@ class ResponseRunner:
                 ),
             )
         except asyncio.CancelledError:
-            await self._persist_interrupted_recorder_off_loop(
-                recorder=turn_recorder,
-                session_scope=session_scope,
-                session_id=runtime.session_id,
-                execution_identity=runtime.tool_dispatch.execution_identity,
-                run_id=run_id,
-                is_team=False,
-                response_event_id=request.existing_event_id,
-            )
+            self._ensure_recorder_interrupted(turn_recorder)
             raise
-        if turn_recorder.outcome == "interrupted":
-            await self._persist_interrupted_recorder_off_loop(
-                recorder=turn_recorder,
-                session_scope=session_scope,
-                session_id=runtime.session_id,
-                execution_identity=runtime.tool_dispatch.execution_identity,
-                run_id=run_id,
-                is_team=False,
-                response_event_id=delivery.event_id,
-            )
+        finally:
+            if turn_recorder.outcome == "interrupted":
+                await self._persist_interrupted_recorder_off_loop(
+                    recorder=turn_recorder,
+                    session_scope=session_scope,
+                    session_id=runtime.session_id,
+                    execution_identity=runtime.tool_dispatch.execution_identity,
+                    run_id=run_id,
+                    is_team=False,
+                    response_event_id=(delivery.event_id if delivery is not None else request.existing_event_id),
+                )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
@@ -2302,6 +2299,9 @@ class ResponseRunner:
                 recorder=turn_recorder,
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
+                original_status=(
+                    RunStatus.cancelled if stream_transport_outcome.terminal_status == "cancelled" else RunStatus.error
+                ),
             )
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,

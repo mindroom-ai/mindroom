@@ -324,6 +324,57 @@ def test_session_started_event_is_registered() -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_and_respond_persists_errored_turn_when_delivery_raises(tmp_path: Path) -> None:
+    """A Matrix delivery exception must not discard the replay for a provider failure."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    async def errored_ai_response(*_args: object, **kwargs: object) -> str:
+        recorder = cast("TurnRecorder", kwargs["turn_recorder"])
+        recorder.record_interrupted(
+            run_metadata={"matrix_seen_event_ids": ["$user_msg"]},
+            assistant_text="",
+            completed_tools=[],
+            interrupted_tools=[],
+            original_status=RunStatus.error,
+        )
+        return "Provider failed"
+
+    with patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=errored_ai_response)):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            enable_streaming=False,
+        )
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "deliver_final",
+            AsyncMock(side_effect=RuntimeError("delivery pipe burst")),
+        )
+        with (
+            patch.object(
+                coordinator,
+                "_persist_interrupted_recorder_off_loop",
+                new=AsyncMock(),
+            ) as mock_persist,
+            pytest.raises(RuntimeError, match="delivery pipe burst"),
+        ):
+            await coordinator.process_and_respond(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            )
+
+    mock_persist.assert_awaited_once()
+    persisted_recorder = mock_persist.await_args.kwargs["recorder"]
+    assert isinstance(persisted_recorder, TurnRecorder)
+    assert persisted_recorder.interruption_status is RunStatus.error
+
+
+@pytest.mark.asyncio
 async def test_process_and_respond_emits_session_started_after_first_persisted_thread_response(
     tmp_path: Path,
 ) -> None:
@@ -891,7 +942,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "Partial answer\n\n(turn interrupted by the user before completion)"),
+        ("assistant", "Partial answer\n\n(turn failed before completion)"),
     ]
 
 
@@ -963,8 +1014,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
         ("user", "Hello"),
         (
             "assistant",
-            "Partial answer\n\n(turn interrupted by the user before completion; "
-            "1 tool call(s) had completed: run_shell_command)",
+            "Partial answer\n\n(turn failed before completion; 1 tool call(s) had completed: run_shell_command)",
         ),
     ]
 
@@ -1049,8 +1099,7 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
     assert "🔧 `run_shell_command` [1]" not in assistant_text
     assert assistant_text.count("run_shell_command") == 1
     assert assistant_text == (
-        "Partial answer\n\n(turn interrupted by the user before completion; "
-        "1 tool call(s) had completed: run_shell_command)"
+        "Partial answer\n\n(turn failed before completion; 1 tool call(s) had completed: run_shell_command)"
     )
 
 

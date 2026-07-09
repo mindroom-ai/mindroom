@@ -393,8 +393,8 @@ async def test_team_response_stream_records_interrupted_turn_on_errored_run_outp
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_leaves_recorder_pending_when_error_has_no_partial() -> None:
-    """A team error with no partial work records nothing for replay."""
+async def test_team_response_stream_records_error_when_error_has_no_partial() -> None:
+    """A zero-output team error still records the user turn for replay."""
     orchestrator, config = _make_orchestrator()
 
     async def stream() -> AsyncIterator[object]:
@@ -419,7 +419,9 @@ async def test_team_response_stream_leaves_recorder_pending_when_error_has_no_pa
             )
         ]
 
-    assert recorder.outcome == "pending"
+    assert recorder.outcome == "interrupted"
+    assert recorder.interruption_status is RunStatus.error
+    assert recorder.assistant_text == ""
 
 
 @pytest.mark.asyncio

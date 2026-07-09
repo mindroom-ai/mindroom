@@ -420,6 +420,7 @@ def _build_agent_turn_callbacks(
             interrupted_tools=snapshot.interrupted_tools,
             run_metadata=snapshot.run_metadata,
             is_team=False,
+            original_status=snapshot.original_status,
         )
 
     return _AgentTurnCallbacks(
@@ -1936,6 +1937,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                         assistant_text=state.assistant_text,
                         completed_tools=state.completed_tools,
                         interrupted_tools=interrupted_tools,
+                        original_status=RunStatus.error,
                     )
                 elif not run.standalone_replay_persisted:
                     persist_interrupted_replay(
@@ -1948,6 +1950,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                         interrupted_tools=interrupted_tools,
                         run_metadata=run.run_metadata,
                         is_team=False,
+                        original_status=RunStatus.error,
                     )
                     run.standalone_replay_persisted = True
                 yield get_user_friendly_error_message(run_error, agent_name)

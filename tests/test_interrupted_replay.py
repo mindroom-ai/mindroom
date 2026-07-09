@@ -199,6 +199,30 @@ def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata() ->
     }
 
 
+def test_build_interrupted_replay_run_describes_provider_error_as_failure() -> None:
+    """Provider failures should not be serialized as user cancellations."""
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Please continue",
+        partial_text="Half done",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={"matrix_seen_event_ids": ["e1"]},
+        original_status=RunStatus.error,
+    )
+
+    run = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="run-123",
+        scope_id="test_agent",
+        session_id="session-1",
+        is_team=False,
+    )
+
+    assert _assistant_text(run) == "Half done\n\n(turn failed before completion)"
+    assert run.metadata is not None
+    assert run.metadata["mindroom_original_status"] == "error"
+
+
 def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> None:
     """Interrupted replay runs should round-trip the same coalesced metadata as completed runs."""
     snapshot = build_interrupted_replay_snapshot(
