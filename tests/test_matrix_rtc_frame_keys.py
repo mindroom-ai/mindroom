@@ -168,3 +168,19 @@ def test_receive_rejects_invalid_base64() -> None:
         key_index=0,
     )
     assert manager.receive(bad, now_ms=0) is None
+
+
+def test_malformed_key_does_not_poison_the_dedup_filter() -> None:
+    """A bad payload must not block a later valid key with an older sent_ts."""
+    manager = _manager()
+    bad = ReceivedFrameKey(
+        user_id="@alice:example.org",
+        claimed_device_id="DEV",
+        member_id="@alice:example.org:DEV",
+        key_base64="not-base64!!",
+        key_index=0,
+        sent_ts=500,
+    )
+    assert manager.receive(bad, now_ms=0) is None
+    older_but_valid = manager.receive(_received(b"B" * 16, 0, sent_ts=400), now_ms=1)
+    assert older_but_valid is not None

@@ -15,7 +15,7 @@ from mindroom.matrix_rtc.events import (
     parse_key_to_device_content,
     parse_membership_event,
 )
-from mindroom.matrix_rtc.focus import OpenIDToken, request_sfu_grant
+from mindroom.matrix_rtc.focus import OpenIDToken, discover_livekit_service_url, request_sfu_grant
 
 USER = "@alice:example.org"
 DEVICE = "DEVICEID"
@@ -176,3 +176,39 @@ async def test_request_sfu_grant_posts_openid_exchange(monkeypatch: pytest.Monke
     assert grant.jwt == "token123"
     assert seen["url"] == "https://rtc.example.org/sfu/get"
     assert b'"room": "!room:example.org"' in seen["body"] or b'"room":"!room:example.org"' in seen["body"]
+
+
+def _patched_httpx_client(monkeypatch: pytest.MonkeyPatch, handler) -> None:  # noqa: ANN001
+    transport = httpx.MockTransport(handler)
+    original_client = httpx.AsyncClient
+
+    def patched_client(**kwargs: object) -> httpx.AsyncClient:
+        kwargs.pop("verify", None)
+        return original_client(transport=transport, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("mindroom.matrix_rtc.focus.httpx.AsyncClient", patched_client)
+
+
+@pytest.mark.asyncio
+async def test_request_sfu_grant_rejects_non_object_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-object JSON grant surfaces as ValueError, not AttributeError."""
+    _patched_httpx_client(monkeypatch, lambda _request: httpx.Response(200, json=["not", "a", "grant"]))
+    with pytest.raises(ValueError, match="non-object grant"):
+        await request_sfu_grant(
+            "https://rtc.example.org",
+            room_id="!room:example.org",
+            device_id=DEVICE,
+            openid_token=OpenIDToken(
+                access_token="opaque",  # noqa: S106
+                expires_in=3600,
+                matrix_server_name="example.org",
+                token_type="Bearer",  # noqa: S106
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_discovery_tolerates_non_object_well_known(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-object well-known body yields None instead of AttributeError."""
+    _patched_httpx_client(monkeypatch, lambda _request: httpx.Response(200, json=["not", "a", "well-known"]))
+    assert await discover_livekit_service_url("https://matrix.example.org") is None

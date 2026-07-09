@@ -62,7 +62,15 @@ class ToDeviceFrameKeyTransport:
 
         missing = olm.get_missing_sessions(sorted({t.user_id for t in recipients}))
         if missing:
-            await client.keys_claim(missing)
+            claim_response = await client.keys_claim(missing)
+            if isinstance(claim_response, nio.KeysClaimError):
+                # Targets without sessions are skipped individually below with
+                # their own warning; surface the claim failure itself too.
+                logger.warning(
+                    "call_key_otk_claim_failed",
+                    room_id=room_id,
+                    error=str(claim_response.message),
+                )
 
         content = build_key_to_device_content(
             key_base64=key_base64,

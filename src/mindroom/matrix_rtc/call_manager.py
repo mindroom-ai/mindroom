@@ -168,6 +168,10 @@ class CallManager:
             if self._shutting_down:
                 return
             members = await self._fetch_remote_members(room_id)
+            if members is None:
+                # Transient state-fetch failure: keep any active session alive
+                # and wait for the next call event to reconcile again.
+                return
             session = self._sessions.get(room_id)
             if session is None:
                 if members:
@@ -179,12 +183,16 @@ class CallManager:
                 self._sessions.pop(room_id, None)
                 await session.stop()
 
-    async def _fetch_remote_members(self, room_id: str) -> list[CallMember]:
-        """Current, unexpired call members in the room, excluding ourselves."""
+    async def _fetch_remote_members(self, room_id: str) -> list[CallMember] | None:
+        """Current, unexpired call members in the room, excluding ourselves.
+
+        Returns ``None`` when the room state could not be read, so callers can
+        distinguish "the call is empty" from a transient homeserver error.
+        """
         response = await self._client.room_get_state(room_id)
         if isinstance(response, nio.RoomGetStateError):
             logger.warning("call_state_fetch_failed", room_id=room_id, error=response.message)
-            return []
+            return None
         now_ms = int(time.time() * 1000)
         members = []
         for raw_event in response.events:
@@ -248,6 +256,11 @@ class CallManager:
             await session.start(members)
         except (CallJoinError, httpx.HTTPError, ValueError) as error:
             logger.warning("call_join_failed", room_id=room_id, agent=self._agent_name, error=str(error))
+            return
+        if self._shutting_down:
+            # shutdown() ran while the join was in flight and cannot see this
+            # session yet; stop it instead of leaking a live SFU connection.
+            await session.stop()
             return
         self._sessions[room_id] = session
         logger.info("call_session_started", room_id=room_id, agent=self._agent_name)

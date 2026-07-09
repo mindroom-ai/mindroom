@@ -153,13 +153,15 @@ class FrameKeyManager:
         newest = self._newest_inbound_ts.get(filter_key)
         if newest is not None and sent_ts < newest:
             return None
-        self._newest_inbound_ts[filter_key] = sent_ts
         try:
             key = base64.b64decode(received.key_base64, validate=True)
         except ValueError:
             return None
         if not key:
             return None
+        # Record the dedup timestamp only for keys that validate, so a
+        # malformed payload cannot poison the filter against a good retry.
+        self._newest_inbound_ts[filter_key] = sent_ts
         return _InboundFrameKey(
             participant_identity=received.member_id,
             key_index=received.key_index,

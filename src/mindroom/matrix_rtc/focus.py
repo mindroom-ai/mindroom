@@ -48,6 +48,9 @@ async def discover_livekit_service_url(homeserver_url: str, *, ssl_verify: bool 
         except (httpx.HTTPError, ValueError) as error:
             logger.warning("rtc_well_known_fetch_failed", url=well_known_url, error=str(error))
             return None
+    if not isinstance(payload, dict):
+        logger.warning("rtc_well_known_not_a_dict", url=well_known_url, payload_type=type(payload).__name__)
+        return None
     foci = payload.get(_RTC_FOCI_WELL_KNOWN_KEY)
     if not isinstance(foci, list):
         return None
@@ -88,6 +91,10 @@ async def request_sfu_grant(
         response = await client.post(endpoint, json=request_body)
         response.raise_for_status()
         payload = response.json()
+    if not isinstance(payload, dict):
+        msg = f"MatrixRTC authorization service returned a non-object grant: {type(payload).__name__}"
+        # ValueError (not TypeError) is the invalid-grant contract callers catch.
+        raise ValueError(msg)  # noqa: TRY004
     url = payload.get("url")
     jwt = payload.get("jwt")
     if not isinstance(url, str) or not url or not isinstance(jwt, str) or not jwt:

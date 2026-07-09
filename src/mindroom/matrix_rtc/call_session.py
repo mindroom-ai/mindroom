@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
+import aiohttp
 import nio
 
 from mindroom.logging_config import get_logger
@@ -134,13 +135,25 @@ class CallSession:
     async def start(self, members: list[CallMember]) -> None:
         """Join the call: connect media, publish membership, distribute keys."""
         grant = await self.deps.fetch_grant()
-        await self.deps.bridge.connect(grant)
+        try:
+            await self.deps.bridge.connect(grant)
+        except Exception as error:
+            # livekit raises SDK-native exception types; convert them so the
+            # manager's join guard handles them as an ordinary failed join.
+            msg = f"LiveKit SFU connect failed: {error}"
+            raise CallJoinError(msg) from error
         try:
             if self.e2ee_enabled:
                 await self._distribute_keys(members)
             await self._publish_membership(initial=True)
             self._spawn(self._membership_refresh_loop())
-            await self.deps.bridge.start_agent(self.deps.agent_options)
+            try:
+                await self.deps.bridge.start_agent(self.deps.agent_options)
+            except Exception as error:
+                if isinstance(error, CallJoinError):
+                    raise
+                msg = f"Realtime agent start failed: {error}"
+                raise CallJoinError(msg) from error
         except BaseException:
             await self.stop()
             raise
@@ -175,10 +188,16 @@ class CallSession:
         for task in self._tasks:
             task.cancel()
         self._tasks.clear()
-        await self._clear_membership()
-        await self.deps.bridge.aclose()
-        if self.deps.on_stopped is not None:
-            await self.deps.on_stopped()
+        # Media teardown and transcript finalization must run even when the
+        # homeserver is unreachable while leaving.
+        try:
+            await self._clear_membership()
+        finally:
+            try:
+                await self.deps.bridge.aclose()
+            finally:
+                if self.deps.on_stopped is not None:
+                    await self.deps.on_stopped()
         logger.info("call_left", room_id=self.room_id, identity=self.local_identity)
 
     async def _distribute_keys(self, members: list[CallMember]) -> None:
@@ -208,7 +227,8 @@ class CallSession:
         if not self._stopped:
             self._apply_own_key(key, key_index)
 
-    async def _publish_membership(self, *, initial: bool) -> None:
+    async def _publish_membership(self, *, initial: bool) -> bool:
+        """Publish or refresh our membership state event; returns success."""
         client = self.deps.client
         now = self.deps.clock_ms()
         if self._created_ts is None:
@@ -235,6 +255,8 @@ class CallSession:
             if initial:
                 raise CallJoinError(message)
             logger.warning("call_membership_refresh_failed", room_id=self.room_id, error=response.message)
+            return False
+        return True
 
     async def _membership_refresh_loop(self) -> None:
         while not self._stopped:
@@ -246,25 +268,41 @@ class CallSession:
             await asyncio.sleep(delay_ms / 1000)
             if self._stopped:
                 return
-            self._refresh_iteration += 1
             try:
-                await self._publish_membership(initial=False)
-            except (nio.exceptions.ProtocolError, OSError) as error:
+                published = await self._publish_membership(initial=False)
+            except (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError) as error:
                 logger.warning("call_membership_refresh_error", room_id=self.room_id, error=str(error))
+                published = False
+            if not published:
+                # Retry the SAME refresh window after a short delay instead of
+                # skipping ahead a whole expiry period (which would let the
+                # membership expire out of the roster).
                 await asyncio.sleep(_MEMBERSHIP_REFRESH_RETRY_MS / 1000)
+                continue
+            self._refresh_iteration += 1
 
     async def _clear_membership(self) -> None:
         client = self.deps.client
-        response = await client.room_put_state(
-            self.room_id,
-            CALL_MEMBER_EVENT_TYPE,
-            {},
-            state_key=membership_state_key(client.user_id, required_device_id(client)),
-        )
+        try:
+            response = await client.room_put_state(
+                self.room_id,
+                CALL_MEMBER_EVENT_TYPE,
+                {},
+                state_key=membership_state_key(client.user_id, required_device_id(client)),
+            )
+        except (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError) as error:
+            logger.warning("call_membership_clear_failed", room_id=self.room_id, error=str(error))
+            return
         if isinstance(response, nio.RoomPutStateError):
             logger.warning("call_membership_clear_failed", room_id=self.room_id, error=response.message)
 
     def _spawn(self, coro: Coroutine[None, None, None]) -> None:
         task = asyncio.create_task(coro)
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+
+        def _observe(done: asyncio.Task[None]) -> None:
+            self._tasks.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                logger.warning("call_session_task_failed", room_id=self.room_id, error=str(done.exception()))
+
+        task.add_done_callback(_observe)

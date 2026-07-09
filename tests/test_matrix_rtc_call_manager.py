@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import nio
 import pytest
 
@@ -442,3 +444,158 @@ async def test_manager_passes_same_agent_tools_and_prompt(
     assert options.instructions.startswith("CHAT PROMPT")
     assert options.on_conversation_turn is not None
     assert options.on_tools_executed is not None
+
+
+@pytest.mark.asyncio
+async def test_transient_state_fetch_error_keeps_active_session(tmp_path: Path) -> None:
+    """A homeserver error on state fetch must not tear down a live call."""
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.connected_grant is GRANT
+
+    client.room_get_state.return_value = nio.RoomGetStateError("503 upstream sad")
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert not bridge.closed
+
+    # A genuinely empty call still ends the session.
+    client.room_get_state.return_value = nio.RoomGetStateResponse([], ROOM_ID)
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.closed
+
+
+@pytest.mark.asyncio
+async def test_shutdown_during_join_stops_the_new_session(tmp_path: Path) -> None:
+    """A join that completes while shutdown runs must not leak a live session."""
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
+
+    release = asyncio.Event()
+    original_connect = bridge.connect
+
+    async def blocking_connect(grant: SfuGrant) -> None:
+        await release.wait()
+        await original_connect(grant)
+
+    bridge.connect = blocking_connect  # type: ignore[method-assign]
+
+    join_task = asyncio.create_task(manager.on_room_event(_room(), _member_unknown_event()))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    shutdown_task = asyncio.create_task(manager.shutdown())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    release.set()
+    await join_task
+    await shutdown_task
+    assert bridge.closed
+
+
+@pytest.mark.asyncio
+async def test_bridge_connect_failure_is_a_clean_join_failure(tmp_path: Path) -> None:
+    """livekit-native connect errors become an ordinary failed join, not a crash."""
+    client = _client()
+    bridge = FakeBridge()
+
+    async def exploding_connect(_grant: SfuGrant) -> None:
+        msg = "sdk boom"
+        raise RuntimeError(msg)
+
+    bridge.connect = exploding_connect  # type: ignore[method-assign]
+    manager = _manager(client, bridge, tmp_path)
+    client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.agent_options is None
+
+
+def _plain_session(
+    client: AsyncMock,
+    bridge: FakeBridge,
+    *,
+    on_stopped: object = None,
+) -> CallSession:
+    async def fetch_grant() -> SfuGrant:
+        return GRANT
+
+    return CallSession(
+        room_id=ROOM_ID,
+        e2ee_enabled=False,
+        deps=CallSessionDeps(
+            client=client,
+            bridge=bridge,
+            key_transport=FakeKeyTransport(),
+            fetch_grant=fetch_grant,
+            agent_options=VoiceAgentOptions(instructions="x", model="m", api_key="k"),
+            livekit_service_url=SERVICE_URL,
+            on_stopped=on_stopped,  # type: ignore[arg-type]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_bridge_and_finalizes_when_clear_membership_fails() -> None:
+    """Transport failures while clearing membership must not skip media teardown."""
+    client = _client()
+    client.room_put_state.side_effect = aiohttp.ClientError("network down")
+    bridge = FakeBridge()
+    finalized: list[bool] = []
+
+    async def on_stopped() -> None:
+        finalized.append(True)
+
+    session = _plain_session(client, bridge, on_stopped=on_stopped)
+    await session.stop()
+    assert bridge.closed
+    assert finalized == [True]
+
+
+@pytest.mark.asyncio
+async def test_stop_still_tears_down_on_unexpected_clear_error() -> None:
+    """Even unexpected errors propagate only after aclose and finalization ran."""
+    client = _client()
+    client.room_put_state.side_effect = RuntimeError("bug")
+    bridge = FakeBridge()
+    finalized: list[bool] = []
+
+    async def on_stopped() -> None:
+        finalized.append(True)
+
+    session = _plain_session(client, bridge, on_stopped=on_stopped)
+    with pytest.raises(RuntimeError, match="bug"):
+        await session.stop()
+    assert bridge.closed
+    assert finalized == [True]
+
+
+@pytest.mark.asyncio
+async def test_membership_refresh_retries_the_same_window_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed refresh retries the same iteration instead of skipping a window."""
+    client = _client()
+    error = MagicMock(spec=nio.RoomPutStateError)
+    error.message = "boom"
+    client.room_put_state.side_effect = [error, MagicMock()]
+    session = _plain_session(client, FakeBridge())
+    session._created_ts = 0
+
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) >= 4:
+            session._stopped = True
+        await real_sleep(0)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", fake_sleep)
+    await session._membership_refresh_loop()
+
+    assert client.room_put_state.await_count == 2
+    assert session._refresh_iteration == 2
+    # The second sleep is the short retry delay, not a full refresh window.
+    assert sleeps[1] == pytest.approx(60.0)
