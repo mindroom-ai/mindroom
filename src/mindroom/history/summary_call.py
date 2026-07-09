@@ -14,10 +14,12 @@ It enforces the call-side half of the compaction invariants
    max_tokens as the truncation guard. Unknown providers pass through untouched
    and rely on the outer chunk timeout alone.
 
-4. Budget shrinks deterministically on provider failure.
+4. Retry on provider failure is deterministic.
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
    (timeouts and the named context-length fragments), the shrink schedule
    (halving), and the give-up floor — no inline string matching at call sites.
+   Empty-text success responses re-issue once at the unchanged budget instead,
+   because shrinking cannot fix a transient empty response.
 
 5. Output-capped summaries use an explicit retry signal.
    ``generate_compaction_summary`` refuses to return a likely truncated summary,
@@ -81,11 +83,12 @@ class _CompactionSummaryEmptyResultError(RuntimeError):
 
 @dataclass(frozen=True)
 class SummaryRetryPolicy:
-    """Explicit budget-shrink policy for failed compaction summary calls.
+    """Explicit retry policy for failed compaction summary calls.
 
-    The schedule is deterministic: each policy-approved failure divides the input
-    budget by ``shrink_divisor`` (clamped to ``floor_tokens``); once the budget can
-    no longer shrink, or ``max_attempts`` is reached, the error propagates.
+    The schedule is deterministic: each shrinkable failure divides the input
+    budget by ``shrink_divisor`` (clamped to ``floor_tokens``), while an empty
+    result re-issues at the unchanged budget; once the budget can no longer
+    shrink, or ``max_attempts`` is reached, the error propagates.
     """
 
     max_attempts: int = 2

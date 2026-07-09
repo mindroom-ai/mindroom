@@ -3,7 +3,7 @@
 1. Compacted runs never reappear (``mindroom.history.storage``).
 2. Chunk progress survives interruption (``mindroom.history.storage``).
 3. Summary calls get exactly one model configuration path (``mindroom.history.summary_call``).
-4. Budget shrinks deterministically on provider failure (``mindroom.history.summary_call``).
+4. Retry on provider failure is deterministic (``mindroom.history.summary_call``).
 
 These tests exercise the owning interfaces directly, not the bot runtime.
 """
@@ -414,7 +414,7 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
 
 def test_configure_summary_model_tunes_claude_in_one_place() -> None:
     model = Claude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         cache_system_prompt=True,
         extended_cache_time=True,
         thinking={"type": "enabled", "budget_tokens": 8192},
@@ -436,7 +436,7 @@ def test_configure_summary_model_tunes_claude_in_one_place() -> None:
 
 def test_configure_summary_model_tunes_vertexai_claude() -> None:
     model = MindroomVertexAIClaude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         project_id="demo-project",
         region="us-central1",
         cache_system_prompt=True,
@@ -456,7 +456,7 @@ def test_configure_summary_model_tunes_vertexai_claude() -> None:
 
 
 def test_configure_summary_model_preserves_authored_output_cap() -> None:
-    model = Claude(id="claude-sonnet-4-6", max_tokens=1024, timeout=30.0)
+    model = Claude(id="claude-sonnet-5", max_tokens=1024, timeout=30.0)
 
     configure_summary_model(model)
 
@@ -476,7 +476,7 @@ def test_configure_summary_model_leaves_unknown_providers_untouched() -> None:
 @pytest.mark.asyncio
 async def test_generate_compaction_summary_applies_tuning_and_request_shape() -> None:
     model = _RecordingClaude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         cache_system_prompt=True,
         extended_cache_time=True,
         thinking={"type": "enabled", "budget_tokens": 8192},
@@ -508,7 +508,7 @@ async def test_generate_compaction_summary_rejects_output_cap_truncation() -> No
     with pytest.raises(RuntimeError, match="output token limit"):
         await generate_compaction_summary(
             model=_RecordingClaude(
-                id="claude-sonnet-4-6",
+                id="claude-sonnet-5",
                 max_tokens=64_000,
                 response=ModelResponse(
                     content="durable summary ended cleanly.",
@@ -525,7 +525,7 @@ async def test_generate_compaction_summary_uses_configured_output_cap() -> None:
     with pytest.raises(RuntimeError, match="output token limit"):
         await generate_compaction_summary(
             model=_RecordingClaude(
-                id="claude-sonnet-4-6",
+                id="claude-sonnet-5",
                 max_tokens=1_024,
                 response=ModelResponse(content="durable summary ended cleanly.", output_tokens=1_024),
             ),
@@ -538,7 +538,7 @@ async def test_generate_compaction_summary_uses_configured_output_cap() -> None:
 async def test_generate_compaction_summary_allows_claude_summary_below_output_cap() -> None:
     summary = await generate_compaction_summary(
         model=_RecordingClaude(
-            id="claude-sonnet-4-6",
+            id="claude-sonnet-5",
             max_tokens=64_000,
             response=ModelResponse(
                 content="durable summary ended cleanly.",
@@ -556,7 +556,7 @@ async def test_generate_compaction_summary_allows_claude_summary_below_output_ca
 async def test_generate_compaction_summary_allows_full_history_summary_above_four_k() -> None:
     summary = await generate_compaction_summary(
         model=_RecordingClaude(
-            id="claude-sonnet-4-6",
+            id="claude-sonnet-5",
             max_tokens=8192,
             response=ModelResponse(
                 content="durable full-history summary ended cleanly.",
@@ -572,7 +572,7 @@ async def test_generate_compaction_summary_allows_full_history_summary_above_fou
 
 @pytest.mark.asyncio
 async def test_generate_compaction_summary_uses_claude_default_output_cap() -> None:
-    model = _RecordingClaude(id="claude-sonnet-4-6")
+    model = _RecordingClaude(id="claude-sonnet-5")
     default_output_cap = model.max_tokens
     assert default_output_cap is not None
     model.response = ModelResponse(
@@ -678,7 +678,7 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
     ):
         await generate_compaction_summary(
             model=_RecordingClaude(
-                id="claude-sonnet-4-6",
+                id="claude-sonnet-5",
                 max_tokens=64_000,
                 response=ModelResponse(content="", output_tokens=0),
             ),

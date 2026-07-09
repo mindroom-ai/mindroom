@@ -553,9 +553,10 @@ async def _generate_compaction_summary_with_retry(
                     max_input_tokens=retry_budget,
                 )
                 # The policy decides whether a retry is allowed; rebuilt_runs is the
-                # feasibility gate. An empty rebuild means the shrunken budget fits no
-                # run at all, so a retry would resend the same failing input — fall
-                # through to raise instead.
+                # feasibility gate. Only a shrunken budget can rebuild empty (an
+                # unchanged budget reproduces the input that already fit), and it
+                # means no run fits — fall through to raise instead of resending
+                # the too-large input.
                 if rebuilt_runs:
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
