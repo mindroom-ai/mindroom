@@ -367,7 +367,6 @@ async def test_build_ingress_envelope_carries_event_identity(config: Config) -> 
     )
 
     envelope = resolver.build_ingress_envelope(
-        room_id=_ROOM_ID,
         event=event,
         requester_user_id=_SENDER,
         target=target,

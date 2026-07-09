@@ -507,13 +507,11 @@ class TestUserIdPassthrough:
         tool_context = coordinator.deps.tool_runtime.build_context(
             target,
             user_id="@alice:localhost",
-            session_id="session-1",
         )
         assert tool_context is not None
         execution_identity = coordinator.deps.tool_runtime.build_execution_identity(
             target=target,
             user_id="@alice:localhost",
-            session_id="session-1",
         )
         observed_final_contexts: list[tuple[object | None, object | None]] = []
 
@@ -592,7 +590,6 @@ class TestUserIdPassthrough:
         outer_context = coordinator.deps.tool_runtime.build_context(
             target,
             user_id="@outer:localhost",
-            session_id="outer-session",
         )
         assert outer_context is not None
         observed_context: list[object | None] = []

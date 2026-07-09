@@ -69,15 +69,11 @@ def _policy_dispatch(
     target = MessageTarget.resolve(room_id, context.thread_id, source_event_id)
     envelope = MessageEnvelope(
         source_event_id=source_event_id,
-        room_id=room_id,
         target=target,
-        requester_id=requester_user_id,
-        sender_id=requester_user_id,
         body=body,
         attachment_ids=(),
         mentioned_agents=tuple(context.mentioned_agents),
         agent_name=agent_name,
-        source_kind="message",
         origin=message_origin(
             sender_id=requester_user_id,
             requester_id=requester_user_id,
@@ -232,15 +228,11 @@ def test_active_response_follow_up_uses_actual_managed_sender_ids(tmp_path: Path
         resolved_requester_id = requester_id or sender_id
         return MessageEnvelope(
             source_event_id="$msg",
-            room_id="!room:localhost",
             target=target,
-            requester_id=resolved_requester_id,
-            sender_id=sender_id,
             body="follow up",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="research",
-            source_kind=origin.source_kind if origin is not None else "message",
             origin=origin
             or message_origin(
                 sender_id=sender_id,

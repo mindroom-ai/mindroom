@@ -30,6 +30,7 @@ import mindroom.api.sandbox_runner_app as sandbox_runner_app_module
 import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.constants as constants_module
 import mindroom.tool_system.metadata as metadata_module
+import mindroom.tool_system.registration as registration_module
 from mindroom import runtime_env_policy
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.main import Config, ConfigRuntimeValidationError
@@ -48,13 +49,9 @@ from mindroom.credentials import (
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolMetadata, ToolStatus
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
-    ConfigField,
-    SetupType,
-    ToolCategory,
-    ToolMetadata,
-    ToolStatus,
     get_tool_by_name,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
@@ -2368,7 +2365,7 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     )
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(shared_storage))
-    metadata_module.register_builtin_tool_metadata(
+    registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
             display_name="Dummy",
@@ -2431,7 +2428,7 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
     original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
     storage_root = tmp_path / "runtime-storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
-    metadata_module.register_builtin_tool_metadata(
+    registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
             display_name="Dummy",
@@ -2807,7 +2804,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ConfigField, ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoPluginTool(Toolkit):\n"
         "    def __init__(self, label: str | None = None) -> None:\n"
@@ -2871,7 +2868,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ConfigField, ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoPluginInitTool(Toolkit):\n"
         "    def __init__(self, base_dir: str | None = None) -> None:\n"
@@ -3391,7 +3388,7 @@ def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
     original_metadata = TOOL_METADATA.copy()
     original_builtin_registry = metadata_module.BUILTIN_TOOL_REGISTRY.copy()
     original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
-    metadata_module.register_builtin_tool_metadata(
+    registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
             display_name="Runner Auto Save",

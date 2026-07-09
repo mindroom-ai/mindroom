@@ -18,6 +18,7 @@ from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.message_target import MessageTarget
 from mindroom.tool_schema_cache import process_function_schema_for_prompt
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
@@ -543,16 +544,19 @@ class TestDelegateKnowledge:
         )
         runtime_context = ToolRuntimeContext(
             agent_name="leader",
-            room_id="!room:example.org",
-            thread_id="$thread",
-            resolved_thread_id="$thread",
+            target=MessageTarget(
+                room_id="!room:example.org",
+                source_thread_id="$thread",
+                resolved_thread_id="$thread",
+                reply_to_event_id=None,
+                session_id="session-1",
+            ),
             requester_id="@alice:example.org",
             client=MagicMock(),
             config=config,
             runtime_paths=runtime_paths,
             event_cache=make_event_cache_mock(),
             conversation_cache=make_conversation_cache_mock(),
-            session_id="session-1",
             correlation_id="corr-parent",
         )
 
@@ -626,9 +630,13 @@ class TestDelegateKnowledge:
         )
         runtime_context = ToolRuntimeContext(
             agent_name="leader",
-            room_id="!room:example.org",
-            thread_id="$thread",
-            resolved_thread_id="$thread",
+            target=MessageTarget(
+                room_id="!room:example.org",
+                source_thread_id="$thread",
+                resolved_thread_id="$thread",
+                reply_to_event_id=None,
+                session_id="session-1",
+            ),
             requester_id="@alice:example.org",
             client=MagicMock(),
             config=config,
@@ -636,7 +644,6 @@ class TestDelegateKnowledge:
             event_cache=make_event_cache_mock(),
             conversation_cache=make_conversation_cache_mock(),
             active_model_name="default",
-            session_id="session-1",
         )
 
         async def fake_ai_response(ctx: object, **_kwargs: object) -> str:

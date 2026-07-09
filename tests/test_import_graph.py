@@ -91,8 +91,10 @@ _TOOLS_ROOTS = _REGISTRY_ROOTS | frozenset(
 _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
     "mindroom.model_loading": _CONFIG_LAYER_ROOTS | frozenset({"agno"}),
+    "mindroom.tool_system.declarations": frozenset({"dotenv"}),
     "mindroom.tool_system.metadata": _REGISTRY_ROOTS,
     "mindroom.tool_system.catalog": _REGISTRY_ROOTS,
+    "mindroom.tool_system.registration": _CONFIG_LAYER_ROOTS,
     "mindroom.tools": _TOOLS_ROOTS,
     # The sandbox runner is the API server for worker tool execution: fastapi
     # and its dependency tree on top of the full registry footprint.
@@ -169,8 +171,10 @@ def _assert_probe_clean(module: str, roots: tuple[str, ...]) -> None:
     [
         "mindroom.config.main",
         "mindroom.model_loading",
+        "mindroom.tool_system.declarations",
         "mindroom.tool_system.metadata",
         "mindroom.tool_system.catalog",
+        "mindroom.tool_system.registration",
         "mindroom.tools",
         "mindroom.api.sandbox_runner",
     ],
@@ -183,6 +187,23 @@ def test_slim_entry_points_do_not_import_provider_sdks(module: str) -> None:
 def test_primary_runtime_does_not_import_provider_sdks() -> None:
     """The orchestrator import (mindroom run) loads no provider SDK; only configured ones load later."""
     _assert_probe_clean("mindroom.orchestrator", _PROVIDER_SDK_ROOTS)
+
+
+def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:
+    """Built-in registration may write registry state without loading catalog behavior."""
+    _assert_probe_clean(
+        "mindroom.tools",
+        ("mindroom.tool_system.catalog", "mindroom.tool_system.metadata"),
+    )
+
+
+def test_tool_auto_install_smoke_entrypoint_imports() -> None:
+    """The repository smoke entry point must use the post-split tool-system surfaces."""
+    subprocess.run(
+        [sys.executable, "-c", "import scripts.testing.tool_auto_install_smoke"],
+        check=True,
+        timeout=120,
+    )
 
 
 @pytest.mark.parametrize("module", sorted(_ALLOWED_THIRD_PARTY_ROOTS))

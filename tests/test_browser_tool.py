@@ -25,6 +25,7 @@ from mindroom.custom_tools.browser import (
     _persistent_launch_kwargs,
     _profile_dir,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -202,9 +203,11 @@ def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(tmp_path: 
     context_storage_path = tmp_path / "context-storage"
     context = ToolRuntimeContext(
         agent_name="general",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
         requester_id="@alice:example.org",
         client=MagicMock(),
         config=MagicMock(),
@@ -233,9 +236,11 @@ def test_resolve_output_dir_does_not_reuse_previous_context_storage_path(tmp_pat
     def runtime_context(storage_path: Path) -> ToolRuntimeContext:
         return ToolRuntimeContext(
             agent_name="general",
-            room_id="!room:example.org",
-            thread_id=None,
-            resolved_thread_id=None,
+            target=MessageTarget.resolve(
+                room_id="!room:example.org",
+                thread_id=None,
+                reply_to_event_id=None,
+            ),
             requester_id="@alice:example.org",
             client=MagicMock(),
             config=MagicMock(),
@@ -626,9 +631,11 @@ def test_browser_upload_roots_do_not_reuse_previous_context_output_dir(tmp_path:
     def runtime_context(storage_path: Path) -> ToolRuntimeContext:
         return ToolRuntimeContext(
             agent_name="general",
-            room_id="!room:example.org",
-            thread_id=None,
-            resolved_thread_id=None,
+            target=MessageTarget.resolve(
+                room_id="!room:example.org",
+                thread_id=None,
+                reply_to_event_id=None,
+            ),
             requester_id="@alice:example.org",
             client=MagicMock(),
             config=MagicMock(),

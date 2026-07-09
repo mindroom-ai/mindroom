@@ -91,15 +91,11 @@ def _plugin(name: str, callbacks: list[object]) -> object:
 def _envelope(*, agent_name: str = "code", body: str = "hello") -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$event",
-        room_id="!room:localhost",
         target=MessageTarget.resolve("!room:localhost", None, "$event"),
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body=body,
         attachment_ids=(),
         mentioned_agents=(),
         agent_name=agent_name,
-        source_kind=MESSAGE_SOURCE_KIND,
         origin=message_origin(
             sender_id="@user:localhost",
             requester_id="@user:localhost",

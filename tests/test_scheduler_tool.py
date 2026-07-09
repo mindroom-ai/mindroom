@@ -12,6 +12,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.scheduler import SchedulerTools
+from mindroom.message_target import MessageTarget
 from mindroom.scheduling import SchedulingRuntime, _extract_mentioned_agents_from_text
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
@@ -28,9 +29,11 @@ def _bind_runtime_paths(config: Config) -> Config:
 def _make_context(config: Config, *, matrix_admin: object | None = None) -> ToolRuntimeContext:
     return ToolRuntimeContext(
         agent_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
+        target=MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id="$thread",
+            reply_to_event_id=None,
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
@@ -38,7 +41,6 @@ def _make_context(config: Config, *, matrix_admin: object | None = None) -> Tool
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
         room=MagicMock(),
-        reply_to_event_id=None,
         storage_path=None,
         matrix_admin=matrix_admin,
     )

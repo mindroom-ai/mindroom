@@ -236,7 +236,6 @@ class EditRegenerator:
             ),
         )
         envelope = self.deps.resolver.build_message_envelope(
-            room_id=room.room_id,
             event=event,
             requester_user_id=requester_user_id,
             context=context,

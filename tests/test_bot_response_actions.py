@@ -967,15 +967,11 @@ class TestAgentBot(AgentBotTestBase):
         )
         envelope = MessageEnvelope(
             source_event_id="$followup",
-            room_id=room.room_id,
             target=target,
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="stop if you see this",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=bot.agent_name,
-            source_kind="live",
             origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
 
@@ -1062,15 +1058,11 @@ class TestAgentBot(AgentBotTestBase):
         )
         envelope = MessageEnvelope(
             source_event_id="$followup",
-            room_id=room.room_id,
             target=target,
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="continue",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=bot.agent_name,
-            source_kind="live",
             origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
 
@@ -1131,15 +1123,11 @@ class TestAgentBot(AgentBotTestBase):
         )
         envelope = MessageEnvelope(
             source_event_id="$followup",
-            room_id=room.room_id,
             target=target,
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="continue",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=bot.agent_name,
-            source_kind="live",
             origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
 
@@ -1197,15 +1185,11 @@ class TestAgentBot(AgentBotTestBase):
         )
         envelope = MessageEnvelope(
             source_event_id="$followup",
-            room_id=room.room_id,
             target=target,
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="stop if you see this",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=bot.agent_name,
-            source_kind=MESSAGE_SOURCE_KIND,
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
             origin=message_origin(
                 sender_id="@user:localhost",
@@ -1284,15 +1268,11 @@ class TestAgentBot(AgentBotTestBase):
         )
         envelope = MessageEnvelope(
             source_event_id="$followup",
-            room_id=room.room_id,
             target=target,
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="stop if you see this",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=bot.agent_name,
-            source_kind=VOICE_SOURCE_KIND,
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
             origin=message_origin(
                 sender_id="@user:localhost",
@@ -1392,15 +1372,11 @@ class TestAgentBot(AgentBotTestBase):
         target = MessageTarget.resolve(room.room_id, "$thread", "$event")
         envelope = MessageEnvelope(
             source_event_id="$event",
-            room_id=room.room_id,
             target=target,
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="continue",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=ROUTER_AGENT_NAME,
-            source_kind="live",
             origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
         event = self._make_handler_event("message", sender="@user:localhost", event_id="$event")

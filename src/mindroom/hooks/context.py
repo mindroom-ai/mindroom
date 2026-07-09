@@ -231,15 +231,11 @@ class MessageEnvelope:
     """Normalized inbound message shape used by message hooks."""
 
     source_event_id: str
-    room_id: str
     target: MessageTarget
-    requester_id: str
-    sender_id: str
     body: str
     attachment_ids: tuple[str, ...]
     mentioned_agents: tuple[str, ...]
     agent_name: str
-    source_kind: str
     origin: TurnOrigin = field(kw_only=True)
     hook_source: str | None = None
     message_received_depth: int = 0
@@ -250,18 +246,26 @@ class MessageEnvelope:
         if self.origin is None:
             message = "MessageEnvelope.origin is required"
             raise TypeError(message)
-        if self.room_id != self.target.room_id:
-            message = "MessageEnvelope.room_id must match MessageEnvelope.target.room_id"
-            raise ValueError(message)
-        if self.sender_id != self.origin.transport_sender_id:
-            message = "MessageEnvelope.sender_id must match MessageEnvelope.origin.transport_sender_id"
-            raise ValueError(message)
-        if self.requester_id != self.origin.requester_id:
-            message = "MessageEnvelope.requester_id must match MessageEnvelope.origin.requester_id"
-            raise ValueError(message)
-        if self.source_kind != self.origin.source_kind:
-            message = "MessageEnvelope.source_kind must match MessageEnvelope.origin.source_kind"
-            raise ValueError(message)
+
+    @property
+    def room_id(self) -> str:
+        """Return the canonical target room ID."""
+        return self.target.room_id
+
+    @property
+    def requester_id(self) -> str:
+        """Return the canonical requester ID."""
+        return self.origin.requester_id
+
+    @property
+    def sender_id(self) -> str:
+        """Return the canonical transport sender ID."""
+        return self.origin.transport_sender_id
+
+    @property
+    def source_kind(self) -> str:
+        """Return the canonical ingress source kind."""
+        return self.origin.source_kind
 
 
 @dataclass(slots=True)

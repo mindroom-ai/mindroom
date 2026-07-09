@@ -22,15 +22,11 @@ def _envelope(
 ) -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$event",
-        room_id="!room:localhost",
         target=MessageTarget.resolve("!room:localhost", None, "$event"),
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body="hello",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="code",
-        source_kind=source_kind,
         hook_source=hook_source,
         message_received_depth=message_received_depth,
         origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind=source_kind),
@@ -59,54 +55,46 @@ def test_message_envelope_requires_origin() -> None:
     """Every envelope should carry canonical turn-origin policy."""
     missing_origin_kwargs: dict[str, Any] = {
         "source_event_id": "$event",
-        "room_id": "!room:localhost",
         "target": MessageTarget.resolve("!room:localhost", None, "$event"),
-        "requester_id": "@user:localhost",
-        "sender_id": "@user:localhost",
         "body": "hello",
         "attachment_ids": (),
         "mentioned_agents": (),
         "agent_name": "code",
-        "source_kind": "message",
     }
     with pytest.raises(TypeError, match="origin"):
         MessageEnvelope(**missing_origin_kwargs)
     with pytest.raises(TypeError, match="origin"):
         MessageEnvelope(
             source_event_id="$event",
-            room_id="!room:localhost",
             target=MessageTarget.resolve("!room:localhost", None, "$event"),
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="hello",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="code",
-            source_kind="message",
             origin=cast("Any", None),
         )
 
 
-def test_message_envelope_source_kind_must_match_origin() -> None:
-    """Envelope source kind and origin policy should stay one value."""
-    with pytest.raises(ValueError, match="source_kind"):
-        MessageEnvelope(
-            source_event_id="$event",
-            room_id="!room:localhost",
-            target=MessageTarget.resolve("!room:localhost", None, "$event"),
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
-            body="hello",
-            attachment_ids=(),
-            mentioned_agents=(),
-            agent_name="code",
-            source_kind="message",
-            origin=message_origin(
-                sender_id="@user:localhost",
-                requester_id="@user:localhost",
-                source_kind="hook",
-            ),
-        )
+def test_message_envelope_identity_is_derived_from_target_and_origin() -> None:
+    """Envelope identity should expose its canonical target and origin values."""
+    envelope = MessageEnvelope(
+        source_event_id="$event",
+        target=MessageTarget.resolve("!room:localhost", None, "$event"),
+        body="hello",
+        attachment_ids=(),
+        mentioned_agents=(),
+        agent_name="code",
+        origin=message_origin(
+            sender_id="@transport:localhost",
+            requester_id="@requester:localhost",
+            source_kind="hook",
+        ),
+    )
+
+    assert envelope.room_id == "!room:localhost"
+    assert envelope.sender_id == "@transport:localhost"
+    assert envelope.requester_id == "@requester:localhost"
+    assert envelope.source_kind == "hook"
 
 
 def test_hook_ingress_policy_skips_origin_plugin_on_first_message_received_hop() -> None:

@@ -172,15 +172,11 @@ def _envelope(
     )
     return MessageEnvelope(
         source_event_id=source_event_id,
-        room_id="!room:localhost",
         target=target,
-        requester_id=requester_id,
-        sender_id=sender_id,
         body="hello",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="general",
-        source_kind=source_kind,
         dispatch_policy_source_kind=dispatch_policy_source_kind,
         origin=origin or message_origin(sender_id=sender_id, requester_id=requester_id, source_kind=source_kind),
     )

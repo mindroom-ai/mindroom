@@ -581,7 +581,6 @@ async def test_should_watch_session_started_returns_false_when_storage_probe_fai
     tool_context = coordinator.deps.tool_runtime.build_context(
         target,
         user_id="@alice:localhost",
-        session_id=target.session_id,
     )
 
     watch_request = _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root")
@@ -1322,21 +1321,18 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
             *,
             target: MessageTarget,
             user_id: str | None,
-            session_id: str,
             agent_name: str | None = None,
         ) -> object:
             build_calls.append(
                 {
                     "target": target,
                     "user_id": user_id,
-                    "session_id": session_id,
                     "agent_name": agent_name,
                 },
             )
             return original_build_execution_identity(
                 target=target,
                 user_id=user_id,
-                session_id=session_id,
                 agent_name=agent_name,
             )
 
@@ -1693,15 +1689,11 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
         _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         response_envelope=MessageEnvelope(
             source_event_id="$user_msg",
-            room_id="!test:localhost",
             target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            requester_id="@alice:localhost",
-            sender_id="@alice:localhost",
             body="Hello",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="general",
-            source_kind=MESSAGE_SOURCE_KIND,
             origin=message_origin(
                 sender_id="@alice:localhost",
                 requester_id="@alice:localhost",
@@ -1783,15 +1775,11 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
         _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         response_envelope=MessageEnvelope(
             source_event_id="$user_msg",
-            room_id="!test:localhost",
             target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            requester_id="@alice:localhost",
-            sender_id="@alice:localhost",
             body="Hello",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="general",
-            source_kind=MESSAGE_SOURCE_KIND,
             origin=message_origin(
                 sender_id="@alice:localhost",
                 requester_id="@alice:localhost",

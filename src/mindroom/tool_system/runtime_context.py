@@ -21,7 +21,6 @@ from mindroom.hooks import (
     validate_event_name,
 )
 from mindroom.logging_config import get_logger
-from mindroom.message_target import MessageTarget
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
@@ -41,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
+    from mindroom.message_target import MessageTarget
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling import SchedulingRuntime
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
@@ -62,9 +62,7 @@ class ToolRuntimeContext:
     """Shared runtime metadata available to all tools."""
 
     agent_name: str
-    room_id: str
-    thread_id: str | None
-    resolved_thread_id: str | None
+    target: MessageTarget
     requester_id: str
     client: nio.AsyncClient
     config: Config
@@ -73,9 +71,7 @@ class ToolRuntimeContext:
     conversation_cache: ConversationCacheProtocol
     transport_agent_name: str | None = None
     active_model_name: str | None = None
-    session_id: str | None = None
     room: nio.MatrixRoom | None = None
-    reply_to_event_id: str | None = None
     storage_path: Path | None = None
     attachment_ids: tuple[str, ...] = field(default_factory=tuple)
     runtime_attachment_ids: list[str] = field(default_factory=list)
@@ -87,6 +83,31 @@ class ToolRuntimeContext:
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
+
+    @property
+    def room_id(self) -> str:
+        """Return the canonical target room ID."""
+        return self.target.room_id
+
+    @property
+    def thread_id(self) -> str | None:
+        """Return the source thread ID from the canonical target."""
+        return self.target.source_thread_id
+
+    @property
+    def resolved_thread_id(self) -> str | None:
+        """Return the effective thread root from the canonical target."""
+        return self.target.resolved_thread_id
+
+    @property
+    def reply_to_event_id(self) -> str | None:
+        """Return the reply event ID from the canonical target."""
+        return self.target.reply_to_event_id
+
+    @property
+    def session_id(self) -> str:
+        """Return the session ID from the canonical target."""
+        return self.target.session_id
 
     def resolve_worker_target(self) -> ResolvedWorkerTarget:
         """Resolve the worker target for toolkits built on behalf of this dispatch.
@@ -192,7 +213,6 @@ class ToolRuntimeSupport:
         target: MessageTarget,
         *,
         user_id: str | None,
-        session_id: str | None = None,
         agent_name: str | None = None,
         active_model_name: str | None = None,
         attachment_ids: list[str] | tuple[str, ...] | None = None,
@@ -206,15 +226,9 @@ class ToolRuntimeSupport:
         event_cache = self.runtime.event_cache
         if event_cache is None:
             return None
-        target_room_id = target.room_id
-        target_thread_id = target.source_thread_id
-        target_resolved_thread_id = target.resolved_thread_id
-        target_reply_to_event_id = target.reply_to_event_id
         return ToolRuntimeContext(
             agent_name=agent_name or self.agent_name,
-            room_id=target_room_id,
-            thread_id=target_thread_id,
-            resolved_thread_id=target_resolved_thread_id,
+            target=target,
             requester_id=user_id or self.matrix_id.full_id,
             client=client,
             config=self.runtime.config,
@@ -223,9 +237,7 @@ class ToolRuntimeSupport:
             event_cache=event_cache,
             transport_agent_name=self.agent_name,
             active_model_name=active_model_name,
-            session_id=session_id or target.session_id,
-            room=self.resolver.cached_room(target_room_id),
-            reply_to_event_id=target_reply_to_event_id,
+            room=self.resolver.cached_room(target.room_id),
             storage_path=self.storage_path,
             attachment_ids=tuple(attachment_ids or ()),
             hook_registry=self.hook_context.registry,
@@ -243,7 +255,6 @@ class ToolRuntimeSupport:
         target: MessageTarget,
         *,
         user_id: str | None,
-        session_id: str | None = None,
         agent_name: str | None = None,
         active_model_name: str | None = None,
         attachment_ids: list[str] | tuple[str, ...] | None = None,
@@ -254,13 +265,11 @@ class ToolRuntimeSupport:
         execution_identity = self.build_execution_identity(
             target=target,
             user_id=user_id,
-            session_id=session_id or target.session_id,
             agent_name=agent_name,
         )
         context = self.build_context(
             target,
             user_id=user_id,
-            session_id=session_id,
             agent_name=agent_name,
             active_model_name=active_model_name,
             attachment_ids=attachment_ids,
@@ -276,7 +285,6 @@ class ToolRuntimeSupport:
         *,
         target: MessageTarget,
         user_id: str | None,
-        session_id: str,
         agent_name: str | None = None,
     ) -> ToolExecutionIdentity:
         """Build the serializable execution identity used for worker routing."""
@@ -289,7 +297,7 @@ class ToolRuntimeSupport:
             room_id=target.room_id,
             thread_id=target.resolved_thread_id,
             resolved_thread_id=target.resolved_thread_id,
-            session_id=session_id,
+            session_id=target.session_id,
         )
 
     async def run_in_context(
@@ -356,7 +364,7 @@ def resolve_current_session_id(
         return execution_identity.session_id
 
     resolved_runtime_context = runtime_context if runtime_context is not None else get_tool_runtime_context()
-    if resolved_runtime_context is not None and resolved_runtime_context.session_id is not None:
+    if resolved_runtime_context is not None:
         return resolved_runtime_context.session_id
 
     return None
@@ -364,7 +372,7 @@ def resolve_current_session_id(
 
 def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -> ToolExecutionIdentity:
     """Build the canonical execution identity represented by one live runtime context."""
-    target = MessageTarget.from_runtime_context(context)
+    target = context.target
     return build_tool_execution_identity(
         channel="matrix",
         agent_name=context.agent_name,
@@ -383,13 +391,13 @@ def execution_identity_matches_tool_runtime_context(
     context: ToolRuntimeContext,
 ) -> bool:
     """Return whether one execution identity represents the same live Matrix tool runtime."""
-    target = MessageTarget.from_runtime_context(context)
+    target = context.target
     valid_thread_ids = {target.source_thread_id, target.resolved_thread_id}
     return (
         execution_identity.channel == "matrix"
         and execution_identity.agent_name == context.agent_name
         and execution_identity.requester_id == context.requester_id
-        and execution_identity.room_id == context.room_id
+        and execution_identity.room_id == target.room_id
         and execution_identity.thread_id in valid_thread_ids
         and execution_identity.resolved_thread_id == target.resolved_thread_id
         and execution_identity.session_id == target.session_id

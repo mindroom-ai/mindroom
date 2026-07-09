@@ -18,6 +18,7 @@ from . import sqlite_event_cache_events, sqlite_event_cache_threads
 from .event_batching import group_lookup_events_by_room
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_agent_message_snapshot import load_sqlite_agent_message_snapshot
+from .thread_cache_state import replacement_validated_at
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -637,7 +638,10 @@ class SqliteEventCache:
         validated_at: float | None = None,
     ) -> bool:
         """Replace one cached thread snapshot only when nothing newer touched it after fetch start."""
-        replacement_validated_at = fetch_started_at if validated_at is None else min(validated_at, fetch_started_at)
+        replacement_timestamp = replacement_validated_at(
+            fetch_started_at=fetch_started_at,
+            validated_at=validated_at,
+        )
 
         async def replace_if_still_safe(db: aiosqlite.Connection) -> bool:
             return await sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
@@ -646,7 +650,7 @@ class SqliteEventCache:
                 thread_id=thread_id,
                 events=events,
                 fetch_started_at=fetch_started_at,
-                validated_at=replacement_validated_at,
+                validated_at=replacement_timestamp,
             )
 
         return bool(

@@ -19,6 +19,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools, send_context_attachments
+from mindroom.message_target import MessageTarget
+from mindroom.session_ids import create_session_id
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -64,9 +66,11 @@ def _tool_context(
     conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
     return ToolRuntimeContext(
         agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        resolved_thread_id="$thread:localhost",
+        target=MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id="$thread:localhost",
+            reply_to_event_id=None,
+        ),
         requester_id="@user:localhost",
         client=client,
         config=config,
@@ -102,9 +106,12 @@ def _tool_context_with_thread_scope(
     context = _tool_context(tmp_path, attachment_ids=attachment_ids)
     return dataclasses.replace(
         context,
-        thread_id=thread_id,
-        resolved_thread_id=resolved_thread_id,
-        session_id=(context.room_id if resolved_thread_id is None else f"{context.room_id}:{resolved_thread_id}"),
+        target=dataclasses.replace(
+            context.target,
+            source_thread_id=thread_id,
+            resolved_thread_id=resolved_thread_id,
+            session_id=create_session_id(context.room_id, resolved_thread_id),
+        ),
     )
 
 

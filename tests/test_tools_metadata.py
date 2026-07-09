@@ -36,10 +36,10 @@ from mindroom.tool_system.metadata import (
     deserialize_tool_validation_snapshot,
     export_tools_metadata,
     get_tool_by_name,
-    register_tool_with_metadata,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import (
     BUILTIN_TOOL_METADATA,
     BUILTIN_TOOL_REGISTRY,

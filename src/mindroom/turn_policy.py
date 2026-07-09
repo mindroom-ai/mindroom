@@ -164,10 +164,7 @@ class IngressHookRunner:
 
         envelope = MessageEnvelope(
             source_event_id=dispatch.envelope.source_event_id,
-            room_id=dispatch.envelope.room_id,
             target=dispatch.envelope.target,
-            requester_id=dispatch.envelope.requester_id,
-            sender_id=dispatch.envelope.sender_id,
             body=dispatch.envelope.body,
             attachment_ids=(
                 tuple(payload.attachment_ids)
@@ -176,7 +173,6 @@ class IngressHookRunner:
             ),
             mentioned_agents=dispatch.envelope.mentioned_agents,
             agent_name=target_entity_name,
-            source_kind=dispatch.envelope.source_kind,
             hook_source=dispatch.envelope.hook_source,
             message_received_depth=dispatch.envelope.message_received_depth,
             dispatch_policy_source_kind=dispatch.envelope.dispatch_policy_source_kind,

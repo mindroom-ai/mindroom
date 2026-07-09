@@ -10,7 +10,6 @@ from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
     from mindroom.scheduling import ScheduledWorkflow
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 class _MessageTargetMetadata(TypedDict):
@@ -108,17 +107,6 @@ class MessageTarget:
             thread_id=None if workflow.new_thread else workflow.thread_id,
             reply_to_event_id=None,
             room_mode=workflow.new_thread or workflow.thread_id is None,
-        )
-
-    @classmethod
-    def from_runtime_context(cls, context: ToolRuntimeContext) -> MessageTarget:
-        """Build the canonical target represented by one tool runtime context."""
-        return cls(
-            room_id=context.room_id,
-            source_thread_id=context.thread_id,
-            resolved_thread_id=context.resolved_thread_id,
-            reply_to_event_id=context.reply_to_event_id,
-            session_id=context.session_id or cls._build_session_id(context.room_id, context.resolved_thread_id),
         )
 
     def with_thread_root(self, resolved_thread_id: str | None) -> MessageTarget:

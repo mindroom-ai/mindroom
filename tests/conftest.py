@@ -335,15 +335,11 @@ def request_envelope(
     resolved_target = target or MessageTarget.resolve(room_id, thread_id, reply_to_event_id)
     return MessageEnvelope(
         source_event_id=reply_to_event_id,
-        room_id=room_id,
         target=resolved_target,
-        requester_id=resolved_user_id,
-        sender_id=resolved_user_id,
         body=prompt,
         attachment_ids=attachment_ids,
         mentioned_agents=(),
         agent_name=agent_name,
-        source_kind=source_kind,
         origin=message_origin(sender_id=resolved_user_id, requester_id=resolved_user_id, source_kind=source_kind),
     )
 

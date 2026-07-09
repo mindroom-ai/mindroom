@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from .agent_message_snapshot import AgentMessageSnapshot
@@ -24,6 +24,7 @@ class EventCacheBackendUnavailableError(RuntimeError):
     """Raised when cache storage is temporarily unreachable but not logically corrupt."""
 
 
+@runtime_checkable
 class ConversationEventCache(Protocol):
     """Storage-agnostic cache API for Matrix event and thread lookups."""
 

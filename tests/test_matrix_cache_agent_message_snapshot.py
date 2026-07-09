@@ -175,6 +175,67 @@ async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_th
 
 
 @pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_ignores_foreign_sender_edits(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Snapshot edits must come from the same sender as the original message."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await _replace_thread(
+            cache,
+            "!room:localhost",
+            "$thread-root",
+            [
+                _message_event(
+                    event_id="$thread-root",
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$reply",
+                    sender="@agent:localhost",
+                    body="Working...",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+                ),
+                _message_event(
+                    event_id="$reply-edit",
+                    sender="@agent:localhost",
+                    body="* Working...",
+                    origin_server_ts=3000,
+                    relates_to={"rel_type": "m.replace", "event_id": "$reply"},
+                    new_content={"body": "Finished"},
+                ),
+                _message_event(
+                    event_id="$forged-edit",
+                    sender="@attacker:localhost",
+                    body="* Working...",
+                    origin_server_ts=4000,
+                    relates_to={"rel_type": "m.replace", "event_id": "$reply"},
+                    new_content={"body": "Forged"},
+                ),
+            ],
+        )
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        event_cache_factory,
+        room_id="!room:localhost",
+        thread_id="$thread-root",
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={"body": "Finished", "msgtype": "m.text"},
+        origin_server_ts=3000,
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_returns_room_level_message_when_thread_id_none(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:

@@ -16,7 +16,7 @@ from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system import plugin_imports
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.plugins import load_plugin_module
 
 if TYPE_CHECKING:

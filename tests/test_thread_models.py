@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -18,9 +19,9 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
+from mindroom.message_target import MessageTarget
 from mindroom.thread_models import (
     _get_thread_model_override,
-    _load_cache,
     _store_path,
     clear_thread_model_override,
     set_thread_model_override,
@@ -68,16 +69,26 @@ def test_store_roundtrip(tmp_path: Path) -> None:
     assert clear_thread_model_override(runtime_paths, THREAD_ID) is False
 
 
-def test_store_ignores_corrupt_file(tmp_path: Path) -> None:
+def test_store_ignores_corrupt_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A corrupt store file should read as empty and be replaced on write."""
     runtime_paths = test_runtime_paths(tmp_path)
     path = _store_path(runtime_paths)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("not json", encoding="utf-8")
 
+    parse_calls = 0
+    real_loads = json.loads
+
+    def tracked_loads(payload: str) -> object:
+        nonlocal parse_calls
+        parse_calls += 1
+        return real_loads(payload)
+
+    monkeypatch.setattr("mindroom.durable_write.json.loads", tracked_loads)
+
     assert _get_thread_model_override(runtime_paths, THREAD_ID) is None
-    # The corrupt parse result is cached so repeat reads skip re-parsing.
-    assert _load_cache[path] == (path.stat().st_mtime_ns, {})
+    assert _get_thread_model_override(runtime_paths, THREAD_ID) is None
+    assert parse_calls == 1
 
     set_thread_model_override(
         runtime_paths,
@@ -87,6 +98,7 @@ def test_store_ignores_corrupt_file(tmp_path: Path) -> None:
         set_by="@user:localhost",
     )
     assert _get_thread_model_override(runtime_paths, THREAD_ID) == "large"
+    assert parse_calls == 2
 
 
 def test_store_prunes_oldest_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,6 +118,29 @@ def test_store_prunes_oldest_entries(tmp_path: Path, monkeypatch: pytest.MonkeyP
     stored = json.loads(_store_path(runtime_paths).read_text(encoding="utf-8"))
     assert len(stored) == 3
     assert _get_thread_model_override(runtime_paths, "$thread-4:localhost") == "large"
+
+
+def test_store_invalidates_cached_records_when_mtime_changes(tmp_path: Path) -> None:
+    """An external file replacement should invalidate the parsed-record cache."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    path = _store_path(runtime_paths)
+    set_thread_model_override(
+        runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="large",
+        room_id=ROOM_ID,
+        set_by="@user:localhost",
+    )
+    assert _get_thread_model_override(runtime_paths, THREAD_ID) == "large"
+
+    path.write_text(
+        json.dumps({THREAD_ID: {"model": "default", "set_at": "2026-07-09T00:00:00+00:00"}}),
+        encoding="utf-8",
+    )
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+    assert _get_thread_model_override(runtime_paths, THREAD_ID) == "default"
 
 
 def test_resolve_runtime_model_prefers_thread_override(tmp_path: Path) -> None:
@@ -430,9 +465,11 @@ def _make_tool_context(*, thread_id: str | None = THREAD_ID) -> ToolRuntimeConte
     config = _config_with_models(Path(tempfile.mkdtemp()))
     return ToolRuntimeContext(
         agent_name="test_agent",
-        room_id=ROOM_ID,
-        thread_id=thread_id,
-        resolved_thread_id=thread_id,
+        target=MessageTarget.resolve(
+            room_id=ROOM_ID,
+            thread_id=thread_id,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,

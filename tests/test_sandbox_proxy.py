@@ -44,6 +44,7 @@ from mindroom.constants import (
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.hooks import HookRegistry
+from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -55,11 +56,11 @@ from mindroom.tool_system.metadata import (
     ToolMetadata,
     ToolValidationInfo,
     get_tool_by_name,
-    register_tool_with_metadata,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
 )
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context, worker_progress_pump_scope
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
@@ -2814,9 +2815,11 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id="$thread",
+            reply_to_event_id=None,
+        ),
         requester_id="@alice:example.org",
         client=object(),
         config=Config(
@@ -2909,9 +2912,11 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id="$thread",
+            reply_to_event_id=None,
+        ),
         requester_id="alice",
         client=object(),
         config=Config(
@@ -3017,9 +3022,11 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id="$thread",
+            reply_to_event_id=None,
+        ),
         requester_id="alice",
         client=object(),
         config=Config(
@@ -4292,9 +4299,11 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:example.org",
         client=object(),
         config=runtime_config,
@@ -4340,9 +4349,11 @@ def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:example.org",
         client=object(),
         config=runtime_config,
@@ -4430,9 +4441,11 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:example.org",
         client=object(),
         config=runtime_config,
@@ -4619,9 +4632,11 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:example.org",
         client=object(),
         config=runtime_config,
@@ -5337,9 +5352,11 @@ async def test_docker_backend_misconfiguration_raises_instead_of_running_locally
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:example.org",
         client=object(),
         config=runtime_config,

@@ -65,7 +65,8 @@ Your expertise includes:
 - **IMPORTS ONLY**: Only modify `src/mindroom/tools/__init__.py` to add imports
 - Follow the EXACT pattern from `src/mindroom/tools/github.py`
 - Use `@register_tool_with_metadata` decorator
-- Import path: `from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata`
+- Declaration import: `from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus`
+- Registration import: `from mindroom.tool_system.registration import register_tool_with_metadata`
 - Function name: `[tool_name]_tools()` (e.g., `calculator_tools()`, `file_tools()`)
 - NO BaseTool class - use the decorator pattern like GitHub tool
 - Use the docs_url from `https://docs.agno.com/llms.txt` but WITHOUT the .md extension

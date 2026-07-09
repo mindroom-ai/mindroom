@@ -10659,12 +10659,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit
@@ -10773,13 +10773,13 @@ Each `ConfigField` describes one constructor parameter that can be configured th
 Example — a tool that requires an API key:
 
 ```python
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 @register_tool_with_metadata(
     name="weather",
@@ -10822,7 +10822,8 @@ Example:
 
 ```python
 from agno.tools import Toolkit
-from mindroom.tool_system.metadata import ToolCategory, ToolManagedInitArg, register_tool_with_metadata
+from mindroom.tool_system.declarations import ToolCategory, ToolManagedInitArg
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 
 @register_tool_with_metadata(
@@ -10863,12 +10864,12 @@ This plugin pattern is still useful when you want a custom wrapper around Agno `
 
 ```python
 from agno.tools.mcp import MCPTools
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 
 class FilesystemMCPTools(MCPTools):
@@ -11576,22 +11577,20 @@ Rooms created via `create_room` are retained for the creating bot across room cl
 ```python
 MessageEnvelope(
     source_event_id: str,
-    room_id: str,
     target: MessageTarget,
-    requester_id: str,
-    sender_id: str,
     body: str,
     attachment_ids: tuple[str, ...],
     mentioned_agents: tuple[str, ...],
     agent_name: str,
-    source_kind: str,  # "message", "edit", "voice", "image", "media", "scheduled", "hook", "hook_dispatch", "trusted_internal_relay"
     origin: TurnOrigin,
     hook_source: str | None = None,
     message_received_depth: int = 0,  # internal synthetic-chain depth for hook-originated relays
     dispatch_policy_source_kind: str | None = None,
 )
 
-# target.thread_id preserves the raw inbound thread ID.
+# envelope.room_id is derived from target.room_id.
+# envelope.requester_id, envelope.sender_id, and envelope.source_kind are derived from origin.
+# target.source_thread_id preserves the raw inbound thread ID.
 # target.resolved_thread_id is the delivery thread after safe-root and room-mode resolution.
 # target.session_id is the canonical persistence key for the conversation.
 # origin is keyword-only in the dataclass constructor and is required.
