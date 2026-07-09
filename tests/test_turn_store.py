@@ -146,6 +146,8 @@ def test_load_turn_uses_ledger_identity_and_outcome_then_backfills_missing_conte
         requester_id="@ledger-user:example.org",
     )
     store.record_turn(ledger_record)
+    persisted_ledger_record = store.get_turn_record("$first")
+    assert persisted_ledger_record is not None
     recovery_target = MessageTarget.resolve("!room:example.org", None, "$anchor")
     recovery_record = TurnRecord.create(
         ["$run-only", "$anchor"],
@@ -172,9 +174,9 @@ def test_load_turn_uses_ledger_identity_and_outcome_then_backfills_missing_conte
     assert loaded.response_owner == "agent"
     assert loaded.history_scope == HistoryScope(kind="agent", scope_id="agent")
     assert loaded.conversation_target == recovery_target
+    assert loaded.timestamp == persisted_ledger_record.timestamp
     repaired = store.get_turn_record("$first")
-    assert repaired is not None
-    assert repaired.response_owner == "agent"
+    assert repaired == loaded
 
 
 def test_load_turn_repairs_missing_ledger_row_from_run_metadata(tmp_path: Path) -> None:

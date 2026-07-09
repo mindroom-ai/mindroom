@@ -383,7 +383,7 @@ class HandledTurnLedger:
         """Persist one exact record for every source event in the turn."""
         if not turn_record.source_event_ids:
             return
-        persisted_record = replace(turn_record, timestamp=time.time())
+        persisted_record = turn_record if turn_record.timestamp != 0.0 else replace(turn_record, timestamp=time.time())
         with self._state.lock:
             self._ensure_loaded_locked()
             for event_id in persisted_record.source_event_ids:
