@@ -283,7 +283,7 @@ class TurnRecordCodec:
             _normalize_source_event_ids(raw_source_event_ids)
             if isinstance(raw_source_event_ids, list)
             else (anchor_event_id,)
-        )
+        ) or (anchor_event_id,)
         return TurnRecord.create(
             source_event_ids,
             anchor_event_id=anchor_event_id,
@@ -515,8 +515,15 @@ class HandledTurnLedger:
                 invalid_event_ids.append(event_id if isinstance(event_id, str) else repr(event_id))
                 continue
             records[event_id] = record
-        if invalid_event_ids:
+        if invalid_event_ids and not records:
             self._quarantine_with_warning("invalid event entries", invalid_event_ids=invalid_event_ids)
+        elif invalid_event_ids:
+            logger.warning(
+                "Ignored invalid handled-turn ledger entries",
+                agent=self.agent_name,
+                responses_file=str(self._responses_file),
+                invalid_event_ids=invalid_event_ids,
+            )
         return records
 
     def _quarantine_with_warning(self, reason: str, **context: object) -> None:

@@ -121,6 +121,21 @@ def test_run_metadata_without_current_schema_version_is_not_recovery_data() -> N
     )
 
 
+def test_run_metadata_with_empty_normalized_sources_falls_back_to_anchor() -> None:
+    """Current metadata should never decode into an eventless canonical record."""
+    parsed = TurnRecordCodec.from_run_metadata(
+        {
+            constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
+            constants.MATRIX_EVENT_ID_METADATA_KEY: "$anchor",
+            constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["", None, 42],
+        },
+    )
+
+    assert parsed is not None
+    assert parsed.anchor_event_id == "$anchor"
+    assert parsed.source_event_ids == ("$anchor",)
+
+
 def test_load_turn_uses_ledger_identity_and_outcome_then_backfills_missing_context(tmp_path: Path) -> None:
     """Ledger facts should win field-by-field while absent optional context comes from run metadata."""
     store = _store(tmp_path)
