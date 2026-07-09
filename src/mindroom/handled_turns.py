@@ -232,12 +232,12 @@ class TurnRecordCodec:
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
-            visible_echo_event_id=_string_or_none(record.get("visible_echo_event_id")),
+            visible_echo_event_id=_normalize_string(record.get("visible_echo_event_id")),
             source_event_prompts=_mapping_or_none(record.get("source_event_prompts")),
             source_event_metadata=_mapping_or_none(record.get("source_event_metadata")),
-            response_owner=_string_or_none(record.get("response_owner")),
-            requester_id=_string_or_none(record.get("requester_id")),
-            correlation_id=_string_or_none(record.get("correlation_id")),
+            response_owner=_normalize_string(record.get("response_owner")),
+            requester_id=_normalize_string(record.get("requester_id")),
+            correlation_id=_normalize_string(record.get("correlation_id")),
             history_scope=HistoryScope.from_metadata(record.get("history_scope")),
             conversation_target=MessageTarget.from_metadata(record.get("conversation_target")),
             timestamp=float(timestamp),
@@ -284,7 +284,7 @@ class TurnRecordCodec:
             if isinstance(raw_source_event_ids, list)
             else (anchor_event_id,)
         ) or (anchor_event_id,)
-        response_event_id = _string_or_none(metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY))
+        response_event_id = _normalize_string(metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY))
         return TurnRecord.create(
             source_event_ids,
             anchor_event_id=anchor_event_id,
@@ -292,9 +292,9 @@ class TurnRecordCodec:
             completed=response_event_id is not None,
             source_event_prompts=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)),
             source_event_metadata=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_METADATA_KEY)),
-            response_owner=_string_or_none(metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)),
-            requester_id=_string_or_none(metadata.get("requester_id")),
-            correlation_id=_string_or_none(metadata.get("correlation_id")),
+            response_owner=_normalize_string(metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)),
+            requester_id=_normalize_string(metadata.get("requester_id")),
+            correlation_id=_normalize_string(metadata.get("correlation_id")),
             history_scope=HistoryScope.from_metadata(metadata.get(constants.MATRIX_HISTORY_SCOPE_METADATA_KEY)),
             conversation_target=MessageTarget.from_metadata(
                 metadata.get(constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY),
@@ -570,11 +570,6 @@ def _normalize_source_event_ids(source_event_ids: Sequence[object]) -> tuple[str
 def _normalize_string(value: object) -> str | None:
     """Return a non-empty string or None."""
     return value if isinstance(value, str) and value else None
-
-
-def _string_or_none(value: object) -> str | None:
-    """Return a string value for codec input, including normalization of empties."""
-    return _normalize_string(value)
 
 
 def _mapping_or_none(value: object) -> Mapping[str, Any] | None:

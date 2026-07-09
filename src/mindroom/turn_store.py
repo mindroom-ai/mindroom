@@ -212,11 +212,6 @@ class TurnStore:
             requester_user_id=requester_user_id,
         )
 
-    @staticmethod
-    def _turn_record_for_run_metadata(metadata: dict[str, Any]) -> TurnRecord | None:
-        """Parse current-version turn facts needed for crash recovery."""
-        return TurnRecordCodec.from_run_metadata(metadata)
-
     def _latest_matching_persisted_turn_record(
         self,
         runs: list[RunOutput | TeamRunOutput] | None,
@@ -230,7 +225,7 @@ class TurnStore:
                 continue
             if not isinstance(run.metadata, dict):
                 continue
-            turn_record = self._turn_record_for_run_metadata(run.metadata)
+            turn_record = TurnRecordCodec.from_run_metadata(run.metadata)
             if turn_record is None:
                 continue
             if (
