@@ -19,7 +19,7 @@ import mindroom.tool_system.metadata as metadata_module
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
 import mindroom.tools.custom_api as custom_api_module
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config, RuntimeConfig, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
@@ -966,6 +966,36 @@ def test_resolved_tool_state_cached_per_config_object(
         metadata_module.clear_resolved_tool_state_cache()
         metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
         assert compute_calls == 5
+    finally:
+        metadata_module.clear_resolved_tool_state_cache()
+
+
+def test_runtime_config_reuses_tool_state_resolved_during_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The authored-to-runtime stage should preserve the catalog's per-config cache."""
+    compute_calls = 0
+    dummy_state = metadata_module._ResolvedToolState({}, {}, {})
+
+    def counted_compute(*_args: object, **_kwargs: object) -> metadata_module._ResolvedToolState:
+        nonlocal compute_calls
+        compute_calls += 1
+        return dummy_state
+
+    monkeypatch.setattr(metadata_module, "_compute_resolved_tool_state_for_runtime", counted_compute)
+    metadata_module.clear_resolved_tool_state_cache()
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    authored = Config.model_validate({"defaults": {"tools": []}})
+    try:
+        config = RuntimeConfig.from_authored(authored, runtime_paths)
+        metadata_module.resolved_tool_metadata_for_runtime(runtime_paths, config)
+
+        assert compute_calls == 1
     finally:
         metadata_module.clear_resolved_tool_state_cache()
 

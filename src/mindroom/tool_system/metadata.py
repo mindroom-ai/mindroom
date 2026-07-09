@@ -974,6 +974,26 @@ def clear_resolved_tool_state_cache() -> None:
         _RESOLVED_TOOL_STATE_CACHE.clear()
 
 
+def bind_resolved_tool_state_cache(
+    runtime_paths: RuntimePaths,
+    source_config: Config,
+    target_config: Config,
+    *,
+    tolerate_plugin_load_errors: bool = False,
+) -> None:
+    """Bind already-resolved tool state to a runtime config created from its authored source."""
+    source_key = (id(source_config), tolerate_plugin_load_errors)
+    target_key = (id(target_config), tolerate_plugin_load_errors)
+    with _RESOLVED_TOOL_STATE_LOCK:
+        cached = _RESOLVED_TOOL_STATE_CACHE.get(source_key)
+        if cached is None or cached[0] != runtime_paths:
+            msg = "Resolved tool state must be cached before it can be bound to a runtime config"
+            raise RuntimeError(msg)
+        if target_key not in _RESOLVED_TOOL_STATE_CACHE:
+            weakref.finalize(target_config, _evict_resolved_tool_state, target_key)
+        _RESOLVED_TOOL_STATE_CACHE[target_key] = cached
+
+
 def _evict_resolved_tool_state(cache_key: tuple[int, bool]) -> None:
     with _RESOLVED_TOOL_STATE_LOCK:
         _RESOLVED_TOOL_STATE_CACHE.pop(cache_key, None)
@@ -1424,12 +1444,18 @@ def _normalize_agent_override_field_value(field: ConfigField, value: object) -> 
     return value
 
 
-def normalize_authored_tool_overrides(tool_name: str, overrides: dict[str, object] | None) -> dict[str, object]:
+def normalize_authored_tool_overrides(
+    tool_name: str,
+    overrides: dict[str, object] | None,
+    *,
+    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
+) -> dict[str, object]:
     """Validate and normalize one tool's authored per-agent overrides."""
     if not overrides:
         return {}
 
-    metadata = TOOL_METADATA.get(tool_name)
+    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
+    metadata = metadata_by_name.get(tool_name)
     if metadata is None:
         msg = f"Unknown tool '{tool_name}' cannot declare per-agent overrides."
         raise ValueError(msg)
@@ -1464,13 +1490,19 @@ def normalize_authored_tool_overrides(tool_name: str, overrides: dict[str, objec
     return normalized
 
 
-def authored_tool_overrides_to_runtime(tool_name: str, overrides: dict[str, object] | None) -> dict[str, object] | None:
+def authored_tool_overrides_to_runtime(
+    tool_name: str,
+    overrides: dict[str, object] | None,
+    *,
+    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
+) -> dict[str, object] | None:
     """Convert normalized authored per-agent overrides into runtime kwargs."""
-    normalized = normalize_authored_tool_overrides(tool_name, overrides)
+    normalized = normalize_authored_tool_overrides(tool_name, overrides, tool_metadata=tool_metadata)
     if not normalized:
         return None
 
-    metadata = TOOL_METADATA[tool_name]
+    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
+    metadata = metadata_by_name[tool_name]
     field_map = {field.name: field for field in metadata.agent_override_fields or []}
     runtime_overrides: dict[str, object] = {}
     for field_name, value in normalized.items():

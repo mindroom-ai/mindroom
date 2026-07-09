@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -52,12 +53,12 @@ from mindroom.room_thread_modes import resolve_room_thread_mode_override
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.catalog import (
-    TOOL_METADATA,
     ToolConfigOverrideError,
     ToolMetadataValidationError,
     ToolValidationInfo,
     apply_authored_overrides,
     authored_tool_overrides_to_runtime,
+    bind_resolved_tool_state_cache,
     resolved_tool_validation_snapshot_for_runtime,
     validate_authored_tool_entry_overrides,
 )
@@ -302,20 +303,22 @@ def build_runtime_config(
         _validate_runtime_paths(effective_authored, runtime_paths)
     except ValueError as exc:
         raise ConfigRuntimeValidationError(str(exc)) from exc
+    resolved_snapshot = tool_validation_snapshot
+    resolved_tool_state_here = resolved_snapshot is None
     try:
-        if tool_validation_snapshot is None:
-            tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
+        if resolved_snapshot is None:
+            resolved_snapshot = resolved_tool_validation_snapshot_for_runtime(
                 runtime_paths,
                 effective_authored,
                 tolerate_plugin_load_errors=tolerate_plugin_load_errors,
             )
-        _validate_authored_tool_entries(effective_authored, tool_validation_snapshot)
+        _validate_authored_tool_entries(effective_authored, resolved_snapshot)
     except (PluginValidationError, ToolConfigOverrideError, ToolMetadataValidationError) as exc:
         raise ConfigRuntimeValidationError(str(exc)) from exc
 
     unavailable_plugin_tool_names = frozenset(
         tool_name
-        for tool_name, validation_info in tool_validation_snapshot.items()
+        for tool_name, validation_info in resolved_snapshot.items()
         if validation_info.unavailable_due_to_plugin_load_error
     )
     runtime_config = runtime_config_type.model_validate(
@@ -324,10 +327,28 @@ def build_runtime_config(
             "runtime_paths": runtime_paths,
             "source_files": source_files,
             "unavailable_plugin_tool_names": unavailable_plugin_tool_names,
+            "agent_tool_runtime_overrides": tuple(
+                (
+                    agent_name,
+                    _resolve_agent_tool_runtime_overrides(
+                        effective_authored,
+                        agent_name,
+                        resolved_snapshot,
+                    ),
+                )
+                for agent_name in effective_authored.agents
+            ),
             "runtime_approved_egress_injected_default_tool": overlay.injected_default_tool,
             "runtime_approved_egress_injected_approval_rule": overlay.injected_approval_rule,
         },
     )
+    if resolved_tool_state_here:
+        bind_resolved_tool_state_cache(
+            runtime_paths,
+            effective_authored,
+            runtime_config,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
     try:
         _validate_shared_only_integration_assignments(runtime_config)
     except ValueError as exc:
@@ -636,23 +657,39 @@ def _agent_culture(config: Config, agent_name: str) -> tuple[str, Any] | None:
     return None
 
 
-def _tool_runtime_overrides(
-    config: RuntimeConfig,
+def _resolve_agent_tool_runtime_overrides(
+    config: Config,
     agent_name: str,
+    tool_validation_snapshot: Mapping[str, ToolValidationInfo],
 ) -> tuple[tuple[str, tuple[tuple[str, object], ...]], ...]:
     resolved: list[tuple[str, tuple[tuple[str, object], ...]]] = []
     for entry in config.get_agent(agent_name).tools:
-        metadata = TOOL_METADATA.get(entry.name)
-        if metadata is None:
+        validation_info = tool_validation_snapshot.get(entry.name)
+        if validation_info is None or validation_info.unavailable_due_to_plugin_load_error:
             continue
-        runtime_field_names = {field.name for field in metadata.agent_override_fields or ()}
+        runtime_field_names = {field.name for field in validation_info.agent_override_fields}
         runtime_overrides = authored_tool_overrides_to_runtime(
             entry.name,
             {name: value for name, value in entry.overrides.items() if name in runtime_field_names},
+            tool_metadata=tool_validation_snapshot,
         )
         if runtime_overrides:
             resolved.append((entry.name, tuple(runtime_overrides.items())))
     return tuple(resolved)
+
+
+def _tool_runtime_overrides(
+    config: RuntimeConfig,
+    agent_name: str,
+) -> tuple[tuple[str, tuple[tuple[str, object], ...]], ...]:
+    return next(
+        (
+            overrides
+            for configured_agent, overrides in config.agent_tool_runtime_overrides
+            if configured_agent == agent_name
+        ),
+        (),
+    )
 
 
 def _deferred_scope_incompatible_tools(
@@ -722,10 +759,12 @@ def resolve_entity(config: RuntimeConfig, entity_name: str | None) -> ResolvedEn
         else config.memory.search.model_copy(deep=True),
         _model_name=_entity_model_name(config, entity_name) if entity_name is not None else None,
         _available_tools=tuple(_agent_available_tools(config, agent_name)) if agent_name is not None else None,
-        _tool_configs=tuple(_agent_tool_configs(config, agent_name)) if agent_name is not None else None,
-        _authored_tool_configs=tuple(authored_tools) if authored_tools is not None else None,
-        _authored_deferred_tool_configs=tuple(deferred_tools) if deferred_tools is not None else None,
-        _tool_runtime_overrides=_tool_runtime_overrides(config, agent_name) if agent_name is not None else None,
+        _tool_configs=tuple(deepcopy(_agent_tool_configs(config, agent_name))) if agent_name is not None else None,
+        _authored_tool_configs=tuple(deepcopy(authored_tools)) if authored_tools is not None else None,
+        _authored_deferred_tool_configs=tuple(deepcopy(deferred_tools)) if deferred_tools is not None else None,
+        _tool_runtime_overrides=deepcopy(_tool_runtime_overrides(config, agent_name))
+        if agent_name is not None
+        else None,
         _deferred_scope_incompatible_tools=(
             _deferred_scope_incompatible_tools(config, agent_name) if agent_name is not None else None
         ),

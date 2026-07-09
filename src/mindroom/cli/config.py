@@ -425,7 +425,7 @@ def config_init(
     # runs so a missing .env is recreated and hosted defaults are appended.
     keep_existing_config = False
     if target.exists() and not force and not print_config:
-        console.print(f"[yellow]RuntimeConfig file already exists:[/yellow] {target}")
+        console.print(f"[yellow]Config file already exists:[/yellow] {target}")
         if no_input:
             console.print("Keeping existing config.yaml. Use --force to overwrite.")
             keep_existing_config = True
@@ -481,9 +481,9 @@ def config_init(
     )
 
     if keep_existing_config:
-        console.print(f"[green]RuntimeConfig unchanged:[/green] {target}")
+        console.print(f"[green]Config unchanged:[/green] {target}")
     else:
-        console.print(f"[green]RuntimeConfig created:[/green] {target}")
+        console.print(f"[green]Config created:[/green] {target}")
     _print_config_init_next_steps(
         env_path,
         env_changed=env_changed,
@@ -522,7 +522,7 @@ def config_show(
         print(content, end="")
         return
 
-    console.print(f"[bold green]RuntimeConfig file:[/bold green] {config_file}\n")
+    console.print(f"[bold green]Config file:[/bold green] {config_file}\n")
     console.print(_yaml_syntax(content, line_numbers=True, word_wrap=True))
 
 

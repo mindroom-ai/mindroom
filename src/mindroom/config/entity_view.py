@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -24,10 +25,10 @@ class ResolvedRuntimeModel:
 
 
 def _copy_tool_config(entry: EffectiveToolConfig) -> EffectiveToolConfig:
-    return replace(entry, tool_config_overrides=dict(entry.tool_config_overrides))
+    return deepcopy(entry)
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True)
 class ResolvedEntityView:
     """Fully materialized effective values for one validated runtime entity scope."""
 
@@ -140,7 +141,7 @@ class ResolvedEntityView:
         assert self._tool_runtime_overrides is not None
         for configured_name, overrides in self._tool_runtime_overrides:
             if configured_name == tool_name:
-                return dict(overrides)
+                return deepcopy(dict(overrides))
         return None
 
     def deferred_tool_scope_incompatible_tools(self, authored_tool_name: str) -> list[str]:

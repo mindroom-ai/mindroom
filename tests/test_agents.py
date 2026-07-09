@@ -1568,6 +1568,7 @@ def test_create_agent_passes_authored_shell_runtime_overrides(
         },
     ]
     config.agents["general"].include_default_tools = False
+    config = _bind_runtime_paths(config, config.runtime_paths)
 
     _create_agent_for_test("general", config=config)
 

@@ -48,7 +48,7 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config_path = runtime_paths.config_path
-    console.print(f"[dim]RuntimeConfig directory: {runtime_paths.config_dir}[/dim]")
+    console.print(f"[dim]Config directory: {runtime_paths.config_dir}[/dim]")
 
     # 1. Config file exists
     p, f, w = _run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path))

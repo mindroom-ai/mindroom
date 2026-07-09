@@ -22,6 +22,7 @@ from mindroom.config.models import (
 from mindroom.config.runtime import expand_tool_names
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.types import HistoryPolicy
+from mindroom.tool_system.catalog import ConfigField, ToolValidationInfo
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -227,10 +228,14 @@ def test_unauthored_compaction_reports_not_authored(tmp_path: Path) -> None:
     assert config.resolve_entity(None).has_authored_compaction_config is False
 
 
-def test_resolve_entity_returns_a_fresh_view_per_call(tmp_path: Path) -> None:
+def test_resolve_entity_returns_a_fresh_value_per_call(tmp_path: Path) -> None:
     config = _representative_config(tmp_path)
 
-    assert config.resolve_entity("overriding_agent") is not config.resolve_entity("overriding_agent")
+    first = config.resolve_entity("overriding_agent")
+    second = config.resolve_entity("overriding_agent")
+
+    assert first is not second
+    assert first == second
 
 
 def test_agent_only_fields_raise_for_defaults_scope(tmp_path: Path) -> None:
@@ -268,3 +273,49 @@ def test_resolved_entity_is_materialized_at_construction(tmp_path: Path) -> None
 
     assert view.memory_backend == "file"
     assert config.resolve_entity("overriding_agent").memory_backend == "none"
+
+
+def test_resolved_entity_tool_overrides_are_deeply_isolated(tmp_path: Path) -> None:
+    config = _representative_config(tmp_path)
+    view = config.resolve_entity("overriding_agent")
+
+    returned_entry = next(entry for entry in view.tool_configs if entry.name == "shell")
+    returned_paths = returned_entry.tool_config_overrides["shell_path_prepend"]
+    assert isinstance(returned_paths, list)
+    returned_paths.append("/mutated/returned/value")
+
+    authored_paths = config.agents["overriding_agent"].tools[1].overrides["shell_path_prepend"]
+    assert isinstance(authored_paths, list)
+    authored_paths.append("/mutated/runtime/config")
+
+    fresh_entry = next(entry for entry in view.tool_configs if entry.name == "shell")
+    assert fresh_entry.tool_config_overrides == {"shell_path_prepend": ["/run/wrappers/bin"]}
+
+
+def test_runtime_tool_overrides_use_bound_validation_snapshot(tmp_path: Path) -> None:
+    tool_name = "snapshot_only_review_tool_1467"
+    paths_field = ConfigField(name="paths", label="Paths", type="string[]")
+    authored = Config(
+        agents={
+            "test_agent": AgentConfig(
+                display_name="Test Agent",
+                tools=[ToolConfigEntry(name=tool_name, overrides={"paths": ["one", "two"]})],
+            ),
+        },
+        defaults=DefaultsConfig(tools=[]),
+    )
+    snapshot = {
+        tool_name: ToolValidationInfo(
+            name=tool_name,
+            config_fields=(paths_field,),
+            agent_override_fields=(paths_field,),
+        ),
+    }
+
+    config = RuntimeConfig.from_authored(
+        authored,
+        test_runtime_paths(tmp_path),
+        tool_validation_snapshot=snapshot,
+    )
+
+    assert config.resolve_entity("test_agent").tool_runtime_overrides(tool_name) == {"paths": "one, two"}

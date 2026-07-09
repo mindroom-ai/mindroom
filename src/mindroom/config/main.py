@@ -69,6 +69,8 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
 
 logger = get_logger(__name__)
 
+_RuntimeToolOverrides = tuple[tuple[str, tuple[tuple[str, object], ...]], ...]
+
 
 _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
@@ -767,6 +769,11 @@ class RuntimeConfig(Config):
     runtime_paths: RuntimePaths = Field(exclude=True, repr=False)
     source_files: frozenset[Path] = Field(default_factory=lambda: frozenset[Path](), exclude=True)
     unavailable_plugin_tool_names: frozenset[str] = Field(default_factory=frozenset, exclude=True, repr=False)
+    agent_tool_runtime_overrides: tuple[tuple[str, _RuntimeToolOverrides], ...] = Field(
+        default_factory=tuple,
+        exclude=True,
+        repr=False,
+    )
     runtime_approved_egress_injected_default_tool: bool = Field(default=False, exclude=True, repr=False)
     runtime_approved_egress_injected_approval_rule: bool = Field(default=False, exclude=True, repr=False)
 
