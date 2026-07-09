@@ -30,7 +30,8 @@ https://github.com/user-attachments/assets/1f121c89-5418-4f42-bdfe-fb9de0fecd03
 - **Model routing** — a different model per agent, room, or thread (`!model`); route sensitive rooms to local Ollama and everything else to a cloud model.
 - **Voice** — transcription of Matrix voice messages, and text-to-speech tools via OpenAI, Groq, ElevenLabs, and Cartesia.
 - **Streaming responses** — agents type into the room with progressive edits, visible tool traces, and cancellation.
-- **Hot reload** — edit `config.yaml` and affected agents restart gracefully without bringing down the stack.
+- **Plugins & hooks** — drop-in [plugins](docs/plugins.md) add custom tools, skills, and OAuth providers, and a typed [event-hook system](docs/hooks.md) (per-hook timeouts, fault isolation) lets them observe and transform messages; reload plugins at runtime with `!reload-plugins`.
+- **Hot reload & restart-safe** — `config.yaml` and plugin changes apply live without bringing down the stack, and conversations resume seamlessly after a restart: session history and turn state are durable on disk, so agents pick up where they left off without double-replying.
 - **Web dashboard** — create and configure agents, teams, models, tools, credentials, and knowledge bases by clicking instead of editing YAML; chat stays in your Matrix client.
 
 What it looks like:
@@ -239,7 +240,9 @@ Teams, cultures, per-room models, context compaction, history controls, and memo
 - **Own homeserver** — set `MATRIX_HOMESERVER` and run against any Synapse, Conduit, or Dendrite instance.
 - **Local stack** — `mindroom local-stack-setup` bootstraps a local Synapse + Cinny via Docker.
 - **Hosted Matrix** — run only the backend locally and pair with [chat.mindroom.chat](https://chat.mindroom.chat) ([guide](docs/deployment/hosted-matrix.md)).
-- **Docker** and **Kubernetes** — see [docs/deployment/docker.md](docs/deployment/docker.md) and [docs/deployment/kubernetes.md](docs/deployment/kubernetes.md).
+- **Docker** — single-container runtime ([guide](docs/deployment/docker.md)).
+- **Kubernetes** — Helm charts for large-scale and multi-tenant deployments ([guide](docs/deployment/kubernetes.md)).
+- **NixOS LXC (Incus)** — the author's favorite for personal use: [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) provisions a persistent, agent-controlled NixOS container with the full stack, which the agent can rebuild and manage itself while the host controls what it sees.
 - **Bridges** — connect Slack, Telegram, WhatsApp, and more via [docs/deployment/bridges](docs/deployment/bridges).
 
 ## Why Matrix?
