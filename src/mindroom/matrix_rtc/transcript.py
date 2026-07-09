@@ -122,18 +122,40 @@ class CallTranscript:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            self._flush_sync()
+            try:
+                self._flush_sync()
+            except OSError as error:
+                logger.warning(
+                    "call_transcript_flush_failed",
+                    agent=self.agent_name,
+                    room_id=self.room_id,
+                    error=str(error),
+                )
             return
         task = loop.create_task(self._flush())
         self._flush_tasks.add(task)
-        task.add_done_callback(self._flush_tasks.discard)
+
+        def _observe_flush(done: asyncio.Task[None]) -> None:
+            self._flush_tasks.discard(done)
+            if done.cancelled():
+                return
+            error = done.exception()
+            if error is not None:
+                logger.warning(
+                    "call_transcript_flush_failed",
+                    agent=self.agent_name,
+                    room_id=self.room_id,
+                    error=str(error),
+                )
+
+        task.add_done_callback(_observe_flush)
 
     async def _flush(self) -> None:
         async with self._write_lock:
             await asyncio.to_thread(self._flush_sync)
 
     def _flush_sync(self) -> None:
-        lines, self._pending = self._pending, []
+        lines = list(self._pending)
         if not lines:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,15 +166,25 @@ class CallTranscript:
                     f"# Voice call in {self.room_display_name}\n\n"
                     f"- Room: `{self.room_id}`\n- Agent: {self.agent_name}\n- Started: {started}\n\n",
                 )
-                self._header_written = True
             handle.writelines(lines)
+        del self._pending[: len(lines)]
+        self._header_written = True
 
     async def finalize(self, *, config: Config, runtime_paths: RuntimePaths, storage_path: Path) -> None:
         """Flush remaining turns and append a daily-memory entry for the call."""
         ended_at = datetime.now(tz=UTC)
         duration_minutes = max(1, round((ended_at - self.started_at).total_seconds() / 60))
-        async with self._write_lock:
-            await asyncio.to_thread(self._flush_sync)
+        try:
+            async with self._write_lock:
+                await asyncio.to_thread(self._flush_sync)
+        except OSError as error:
+            logger.warning(
+                "call_transcript_finalize_failed",
+                agent=self.agent_name,
+                room_id=self.room_id,
+                error=str(error),
+            )
+            return
         if self._turns == 0:
             return
         summary = (

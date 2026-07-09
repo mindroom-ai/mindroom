@@ -73,7 +73,6 @@ from mindroom.git_urls import credential_free_repo_url
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
-from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     managed_room_alias_localpart,
@@ -563,7 +562,7 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_call_agents(self, info: ValidationInfo) -> Config:
+    def validate_call_agents(self) -> Config:
         """Ensure call agents exist and no two are configured for one room."""
         unknown_agents = sorted(set(self.calls.agents) - set(self.agents))
         if unknown_agents:
@@ -580,14 +579,9 @@ class Config(BaseModel):
             )
             raise ValueError(msg)
 
-        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
         agents_by_room: dict[str, list[str]] = {}
         for agent_name in self.calls.agents:
-            rooms = self.agents[agent_name].rooms
-            resolved_rooms = (
-                resolve_room_aliases(rooms, runtime_paths) if isinstance(runtime_paths, RuntimePaths) else rooms
-            )
-            for room in resolved_rooms:
+            for room in self.agents[agent_name].rooms:
                 agents_by_room.setdefault(room, []).append(agent_name)
         conflicts = [
             f"{room} ({', '.join(sorted(agent_names))})"
@@ -1045,6 +1039,9 @@ class Config(BaseModel):
         normalized_data = normalized_config_data(data)
         approved_egress_overlay = apply_runtime_approved_egress_overlay(normalized_data, runtime_paths)
         config = cls.model_validate(approved_egress_overlay.data, context={"runtime_paths": runtime_paths})
+        from mindroom.entity_resolution import validate_call_agent_room_ownership  # noqa: PLC0415
+
+        validate_call_agent_room_ownership(config, runtime_paths)
         config._runtime_approved_egress_injected_default_tool = approved_egress_overlay.injected_default_tool
         config._runtime_approved_egress_injected_approval_rule = approved_egress_overlay.injected_approval_rule
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.

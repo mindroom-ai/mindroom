@@ -69,7 +69,7 @@ The room's power levels must allow members to send `org.matrix.msc3401.call.memb
 
 Element Call encrypts call media with per-sender frame keys distributed over olm-encrypted to-device messages.
 MindRoom sends its own frame key this way, so participants can always hear the agent.
-Hearing the participants in an encrypted room additionally requires a mindroom-nio release that surfaces unknown decrypted to-device events ([mindroom-nio#5](https://github.com/mindroom-ai/mindroom-nio/pull/5)); without it the agent joins but cannot decrypt inbound audio.
+Hearing the participants in an encrypted room requires mindroom-nio 0.27.0 or newer, which surfaces unknown decrypted to-device events and is required by MindRoom's dependency metadata ([mindroom-nio#5](https://github.com/mindroom-ai/mindroom-nio/pull/5)).
 Calls in unencrypted rooms need none of this and work with plain SFU media.
 
 ## Transcripts and memory

@@ -118,7 +118,6 @@ class ReceivedFrameKey:
 
     user_id: str
     claimed_device_id: str
-    member_id: str
     key_base64: str
     key_index: int
     sent_ts: int | None = None
@@ -156,7 +155,13 @@ def parse_key_to_device_content(sender: str, content: dict[str, Any], *, room_id
         return None
     key = keys.get("key")
     index = keys.get("index")
-    if not isinstance(key, str) or not key or not isinstance(index, int):
+    if (
+        not isinstance(key, str)
+        or not key
+        or not isinstance(index, int)
+        or isinstance(index, bool)
+        or not 0 <= index < 256
+    ):
         return None
     member = content.get("member")
     if not isinstance(member, dict):
@@ -164,14 +169,10 @@ def parse_key_to_device_content(sender: str, content: dict[str, Any], *, room_id
     claimed_device_id = member.get("claimed_device_id")
     if not isinstance(claimed_device_id, str) or not claimed_device_id:
         return None
-    member_id = member.get("id")
-    if not isinstance(member_id, str) or not member_id:
-        member_id = f"{sender}:{claimed_device_id}"
     sent_ts = content.get("sent_ts")
     return ReceivedFrameKey(
         user_id=sender,
         claimed_device_id=claimed_device_id,
-        member_id=member_id,
         key_base64=key,
         key_index=index,
         sent_ts=sent_ts if isinstance(sent_ts, int) else None,

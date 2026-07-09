@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -88,6 +89,81 @@ async def test_finalize_without_turns_skips_daily_memory(tmp_path: Path, monkeyp
 
     assert entries == []
     assert not transcript.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_failed_flush_preserves_pending_lines_for_retry(tmp_path: Path) -> None:
+    """A filesystem failure cannot discard transcript turns before a later retry."""
+    transcript = _transcript(tmp_path)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("block")
+    transcript.path = blocker / "transcript.md"
+    transcript._pending.append("- preserved\n")
+
+    with pytest.raises(FileExistsError):
+        await transcript._flush()
+
+    assert transcript._pending == ["- preserved\n"]
+    transcript.path = tmp_path / "calls" / "retry.md"
+    await transcript._flush()
+    assert "preserved" in transcript.path.read_text(encoding="utf-8")
+    assert transcript._pending == []
+
+
+def test_sync_record_contains_flush_failure(tmp_path: Path) -> None:
+    """A synchronous media callback survives local transcript storage failure."""
+    transcript = _transcript(tmp_path)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("block")
+    transcript.path = blocker / "transcript.md"
+
+    transcript.record("user", "keep me")
+
+    assert transcript._pending
+
+
+@pytest.mark.asyncio
+async def test_background_flush_observes_and_logs_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scheduled flush errors are retrieved and reported instead of leaking task warnings."""
+    transcript = _transcript(tmp_path)
+    logged = MagicMock()
+
+    async def fail_flush() -> None:
+        message = "disk full"
+        raise OSError(message)
+
+    monkeypatch.setattr(transcript, "_flush", fail_flush)
+    monkeypatch.setattr("mindroom.matrix_rtc.transcript.logger.warning", logged)
+
+    transcript.record("user", "keep me")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    logged.assert_called_once()
+    assert transcript._pending
+    assert transcript._flush_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_finalize_contains_transcript_io_failure(tmp_path: Path) -> None:
+    """Transcript storage errors remain local to call teardown."""
+    transcript = _transcript(tmp_path)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("block")
+    transcript.path = blocker / "transcript.md"
+    transcript._turns = 1
+    transcript._pending.append("- preserved\n")
+
+    await transcript.finalize(
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        storage_path=tmp_path,
+    )
+
+    assert transcript._pending == ["- preserved\n"]
 
 
 def test_transcript_path_prefers_agent_workspace(tmp_path: Path) -> None:

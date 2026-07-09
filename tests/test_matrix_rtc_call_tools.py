@@ -83,6 +83,50 @@ async def test_wrapped_tool_executes_async_entrypoint(tmp_path: Path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_wrapped_tool_runs_agno_tool_hooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Voice tool execution preserves Agno hook policy and result transformations."""
+    calls: list[str] = []
+
+    def add(a: int, b: int) -> int:
+        calls.append("tool")
+        return a + b
+
+    def hook(name: str, function: object, arguments: dict[str, int]) -> str:
+        calls.append(name)
+        result = function(**arguments)  # type: ignore[operator]
+        return f"hooked={result}"
+
+    function = _function(add)
+    function.tool_hooks = [hook]
+    tool = _wrap(function, tmp_path, monkeypatch)
+
+    assert await tool({"a": 2, "b": 4}) == "hooked=6"
+    assert calls == ["add", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_wrapped_tool_refuses_agno_interactive_execution_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agno-managed confirmation flows do not execute without their text UI."""
+    calls: list[str] = []
+
+    def add(a: int, b: int) -> int:
+        calls.append("tool")
+        return a + b
+
+    function = _function(add)
+    function.requires_confirmation = True
+    tool = _wrap(function, tmp_path, monkeypatch)
+
+    result = await tool({"a": 2, "b": 4})
+
+    assert "text chat" in result
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_wrapped_tool_refuses_when_approval_required(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -144,7 +188,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     def add(a: int, b: int) -> int:
         return a + b
 
-    toolkit = SimpleNamespace(functions={"add": _function(add)})
+    toolkit = SimpleNamespace(functions={"add": _function(add)}, async_functions={})
 
     class FakeAgnoAgent:
         tools: ClassVar[list] = [toolkit]
@@ -170,3 +214,43 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     assert tooling.tool_names == ("add",)
     assert len(tooling.tools) == 1
     assert tooling.instructions == "THE CHAT SYSTEM PROMPT"
+
+
+@pytest.mark.asyncio
+async def test_build_call_tools_includes_async_only_toolkit_functions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Async-only Agno toolkit registrations are exposed to the realtime model."""
+
+    async def async_add(a: int, b: int) -> int:
+        return a + b
+
+    function = _function(async_add)
+    toolkit = SimpleNamespace(functions={}, async_functions={"add": function})
+
+    class FakeAgnoAgent:
+        tools: ClassVar[list] = [toolkit]
+
+        def get_system_message(self, _session: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.create_agent",
+        lambda *_args, **_kwargs: FakeAgnoAgent(),
+    )
+    tool_support = SimpleNamespace(
+        build_context=lambda *_a, **_k: _context(),
+        build_execution_identity=lambda **_k: SimpleNamespace(),
+    )
+
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        tool_support=tool_support,  # type: ignore[arg-type]
+        room_id="!room:example.org",
+    )
+
+    assert tooling.tool_names == ("add",)
+    assert len(tooling.tools) == 1

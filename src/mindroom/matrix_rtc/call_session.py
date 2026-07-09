@@ -123,6 +123,7 @@ class CallSession:
     _created_ts: int | None = field(default=None, init=False)
     _stopped: bool = field(default=False, init=False)
     _members: list[CallMember] = field(default_factory=list, init=False)
+    _key_distribution_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _key_distribution_retry_scheduled: bool = field(default=False, init=False)
     _key_retry_attempt: int = field(default=0, init=False)
 
@@ -153,7 +154,7 @@ class CallSession:
             raise CallJoinError(msg) from error
         try:
             if self.e2ee_enabled:
-                await self._distribute_keys(members)
+                await self._distribute_keys()
             await self._publish_membership(initial=True)
             self._spawn(self._membership_refresh_loop())
             try:
@@ -175,13 +176,34 @@ class CallSession:
         self._members = members
         # A roster change is a fresh delivery opportunity: restart the backoff.
         self._key_retry_attempt = 0
-        await self._distribute_keys(members)
+        await self._distribute_keys()
 
     def on_key_received(self, received: ReceivedFrameKey) -> None:
         """Install a remote participant's frame key on the media bridge."""
         if self._stopped:
             return
-        inbound = self._key_manager.receive(received, self.deps.clock_ms())
+        member = next(
+            (
+                candidate
+                for candidate in self._members
+                if candidate.user_id == received.user_id and candidate.device_id == received.claimed_device_id
+            ),
+            None,
+        )
+        if member is None:
+            logger.warning(
+                "call_frame_key_rejected_nonmember",
+                room_id=self.room_id,
+                user_id=received.user_id,
+                device_id=received.claimed_device_id,
+            )
+            return
+        participant_identity = f"{member.user_id}:{member.device_id}"
+        inbound = self._key_manager.receive(
+            received,
+            self.deps.clock_ms(),
+            participant_identity=participant_identity,
+        )
         if inbound is None:
             return
         self.deps.bridge.set_frame_key(inbound.participant_identity, inbound.key, inbound.key_index)
@@ -197,9 +219,11 @@ class CallSession:
         if self._stopped:
             return
         self._stopped = True
-        for task in self._tasks:
+        tasks = list(self._tasks)
+        for task in tasks:
             task.cancel()
-        self._tasks.clear()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         # Media teardown and transcript finalization must run even when the
         # homeserver is unreachable while leaving.
         try:
@@ -212,30 +236,33 @@ class CallSession:
                     await self.deps.on_stopped()
         logger.info("call_left", room_id=self.room_id, identity=self.local_identity)
 
-    async def _distribute_keys(self, members: list[CallMember]) -> None:
-        self._members = members
-        distribution = self._key_manager.update_memberships(members, self.deps.clock_ms())
-        if distribution is None:
-            return
-        delivered: list[CallMember] = []
-        if distribution.targets:
-            delivered = await self.deps.key_transport.send_key(
-                room_id=self.room_id,
-                key_base64=distribution.key_base64,
-                key_index=distribution.key_index,
-                targets=list(distribution.targets),
-            )
-        self._key_manager.mark_distributed(distribution, tuple(delivered))
-        if len(delivered) == len(distribution.targets):
-            self._key_retry_attempt = 0
-        else:
-            self._schedule_key_distribution_retry()
-        if distribution.apply_after_ms <= 0:
-            self._apply_own_key(distribution.key, distribution.key_index)
-        else:
-            self._spawn(
-                self._apply_own_key_later(distribution.key, distribution.key_index, distribution.apply_after_ms),
-            )
+    async def _distribute_keys(self) -> None:
+        async with self._key_distribution_lock:
+            if self._stopped:
+                return
+            members = list(self._members)
+            distribution = self._key_manager.update_memberships(members, self.deps.clock_ms())
+            if distribution is None:
+                return
+            delivered: list[CallMember] = []
+            if distribution.targets:
+                delivered = await self.deps.key_transport.send_key(
+                    room_id=self.room_id,
+                    key_base64=distribution.key_base64,
+                    key_index=distribution.key_index,
+                    targets=list(distribution.targets),
+                )
+            self._key_manager.mark_distributed(distribution, tuple(delivered))
+            if len(delivered) == len(distribution.targets):
+                self._key_retry_attempt = 0
+            else:
+                self._schedule_key_distribution_retry()
+            if distribution.apply_after_ms <= 0:
+                self._apply_own_key(distribution.key, distribution.key_index)
+            else:
+                self._spawn(
+                    self._apply_own_key_later(distribution.key, distribution.key_index, distribution.apply_after_ms),
+                )
 
     def _schedule_key_distribution_retry(self) -> None:
         """Re-attempt undelivered recipients on a bounded backoff."""
@@ -259,7 +286,7 @@ class CallSession:
         finally:
             self._key_distribution_retry_scheduled = False
         if not self._stopped:
-            await self._distribute_keys(self._members)
+            await self._distribute_keys()
 
     def _apply_own_key(self, key: bytes, key_index: int) -> None:
         self.deps.bridge.set_frame_key(self.local_identity, key, key_index)

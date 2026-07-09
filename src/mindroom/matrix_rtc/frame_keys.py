@@ -145,17 +145,23 @@ class FrameKeyManager:
             if share not in self._shared_with:
                 self._shared_with.append(share)
 
-    def receive(self, received: ReceivedFrameKey, now_ms: int) -> _InboundFrameKey | None:
+    def receive(
+        self,
+        received: ReceivedFrameKey,
+        now_ms: int,
+        *,
+        participant_identity: str,
+    ) -> _InboundFrameKey | None:
         """Validate and decode a remote key, dropping stale duplicates.
 
-        A quick leave/rejoin can produce two keys with the same index; the
-        ``sent_ts`` comparison keeps the newest one when they arrive out of
-        order (matrix-js-sdk's ``OutdatedKeyFilter``).
+        Ordering uses the local receipt time because the event's ``sent_ts``
+        is supplied by the remote sender and cannot be trusted.
         """
-        sent_ts = received.sent_ts if received.sent_ts is not None else now_ms
+        if isinstance(received.key_index, bool) or not 0 <= received.key_index < _KEY_INDEX_MODULUS:
+            return None
         filter_key = (received.user_id, received.claimed_device_id, received.key_index)
         newest = self._newest_inbound_ts.get(filter_key)
-        if newest is not None and sent_ts < newest:
+        if newest is not None and now_ms < newest:
             return None
         try:
             key = base64.b64decode(received.key_base64, validate=True)
@@ -165,9 +171,9 @@ class FrameKeyManager:
             return None
         # Record the dedup timestamp only for keys that validate, so a
         # malformed payload cannot poison the filter against a good retry.
-        self._newest_inbound_ts[filter_key] = sent_ts
+        self._newest_inbound_ts[filter_key] = now_ms
         return _InboundFrameKey(
-            participant_identity=received.member_id,
+            participant_identity=participant_identity,
             key_index=received.key_index,
             key=key,
         )

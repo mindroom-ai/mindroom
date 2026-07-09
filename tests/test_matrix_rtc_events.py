@@ -120,7 +120,6 @@ def test_key_to_device_content_round_trip() -> None:
     )
     received = parse_key_to_device_content(USER, content, room_id="!room:example.org")
     assert received is not None
-    assert received.member_id == f"{USER}:{DEVICE}"
     assert received.key_index == 3
     assert received.sent_ts == 777
     # A key for a different room must not leak into this session.
@@ -135,6 +134,18 @@ def test_parse_key_content_requires_key_and_claimed_device() -> None:
         parse_key_to_device_content(
             USER,
             {"room_id": room_id, "keys": {"index": 0, "key": "abc"}, "member": {}},
+            room_id=room_id,
+        )
+        is None
+    )
+    assert (
+        parse_key_to_device_content(
+            USER,
+            {
+                "room_id": room_id,
+                "keys": {"index": 256, "key": "abc"},
+                "member": {"claimed_device_id": DEVICE},
+            },
             room_id=room_id,
         )
         is None

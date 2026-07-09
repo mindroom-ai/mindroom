@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import inspect
 import json
 from dataclasses import dataclass
+from inspect import isasyncgenfunction, iscoroutinefunction
 from typing import TYPE_CHECKING, Any
 
 from agno.session import AgentSession as AgnoAgentSession
+from agno.tools.function import FunctionCall
 
 from mindroom.agents import create_agent
 from mindroom.logging_config import get_logger
@@ -41,6 +42,10 @@ logger = get_logger(__name__)
 
 _APPROVAL_REQUIRED_MESSAGE = (
     "This tool requires human approval and cannot run during a voice call. "
+    "Tell the user to ask for it in the text chat instead."
+)
+_TEXT_CHAT_REQUIRED_MESSAGE = (
+    "This tool needs an interactive or external execution flow that is unavailable during a voice call. "
     "Tell the user to ask for it in the text chat instead."
 )
 
@@ -101,8 +106,14 @@ async def build_call_tools(
     instructions = await asyncio.to_thread(_render_system_prompt, agent, session_id)
     tools: list[Any] = []
     names: list[str] = []
+    seen_functions: set[int] = set()
+    seen_names: set[str] = set()
     for toolkit in agent.tools or []:
-        for function in toolkit.functions.values():
+        for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
+            if id(function) in seen_functions or function.name in seen_names:
+                continue
+            seen_functions.add(id(function))
+            seen_names.add(function.name)
             tools.append(
                 _wrap_agno_function(
                     function,
@@ -143,6 +154,15 @@ def _normalize_tool_result(result: object) -> str:
     return text
 
 
+def _function_requires_async_execution(function: Function) -> bool:
+    """Return whether an entrypoint or hook requires Agno's async executor."""
+    callbacks = [function.entrypoint, function.pre_hook, function.post_hook, *(function.tool_hooks or [])]
+    return any(
+        callback is not None and (iscoroutinefunction(callback) or isasyncgenfunction(callback))
+        for callback in callbacks
+    )
+
+
 def _wrap_agno_function(
     function: Function,
     *,
@@ -167,6 +187,14 @@ def _wrap_agno_function(
     }
 
     async def _handler(raw_arguments: dict[str, Any]) -> str:
+        if (
+            function.requires_confirmation
+            or function.requires_user_input
+            or function.external_execution
+            or function.approval_type == "required"
+        ):
+            logger.info("call_tool_blocked_needs_text_chat", tool=function.name, agent=agent_name)
+            return _TEXT_CHAT_REQUIRED_MESSAGE
         requires_approval, _timeout = await evaluate_tool_approval(
             config,
             runtime_paths,
@@ -177,21 +205,23 @@ def _wrap_agno_function(
         if requires_approval:
             logger.info("call_tool_blocked_needs_approval", tool=function.name, agent=agent_name)
             return _APPROVAL_REQUIRED_MESSAGE
-        entrypoint = function.entrypoint
-        if entrypoint is None:
-            return f"Tool {function.name} has no entrypoint and cannot run."
         logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)
         try:
             with tool_runtime_context(context):
-                if inspect.iscoroutinefunction(entrypoint):
-                    result = await entrypoint(**raw_arguments)
+                execution = FunctionCall(function=function, arguments=raw_arguments)
+                if _function_requires_async_execution(function):
+                    result = await execution.aexecute()
                 else:
                     # asyncio.to_thread copies the current contextvars context,
-                    # so the tool runtime context stays visible in the thread.
-                    result = await asyncio.to_thread(functools.partial(entrypoint, **raw_arguments))
+                    # so hooks and the tool see the call's runtime context.
+                    result = await asyncio.to_thread(execution.execute)
         except Exception as error:
             logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(error))
             return f"Tool {function.name} failed: {error}"
-        return _normalize_tool_result(result)
+        if result.status != "success":
+            error = result.error or "unknown error"
+            logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=error)
+            return f"Tool {function.name} failed: {error}"
+        return _normalize_tool_result(result.result)
 
     return llm.function_tool(_handler, raw_schema=raw_schema)

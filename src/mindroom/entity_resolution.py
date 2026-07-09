@@ -31,6 +31,23 @@ class DuplicateManagedEntityIdentityError(RuntimeError):
     """Raised when persisted managed Matrix accounts are ambiguous."""
 
 
+def validate_call_agent_room_ownership(config: Config, runtime_paths: RuntimePaths) -> None:
+    """Reject runtime-resolved rooms assigned to more than one call agent."""
+    agents_by_room: dict[str, list[str]] = {}
+    for agent_name in config.calls.agents:
+        rooms = matrix_state.resolve_room_aliases(config.agents[agent_name].rooms, runtime_paths)
+        for room in rooms:
+            agents_by_room.setdefault(room, []).append(agent_name)
+    conflicts = [
+        f"{room} ({', '.join(sorted(agent_names))})"
+        for room, agent_names in sorted(agents_by_room.items())
+        if len(agent_names) > 1
+    ]
+    if conflicts:
+        msg = "calls.agents configures multiple agents for room(s): " + "; ".join(conflicts)
+        raise ValueError(msg)
+
+
 def configured_bot_user_ids_for_room(
     config: Config,
     room_id: str,

@@ -17,13 +17,19 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.calls import CallsConfig
 from mindroom.config.main import Config
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix_rtc.call_manager import CallManager, _build_call_instructions, maybe_build_call_manager
+from mindroom.matrix_rtc.call_manager import (
+    _MAX_PENDING_KEYS_PER_ROOM,
+    CallManager,
+    _build_call_instructions,
+    maybe_build_call_manager,
+)
 from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps
 from mindroom.matrix_rtc.call_tools import CallAgentTooling
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
     CALL_MEMBER_EVENT_TYPE,
     DEFAULT_MEMBERSHIP_EXPIRES_MS,
+    ReceivedFrameKey,
     build_key_to_device_content,
     build_membership_content,
     membership_state_key,
@@ -421,6 +427,27 @@ async def test_manager_shutdown_continues_after_a_session_stop_failure(tmp_path:
     assert second_bridge.closed
 
 
+@pytest.mark.asyncio
+async def test_manager_reconcile_contains_session_stop_failure(tmp_path: Path) -> None:
+    """A teardown failure on call end cannot escape the Matrix sync callback."""
+    client = _client()
+    client.room_get_state.return_value = nio.RoomGetStateResponse([], ROOM_ID)
+    bridge = FakeBridge()
+
+    async def failed_finalizer() -> None:
+        message = "disk full"
+        raise OSError(message)
+
+    session = _plain_session(client, bridge, on_stopped=failed_finalizer)
+    manager = _manager(client, FakeBridge(), tmp_path)
+    manager._sessions[ROOM_ID] = session
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert bridge.closed
+    assert manager._sessions == {}
+
+
 def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None:
     """Maybe build call manager respects configuration."""
     client = _client()
@@ -548,7 +575,7 @@ async def test_session_distributes_and_applies_first_key_on_start() -> None:
 
 @pytest.mark.asyncio
 async def test_session_installs_inbound_keys_on_bridge() -> None:
-    """Session installs inbound keys on bridge."""
+    """Session derives the media identity from its trusted call roster."""
     client = _client()
     bridge = FakeBridge()
     transport = FakeKeyTransport()
@@ -557,13 +584,10 @@ async def test_session_installs_inbound_keys_on_bridge() -> None:
     await session.start([_member("@alice:example.org", "ALICEDEV")])
     bridge.frame_keys.clear()
 
-    from mindroom.matrix_rtc.events import ReceivedFrameKey  # noqa: PLC0415
-
     session.on_key_received(
         ReceivedFrameKey(
             user_id="@alice:example.org",
             claimed_device_id="ALICEDEV",
-            member_id="@alice:example.org:ALICEDEV",
             key_base64="QUFBQUFBQUFBQUFBQUFBQQ==",
             key_index=2,
             sent_ts=1_500,
@@ -571,6 +595,28 @@ async def test_session_installs_inbound_keys_on_bridge() -> None:
     )
 
     assert bridge.frame_keys == [("@alice:example.org:ALICEDEV", b"A" * 16, 2)]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_rejects_inbound_key_from_device_outside_roster() -> None:
+    """An authorized user cannot inject a key for a device outside the active call."""
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), [1_000])
+    await session.start([_member("@alice:example.org", "ALICEDEV")])
+    bridge.frame_keys.clear()
+
+    session.on_key_received(
+        ReceivedFrameKey(
+            user_id="@alice:example.org",
+            claimed_device_id="OTHERDEV",
+            key_base64="QUFBQUFBQUFBQUFBQUFBQQ==",
+            key_index=2,
+            sent_ts=1_500,
+        ),
+    )
+
+    assert bridge.frame_keys == []
     await session.stop()
 
 
@@ -622,6 +668,72 @@ async def test_manager_replays_a_key_received_before_startup_reconciliation(
     await manager.reconcile_joined_rooms()
 
     assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
+
+
+@pytest.mark.asyncio
+async def test_manager_accepts_key_for_alias_only_configured_room(tmp_path: Path) -> None:
+    """To-device admission uses the cached room alias just like room events."""
+    config = Config(
+        agents={"helper": AgentConfig(display_name="Helper", rooms=["#voice:example.org"])},
+        models={},
+        authorization=AuthorizationConfig(global_users=["@alice:example.org"]),
+        calls=CallsConfig(enabled=True, agents=["helper"], livekit_service_url=SERVICE_URL),
+    )
+    room = _room(encrypted=True)
+    room.canonical_alias = "#voice:example.org"
+    client = _client()
+    client.rooms = {ROOM_ID: room}
+    client.room_get_state.return_value = nio.RoomGetStateResponse([_remote_member_event()], ROOM_ID)
+    manager = _manager(client, FakeBridge(), tmp_path, config)
+
+    await manager.on_to_device_event(_frame_key_event())
+
+    assert ROOM_ID in manager._pending_keys
+
+
+@pytest.mark.asyncio
+async def test_manager_rejects_pending_key_from_device_outside_roster(tmp_path: Path) -> None:
+    """Pre-join key buffering requires an exact current user/device membership."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room(encrypted=True)}
+    client.room_get_state.return_value = nio.RoomGetStateResponse(
+        [_remote_member_event(device="DIFFERENTDEV")],
+        ROOM_ID,
+    )
+    manager = _manager(client, FakeBridge(), tmp_path)
+
+    await manager.on_to_device_event(_frame_key_event())
+
+    assert manager._pending_keys == {}
+
+
+def test_manager_bounds_and_deduplicates_pending_keys(tmp_path: Path) -> None:
+    """A stalled join cannot accumulate an unbounded to-device key backlog."""
+    manager = _manager(_client(), FakeBridge(), tmp_path)
+    for index in range(_MAX_PENDING_KEYS_PER_ROOM + 1):
+        manager._queue_pending_key(
+            ROOM_ID,
+            ReceivedFrameKey(
+                user_id="@alice:example.org",
+                claimed_device_id="ALICEDEV",
+                key_base64="QUFBQUFBQUFBQUFBQUFBQQ==",
+                key_index=index,
+            ),
+        )
+
+    pending = manager._pending_keys[ROOM_ID]
+    assert len(pending) == _MAX_PENDING_KEYS_PER_ROOM
+    assert ("@alice:example.org", "ALICEDEV", 0) not in pending
+
+    replacement = ReceivedFrameKey(
+        user_id="@alice:example.org",
+        claimed_device_id="ALICEDEV",
+        key_base64="QkJCQkJCQkJCQkJCQkJCQg==",
+        key_index=1,
+    )
+    manager._queue_pending_key(ROOM_ID, replacement)
+    assert len(pending) == _MAX_PENDING_KEYS_PER_ROOM
+    assert pending[("@alice:example.org", "ALICEDEV", 1)] is replacement
 
 
 @pytest.mark.asyncio
@@ -804,6 +916,27 @@ async def test_stop_still_tears_down_on_unexpected_clear_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_drains_cancelled_background_tasks() -> None:
+    """Session shutdown waits until cancelled background work has unwound."""
+    session = _plain_session(_client(), FakeBridge())
+    cancelled = asyncio.Event()
+
+    async def background() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    session._spawn(background())
+    await asyncio.sleep(0)
+
+    await session.stop()
+
+    assert cancelled.is_set()
+    assert session._tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_membership_refresh_retries_the_same_window_after_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -869,13 +1002,63 @@ async def test_session_retries_members_that_did_not_receive_a_key(monkeypatch: p
     session = _session(_client(), bridge, transport, [1_000])
     alice = _member("@alice:example.org", "ALICEDEV")
 
-    await session._distribute_keys([alice])
+    session._members = [alice]
+    await session._distribute_keys()
     for _ in range(10):
         if len(transport.sent) == 2:
             break
         await real_sleep(0)
 
     assert len(transport.sent) == 2
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_key_distribution_serializes_roster_change_after_inflight_send() -> None:
+    """A leaver during key delivery is followed by a rotation for the latest roster."""
+
+    class BlockingTransport(FakeKeyTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sending = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def send_key(
+            self,
+            *,
+            room_id: str,
+            key_base64: str,
+            key_index: int,
+            targets: list[CallMember],
+        ) -> list[CallMember]:
+            await super().send_key(
+                room_id=room_id,
+                key_base64=key_base64,
+                key_index=key_index,
+                targets=targets,
+            )
+            if len(self.sent) == 1:
+                self.sending.set()
+                await self.release.wait()
+            return targets
+
+    transport = BlockingTransport()
+    session = _session(_client(), FakeBridge(), transport, [1_000])
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    session._members = [alice, bob]
+    initial = asyncio.create_task(session._distribute_keys())
+    await asyncio.wait_for(transport.sending.wait(), timeout=1)
+
+    changed = asyncio.create_task(session.on_members_changed([bob]))
+    await asyncio.sleep(0)
+    transport.release.set()
+    await initial
+    await changed
+
+    assert [send["key_index"] for send in transport.sent] == [0, 1]
+    assert transport.sent[1]["targets"] == [bob]
+    assert session._key_manager.update_memberships([bob], now_ms=1_001) is None
     await session.stop()
 
 
@@ -941,7 +1124,8 @@ async def test_key_distribution_retry_backs_off_and_gives_up(
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", fake_sleep)
 
-    await session._distribute_keys([_member("@alice:example.org", "ALICEDEV")])
+    session._members = [_member("@alice:example.org", "ALICEDEV")]
+    await session._distribute_keys()
     for _ in range(50):
         await real_sleep(0)
 
