@@ -41,8 +41,10 @@ _MEMBERSHIP_REFRESH_MARGIN_MS = 5 * 60 * 1000
 #: Retry delay after a failed membership refresh.
 _MEMBERSHIP_REFRESH_RETRY_MS = 60 * 1000
 
-#: Retry delivery to members that could not receive a media frame key yet.
-_KEY_DISTRIBUTION_RETRY_MS = 1_000
+#: Backoff for members that could not receive a media frame key yet; after
+#: the last delay, delivery waits for the next membership change instead of
+#: polling the homeserver forever for a device that may never come online.
+_KEY_DISTRIBUTION_RETRY_DELAYS_S = (1.0, 5.0, 30.0)
 
 
 class CallJoinError(RuntimeError):
@@ -122,6 +124,7 @@ class CallSession:
     _stopped: bool = field(default=False, init=False)
     _members: list[CallMember] = field(default_factory=list, init=False)
     _key_distribution_retry_scheduled: bool = field(default=False, init=False)
+    _key_retry_attempt: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         """Initialize the frame-key manager from the client identity."""
@@ -170,6 +173,8 @@ class CallSession:
         if self._stopped or not self.e2ee_enabled:
             return
         self._members = members
+        # A roster change is a fresh delivery opportunity: restart the backoff.
+        self._key_retry_attempt = 0
         await self._distribute_keys(members)
 
     def on_key_received(self, received: ReceivedFrameKey) -> None:
@@ -221,7 +226,9 @@ class CallSession:
                 targets=list(distribution.targets),
             )
         self._key_manager.mark_distributed(distribution, tuple(delivered))
-        if len(delivered) < len(distribution.targets):
+        if len(delivered) == len(distribution.targets):
+            self._key_retry_attempt = 0
+        else:
             self._schedule_key_distribution_retry()
         if distribution.apply_after_ms <= 0:
             self._apply_own_key(distribution.key, distribution.key_index)
@@ -231,20 +238,28 @@ class CallSession:
             )
 
     def _schedule_key_distribution_retry(self) -> None:
-        """Re-attempt recipients that were not successfully sent the current key."""
+        """Re-attempt undelivered recipients on a bounded backoff."""
         if self._key_distribution_retry_scheduled or self._stopped:
             return
+        if self._key_retry_attempt >= len(_KEY_DISTRIBUTION_RETRY_DELAYS_S):
+            logger.warning(
+                "call_key_distribution_gave_up",
+                room_id=self.room_id,
+                hint="undelivered recipients will be retried on the next membership change",
+            )
+            return
+        delay_s = _KEY_DISTRIBUTION_RETRY_DELAYS_S[self._key_retry_attempt]
+        self._key_retry_attempt += 1
         self._key_distribution_retry_scheduled = True
-        self._spawn(self._retry_key_distribution())
+        self._spawn(self._retry_key_distribution(delay_s))
 
-    async def _retry_key_distribution(self) -> None:
+    async def _retry_key_distribution(self, delay_s: float) -> None:
         try:
-            await asyncio.sleep(_KEY_DISTRIBUTION_RETRY_MS / 1000)
-            self._key_distribution_retry_scheduled = False
-            if not self._stopped:
-                await self._distribute_keys(self._members)
+            await asyncio.sleep(delay_s)
         finally:
             self._key_distribution_retry_scheduled = False
+        if not self._stopped:
+            await self._distribute_keys(self._members)
 
     def _apply_own_key(self, key: bytes, key_index: int) -> None:
         self.deps.bridge.set_frame_key(self.local_identity, key, key_index)

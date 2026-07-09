@@ -705,3 +705,48 @@ def test_calls_config_rejects_agents_sharing_a_room() -> None:
             },
             calls=CallsConfig(enabled=True, agents=["one", "two"]),
         )
+
+
+class UndeliverableKeyTransport(FakeKeyTransport):
+    """A transport whose targets never receive the key."""
+
+    async def send_key(self, **kwargs: object) -> list[CallMember]:
+        """Record the attempt and deliver to nobody."""
+        await super().send_key(**kwargs)  # type: ignore[arg-type]
+        return []
+
+
+@pytest.mark.asyncio
+async def test_key_distribution_retry_backs_off_and_gives_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Undeliverable frame keys retry on a bounded backoff, not a 1s poll forever."""
+    client = _client()
+    transport = UndeliverableKeyTransport()
+    clock = [1_000]
+    session = _session(client, FakeBridge(), transport, clock)
+
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", fake_sleep)
+
+    await session._distribute_keys([_member("@alice:example.org", "ALICEDEV")])
+    for _ in range(50):
+        await real_sleep(0)
+
+    # One initial attempt plus one per backoff delay, then it stops.
+    assert len(transport.sent) == 4
+    assert sleeps == [1.0, 5.0, 30.0]
+
+    # A membership change restarts the budget.
+    await session.on_members_changed(
+        [_member("@alice:example.org", "ALICEDEV"), _member("@bob:example.org", "BOBDEV")],
+    )
+    for _ in range(50):
+        await real_sleep(0)
+    assert len(transport.sent) > 4
