@@ -42,7 +42,12 @@ class ThreadCacheStateRow:
 
 def thread_cache_state_row(values: Sequence[float | str | None] | None) -> ThreadCacheStateRow | None:
     """Normalize one backend storage row into backend-neutral cache-state values."""
-    if values is None or all(value is None for value in values):
+    if values is None:
+        return None
+    if len(values) != 5:
+        msg = f"Thread cache-state row must contain exactly 5 values, got {len(values)}"
+        raise ValueError(msg)
+    if all(value is None for value in values):
         return None
     return ThreadCacheStateRow(
         validated_at=None if values[0] is None else float(values[0]),
