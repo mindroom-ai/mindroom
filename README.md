@@ -16,7 +16,7 @@
 MindRoom is an open-source multi-agent runtime built on [Matrix](https://matrix.org/).
 You define agents in a YAML file or in the web dashboard; MindRoom gives each one a Matrix account, and you talk to them in threads in the [MindRoom chat client](https://github.com/mindroom-ai/mindroom-cinny) — or any other Matrix client you already use.
 Because Matrix bridges to other platforms, the same agents also work in Slack, Telegram, Discord, WhatsApp, IRC, and email — with the same persistent memory everywhere.
-Self-host the whole stack, or run only the MindRoom backend locally and pair it with hosted Matrix at [chat.mindroom.chat](https://chat.mindroom.chat).
+Self-host the whole stack, or run only the MindRoom backend locally and pair it with hosted Matrix at [mindroom.chat](https://mindroom.chat).
 
 https://github.com/user-attachments/assets/1f121c89-5418-4f42-bdfe-fb9de0fecd03
 
@@ -37,7 +37,7 @@ https://github.com/user-attachments/assets/1f121c89-5418-4f42-bdfe-fb9de0fecd03
 
 What it looks like:
 
-```
+```text
 You: @research @analyst @writer Create a competitive analysis report
 Research: I'll gather data on our top 5 competitors...
 Analyst: I'll identify strategic patterns and opportunities...
@@ -59,7 +59,7 @@ MindRoom agents live in one place (Matrix) and follow you everywhere via bridges
 
 Federation even lets agents cross organization boundaries:
 
-```
+```text
 Your client asks in their Discord:
 Client: Can our architect AI review this with your team?
 You: Sure! @assistant please collaborate with them
@@ -89,8 +89,8 @@ Coming from OpenClaw? MindRoom [imports OpenClaw workspaces](docs/openclaw.md) (
 
 ### Hosted Matrix + local MindRoom (fastest)
 
-MindRoom runs on your machine; Matrix and the chat UI are hosted at `mindroom.chat`.
-The only prerequisite is [uv](https://github.com/astral-sh/uv).
+MindRoom runs on your machine; Matrix is hosted at `mindroom.chat` and the chat UI at [chat.mindroom.chat](https://chat.mindroom.chat).
+The only prerequisite is [uv](https://github.com/astral-sh/uv), which installs Python automatically if needed.
 Watch the 2-minute setup video:
 
 <a href="https://youtu.be/jR3xLUxyWhg"><img src="https://img.youtube.com/vi/jR3xLUxyWhg/maxresdefault.jpg" alt="MindRoom: installing and talking to my first AI agent in 2 minutes" width="480"></a>
@@ -149,7 +149,7 @@ See the [macOS app guide](docs/installation/macos-app.md) for setup, updates, an
 
 In the MindRoom chat client (hosted at [chat.mindroom.chat](https://chat.mindroom.chat), or bundled with the local stack):
 
-```
+```text
 You: @assistant What can you do?
 Assistant: I can coordinate our team of specialized agents...
 
@@ -238,12 +238,12 @@ authorization:
 Environment variables go in `.env` (or `~/.mindroom/.env` for the hosted path):
 
 ```bash
-export MATRIX_HOMESERVER=https://your-matrix.server
-export ANTHROPIC_API_KEY=your-key-here
+MATRIX_HOMESERVER=https://your-matrix.server
+ANTHROPIC_API_KEY=your-key-here
 # Optional: protect dashboard API endpoints (recommended for non-localhost)
-# export MINDROOM_API_KEY=your-secret-key
+# MINDROOM_API_KEY=your-secret-key
 # Optional: use a non-default config location
-# export MINDROOM_CONFIG_PATH=/path/to/config.yaml
+# MINDROOM_CONFIG_PATH=/path/to/config.yaml
 ```
 
 Teams, cultures, per-room models, context compaction, history controls, and memory backends are covered in the [configuration docs](docs/configuration/index.md) and at [docs.mindroom.chat](https://docs.mindroom.chat).
@@ -252,7 +252,7 @@ Teams, cultures, per-room models, context compaction, history controls, and memo
 
 - **Own homeserver** — set `MATRIX_HOMESERVER` and run against any Synapse, Conduit, or Dendrite instance.
 - **Local stack** — `mindroom local-stack-setup` bootstraps a local Synapse + Cinny via Docker.
-- **Hosted Matrix** — run only the backend locally and pair with [chat.mindroom.chat](https://chat.mindroom.chat) ([guide](docs/deployment/hosted-matrix.md)).
+- **Hosted Matrix** — run only the backend locally against hosted Matrix at [mindroom.chat](https://mindroom.chat), pairing via [chat.mindroom.chat](https://chat.mindroom.chat) ([guide](docs/deployment/hosted-matrix.md)).
 - **Docker** — single-container runtime ([guide](docs/deployment/docker.md)).
 - **Kubernetes** — Helm charts for enterprise-scale, multi-tenant deployments ([guide](docs/deployment/kubernetes.md)).
 - **NixOS LXC (Incus)** — the author's favorite for personal use: [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) provisions a persistent, agent-controlled NixOS container with the full stack, which the agent can rebuild and manage itself while the host controls what it sees.
@@ -297,7 +297,8 @@ The `saas-platform/` directory contains infrastructure specific to running MindR
 
 ## Contributing
 
-We welcome contributions! See [CLAUDE.md](CLAUDE.md) for the current development workflow and quality checks.
+We welcome contributions!
+See [CLAUDE.md](CLAUDE.md) for the current development workflow and quality checks.
 
 ## License
 
