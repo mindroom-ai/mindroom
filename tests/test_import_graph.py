@@ -197,6 +197,15 @@ def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:
     )
 
 
+def test_tool_auto_install_smoke_entrypoint_imports() -> None:
+    """The repository smoke entry point must use the post-split tool-system surfaces."""
+    subprocess.run(
+        [sys.executable, "-c", "import scripts.testing.tool_auto_install_smoke"],
+        check=True,
+        timeout=120,
+    )
+
+
 @pytest.mark.parametrize("module", sorted(_ALLOWED_THIRD_PARTY_ROOTS))
 def test_slim_entry_points_only_load_allowlisted_packages(module: str) -> None:
     """A new third-party package in a slim import graph must be a conscious decision.
