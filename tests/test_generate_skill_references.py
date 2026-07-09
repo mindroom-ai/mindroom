@@ -26,11 +26,11 @@ def test_source_page_reference_preserves_authored_markdown(tmp_path: Path) -> No
     """Generated references should preserve authored Markdown exactly after frontmatter."""
     generator = _load_generator()
     source_text = """\
-## Delivery Policy
+## Room Access
 
 ```yaml
-matrix_delivery:
-  ignore_unverified_devices: false
+matrix_room_access:
+  encrypt_managed_rooms: false
 ```
 """
     docs_dir = tmp_path / "docs"

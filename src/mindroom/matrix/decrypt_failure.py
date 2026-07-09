@@ -95,8 +95,8 @@ def raise_notice_floor(user_id: str, room_id: str | None = None) -> None:
     _notice_floors[(user_id, room_id)] = int(time.time() * 1000)
 
 
-def _below_notice_floor(user_id: str | None, room_id: str, server_timestamp: int | None) -> bool:
-    if user_id is None or not isinstance(server_timestamp, int):
+def _below_notice_floor(user_id: str | None, room_id: str, server_timestamp: int) -> bool:
+    if user_id is None:
         return False
     floor = max(
         _notice_floors.get((user_id, room_id), 0),

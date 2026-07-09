@@ -14734,7 +14734,8 @@ All bots share a disk-backed notice ledger, so the first bot that fails on a ses
 Notices are suppressed for events that predate a bot's room join or a start without sync continuity, since pre-join and already-replayed history is expected to be undecryptable.
 Decryption-failure counters are exposed on `/api/health` under `e2ee`.
 
-Each agent bootstraps a self-managed cross-signing identity at login (master and self-signing keys persisted next to its encryption store) and signs its own device, so clients that exclude non-cross-signed devices (MSC4153) keep sharing room keys with agents. `!e2ee` reports the cross-signing status.
+Each agent bootstraps a self-managed cross-signing identity at login (master and self-signing keys persisted next to its encryption store) and signs its own device, so clients that exclude non-cross-signed devices (MSC4153) keep sharing room keys with agents.
+`!e2ee` reports the cross-signing status.
 When the homeserver no longer has the uploaded identity (for example after a dev-server reset that kept `encryption_keys/`), the bootstrap detects the divergence and re-uploads the persisted keys instead of wedging.
 
 If a bot's encryption store under `mindroom_data/encryption_keys/` is lost while its device identity persists, startup logs in as a fresh device instead of restoring a wedged crypto identity, and re-signs the new device with the persisted cross-signing keys; `mindroom doctor` reports missing stores.
