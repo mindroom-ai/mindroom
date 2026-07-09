@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -38,7 +38,7 @@ class ResolvedMemoryBackend(Protocol):
         content: str,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         metadata: dict | None = None,
         execution_identity: ToolExecutionIdentity | None = None,
@@ -50,7 +50,7 @@ class ResolvedMemoryBackend(Protocol):
         query: str,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
@@ -61,7 +61,7 @@ class ResolvedMemoryBackend(Protocol):
         self,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         limit: int,
         preserve_resolved_storage_path: bool = False,
@@ -74,7 +74,7 @@ class ResolvedMemoryBackend(Protocol):
         memory_id: str,
         caller_context: str | list[str],
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryResult | None:
@@ -86,7 +86,7 @@ class ResolvedMemoryBackend(Protocol):
         content: str,
         caller_context: str | list[str],
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
@@ -97,7 +97,7 @@ class ResolvedMemoryBackend(Protocol):
         memory_id: str,
         caller_context: str | list[str],
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
@@ -109,7 +109,7 @@ class ResolvedMemoryBackend(Protocol):
         agent_name: str | list[str],
         storage_path: Path,
         session_id: str,
-        config: Config,
+        config: RuntimeConfig,
         *,
         thread_history: Sequence[ResolvedVisibleMessage] | None = None,
         user_id: str | None = None,
@@ -121,7 +121,7 @@ class ResolvedMemoryBackend(Protocol):
         self,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> str:
@@ -130,7 +130,7 @@ class ResolvedMemoryBackend(Protocol):
 
 def resolve_memory_backend(
     caller_context: str | list[str],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> ResolvedMemoryBackend | None:
     """Resolve the effective backend for one caller scope; None disables memory.

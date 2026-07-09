@@ -15,7 +15,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix import state as matrix_state
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -29,7 +29,7 @@ class _RoomTopic(BaseModel):
 
 def _configured_entity_display_names_for_room(
     room_key: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[str]:
     """Return configured agent and team display names for one room key or ID."""
@@ -45,7 +45,7 @@ def _configured_entity_display_names_for_room(
 async def generate_room_topic_ai(
     room_key: str,
     room_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Generate a contextual topic for a room using AI based on its purpose and configured entities.
@@ -133,7 +133,7 @@ async def ensure_room_has_topic(
     room_id: str,
     room_key: str,
     room_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Ensure a room has a topic set, generating one if needed.

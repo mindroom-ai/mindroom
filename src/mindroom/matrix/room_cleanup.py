@@ -27,15 +27,15 @@ from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
 
-def _get_all_known_bot_user_ids(config: Config, runtime_paths: RuntimePaths) -> set[str]:
+def _get_all_known_bot_user_ids(config: RuntimeConfig, runtime_paths: RuntimePaths) -> set[str]:
     """Get all current persisted bot Matrix user IDs from matrix_state.yaml."""
-    domain = config.get_domain(runtime_paths)
+    domain = config.get_domain()
     state = matrix_state_for_runtime(runtime_paths)
     return {
         MatrixID.from_username(account.username, account.domain or domain).full_id
@@ -46,7 +46,7 @@ def _get_all_known_bot_user_ids(config: Config, runtime_paths: RuntimePaths) -> 
 
 
 def _load_all_persisted_invited_rooms(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> dict[str, set[str]]:
     """Load persisted invited rooms for invite-accepting entities, keyed by bot Matrix user ID."""
@@ -67,7 +67,7 @@ def _load_all_persisted_invited_rooms(
 async def _cleanup_orphaned_bots_in_room(
     client: nio.AsyncClient,
     room_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     persisted_invited_rooms_by_bot: dict[str, set[str]] | None = None,
 ) -> list[str]:
@@ -182,7 +182,7 @@ async def _remove_orphaned_bot(client: nio.AsyncClient, room_id: str, matrix_id:
 
 async def cleanup_all_orphaned_bots(
     client: nio.AsyncClient,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> dict[str, list[str]]:
     """Remove all orphaned bots from all rooms the client has access to.

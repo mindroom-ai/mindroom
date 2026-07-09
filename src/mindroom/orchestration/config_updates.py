@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
     from mindroom.bot import AgentBot, TeamBot
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
 
 logger = get_logger(__name__)
 
@@ -44,7 +44,7 @@ _ENTITY_CONSTRUCTION_PROMPTS = frozenset(
 class ConfigUpdatePlan:
     """Computed impact of one config reload."""
 
-    new_config: Config
+    new_config: RuntimeConfig
     changed_mcp_servers: set[str]
     configured_entities: set[str]
     entities_to_restart: set[str]
@@ -75,12 +75,12 @@ class ConfigUpdatePlan:
         )
 
 
-def configured_entity_names(config: Config) -> list[str]:
+def configured_entity_names(config: RuntimeConfig) -> list[str]:
     """Return configured entity names with the router first."""
     return [ROUTER_AGENT_NAME, *config.agents.keys(), *config.teams.keys()]
 
 
-def plugin_change_paths(current_config: Config, new_config: Config) -> tuple[str, ...]:
+def plugin_change_paths(current_config: RuntimeConfig, new_config: RuntimeConfig) -> tuple[str, ...]:
     """Return plugin paths whose entry config changed across a reload."""
     old_entries = {entry.path: entry.model_dump(mode="python") for entry in current_config.plugins}
     new_entries = {entry.path: entry.model_dump(mode="python") for entry in new_config.plugins}
@@ -98,8 +98,8 @@ def _config_entries_differ(old_entry: BaseModel | None, new_entry: BaseModel | N
 
 
 def _identify_entities_to_restart(
-    config: Config | None,
-    new_config: Config,
+    config: RuntimeConfig | None,
+    new_config: RuntimeConfig,
     agent_bots: Mapping[str, AgentBot | TeamBot],
     changed_mcp_servers: set[str],
 ) -> set[str]:
@@ -118,8 +118,8 @@ def _identify_entities_to_restart(
 
 
 def _get_changed_agents(
-    config: Config | None,
-    new_config: Config,
+    config: RuntimeConfig | None,
+    new_config: RuntimeConfig,
     agent_bots: Mapping[str, AgentBot | TeamBot],
 ) -> set[str]:
     """Return agent names whose config or culture changed."""
@@ -153,7 +153,7 @@ def _get_changed_agents(
     return changed
 
 
-def _culture_signature_for_agent(agent_name: str, config: Config) -> tuple[str, str, str] | None:
+def _culture_signature_for_agent(agent_name: str, config: RuntimeConfig) -> tuple[str, str, str] | None:
     """Return the relevant culture tuple used for restart decisions."""
     assignment = config.resolve_entity(agent_name).culture
     if assignment is None:
@@ -163,8 +163,8 @@ def _culture_signature_for_agent(agent_name: str, config: Config) -> tuple[str, 
 
 
 def _get_changed_teams(
-    config: Config | None,
-    new_config: Config,
+    config: RuntimeConfig | None,
+    new_config: RuntimeConfig,
     agent_bots: Mapping[str, AgentBot | TeamBot],
 ) -> set[str]:
     """Return team names whose config changed."""
@@ -185,7 +185,7 @@ def _get_changed_teams(
     return changed
 
 
-def _router_needs_restart(config: Config | None, new_config: Config) -> bool:
+def _router_needs_restart(config: RuntimeConfig | None, new_config: RuntimeConfig) -> bool:
     """Check if router needs restart due to room changes."""
     if not config:
         return False
@@ -195,14 +195,14 @@ def _router_needs_restart(config: Config | None, new_config: Config) -> bool:
     return old_rooms != new_rooms
 
 
-def _room_metadata_changed(config: Config, new_config: Config) -> bool:
+def _room_metadata_changed(config: RuntimeConfig, new_config: RuntimeConfig) -> bool:
     """Return whether managed room metadata changed without implying bot reconstruction."""
     return config.rooms != new_config.rooms
 
 
 def _changed_mcp_servers(
-    config: Config | None,
-    new_config: Config,
+    config: RuntimeConfig | None,
+    new_config: RuntimeConfig,
 ) -> set[str]:
     """Return MCP server ids whose config changed across a reload."""
     if config is None:
@@ -216,8 +216,8 @@ def _changed_mcp_servers(
 
 
 def _entities_referencing_mcp_servers(
-    config: Config | None,
-    new_config: Config,
+    config: RuntimeConfig | None,
+    new_config: RuntimeConfig,
     changed_server_ids: set[str],
 ) -> set[str]:
     """Return entities that reference any changed MCP server tool."""
@@ -227,7 +227,7 @@ def _entities_referencing_mcp_servers(
     return old_entities | new_entities
 
 
-def _changed_entity_construction_prompts(config: Config, new_config: Config) -> set[str]:
+def _changed_entity_construction_prompts(config: RuntimeConfig, new_config: RuntimeConfig) -> set[str]:
     """Return root prompt overrides that require entity reconstruction."""
     changed_prompt_names = {
         prompt_name
@@ -237,7 +237,7 @@ def _changed_entity_construction_prompts(config: Config, new_config: Config) -> 
     return changed_prompt_names & _ENTITY_CONSTRUCTION_PROMPTS
 
 
-def _changed_entity_construction_defaults(config: Config, new_config: Config) -> set[str]:
+def _changed_entity_construction_defaults(config: RuntimeConfig, new_config: RuntimeConfig) -> set[str]:
     """Return defaults that require rebuilding agent and team entities."""
     if (
         config.defaults.tool_output_auto_save_threshold_bytes
@@ -249,8 +249,8 @@ def _changed_entity_construction_defaults(config: Config, new_config: Config) ->
 
 def build_config_update_plan(
     *,
-    current_config: Config,
-    new_config: Config,
+    current_config: RuntimeConfig,
+    new_config: RuntimeConfig,
     configured_entities: set[str],
     existing_entities: set[str],
     agent_bots: Mapping[str, AgentBot | TeamBot],

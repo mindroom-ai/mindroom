@@ -17,7 +17,6 @@ from authlib.integrations.base_client.errors import OAuthError
 from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, ToolListChangedNotification
 
 from mindroom.agents import create_agent
-from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
@@ -36,6 +35,7 @@ from mindroom.oauth.service import refresh_scoped_oauth_credentials
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.config_test_utils import runtime_config_from_data
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -1214,7 +1214,7 @@ async def test_mcp_manager_allows_same_oauth_typed_tools_for_multiple_requesters
     _save_mcp_oauth_credentials(runtime_paths, bob_target, "bob-token")
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": _oauth_mcp_config().model_dump(exclude_none=True),
@@ -1722,7 +1722,7 @@ async def test_mcp_manager_marks_cross_server_function_name_collisions_as_failed
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
     manager = MCPServerManager(runtime_paths)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "defaults": {"tools": []},
             "mcp_servers": {
@@ -1766,7 +1766,7 @@ async def test_mcp_manager_marks_oauth_bridge_function_name_collisions_as_failed
     runtime_paths = _runtime_paths(tmp_path)
     manager = MCPServerManager(runtime_paths)
     oauth_server = _oauth_mcp_config().model_copy(update={"tool_prefix": "shared"})
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": oauth_server.model_dump(exclude_none=True),
@@ -1812,7 +1812,7 @@ async def test_mcp_manager_marks_oauth_bridge_local_function_name_collisions_as_
             self.tools = ()
 
     monkeypatch.setattr("mindroom.mcp.manager.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": _oauth_mcp_config().model_dump(exclude_none=True),
@@ -1866,7 +1866,7 @@ async def test_mcp_manager_marks_local_function_name_collisions_as_failed(
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("shell_command")]
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -1906,7 +1906,7 @@ async def test_mcp_manager_marks_direct_builtin_function_name_collisions_as_fail
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("memory")]
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -1947,7 +1947,7 @@ async def test_mcp_manager_allows_memory_mcp_function_when_memory_backend_none(
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("memory")]
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -1984,7 +1984,7 @@ async def test_mcp_manager_marks_compact_context_function_name_collisions_as_fai
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("context")]
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -2024,7 +2024,7 @@ async def test_mcp_manager_ignores_deferred_unloaded_local_function_collisions_a
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("shell_command")]
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -2075,7 +2075,7 @@ async def test_mcp_manager_uses_deferred_tool_overrides_for_load_time_collision_
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("shell_command")]
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -2122,7 +2122,7 @@ async def test_mcp_manager_uses_deferred_mcp_filters_for_load_time_collision_val
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("shell_command"), _tool("safe")]
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -2169,7 +2169,7 @@ async def test_dynamic_load_rejects_failed_deferred_non_oauth_mcp_server_before_
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("x" * 60)]
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -2240,7 +2240,7 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
     _FakeClientSession.tool_list = [_tool("echo")]
     _FakeClientSession.initialize_delay_seconds = 0.05
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -2315,7 +2315,7 @@ async def test_mcp_manager_marks_oauth_typed_function_name_collisions_as_failed(
             self.tools = ()
 
     monkeypatch.setattr("mindroom.mcp.manager.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": _oauth_mcp_config().model_dump(exclude_none=True),
@@ -2357,7 +2357,7 @@ async def test_mcp_manager_marks_oauth_typed_bridge_function_name_collisions_as_
     _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": _oauth_mcp_config().model_dump(exclude_none=True),
@@ -2397,7 +2397,7 @@ async def test_mcp_manager_allows_local_function_name_collisions_on_other_agents
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("shell_command")]
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {

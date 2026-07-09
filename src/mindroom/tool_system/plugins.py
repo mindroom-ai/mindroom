@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookCallback
     from mindroom.tool_system.metadata import ToolMetadata
@@ -118,7 +118,7 @@ def deactivate_plugins() -> PluginReloadResult:
 
 
 def load_plugins(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     set_skill_roots: bool = True,
@@ -176,7 +176,7 @@ def load_plugins(
 
 
 def get_configured_plugin_roots(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> tuple[Path, ...]:
     """Resolve the enabled plugin roots for one config snapshot."""
@@ -201,7 +201,7 @@ def get_configured_plugin_roots(
 
 
 def _configured_plugin_root_cache_key(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> _ConfiguredPluginRootCacheKey:
     return _ConfiguredPluginRootCacheKey(
@@ -226,7 +226,7 @@ def _clear_oauth_provider_cache_after_plugin_change() -> None:
 
 
 def prepare_plugin_reload(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     skip_broken_plugins: bool = False,
@@ -274,7 +274,7 @@ def apply_prepared_plugin_reload(
 
 
 def reload_plugins(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     skip_broken_plugins: bool = False,

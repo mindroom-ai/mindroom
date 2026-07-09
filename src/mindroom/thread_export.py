@@ -27,7 +27,7 @@ from mindroom.runtime_support import build_owned_runtime_support, close_owned_ru
 if TYPE_CHECKING:
     import nio
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -202,7 +202,7 @@ def _room_matches_filter(room_key: str, room: MatrixRoom, room_filter: str) -> b
     )
 
 
-def _trusted_sender_ids_for_export(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+def _trusted_sender_ids_for_export(config: RuntimeConfig, runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return trusted senders when Matrix accounts have already been prepared."""
     try:
         return trusted_visible_sender_ids(config, runtime_paths)
@@ -213,7 +213,7 @@ def _trusted_sender_ids_for_export(config: Config, runtime_paths: RuntimePaths) 
 async def _export_threads_for_client(
     *,
     client: nio.AsyncClient,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache,
     output_dir: Path | None = None,
@@ -346,7 +346,7 @@ def _select_export_account(runtime_paths: RuntimePaths, homeserver: str) -> Agen
 
 async def export_threads_once(
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     output_dir: Path | None = None,
     room_filter: str | None = None,

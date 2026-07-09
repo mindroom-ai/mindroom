@@ -36,7 +36,7 @@ from mindroom.runtime_resolution import resolve_knowledge_binding
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.runtime_resolution import ResolvedKnowledgeBinding
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -152,7 +152,7 @@ def _published_index_key_from_binding(
     base_id: str,
     binding: ResolvedKnowledgeBinding,
     *,
-    config: Config,
+    config: RuntimeConfig,
 ) -> PublishedIndexKey:
     storage_root = binding.storage_root.expanduser().resolve()
     knowledge_path = binding.knowledge_path.resolve()
@@ -172,7 +172,7 @@ def _published_index_key_from_binding(
 def _resolve_published_index_key_and_binding(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
@@ -191,7 +191,7 @@ def _resolve_published_index_key_and_binding(
 def resolve_published_index_key(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
@@ -229,7 +229,7 @@ def source_root_for_published_index_key(key: PublishedIndexKey) -> KnowledgeSour
 def resolve_refresh_target(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
@@ -442,7 +442,7 @@ def _build_published_index_vector_db(
     key: PublishedIndexKey,
     state: PublishedIndexState,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> _PublishedIndexVectorDb:
     return cast(
@@ -460,7 +460,7 @@ def _build_published_index_knowledge(
     key: PublishedIndexKey,
     state: PublishedIndexState,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> Knowledge:
     return Knowledge(
@@ -599,7 +599,7 @@ def _load_queryable_index_from_state(
     key: PublishedIndexKey,
     state: PublishedIndexState,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> Knowledge | None:
     if not _published_index_state_queryable(key, state):
@@ -612,7 +612,7 @@ def _load_queryable_index_from_state(
 def get_published_index(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> PublishedIndexResolution:
@@ -721,7 +721,7 @@ def publish_knowledge_index_from_state(
     key: PublishedIndexKey,
     *,
     state: PublishedIndexState,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     metadata_path: Path | None = None,
 ) -> _PublishedIndexHandle | None:
@@ -769,7 +769,7 @@ def _evict_published_indexes_for_refresh_target(refresh_target: KnowledgeRefresh
 def _published_index_keys_for_shared_source(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> tuple[PublishedIndexKey, ...]:
@@ -823,7 +823,7 @@ def mark_published_index_stale_and_evict(matching_key: PublishedIndexKey, *, rea
 def _mark_knowledge_source_changed(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     reason: str = "source_mutated",
@@ -843,7 +843,7 @@ def _mark_knowledge_source_changed(
 async def mark_knowledge_source_changed_async(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     reason: str = "source_mutated",

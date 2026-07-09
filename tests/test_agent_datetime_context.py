@@ -68,8 +68,7 @@ def test_get_datetime_context_invalid_timezone() -> None:
 
 def test_agent_prompt_includes_datetime() -> None:
     """Test that agent's role prompt includes datetime context."""
-    config = _datetime_test_config()
-    config.timezone = "America/Los_Angeles"
+    config = _datetime_test_config().model_copy(update={"timezone": "America/Los_Angeles"})
     runtime_paths = runtime_paths_for(config)
     model = Ollama(id="test-model")
 
@@ -104,11 +103,11 @@ def test_agent_prompt_datetime_changes_with_timezone() -> None:
         patch("mindroom.model_loading.get_model_instance", return_value=model),
     ):
         mock_datetime.now.side_effect = lambda tz: datetime(2026, 3, 20, 8, 15, tzinfo=tz)
-        config.timezone = "America/New_York"
-        agent_ny = create_agent("general", config, runtime_paths, execution_identity=None)
+        ny_config = config.model_copy(update={"timezone": "America/New_York"})
+        agent_ny = create_agent("general", ny_config, runtime_paths, execution_identity=None)
 
-        config.timezone = "Asia/Tokyo"
-        agent_tokyo = create_agent("general", config, runtime_paths, execution_identity=None)
+        tokyo_config = config.model_copy(update={"timezone": "Asia/Tokyo"})
+        agent_tokyo = create_agent("general", tokyo_config, runtime_paths, execution_identity=None)
 
     assert "Timezone: America/New_York (EDT)" in agent_ny.role
     assert "Timezone: Asia/Tokyo (JST)" in agent_tokyo.role
@@ -118,7 +117,7 @@ def test_agent_prompt_datetime_changes_with_timezone() -> None:
 def test_agent_prompt_datetime_stable_within_same_day() -> None:
     """System prompt date context should stay identical across turns within one day."""
     config = _datetime_test_config()
-    config.timezone = "UTC"
+    config = config.model_copy(update={"timezone": "UTC"})
     runtime_paths = runtime_paths_for(config)
     model = Ollama(id="test-model")
 

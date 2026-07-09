@@ -11,7 +11,7 @@ from mindroom.thread_models import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 _RESET_ARGUMENTS = frozenset({"reset", "clear"})
@@ -21,11 +21,11 @@ _THREAD_REQUIRED_MESSAGE = (
 )
 
 
-def _available_models_text(config: Config) -> str:
+def _available_models_text(config: RuntimeConfig) -> str:
     return "\n".join(f"- `{name}` ({model.provider} {model.id})" for name, model in config.models.items())
 
 
-def _show_thread_model(config: Config, runtime_paths: RuntimePaths, thread_id: str | None) -> str:
+def _show_thread_model(config: RuntimeConfig, runtime_paths: RuntimePaths, thread_id: str | None) -> str:
     override = resolve_thread_model_override(runtime_paths, thread_id, configured_models=config.models).active
     if override is not None:
         model = config.models[override]
@@ -41,7 +41,7 @@ def _show_thread_model(config: Config, runtime_paths: RuntimePaths, thread_id: s
 def handle_model_command(  # noqa: PLR0911
     args_text: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     room_id: str,
     thread_id: str | None,

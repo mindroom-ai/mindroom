@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
@@ -81,7 +81,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
 async def _request_config_and_trigger_snapshot(
     trigger_id: str,
     request: Request,
-) -> tuple[Config, RuntimePaths, TriggerDeliverySnapshot]:
+) -> tuple[RuntimeConfig, RuntimePaths, TriggerDeliverySnapshot]:
     api_snapshot = _bind_request_api_snapshot(request)
     try:
         config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
@@ -119,7 +119,7 @@ async def _claim_and_execute_trigger(
     payload: ExternalTriggerPayload,
     signature_headers: TriggerSignatureHeaders,
     snapshot: TriggerDeliverySnapshot,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     runtime: config_lifecycle.ExternalTriggerRuntime,
 ) -> ExternalTriggerAcceptedResponse:
@@ -199,7 +199,7 @@ def _replay_store(runtime_paths: RuntimePaths) -> ExternalTriggerReplayStore:
 
 def _validate_snapshot_policy_and_auth(
     snapshot: TriggerDeliverySnapshot,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> None:
     if not is_authorized_sender(snapshot.owner_user_id, config, snapshot.resolved_room_id, runtime_paths):

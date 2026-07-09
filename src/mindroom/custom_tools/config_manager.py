@@ -16,8 +16,8 @@ from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import (
-    Config,
     ConfigRuntimeValidationError,
+    RuntimeConfig,
     format_invalid_config_message,
     load_config_or_user_error,
 )
@@ -303,7 +303,7 @@ class ConfigManagerTools(Toolkit):
         self,
         *,
         footer: str | None = None,
-    ) -> tuple[Config | None, str | None]:
+    ) -> tuple[RuntimeConfig | None, str | None]:
         """Load config or return one shared invalid-config response."""
         return load_config_or_user_error(
             self.runtime_paths,
@@ -315,7 +315,7 @@ class ConfigManagerTools(Toolkit):
         self,
         *,
         footer: str | None = None,
-    ) -> tuple[Config | None, dict[str, ToolMetadata] | None, str | None]:
+    ) -> tuple[RuntimeConfig | None, dict[str, ToolMetadata] | None, str | None]:
         """Load config and resolve one runtime-aware tool metadata snapshot."""
         config, load_error = self._load_config_or_error(footer=footer)
         if load_error:
@@ -442,7 +442,7 @@ class ConfigManagerTools(Toolkit):
 
     def _agent_entries_for_scope(
         self,
-        config: Config,
+        config: RuntimeConfig,
         agent_scope: str,
     ) -> tuple[str, list[tuple[str, AgentConfig]]]:
         """Return the heading and agent entries for one listing scope."""

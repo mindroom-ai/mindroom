@@ -83,7 +83,7 @@ class TestAgentResponseLogic:
         )
         self.config.authorization.default_room_access = True
         self.runtime_paths = runtime_paths_for(self.config)
-        self.domain = self.config.get_domain(self.runtime_paths)
+        self.domain = self.config.get_domain()
         self.sender = f"@user:{self.domain}"
 
     def agent_id(self, agent_name: str) -> str:

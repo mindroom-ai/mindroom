@@ -21,7 +21,7 @@ from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workers.models import WorkerHandle
@@ -98,7 +98,7 @@ def _stable_json_digest(payload: object) -> str:
 
 def _worker_validation_snapshot_cache_key(
     runtime_paths: RuntimePaths,
-    runtime_config: Config,
+    runtime_config: RuntimeConfig,
 ) -> tuple[str, ...]:
     """Return the cheap explicit inputs that affect worker validation metadata."""
     plugins_identity = [plugin_entry.model_dump(mode="json") for plugin_entry in runtime_config.plugins]
@@ -127,7 +127,7 @@ def clear_worker_validation_snapshot_cache() -> None:
 def serialized_kubernetes_worker_validation_snapshot(
     runtime_paths: RuntimePaths,
     *,
-    runtime_config: Config | None = None,
+    runtime_config: RuntimeConfig | None = None,
 ) -> dict[str, dict[str, object]]:
     """Build the authoritative worker validation snapshot in the primary runtime."""
     if runtime_config is None:

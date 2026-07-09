@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     import yaml  # type: ignore[import-untyped]
     from pydantic import ValidationError
 
-    from mindroom.config.main import Config, ConfigRuntimeValidationError
+    from mindroom.config.main import ConfigRuntimeValidationError, RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 console = Console()
@@ -425,7 +425,7 @@ def config_init(
     # runs so a missing .env is recreated and hosted defaults are appended.
     keep_existing_config = False
     if target.exists() and not force and not print_config:
-        console.print(f"[yellow]Config file already exists:[/yellow] {target}")
+        console.print(f"[yellow]RuntimeConfig file already exists:[/yellow] {target}")
         if no_input:
             console.print("Keeping existing config.yaml. Use --force to overwrite.")
             keep_existing_config = True
@@ -481,9 +481,9 @@ def config_init(
     )
 
     if keep_existing_config:
-        console.print(f"[green]Config unchanged:[/green] {target}")
+        console.print(f"[green]RuntimeConfig unchanged:[/green] {target}")
     else:
-        console.print(f"[green]Config created:[/green] {target}")
+        console.print(f"[green]RuntimeConfig created:[/green] {target}")
     _print_config_init_next_steps(
         env_path,
         env_changed=env_changed,
@@ -522,7 +522,7 @@ def config_show(
         print(content, end="")
         return
 
-    console.print(f"[bold green]Config file:[/bold green] {config_file}\n")
+    console.print(f"[bold green]RuntimeConfig file:[/bold green] {config_file}\n")
     console.print(_yaml_syntax(content, line_numbers=True, word_wrap=True))
 
 
@@ -664,7 +664,7 @@ def load_config_quiet(
     runtime_paths: RuntimePaths,
     *,
     tolerate_plugin_load_errors: bool = False,
-) -> Config:
+) -> RuntimeConfig:
     """Load config while temporarily suppressing structlog output.
 
     structlog's default PrintLogger bypasses stdlib log levels, so we
@@ -694,7 +694,7 @@ def load_config_quiet(
 
 
 def _find_missing_env_keys(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[tuple[str, str]]:
     """Return (provider, env_key) pairs for configured providers missing env vars."""
@@ -772,7 +772,7 @@ def _normalize_matrix_server_preset(matrix_server: str) -> _MatrixServerPreset |
     return None
 
 
-def check_env_keys(config: Config, runtime_paths: RuntimePaths) -> None:
+def check_env_keys(config: RuntimeConfig, runtime_paths: RuntimePaths) -> None:
     """Warn about missing environment variables for configured providers."""
     missing = _find_missing_env_keys(config, runtime_paths)
     if missing:

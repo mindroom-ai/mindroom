@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from agno.knowledge.document import Document
     from agno.knowledge.knowledge import Knowledge
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -91,7 +91,7 @@ class _AsyncKnowledgeVectorDb(_KnowledgeVectorDb, Protocol):
     ) -> list[Document]: ...
 
 
-def _knowledge_source_description(base_id: str, config: Config) -> KnowledgeSourceDescription:
+def _knowledge_source_description(base_id: str, config: RuntimeConfig) -> KnowledgeSourceDescription:
     """Return configured source metadata for one queryable Knowledge handle."""
     base_config = config.get_knowledge_base_config(base_id)
     description = " ".join(base_config.description.split())
@@ -101,7 +101,7 @@ def _knowledge_source_description(base_id: str, config: Config) -> KnowledgeSour
     return KnowledgeSourceDescription(base_id=base_id, description=description)
 
 
-def _apply_knowledge_metadata(base_id: str, knowledge: Knowledge, config: Config) -> None:
+def _apply_knowledge_metadata(base_id: str, knowledge: Knowledge, config: RuntimeConfig) -> None:
     """Attach configured source metadata to one queryable Knowledge handle."""
     source_description = _knowledge_source_description(base_id, config)
     knowledge.name = base_id
@@ -111,7 +111,7 @@ def _apply_knowledge_metadata(base_id: str, knowledge: Knowledge, config: Config
 def _lookup_knowledge_for_base(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> PublishedIndexResolution | None:
@@ -166,14 +166,14 @@ def _published_index_age_seconds(value: str | None) -> float | None:
     return max((datetime.now(tz=UTC) - published_at).total_seconds(), 0.0)
 
 
-def _git_poll_interval_seconds(lookup: PublishedIndexResolution, config: Config) -> float | None:
+def _git_poll_interval_seconds(lookup: PublishedIndexResolution, config: RuntimeConfig) -> float | None:
     git_config = config.get_knowledge_base_config(lookup.key.base_id).git
     if git_config is None:
         return None
     return max(float(git_config.poll_interval_seconds), 0.0)
 
 
-def _git_poll_due(lookup: PublishedIndexResolution, config: Config) -> bool:
+def _git_poll_due(lookup: PublishedIndexResolution, config: RuntimeConfig) -> bool:
     if lookup.index is None:
         return False
     poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
@@ -187,7 +187,7 @@ def _git_poll_due(lookup: PublishedIndexResolution, config: Config) -> bool:
 
 def _ready_index_effective_availability(
     lookup: PublishedIndexResolution,
-    config: Config,
+    config: RuntimeConfig,
 ) -> KnowledgeAvailability:
     """Return request-path availability for a ready index without eager rescans."""
     availability = lookup.availability
@@ -198,7 +198,7 @@ def _ready_index_effective_availability(
 
 def _refresh_cooldown_seconds(
     lookup: PublishedIndexResolution | None,
-    config: Config,
+    config: RuntimeConfig,
     availability: KnowledgeAvailability,
 ) -> float:
     if lookup is None or availability is not KnowledgeAvailability.STALE:
@@ -211,7 +211,7 @@ def _refresh_cooldown_seconds(
 
 def _failed_refresh_retry_fingerprint(
     lookup: PublishedIndexResolution,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, ...]:
     """Return a secret-free fingerprint for Git refresh/auth settings that can fix a failed retry."""
@@ -256,7 +256,7 @@ def _embedded_userinfo_fingerprint(repo_url: str) -> str:
 
 def _refresh_retry_settings(
     lookup: PublishedIndexResolution,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     availability: KnowledgeAvailability,
 ) -> Hashable | None:
@@ -267,7 +267,7 @@ def _refresh_retry_settings(
     return None
 
 
-def _schedule_refresh_on_access_cooldown_seconds(lookup: PublishedIndexResolution, config: Config) -> float:
+def _schedule_refresh_on_access_cooldown_seconds(lookup: PublishedIndexResolution, config: RuntimeConfig) -> float:
     """Return READY refresh throttle without request-path source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
         return _REFRESH_RETRY_COOLDOWN_SECONDS
@@ -275,7 +275,7 @@ def _schedule_refresh_on_access_cooldown_seconds(lookup: PublishedIndexResolutio
     return max(poll_interval_seconds or _REFRESH_RETRY_COOLDOWN_SECONDS, 1.0)
 
 
-def _schedule_refresh_on_access_due(lookup: PublishedIndexResolution, config: Config) -> bool:
+def _schedule_refresh_on_access_due(lookup: PublishedIndexResolution, config: RuntimeConfig) -> bool:
     """Return whether READY on-access refresh should be scheduled without source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
         return True
@@ -286,7 +286,7 @@ def _schedule_refresh_for_availability(
     refresh_scheduler: KnowledgeRefreshScheduler,
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     lookup: PublishedIndexResolution | None,
@@ -363,7 +363,7 @@ def _schedule_refresh_for_availability(
     return availability
 
 
-def _semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple[str, ...]:
+def _semantic_agent_knowledge_base_ids(agent_name: str, config: RuntimeConfig) -> tuple[str, ...]:
     return tuple(
         base_id
         for base_id in config.resolve_entity(agent_name).knowledge_base_ids
@@ -374,7 +374,7 @@ def _semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple
 def _resolve_base_knowledge(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     execution_identity: ToolExecutionIdentity | None,
@@ -407,7 +407,7 @@ def _resolve_base_knowledge(
 
 def resolve_agent_knowledge_access(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -452,7 +452,7 @@ def resolve_agent_knowledge_access(
 
 def resolve_knowledge_base_access(
     base_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     execution_identity: ToolExecutionIdentity | None = None,

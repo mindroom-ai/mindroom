@@ -23,7 +23,7 @@ from mindroom.matrix.message_builder import build_reaction_content
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -442,7 +442,7 @@ async def handle_reaction(
     client: nio.AsyncClient,
     event: nio.ReactionEvent,
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> InteractiveSelection | None:
     """Handle a reaction event that might be an answer to a question.

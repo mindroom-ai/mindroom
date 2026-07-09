@@ -124,7 +124,6 @@ def test_resolve_runtime_model_prefers_thread_override(tmp_path: Path) -> None:
         entity_name="test_agent",
         room_id=ROOM_ID,
         thread_id=THREAD_ID,
-        runtime_paths=runtime_paths,
     )
 
     assert runtime_model.model_name == "large"
@@ -161,7 +160,6 @@ def test_resolve_runtime_model_thread_override_beats_room_override(
         entity_name="test_agent",
         room_id=ROOM_ID,
         thread_id=THREAD_ID,
-        runtime_paths=runtime_paths,
     )
 
     assert runtime_model.model_name == "large"
@@ -184,7 +182,6 @@ def test_resolve_runtime_model_active_model_beats_thread_override(tmp_path: Path
         active_model_name="default",
         room_id=ROOM_ID,
         thread_id=THREAD_ID,
-        runtime_paths=runtime_paths,
     )
 
     assert runtime_model.model_name == "default"
@@ -206,7 +203,6 @@ def test_resolve_runtime_model_ignores_stale_thread_override(tmp_path: Path) -> 
         entity_name="test_agent",
         room_id=ROOM_ID,
         thread_id=THREAD_ID,
-        runtime_paths=runtime_paths,
     )
 
     assert runtime_model.model_name == "default"
@@ -227,7 +223,6 @@ def test_resolve_runtime_model_without_thread_id_keeps_authored_model(tmp_path: 
     runtime_model = config.resolve_runtime_model(
         entity_name="test_agent",
         room_id=ROOM_ID,
-        runtime_paths=runtime_paths,
     )
 
     assert runtime_model.model_name == "default"
@@ -396,12 +391,22 @@ def test_model_command_default_sets_model_instead_of_resetting(tmp_path: Path) -
     assert _get_thread_model_override(runtime_paths, THREAD_ID) == "default"
 
 
-def test_resolve_runtime_model_requires_runtime_paths_for_thread_id(tmp_path: Path) -> None:
-    """Passing thread_id without runtime_paths must fail loudly, mirroring the room branch."""
+def test_resolve_runtime_model_uses_bound_runtime_paths_for_thread_id(tmp_path: Path) -> None:
+    """Thread model resolution should use the runtime paths bound during validation."""
     config = _config_with_models(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    set_thread_model_override(
+        runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="large",
+        room_id=ROOM_ID,
+        set_by="@user:localhost",
+    )
 
-    with pytest.raises(ValueError, match="thread-specific runtime model"):
-        config.resolve_runtime_model(entity_name="test_agent", thread_id=THREAD_ID)
+    runtime_model = config.resolve_runtime_model(entity_name="test_agent", thread_id=THREAD_ID)
+
+    assert runtime_model.model_name == "large"
+    assert runtime_model.context_window == 32_000
 
 
 def test_store_drops_records_with_corrupt_set_at(tmp_path: Path) -> None:
@@ -538,7 +543,6 @@ def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path) -> None:
         entity_name="test_agent",
         room_id=ROOM_ID,
         thread_id=THREAD_ID,
-        runtime_paths=runtime_paths,
     ).model_name
 
     # A mid-run switch_thread_model call persists a new override before the

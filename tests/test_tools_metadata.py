@@ -811,7 +811,6 @@ def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: 
                 },
             },
         },
-        context={"runtime_paths": runtime_paths},
     )
 
     snapshot = resolved_tool_validation_snapshot_for_runtime(runtime_paths, config)

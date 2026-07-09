@@ -24,6 +24,7 @@ from mindroom.matrix.identity import (
 )
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import agent_username_localpart, unnamespaced_agent_name_from_username_localpart
+from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
@@ -191,7 +192,7 @@ class TestMatrixID:
         """Test extracting entity name."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
-        domain = self.config.get_domain(runtime_paths)
+        domain = self.config.get_domain()
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_calculator", "actual_calculator", "pw", domain=domain)
         state.save(runtime_paths=runtime_paths)
@@ -204,7 +205,7 @@ class TestMatrixID:
         """Test parsing a router agent ID."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
-        domain = self.config.get_domain(runtime_paths)
+        domain = self.config.get_domain()
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_router", "actual_router", "pw", domain=domain)
         state.save(runtime_paths=runtime_paths)
@@ -229,8 +230,8 @@ class TestMatrixID:
             room_models=self.config.room_models,
             models=self.config.models,
         )
-        config = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
-        domain = config.get_domain(runtime_paths)
+        config = runtime_config_from_data(config.authored_model_dump(), runtime_paths)
+        domain = config.get_domain()
         persist_entity_accounts(config, runtime_paths, usernames={"calculator": "actual_calculator"})
 
         assert agent_username_localpart("calculator", runtime_paths=runtime_paths) == "mindroom_calculator_a1b2c3d4"
@@ -289,7 +290,7 @@ class TestHelperFunctions:
         """Test quick agent ID check."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
-        domain = self.config.get_domain(runtime_paths)
+        domain = self.config.get_domain()
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_calculator", "actual_calculator", "pw", domain=domain)
         state.add_account("agent_general", "actual_general", "pw", domain=domain)
@@ -305,7 +306,7 @@ class TestHelperFunctions:
         """Test entity name extraction."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
-        domain = self.config.get_domain(runtime_paths)
+        domain = self.config.get_domain()
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_calculator", "actual_calculator", "pw", domain=domain)
         state.add_account("agent_general", "actual_general", "pw", domain=domain)
@@ -320,7 +321,7 @@ class TestHelperFunctions:
         """Persisted usernames for current managed agents should resolve to their entity name."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
-        domain = self.config.get_domain(runtime_paths)
+        domain = self.config.get_domain()
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_calculator", "mindroom_calculator", "pw", domain=domain)
         state.add_account("agent_general", "mindroom_general_oldns", "pw", domain=domain)
@@ -340,7 +341,7 @@ class TestHelperFunctions:
         """Managed account user-id resolution should preserve persisted username drift."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
-        domain = self.config.get_domain(runtime_paths)
+        domain = self.config.get_domain()
         account_key = managed_account_key("general")
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account(account_key, "mindroom_general_oldns", "pw", domain=domain)
@@ -354,7 +355,7 @@ class TestHelperFunctions:
         """Config entity IDs should use only persisted runtime account usernames."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
-        domain = self.config.get_domain(runtime_paths)
+        domain = self.config.get_domain()
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_router", "mindroom_router", "pw", domain=domain)
         state.add_account("agent_calculator", "actual_calculator", "pw", domain=domain)
@@ -389,9 +390,9 @@ class TestHelperFunctions:
 
         state = MatrixState.load(runtime_paths=runtime_paths)
 
-        assert state.accounts["agent_general"].domain == self.config.get_domain(runtime_paths)
+        assert state.accounts["agent_general"].domain == self.config.get_domain()
         migrated_data = yaml.safe_load(state_file.read_text())
-        assert migrated_data["accounts"]["agent_general"]["domain"] == self.config.get_domain(runtime_paths)
+        assert migrated_data["accounts"]["agent_general"]["domain"] == self.config.get_domain()
         assert "known_user_ids" not in migrated_data["accounts"]["agent_general"]
 
     def test_matrix_state_load_preserves_persisted_account_domain(self, tmp_path: Path) -> None:
@@ -419,7 +420,7 @@ class TestHelperFunctions:
         state = MatrixState.load(runtime_paths=runtime_paths)
 
         assert state.accounts["agent_general"].domain == "matrix.example"
-        assert managed_account_user_id("agent_general", self.config.get_domain(runtime_paths), runtime_paths) == (
+        assert managed_account_user_id("agent_general", self.config.get_domain(), runtime_paths) == (
             "@actual_general:matrix.example"
         )
 
@@ -455,7 +456,7 @@ class TestHelperFunctions:
 
         state = MatrixState.load(runtime_paths=runtime_paths)
 
-        assert state.accounts["agent_general"].domain == self.config.get_domain(runtime_paths)
+        assert state.accounts["agent_general"].domain == self.config.get_domain()
         assert not state_file.with_name("matrix_state.yaml.lock").exists()
 
     def test_matrix_state_save_is_atomic_without_advisory_lock(
@@ -467,7 +468,7 @@ class TestHelperFunctions:
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
         state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
-        domain = self.config.get_domain(runtime_paths)
+        domain = self.config.get_domain()
 
         def _fail_flock(*_args: object, **_kwargs: object) -> None:
             raise AssertionError
@@ -489,7 +490,7 @@ class TestHelperFunctions:
         """A failed Matrix state write should not leave partial YAML behind."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
-        domain = self.config.get_domain(runtime_paths)
+        domain = self.config.get_domain()
         state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
 
         original_state = MatrixState.load(runtime_paths=runtime_paths)
@@ -521,7 +522,7 @@ class TestHelperFunctions:
         """Persisted usernames for removed agents must not stay live-managed."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
-        domain = self.config.get_domain(runtime_paths)
+        domain = self.config.get_domain()
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_removed", "mindroom_removed", "pw", domain=domain)
         state.save(runtime_paths=runtime_paths)

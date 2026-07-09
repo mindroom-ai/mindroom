@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from agno.knowledge.document.base import Document
     from agno.knowledge.knowledge import Knowledge
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.config.memory import MemorySearchConfig
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -63,12 +63,12 @@ def _memory_include_patterns(search_config: MemorySearchConfig) -> list[str]:
 
 
 def _memory_knowledge_config(
-    config: Config,
+    config: RuntimeConfig,
     *,
     base_id: str,
     root: Path,
     search_config: MemorySearchConfig,
-) -> Config:
+) -> RuntimeConfig:
     knowledge_config = config.model_copy(deep=True)
     knowledge_config.knowledge_bases[base_id] = KnowledgeBaseConfig(
         mode="semantic",
@@ -87,7 +87,7 @@ def schedule_semantic_file_memory_refresh(
     *,
     scope_user_id: str,
     root: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     search_config: MemorySearchConfig,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -113,7 +113,7 @@ def schedule_semantic_file_memory_refresh(
     return True
 
 
-async def _list_memory_knowledge_files(config: Config, base_id: str, root: Path) -> list[Path]:
+async def _list_memory_knowledge_files(config: RuntimeConfig, base_id: str, root: Path) -> list[Path]:
     return await asyncio.to_thread(list_knowledge_files, config, base_id, root)
 
 
@@ -165,7 +165,7 @@ async def search_semantic_file_memories(
     *,
     scope_user_id: str,
     root: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     search_config: MemorySearchConfig,
     limit: int,

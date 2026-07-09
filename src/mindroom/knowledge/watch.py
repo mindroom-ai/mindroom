@@ -21,7 +21,7 @@ from mindroom.knowledge.registry import (
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 
@@ -55,7 +55,10 @@ def _ensure_watch_root(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> dict[KnowledgeSourceRoot, _WatchTarget]:
+def _shared_local_watch_targets(
+    config: RuntimeConfig,
+    runtime_paths: RuntimePaths,
+) -> dict[KnowledgeSourceRoot, _WatchTarget]:
     targets_by_key: dict[KnowledgeSourceRoot, list[str]] = {}
     for base_id in sorted(config.knowledge_bases):
         base_config = config.get_knowledge_base_config(base_id)
@@ -81,7 +84,7 @@ def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> 
 
 
 def _shared_git_poll_targets(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> dict[KnowledgeRefreshTarget, _GitPollTarget]:
     targets: dict[KnowledgeRefreshTarget, _GitPollTarget] = {}
@@ -106,7 +109,7 @@ def _shared_git_poll_targets(
     return targets
 
 
-def _changed_path_is_indexable(target: _WatchTarget, config: Config, changed_path: Path) -> bool:
+def _changed_path_is_indexable(target: _WatchTarget, config: RuntimeConfig, changed_path: Path) -> bool:
     try:
         relative_path = changed_path.relative_to(target.path)
     except ValueError:
@@ -119,7 +122,7 @@ def _changed_path_is_indexable(target: _WatchTarget, config: Config, changed_pat
 
 def _changes_include_indexable_path(
     target: _WatchTarget,
-    config: Config,
+    config: RuntimeConfig,
     changes: set[tuple[Change, str]],
 ) -> bool:
     for change, changed_path in changes:
@@ -138,7 +141,7 @@ class KnowledgeSourceWatcher:
         self._filesystem_tasks: dict[KnowledgeSourceRoot, _WatchTask] = {}
         self._git_poll_tasks: dict[KnowledgeRefreshTarget, _WatchTask] = {}
 
-    async def sync(self, *, config: Config | None, runtime_paths: RuntimePaths) -> None:
+    async def sync(self, *, config: RuntimeConfig | None, runtime_paths: RuntimePaths) -> None:
         """Replace watcher tasks so they match the current shared knowledge config."""
         await self.shutdown()
         if config is None:
@@ -185,7 +188,7 @@ class KnowledgeSourceWatcher:
         self,
         target: _WatchTarget,
         *,
-        config: Config,
+        config: RuntimeConfig,
         runtime_paths: RuntimePaths,
         stop_event: asyncio.Event,
     ) -> None:
@@ -213,7 +216,7 @@ class KnowledgeSourceWatcher:
         self,
         target: _GitPollTarget,
         *,
-        config: Config,
+        config: RuntimeConfig,
         runtime_paths: RuntimePaths,
         stop_event: asyncio.Event,
     ) -> None:
@@ -247,7 +250,7 @@ class KnowledgeSourceWatcher:
         self,
         target: _WatchTarget,
         *,
-        config: Config,
+        config: RuntimeConfig,
         runtime_paths: RuntimePaths,
     ) -> None:
         scheduled_base_ids: set[str] = set()

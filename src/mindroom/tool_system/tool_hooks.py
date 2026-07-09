@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from agno.tools import Toolkit
     from agno.tools.function import Function
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import (
         HookMatrixAdmin,
@@ -96,7 +96,7 @@ class _ResolvedToolContext:
     requester_id: str | None
     session_id: str | None
     channel: str | None
-    config: Config | None
+    config: RuntimeConfig | None
     runtime_paths: RuntimePaths | None
     correlation_id: str
     message_sender: HookMessageSender | None
@@ -129,7 +129,7 @@ class _ToolHookBridgeContext:
     """Static hook-bridge inputs that remain valid across live and detached calls."""
 
     agent_name: str | None
-    config: Config | None
+    config: RuntimeConfig | None
     runtime_paths: RuntimePaths | None
     dispatch_context: ToolDispatchContext | None
 
@@ -657,7 +657,7 @@ async def _execute_bridge(
     args: dict[str, Any],
     agent_name: str | None,
     dispatch_context: ToolDispatchContext | None,
-    config: Config | None,
+    config: RuntimeConfig | None,
     runtime_paths: RuntimePaths | None,
     has_before_hooks: bool,
     has_after_hooks: bool,
@@ -867,7 +867,7 @@ def build_tool_hook_bridge(
     hook_registry: HookRegistry,
     agent_name: str | None,
     dispatch_context: ToolDispatchContext | None = None,
-    config: Config | None = None,
+    config: RuntimeConfig | None = None,
     runtime_paths: RuntimePaths | None = None,
     workflow_origin: ToolCallWorkflowOrigin | None = None,
 ) -> Callable[..., Any]:

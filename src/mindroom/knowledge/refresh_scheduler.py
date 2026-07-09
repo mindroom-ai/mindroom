@@ -19,7 +19,7 @@ from mindroom.knowledge.registry import KnowledgeRefreshTarget, resolve_refresh_
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_runner import KnowledgeRefreshResult
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -48,7 +48,7 @@ def _default_max_concurrent_refreshes() -> int:
 @dataclass(frozen=True, slots=True)
 class _ScheduledRefresh:
     base_id: str
-    config: Config
+    config: RuntimeConfig
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
 
@@ -67,7 +67,7 @@ class KnowledgeRefreshScheduler:
         self,
         base_id: str,
         *,
-        config: Config,
+        config: RuntimeConfig,
         runtime_paths: RuntimePaths,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
@@ -83,7 +83,7 @@ class KnowledgeRefreshScheduler:
         self,
         base_id: str,
         *,
-        config: Config,
+        config: RuntimeConfig,
         runtime_paths: RuntimePaths,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> bool:
@@ -104,7 +104,7 @@ class KnowledgeRefreshScheduler:
         self,
         base_id: str,
         *,
-        config: Config,
+        config: RuntimeConfig,
         runtime_paths: RuntimePaths,
         execution_identity: ToolExecutionIdentity | None = None,
         force_reindex: bool = False,
@@ -143,7 +143,7 @@ class KnowledgeRefreshScheduler:
         self,
         base_id: str,
         *,
-        config: Config,
+        config: RuntimeConfig,
         runtime_paths: RuntimePaths,
         execution_identity: ToolExecutionIdentity | None,
     ) -> None:

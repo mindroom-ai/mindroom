@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.tool_system.metadata import get_tool_by_name
+from tests.config_test_utils import runtime_config_from_data
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,7 +49,7 @@ async def test_mcp_fake_stdio_server_end_to_end(tmp_path: Path) -> None:
     )
 
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "echo": {

@@ -10,7 +10,6 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
@@ -25,6 +24,7 @@ from mindroom.mcp.oauth import (
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.config_test_utils import runtime_config_from_data
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -213,7 +213,7 @@ def test_custom_mcp_oauth_provider_id_keeps_generated_credential_services_mcp_sc
 def test_load_oauth_providers_includes_mcp_oauth_provider(tmp_path: Path) -> None:
     """The generic OAuth routes should see providers generated from MCP config."""
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": _oauth_mcp_server_config().model_dump(exclude_none=True),

@@ -23,7 +23,7 @@ from mindroom.tool_system.dependencies import ensure_optional_deps
 if TYPE_CHECKING:
     from agno.models.base import Model
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.config.models import ModelConfig
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -306,7 +306,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
 
 def get_model_instance(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     model_name: str = "default",
     execution_identity: ToolExecutionIdentity | None = None,

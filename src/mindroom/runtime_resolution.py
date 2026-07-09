@@ -29,7 +29,7 @@ from mindroom.workspaces import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 
@@ -135,7 +135,7 @@ def _resolved_private_state_root(
 
 def resolve_agent_execution(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     execution_identity: ToolExecutionIdentity | None,
 ) -> ResolvedAgentExecution:
     """Resolve one agent's execution scope for the current runtime context."""
@@ -169,7 +169,7 @@ def resolve_agent_execution(
 
 def resolve_agent_runtime(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,
@@ -247,7 +247,7 @@ def resolve_agent_runtime(
 
 def resolve_knowledge_binding(
     base_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,

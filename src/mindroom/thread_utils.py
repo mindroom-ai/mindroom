@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
@@ -50,7 +50,7 @@ class AgentResponseDecision:
 
 def _extract_mentioned_user_ids(
     content: dict[str, object],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[str]:
     """Extract mentioned user IDs from message content.
@@ -75,7 +75,7 @@ def _extract_mentioned_user_ids(
     return []
 
 
-def _is_bot_or_agent(sender: str, config: Config, runtime_paths: RuntimePaths) -> bool:
+def _is_bot_or_agent(sender: str, config: RuntimeConfig, runtime_paths: RuntimePaths) -> bool:
     """Return True when *sender* is a MindRoom agent **or** listed in ``bot_accounts``."""
     registry = entity_identity_registry(config, runtime_paths)
     return registry.current_entity_name_for_user_id(sender) is not None or sender in config.bot_accounts
@@ -85,7 +85,7 @@ def is_router_only_agent_mention(
     mentioned_agents: Sequence[MatrixID],
     *,
     has_non_agent_mentions: bool,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Return whether the message only targeted the router managed account."""
@@ -100,7 +100,7 @@ def is_router_only_agent_mention(
 def check_agent_mentioned(
     event_source: dict,
     agent_id: MatrixID | None,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> tuple[list[MatrixID], bool, bool]:
     """Check if an agent is mentioned in a message.
@@ -122,7 +122,7 @@ def check_agent_mentioned(
 
 def get_agents_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Get list of unique agents that have participated in thread.
@@ -153,7 +153,7 @@ def get_agents_in_thread(
 
 def _agents_from_user_ids(
     user_ids: list[str],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return agent MatrixIDs from a list of raw Matrix user ID strings."""
@@ -168,7 +168,7 @@ def _agents_from_user_ids(
 
 def has_multiple_non_agent_users_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Return True when more than one non-agent user has posted in the thread.
@@ -190,7 +190,7 @@ def thread_requires_explicit_agent_targeting(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
     sender_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     available_responders_in_room: Sequence[MatrixID] | None = None,
 ) -> bool:
@@ -210,7 +210,7 @@ def thread_requires_explicit_agent_targeting(
 def filter_thread_agents_for_sender(
     agents_in_thread: Sequence[MatrixID],
     sender_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     available_responders_in_room: Sequence[MatrixID] | None = None,
@@ -231,7 +231,7 @@ def filter_thread_agents_for_sender(
 
 def get_all_mentioned_agents_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Get all unique agent MatrixIDs that have been mentioned anywhere in the thread.
@@ -259,7 +259,7 @@ def _decide_thread_agent_response(
     agent_matrix_id: MatrixID,
     sender_id: str,
     thread_history: Sequence[ResolvedVisibleMessage],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     available_responders: Sequence[MatrixID],
     agents_in_thread: Sequence[MatrixID] | None,
@@ -304,7 +304,7 @@ def decide_agent_response(
     is_thread: bool,
     room: nio.MatrixRoom,
     thread_history: Sequence[ResolvedVisibleMessage],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     mentioned_agents: list[MatrixID] | None = None,
     has_non_agent_mentions: bool = False,

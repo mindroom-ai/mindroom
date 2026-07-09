@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 from mindroom.constants import ROUTER_AGENT_NAME
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
 
 
-def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
+def get_rooms_for_entity(entity_name: str, config: RuntimeConfig) -> list[str]:
     """Return the room references an entity should join and treat as configured."""
     if entity_name in config.teams:
         return list(config.teams[entity_name].rooms)

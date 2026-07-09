@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -139,7 +139,7 @@ async def _compute_normalized_voice_message(
     storage_path: Path,
     room: nio.MatrixRoom,
     event: AudioMessageEvent,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     thread_id: str | None,
@@ -184,7 +184,7 @@ async def _normalize_voice_message(
     storage_path: Path,
     room: nio.MatrixRoom,
     event: AudioMessageEvent,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     thread_id: str | None,
@@ -219,7 +219,7 @@ async def prepare_voice_message(
     storage_path: Path,
     room: nio.MatrixRoom,
     event: AudioMessageEvent,
-    config: Config,
+    config: RuntimeConfig,
     *,
     runtime_paths: RuntimePaths,
     thread_id: str | None,
@@ -258,7 +258,7 @@ async def prepare_raw_voice_fallback_message(
     storage_path: Path,
     room: nio.MatrixRoom,
     event: AudioMessageEvent,
-    config: Config,
+    config: RuntimeConfig,
     *,
     runtime_paths: RuntimePaths,
     thread_id: str | None,
@@ -295,7 +295,7 @@ async def prepare_raw_voice_fallback_message(
 
 def _build_prepared_voice_message(
     event: AudioMessageEvent,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     text: str,
@@ -347,7 +347,7 @@ async def _handle_voice_message(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
     event: AudioMessageEvent,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     audio: Audio | None = None,
 ) -> str | None:
@@ -452,7 +452,7 @@ def _stt_upload_filename_and_mime_type(mime_type: str | None) -> tuple[str, str]
 
 async def _transcribe_audio(
     audio_data: bytes,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     mime_type: str | None = None,
@@ -503,7 +503,7 @@ async def _transcribe_audio(
 
 async def _process_transcription(
     transcription: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     available_agent_names: list[str] | None = None,
@@ -598,7 +598,7 @@ async def _get_available_entities_for_sender(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
     sender_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> tuple[list[str], list[str]]:
     """Return available agent and team names in this room for a specific sender."""
@@ -628,7 +628,7 @@ def _sanitize_unavailable_mentions(
     text: str,
     *,
     allowed_entities: set[str],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> str:
     """Strip @ from mentions that target configured but unavailable entities."""
@@ -656,7 +656,7 @@ def _sanitize_unavailable_mentions(
 def _voice_mention_entity_name(
     token: str,
     registry: EntityIdentityRegistry,
-    config: Config,
+    config: RuntimeConfig,
 ) -> str | None:
     """Resolve one voice-normalizer mention token using Matrix mention semantics."""
     body = token[1:]

@@ -12,17 +12,30 @@ import pytest_asyncio
 
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
+from mindroom.tool_system.catalog import resolved_tool_validation_snapshot_for_runtime
 from tests.conftest import make_event_cache_mock, make_event_cache_write_coordinator_mock, orchestrator_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
+
+    from mindroom.constants import RuntimePaths
+
+
+def _runtime_config(config: Config, runtime_paths: RuntimePaths) -> RuntimeConfig:
+    """Materialize test configs without importing their synthetic plugin paths."""
+    tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(runtime_paths, Config())
+    return RuntimeConfig.from_authored(
+        config,
+        runtime_paths,
+        tool_validation_snapshot=tool_validation_snapshot,
+    )
 
 
 def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMock:
@@ -88,6 +101,7 @@ class TestDynamicConfigUpdate:
 
         # Create orchestrator and set initial config
         orchestrator = orchestrator_factory()
+        initial_config = _runtime_config(initial_config, orchestrator.runtime_paths)
         orchestrator.config = initial_config
 
         # Create a mock bot for the general agent
@@ -113,6 +127,7 @@ class TestDynamicConfigUpdate:
             },
             models={"default": {"provider": "test", "id": "test-model"}},
         )
+        updated_config = _runtime_config(updated_config, orchestrator.runtime_paths)
         persist_entity_accounts(initial_config, orchestrator.runtime_paths)
         persist_entity_accounts(updated_config, orchestrator.runtime_paths)
 
@@ -178,6 +193,8 @@ class TestDynamicConfigUpdate:
         )
 
         orchestrator = orchestrator_factory()
+        initial_config = _runtime_config(initial_config, orchestrator.runtime_paths)
+        updated_config = _runtime_config(updated_config, orchestrator.runtime_paths)
         orchestrator.config = initial_config
         persist_entity_accounts(initial_config, orchestrator.runtime_paths)
         persist_entity_accounts(updated_config, orchestrator.runtime_paths)
@@ -241,6 +258,7 @@ class TestDynamicConfigUpdate:
             storage_path=tmp_path / "mindroom_data",
             process_env={},
         )
+        updated_config = _runtime_config(updated_config, runtime_paths)
         persist_entity_accounts(updated_config, runtime_paths)
 
         # Mock the AI model to return a proper workflow
@@ -319,6 +337,8 @@ class TestDynamicConfigUpdate:
         )
 
         orchestrator = orchestrator_factory()
+        initial_config = _runtime_config(initial_config, orchestrator.runtime_paths)
+        updated_config = _runtime_config(updated_config, orchestrator.runtime_paths)
         orchestrator.config = initial_config
 
         mock_bot = _mock_agent_bot(initial_config)
@@ -377,6 +397,8 @@ class TestDynamicConfigUpdate:
         )
 
         orchestrator = orchestrator_factory()
+        initial_config = _runtime_config(initial_config, orchestrator.runtime_paths)
+        updated_config = _runtime_config(updated_config, orchestrator.runtime_paths)
         orchestrator.config = initial_config
 
         mock_bot = _mock_agent_bot(initial_config)
@@ -433,6 +455,8 @@ class TestDynamicConfigUpdate:
         )
 
         orchestrator = orchestrator_factory()
+        initial_config = _runtime_config(initial_config, orchestrator.runtime_paths)
+        updated_config = _runtime_config(updated_config, orchestrator.runtime_paths)
         orchestrator.config = initial_config
 
         general_bot = _mock_agent_bot(initial_config)
@@ -484,6 +508,8 @@ class TestDynamicConfigUpdate:
         )
 
         orchestrator = orchestrator_factory()
+        initial_config = _runtime_config(initial_config, orchestrator.runtime_paths)
+        updated_config = _runtime_config(updated_config, orchestrator.runtime_paths)
         orchestrator.config = initial_config
 
         general_bot = _mock_agent_bot(initial_config)
@@ -534,6 +560,8 @@ class TestDynamicConfigUpdate:
         )
 
         orchestrator = orchestrator_factory()
+        initial_config = _runtime_config(initial_config, orchestrator.runtime_paths)
+        updated_config = _runtime_config(updated_config, orchestrator.runtime_paths)
         orchestrator.config = initial_config
         persist_entity_accounts(updated_config, orchestrator.runtime_paths)
         mock_bot = _mock_agent_bot(initial_config)
@@ -588,6 +616,8 @@ class TestDynamicConfigUpdate:
         )
 
         orchestrator = orchestrator_factory()
+        initial_config = _runtime_config(initial_config, orchestrator.runtime_paths)
+        updated_config = _runtime_config(updated_config, orchestrator.runtime_paths)
         orchestrator.config = initial_config
         mock_bot = _mock_agent_bot(initial_config)
         mock_bot._set_presence_with_model_info = AsyncMock()

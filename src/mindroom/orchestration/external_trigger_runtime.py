@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from mindroom.bot import AgentBot, TeamBot
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
 
@@ -27,7 +27,7 @@ class ExternalTriggerRuntimeCoordinator:
 
     def bind_if_ready(
         self,
-        config: Config | None,
+        config: RuntimeConfig | None,
         bots: Mapping[str, AgentBot | TeamBot],
     ) -> None:
         """Bind trigger delivery runtime after router is running."""
@@ -96,7 +96,7 @@ class ExternalTriggerRuntimeCoordinator:
 
     async def sync_api_config_snapshot(
         self,
-        new_config: Config,
+        new_config: RuntimeConfig,
     ) -> None:
         """Publish the current config to the bundled API before binding trigger runtime."""
         if not self.api_enabled:

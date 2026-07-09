@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from mindroom import constants
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix import client as matrix_client
@@ -148,12 +148,14 @@ def test_config_rejects_room_key_that_conflicts_with_root_space_alias() -> None:
     colliding_room_key = managed_room_key_from_alias_localpart(reserved_alias, runtime_paths) or reserved_alias
 
     with pytest.raises(ValueError, match="reserved root Space alias"):
-        Config.model_validate(
-            {
-                "agents": {"general": {"display_name": "General", "rooms": [colliding_room_key]}},
-                "matrix_space": {"enabled": True},
-            },
-            context={"runtime_paths": runtime_paths},
+        RuntimeConfig.from_authored(
+            Config.model_validate(
+                {
+                    "agents": {"general": {"display_name": "General", "rooms": [colliding_room_key]}},
+                    "matrix_space": {"enabled": True},
+                },
+            ),
+            runtime_paths,
         )
 
 
@@ -163,12 +165,14 @@ def test_config_allows_colliding_room_key_when_space_disabled() -> None:
     reserved_alias = managed_space_alias_localpart(runtime_paths)
     colliding_room_key = managed_room_key_from_alias_localpart(reserved_alias, runtime_paths) or reserved_alias
 
-    config = Config.model_validate(
-        {
-            "agents": {"general": {"display_name": "General", "rooms": [colliding_room_key]}},
-            "matrix_space": {"enabled": False},
-        },
-        context={"runtime_paths": runtime_paths},
+    config = RuntimeConfig.from_authored(
+        Config.model_validate(
+            {
+                "agents": {"general": {"display_name": "General", "rooms": [colliding_room_key]}},
+                "matrix_space": {"enabled": False},
+            },
+        ),
+        runtime_paths,
     )
     assert config.matrix_space.enabled is False
 

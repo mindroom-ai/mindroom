@@ -15,7 +15,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
 from mindroom import constants
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import RuntimeConfig, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path, workspace_avatar_path
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
@@ -92,7 +92,7 @@ def _get_console() -> Console:
     return Console()
 
 
-def _load_validated_config(runtime_paths: constants.RuntimePaths) -> Config:
+def _load_validated_config(runtime_paths: constants.RuntimePaths) -> RuntimeConfig:
     """Load and validate the active MindRoom configuration."""
     return load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
@@ -108,12 +108,12 @@ def _get_avatar_path(
     return avatar_path
 
 
-def _managed_room_avatar_keys(config: Config) -> set[str]:
+def _managed_room_avatar_keys(config: RuntimeConfig) -> set[str]:
     """Return room keys that participate in managed avatar generation and sync."""
     return {room_name for room_name in config.get_all_configured_rooms() if not room_name.startswith(("!", "#"))}
 
 
-def _managed_avatar_targets(config: Config) -> list[tuple[str, str]]:
+def _managed_avatar_targets(config: RuntimeConfig) -> list[tuple[str, str]]:
     """Return every managed avatar target for the active config."""
     targets = [("agents", agent_name) for agent_name in config.agents]
     targets.append(("agents", "router"))
@@ -125,7 +125,7 @@ def _managed_avatar_targets(config: Config) -> list[tuple[str, str]]:
 
 
 def _missing_avatar_targets(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
 ) -> set[tuple[str, str]]:
     """Return the managed avatar targets with no bundled or workspace avatar yet."""
@@ -139,7 +139,7 @@ def _missing_avatar_targets(
 async def _generate_prompt(
     client: genai.Client,
     target: _AvatarTarget,
-    config: Config,
+    config: RuntimeConfig,
 ) -> str:
     """Generate an image prompt based on the entity's role using AI."""
     if target.entity_type in {"rooms", "spaces"}:
@@ -208,7 +208,7 @@ async def _generate_avatar(
     client: genai.Client,
     target: _AvatarTarget,
     runtime_paths: constants.RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     *,
     force: bool = False,
 ) -> None:
@@ -305,7 +305,7 @@ async def _sync_avatar_target(
 
 async def _sync_configured_room_avatars(
     client: nio.AsyncClient,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     *,
     force: bool = False,
@@ -344,7 +344,7 @@ async def _sync_configured_room_avatars(
 
 async def _sync_root_space_avatar(
     client: nio.AsyncClient,
-    config: Config,
+    config: RuntimeConfig,
     state: MatrixState,
     runtime_paths: constants.RuntimePaths,
     *,
@@ -429,7 +429,7 @@ async def set_room_avatars_in_matrix(runtime_paths: constants.RuntimePaths, *, f
 
 
 def _build_avatar_generation_targets(
-    config: Config,
+    config: RuntimeConfig,
     missing_targets: set[tuple[str, str]],
 ) -> list[_AvatarTarget]:
     """Build typed avatar targets for every missing managed avatar."""
@@ -519,7 +519,7 @@ def _remaining_missing_avatar_targets(
 
 
 async def _generate_missing_avatars(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     selected_targets: set[tuple[str, str]],
     *,

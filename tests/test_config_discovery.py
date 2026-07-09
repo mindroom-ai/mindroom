@@ -10,10 +10,9 @@ from functools import cache
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 import mindroom.constants as constants_mod
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import managed_space_alias_localpart
@@ -630,7 +629,7 @@ class TestResolveConfigRelativePath:
         config = load_config_yaml(config_path)
         resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
-        assert not hasattr(config, "runtime_paths")
+        assert config.runtime_paths == resolved_runtime_paths
         assert resolved_runtime_paths.env_value("OPENAI_API_KEY") == "from-shell"
 
     def test_config_from_yaml_explicit_path_keeps_exported_storage_override(
@@ -650,7 +649,7 @@ class TestResolveConfigRelativePath:
         config = load_config_yaml(config_path)
         resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
-        assert not hasattr(config, "runtime_paths")
+        assert config.runtime_paths == resolved_runtime_paths
         assert resolved_runtime_paths.storage_root == storage_path.resolve()
 
     def test_explicit_runtime_paths_use_process_env_for_non_path_values(
@@ -678,7 +677,7 @@ class TestResolveConfigRelativePath:
         assert constants_mod.runtime_mindroom_namespace(runtime_paths=runtime_paths) == "alpha1234"
         assert constants_mod.runtime_matrix_homeserver(runtime_paths=runtime_paths) == "https://hs.example"
         assert constants_mod.runtime_matrix_server_name(runtime_paths=runtime_paths) == "server.example"
-        assert config.get_domain(runtime_paths) == "server.example"
+        assert config.get_domain() == "server.example"
 
     def test_config_domain_uses_sibling_env_matrix_homeserver(
         self,
@@ -700,9 +699,8 @@ class TestResolveConfigRelativePath:
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
 
         config = load_config_yaml(config_path)
-        resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
-        assert config.get_domain(resolved_runtime_paths) == "example.org"
+        assert config.get_domain() == "example.org"
 
     def test_config_from_yaml_rejects_persisted_router_mindroom_user_localpart(self, tmp_path: Path) -> None:
         """Pure YAML loads must still apply runtime-sensitive prepared-account validation."""
@@ -727,7 +725,7 @@ class TestResolveConfigRelativePath:
             encoding="utf-8",
         )
 
-        with pytest.raises(ValidationError, match="conflicts with router"):
+        with pytest.raises(ConfigRuntimeValidationError, match="conflicts with router"):
             load_config_yaml(config_path)
 
     def test_config_from_yaml_allows_obsolete_entity_proposal_after_account_prep(self, tmp_path: Path) -> None:
@@ -789,7 +787,7 @@ class TestResolveConfigRelativePath:
             encoding="utf-8",
         )
 
-        with pytest.raises(ValidationError, match="reserved root Space alias"):
+        with pytest.raises(ConfigRuntimeValidationError, match="reserved root Space alias"):
             load_config_yaml(config_path)
 
     def test_config_from_yaml_explicit_path_ignores_activated_runtime_storage(self, tmp_path: Path) -> None:
@@ -806,7 +804,7 @@ class TestResolveConfigRelativePath:
         config = load_config_yaml(config_path)
         resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
-        assert not hasattr(config, "runtime_paths")
+        assert config.runtime_paths == resolved_runtime_paths
         assert resolved_runtime_paths.storage_root == (tmp_path / "mindroom_data").resolve()
 
     def test_find_config_and_primary_runtime_ignore_resolved_runtime_paths(self, tmp_path: Path) -> None:

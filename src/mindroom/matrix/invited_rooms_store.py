@@ -13,7 +13,7 @@ from mindroom.tool_system.worker_routing import agent_state_root_path
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
 
 logger = get_logger(__name__)
 
@@ -62,7 +62,7 @@ def save_invited_rooms(path: Path, room_ids: set[str]) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def should_accept_invites(config: Config, agent_name: str) -> bool:
+def should_accept_invites(config: RuntimeConfig, agent_name: str) -> bool:
     """Return whether one configured entity accepts authorized room invites."""
     if agent_name == ROUTER_AGENT_NAME:
         return config.router.accept_invites
@@ -74,11 +74,11 @@ def should_accept_invites(config: Config, agent_name: str) -> bool:
     return agent_name in config.teams
 
 
-def invited_room_entity_names(config: Config) -> tuple[str, ...]:
+def invited_room_entity_names(config: RuntimeConfig) -> tuple[str, ...]:
     """Return configured entity names that may own persisted invited rooms."""
     return (ROUTER_AGENT_NAME, *config.agents.keys(), *config.teams.keys())
 
 
-def should_persist_invited_rooms(config: Config, agent_name: str) -> bool:
+def should_persist_invited_rooms(config: RuntimeConfig, agent_name: str) -> bool:
     """Return whether one entity should keep accepted invited rooms across restarts."""
     return should_accept_invites(config, agent_name)

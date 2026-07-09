@@ -68,6 +68,7 @@ async def test_prepare_agent_and_prompt_builds_agent_off_event_loop(
 
     config = Config.model_validate({"agents": {"general": {"display_name": "General", "role": "test"}}})
     runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(config, runtime_paths)
     prepare_task = asyncio.get_running_loop().create_task(
         ai_module._prepare_agent_and_prompt(
             make_turn_context("general"),

@@ -13,7 +13,7 @@ from mindroom.tool_system.catalog import TOOL_METADATA, validate_authored_tool_e
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
 
 
 logger = get_logger(__name__)
@@ -94,20 +94,20 @@ def _ordered_deferred_tools(
     return [tool_name for tool_name in deferred_tool_names if tool_name in loaded]
 
 
-def _deferred_tool_names(config: Config, agent_name: str) -> list[str]:
+def _deferred_tool_names(config: RuntimeConfig, agent_name: str) -> list[str]:
     return [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs]
 
 
-def _initial_loaded_tools(config: Config, agent_name: str) -> list[str]:
+def _initial_loaded_tools(config: RuntimeConfig, agent_name: str) -> list[str]:
     return [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs if entry.initial]
 
 
-def _default_loaded_tools(config: Config, agent_name: str) -> list[str]:
+def _default_loaded_tools(config: RuntimeConfig, agent_name: str) -> list[str]:
     return _sanitize_loaded_tools(config, agent_name, _initial_loaded_tools(config, agent_name))[0]
 
 
 def _sanitize_loaded_tools(
-    config: Config,
+    config: RuntimeConfig,
     agent_name: str,
     loaded_tools: list[str],
 ) -> tuple[list[str], list[str]]:
@@ -128,7 +128,7 @@ def _sanitize_loaded_tools(
 
 
 def _sanitize_loaded_tools_with_current_initials(
-    config: Config,
+    config: RuntimeConfig,
     agent_name: str,
     loaded_tools: list[str],
 ) -> tuple[list[str], list[str]]:
@@ -146,14 +146,14 @@ def _normalize_effective_tool_config_overrides(
     return validate_authored_tool_entry_overrides(tool_name, overrides)
 
 
-def has_deferred_tools(config: Config, agent_name: str) -> bool:
+def has_deferred_tools(config: RuntimeConfig, agent_name: str) -> bool:
     """Return whether one agent has at least one authored deferred tool."""
     return bool(config.resolve_entity(agent_name).authored_deferred_tool_configs)
 
 
 def _special_tool_names(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     delegation_depth: int,
     enable_dynamic_tools_manager: bool,
 ) -> list[str]:
@@ -180,7 +180,7 @@ def _special_tool_names(
     return tool_names
 
 
-def _tool_config_owner_precedence(config: Config, entry: EffectiveToolConfig) -> tuple[int, int, int]:
+def _tool_config_owner_precedence(config: RuntimeConfig, entry: EffectiveToolConfig) -> tuple[int, int, int]:
     directly_authored = entry.name == (entry.authored_name or entry.name)
     authored_from_individual_tool = not config.is_tool_preset(entry.authored_name or entry.name)
     return (int(directly_authored), int(authored_from_individual_tool), -entry.authored_order)
@@ -198,7 +198,7 @@ def _expanded_authored_entry_config(entry: EffectiveToolConfig, tool_name: str) 
 
 
 def _visible_authored_tool_configs(
-    config: Config,
+    config: RuntimeConfig,
     agent_name: str,
     *,
     loaded_deferred_tools: set[str],
@@ -241,7 +241,7 @@ def _append_injected_special_tool_configs(
     resolved_tool_configs: list[EffectiveToolConfig],
     *,
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     delegation_depth: int,
     enable_dynamic_tools_manager: bool,
 ) -> list[EffectiveToolConfig]:
@@ -271,7 +271,7 @@ def _append_injected_special_tool_configs(
 def visible_tool_surface(
     *,
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     session_id: str | None = None,
     loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     delegation_depth: int = 0,
@@ -328,7 +328,7 @@ def visible_tool_surface(
 def get_loaded_tools_for_session(
     *,
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     session_id: str | None,
 ) -> list[str]:
     """Return one agent/session's loaded dynamic tools, initializing in-memory state when needed."""
@@ -368,7 +368,7 @@ def get_loaded_tools_for_session(
 def load_tool_for_session(
     *,
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     session_id: str | None,
     tool_name: str,
     validate_loaded_tools: Callable[[list[str]], LoadToolValidationFailure | None] | None = None,
@@ -448,7 +448,7 @@ def load_tool_for_session(
 def unload_tool_for_session(
     *,
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     session_id: str | None,
     tool_name: str,
 ) -> list[str]:
@@ -489,7 +489,7 @@ def save_loaded_tools_for_session(
     agent_name: str,
     session_id: str | None,
     loaded_tools: list[str],
-    config: Config | None = None,
+    config: RuntimeConfig | None = None,
 ) -> None:
     """Persist one agent/session's loaded tool set in memory."""
     if session_id is None:
@@ -507,7 +507,7 @@ def save_loaded_tools_for_session(
 def deferred_tool_catalog_entries(
     *,
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     loaded_tools: list[str],
 ) -> list[DeferredToolCatalogEntry]:
     """Return model-visible catalog metadata for one agent's authored deferred tools."""
@@ -532,7 +532,7 @@ def deferred_tool_catalog_entries(
 def resolve_dynamic_tool_selection(
     *,
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     session_id: str | None,
     delegation_depth: int = 0,
 ) -> VisibleToolSurface:

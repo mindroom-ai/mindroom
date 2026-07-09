@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tests.config_test_utils import runtime_config_from_data
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
@@ -45,7 +47,7 @@ from mindroom.api.openai_compat import (
 )
 from mindroom.api.openai_request_parsing import _extract_content_text
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import _PreparedExecutionContext
@@ -89,10 +91,14 @@ def _runtime_paths(process_env: dict[str, str] | None = None) -> RuntimePaths:
     return resolve_runtime_paths(config_path=Path(__file__), process_env=process_env or {})
 
 
-def _runtime_paths_for_config(config: Config, process_env: dict[str, str] | None = None) -> RuntimePaths:
+def _runtime_config_with_paths(
+    config: Config,
+    process_env: dict[str, str] | None = None,
+) -> tuple[RuntimeConfig, RuntimePaths]:
     runtime_paths = _runtime_paths(process_env)
-    persist_entity_accounts(config, runtime_paths)
-    return runtime_paths
+    runtime_config = RuntimeConfig.from_authored(config, runtime_paths)
+    persist_entity_accounts(runtime_config, runtime_paths)
+    return runtime_config, runtime_paths
 
 
 def _fake_indexing_settings(base_id: str) -> IndexingSettings:
@@ -205,29 +211,33 @@ def _tool_calls_path(runtime_paths: RuntimePaths) -> Path:
 
 
 @pytest.fixture
-def test_config() -> Config:
+def test_config() -> RuntimeConfig:
     """Create a minimal test config with a few agents."""
-    return Config(
-        agents={
-            "general": AgentConfig(
-                display_name="GeneralAgent",
-                role="General-purpose assistant",
-                rooms=[],
-            ),
-            "code": AgentConfig(
-                display_name="CodeAgent",
-                role="Generate code and manage files",
-                tools=["file", "shell"],
-                rooms=[],
-            ),
-            "research": AgentConfig(
-                display_name="ResearchAgent",
-                role="",
-                rooms=[],
-            ),
-        },
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
-        router=RouterConfig(model="default"),
+    runtime_paths = _runtime_paths({})
+    return RuntimeConfig.from_authored(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    role="General-purpose assistant",
+                    rooms=[],
+                ),
+                "code": AgentConfig(
+                    display_name="CodeAgent",
+                    role="Generate code and manage files",
+                    tools=["file", "shell"],
+                    rooms=[],
+                ),
+                "research": AgentConfig(
+                    display_name="ResearchAgent",
+                    role="",
+                    rooms=[],
+                ),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        ),
+        runtime_paths,
     )
 
 
@@ -406,7 +416,7 @@ def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: C
 def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config, tmp_path: Path) -> None:
     """OpenAI-compatible agent construction should hide tools that require approval."""
     runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             **test_config.authored_model_dump(),
             "tool_approval": {
@@ -460,6 +470,7 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -
         models={"default": ModelConfig(provider="ollama", id="test-model")},
         router=RouterConfig(model="default"),
     )
+    config = RuntimeConfig.from_authored(config, runtime_paths)
     persist_entity_accounts(config, runtime_paths)
     execution_identity = build_tool_execution_identity(
         channel="openai_compat",
@@ -502,20 +513,23 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -
 def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_path: Path) -> None:
     """OpenAI-compatible dynamic tooling should not advertise or load context-bound todo."""
     runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-    config = Config(
-        agents={
-            "code": AgentConfig(
-                display_name="CodeAgent",
-                role="Generate code and manage files",
-                tools=[
-                    ToolConfigEntry(name="todo", defer=True),
-                    ToolConfigEntry(name="sleep", defer=True),
-                ],
-                rooms=[],
-            ),
+    config = runtime_config_from_data(
+        {
+            "agents": {
+                "code": AgentConfig(
+                    display_name="CodeAgent",
+                    role="Generate code and manage files",
+                    tools=[
+                        ToolConfigEntry(name="todo", defer=True),
+                        ToolConfigEntry(name="sleep", defer=True),
+                    ],
+                    rooms=[],
+                ),
+            },
+            "models": {"default": ModelConfig(provider="ollama", id="test-model")},
+            "router": RouterConfig(model="default"),
         },
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
-        router=RouterConfig(model="default"),
+        runtime_paths,
     )
     persist_entity_accounts(config, runtime_paths)
     execution_identity = build_tool_execution_identity(
@@ -562,7 +576,7 @@ def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, t
         "def check(tool_name, arguments, agent_name):\n    return tool_name == 'run_shell_command'\n",
         encoding="utf-8",
     )
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             **test_config.authored_model_dump(),
             "tool_approval": {
@@ -804,24 +818,28 @@ def test_chat_completions_returns_malformed_yaml_errors(tmp_path: Path) -> None:
 
 def test_openai_incompatible_agents_is_order_independent_for_cycles() -> None:
     """Cyclic delegation should not change which /v1 agents are rejected."""
-    config = Config(
-        agents={
-            "a": AgentConfig(
-                display_name="A",
-                role="Private agent",
-                rooms=[],
-                private={"per": "user"},
-                delegate_to=["b"],
-            ),
-            "b": AgentConfig(
-                display_name="B",
-                role="Delegating agent",
-                rooms=[],
-                delegate_to=["a"],
-            ),
+    runtime_paths = _runtime_paths()
+    config = runtime_config_from_data(
+        {
+            "agents": {
+                "a": AgentConfig(
+                    display_name="A",
+                    role="Private agent",
+                    rooms=[],
+                    private={"per": "user"},
+                    delegate_to=["b"],
+                ),
+                "b": AgentConfig(
+                    display_name="B",
+                    role="Delegating agent",
+                    rooms=[],
+                    delegate_to=["a"],
+                ),
+            },
+            "models": {"default": ModelConfig(provider="ollama", id="test-model")},
+            "router": RouterConfig(model="default"),
         },
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
-        router=RouterConfig(model="default"),
+        runtime_paths,
     )
 
     assert openai_compat._openai_incompatible_agents(["a", "b"], config) == ["a", "b"]
@@ -865,14 +883,12 @@ class TestListModels:
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         test_config.agents["code"].worker_scope = "user"
-        test_config.teams = {
-            "dev-team": TeamConfig(
-                display_name="Dev Team",
-                role="Engineering helpers",
-                agents=["general", "code"],
-                mode="coordinate",
-            ),
-        }
+        test_config.teams["dev-team"] = TeamConfig(
+            display_name="Dev Team",
+            role="Engineering helpers",
+            agents=["general", "code"],
+            mode="coordinate",
+        )
 
         app = FastAPI()
         app.include_router(router)
@@ -1160,21 +1176,24 @@ class TestChatCompletions:
 
     def test_agent_completion_does_not_require_persisted_matrix_accounts(self, tmp_path: Path) -> None:
         """OpenAI-compatible agent completions should not prepare or require Matrix accounts."""
-        config = Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="GeneralAgent",
-                    role="General-purpose assistant",
-                    rooms=[],
-                ),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
-        )
         runtime_paths = resolve_runtime_paths(
             config_path=tmp_path / "config.yaml",
             storage_path=tmp_path / "data",
             process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+        )
+        config = runtime_config_from_data(
+            {
+                "agents": {
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        role="General-purpose assistant",
+                        rooms=[],
+                    ),
+                },
+                "models": {"default": ModelConfig(provider="ollama", id="test-model")},
+                "router": RouterConfig(model="default"),
+            },
+            runtime_paths,
         )
         app = FastAPI()
         app.include_router(openai_compat.router)
@@ -1280,14 +1299,12 @@ class TestChatCompletions:
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         test_config.agents["code"].worker_scope = "user_agent"
-        test_config.teams = {
-            "dev-team": TeamConfig(
-                display_name="Dev Team",
-                role="Engineering helpers",
-                agents=["general", "code"],
-                mode="coordinate",
-            ),
-        }
+        test_config.teams["dev-team"] = TeamConfig(
+            display_name="Dev Team",
+            role="Engineering helpers",
+            agents=["general", "code"],
+            mode="coordinate",
+        )
         app = FastAPI()
         app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
@@ -2807,31 +2824,35 @@ class TestAutoRouting:
 
 
 @pytest.fixture
-def team_config() -> Config:
+def team_config() -> RuntimeConfig:
     """Create a test config with agents and a team."""
-    return Config(
-        agents={
-            "general": AgentConfig(
-                display_name="GeneralAgent",
-                role="General-purpose assistant",
-                rooms=[],
-            ),
-            "code": AgentConfig(
-                display_name="CodeAgent",
-                role="Generate code",
-                rooms=[],
-            ),
-        },
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
-        router=RouterConfig(model="default"),
-        teams={
-            "super_team": TeamConfig(
-                display_name="Super Team",
-                role="Collaborative engineering team",
-                agents=["general", "code"],
-                mode="coordinate",
-            ),
-        },
+    runtime_paths = _runtime_paths({})
+    return RuntimeConfig.from_authored(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    role="General-purpose assistant",
+                    rooms=[],
+                ),
+                "code": AgentConfig(
+                    display_name="CodeAgent",
+                    role="Generate code",
+                    rooms=[],
+                ),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+            teams={
+                "super_team": TeamConfig(
+                    display_name="Super Team",
+                    role="Collaborative engineering team",
+                    agents=["general", "code"],
+                    mode="coordinate",
+                ),
+            },
+        ),
+        runtime_paths,
     )
 
 
@@ -4491,6 +4512,7 @@ class TestTeamCompletion:
             router=RouterConfig(model="default"),
         )
         runtime_paths = _runtime_paths()
+        config = RuntimeConfig.from_authored(config, runtime_paths)
         agent = _make_test_agent("GeneralAgent")
         team = _make_test_team(name="General Team", team_id="general-team")
 
@@ -4645,7 +4667,7 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            runtime_paths = _runtime_paths_for_config(collaborate_config)
+            collaborate_config, runtime_paths = _runtime_config_with_paths(collaborate_config)
             with open_bound_scope_session_context(
                 agents=[],
                 session_id="session-1",
@@ -4691,7 +4713,7 @@ class TestTeamCompletion:
                     ),
                 },
             )
-            runtime_paths = _runtime_paths_for_config(config)
+            config, runtime_paths = _runtime_config_with_paths(config)
             with open_bound_scope_session_context(
                 agents=[],
                 session_id="session-1",
@@ -4727,7 +4749,7 @@ class TestTeamCompletion:
                 ),
             },
         )
-        runtime_paths = _runtime_paths_for_config(config)
+        config, runtime_paths = _runtime_config_with_paths(config)
         member = MagicMock(name="GeneralAgent")
         member.id = "general"
 
@@ -4781,7 +4803,7 @@ class TestTeamCompletion:
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            runtime_paths = _runtime_paths_for_config(config)
+            config, runtime_paths = _runtime_config_with_paths(config)
             with open_bound_scope_session_context(
                 agents=[],
                 session_id="session-1",
@@ -4860,21 +4882,24 @@ class TestTeamCompletion:
 
     def test_build_team_closes_materialized_agents_when_team_build_fails(self) -> None:
         """Configured-team build failures should close partially built member resources."""
-        config = Config(
-            agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            router=RouterConfig(model="default"),
-            teams={
-                "coord_team": TeamConfig(
-                    display_name="Coord Team",
-                    role="Coordinated team",
-                    agents=["general"],
-                    mode="coordinate",
-                ),
+        runtime_paths = _runtime_paths()
+        config = runtime_config_from_data(
+            {
+                "agents": {"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
+                "models": {"default": ModelConfig(provider="openai", id="test-model")},
+                "router": RouterConfig(model="default"),
+                "teams": {
+                    "coord_team": TeamConfig(
+                        display_name="Coord Team",
+                        role="Coordinated team",
+                        agents=["general"],
+                        mode="coordinate",
+                    ),
+                },
             },
+            runtime_paths,
         )
         built_agent = _make_test_agent("GeneralAgent")
-        runtime_paths = _runtime_paths()
 
         with open_bound_scope_session_context(
             agents=[],
@@ -4955,7 +4980,7 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            runtime_paths = _runtime_paths_for_config(config)
+            config, runtime_paths = _runtime_config_with_paths(config)
             with open_bound_scope_session_context(
                 agents=[],
                 session_id="session-1",
@@ -5020,9 +5045,10 @@ def knowledge_app_client(knowledge_config: Config) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(router)
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+    runtime_config = RuntimeConfig.from_authored(knowledge_config, runtime_paths)
     initialize_api_app(app, runtime_paths)
     with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
+        patch("mindroom.api.openai_compat._load_config", return_value=(runtime_config, runtime_paths)),
         TestClient(app) as client,
     ):
         yield client
@@ -5064,15 +5090,16 @@ class TestKnowledgeIntegration:
         app = FastAPI()
         app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+        runtime_config = RuntimeConfig.from_authored(knowledge_config, runtime_paths)
         initialize_api_app(app, runtime_paths)
 
         mock_knowledge = MagicMock()
-        observed_calls: list[tuple[str, Config | None, RuntimePaths | None]] = []
+        observed_calls: list[tuple[str, RuntimeConfig | None, RuntimePaths | None]] = []
 
         def fake_lookup_knowledge_for_base(
             base_id: str,
             *,
-            config: Config | None = None,
+            config: RuntimeConfig | None = None,
             runtime_paths: RuntimePaths | None = None,
             execution_identity: object | None = None,  # noqa: ARG001
             on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
@@ -5083,7 +5110,7 @@ class TestKnowledgeIntegration:
             return _knowledge_lookup(mock_knowledge, base_id=base_id)
 
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
+            patch("mindroom.api.openai_compat._load_config", return_value=(runtime_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             TestClient(app) as client,
@@ -5099,7 +5126,7 @@ class TestKnowledgeIntegration:
 
         assert response.status_code == 200
         assert mock_ai.call_args.kwargs["knowledge"] is mock_knowledge
-        assert observed_calls == [("docs", knowledge_config, runtime_paths)]
+        assert observed_calls == [("docs", runtime_config, runtime_paths)]
 
     def test_knowledge_none_when_not_configured(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is None when agent has no knowledge_bases."""
@@ -5224,6 +5251,7 @@ class TestKnowledgeIntegration:
         app = FastAPI()
         app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+        runtime_config = RuntimeConfig.from_authored(knowledge_config, runtime_paths)
         initialize_api_app(app, runtime_paths)
 
         mock_knowledge_docs = MagicMock()
@@ -5237,7 +5265,7 @@ class TestKnowledgeIntegration:
         def fake_lookup_knowledge_for_base(
             base_id: str,
             *,
-            config: Config | None = None,  # noqa: ARG001
+            config: RuntimeConfig | None = None,  # noqa: ARG001
             runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
             execution_identity: object | None = None,  # noqa: ARG001
             on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
@@ -5246,7 +5274,7 @@ class TestKnowledgeIntegration:
             return _knowledge_lookup(knowledge, base_id=base_id) if knowledge is not None else None
 
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
+            patch("mindroom.api.openai_compat._load_config", return_value=(runtime_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             TestClient(app) as client,

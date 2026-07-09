@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.coalescing_batch import coalesced_prompt
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
@@ -48,7 +48,7 @@ class _RuntimeStub:
     """Typed SupportsClientConfig stand-in for direct EditRegenerator tests."""
 
     client: nio.AsyncClient | None
-    config: Config
+    config: RuntimeConfig
 
 
 @dataclass
@@ -61,7 +61,7 @@ class _Harness:
     ingress_hook_runner: MagicMock
     generate_response: AsyncMock
     logger: MagicMock
-    config: Config
+    config: RuntimeConfig
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom
     context: MessageContext
@@ -129,13 +129,22 @@ def _edit_event(
     return event, EventInfo.from_event(source)
 
 
-def _harness(tmp_path: Path, *, turn_record: HandledTurnRecord | None, requires_backfill: bool = False) -> _Harness:
+def _harness(
+    tmp_path: Path,
+    *,
+    turn_record: HandledTurnRecord | None,
+    requires_backfill: bool = False,
+    timezone: str = "UTC",
+) -> _Harness:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
         process_env={},
     )
-    config = Config(agents={AGENT_NAME: AgentConfig(display_name="Assistant")})
+    config = RuntimeConfig.from_authored(
+        Config(agents={AGENT_NAME: AgentConfig(display_name="Assistant")}, timezone=timezone),
+        runtime_paths,
+    )
     entity_ids(config, runtime_paths)
 
     context = _message_context()
@@ -303,8 +312,7 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
             second_event_id: SourceEventMetadata(sender="@bob:example.org", timestamp_ms=1_774_019_760_000),
         },
     )
-    harness = _harness(tmp_path, turn_record=record)
-    harness.config.timezone = "America/Los_Angeles"
+    harness = _harness(tmp_path, turn_record=record, timezone="America/Los_Angeles")
     event, event_info = _edit_event(original_event_id=first_event_id, new_body="edited ]]> first <message>")
 
     await _handle_edit(harness, event, event_info)

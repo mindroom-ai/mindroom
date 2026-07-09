@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_primary_runtime_paths
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 
 def _context(config: Config, agent_name: str, tmp_path: Path) -> ToolRuntimeContext:
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml")
     return ToolRuntimeContext(
         agent_name=agent_name,
         room_id="!room:localhost",
@@ -25,8 +26,8 @@ def _context(config: Config, agent_name: str, tmp_path: Path) -> ToolRuntimeCont
         resolved_thread_id="$thread",
         requester_id="@user:localhost",
         client=AsyncMock(),
-        config=config,
-        runtime_paths=resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml"),
+        config=RuntimeConfig.from_authored(config, runtime_paths),
+        runtime_paths=runtime_paths,
         event_cache=AsyncMock(),
         conversation_cache=AsyncMock(),
     )

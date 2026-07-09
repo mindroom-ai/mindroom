@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.bot import AgentBot, TeamBot
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -36,7 +36,7 @@ class OrchestratorRuntime(Protocol):
     """Narrow orchestrator surface used by extracted runtime collaborators."""
 
     @property
-    def config(self) -> Config | None: ...  # noqa: D102
+    def config(self) -> RuntimeConfig | None: ...  # noqa: D102
 
     @property
     def runtime_paths(self) -> RuntimePaths: ...  # noqa: D102
@@ -81,7 +81,7 @@ class SupportsConfig(Protocol):
     """Expose the runtime config snapshot."""
 
     @property
-    def config(self) -> Config: ...  # noqa: D102
+    def config(self) -> RuntimeConfig: ...  # noqa: D102
 
 
 class SupportsClientConfig(Protocol):
@@ -91,7 +91,7 @@ class SupportsClientConfig(Protocol):
     def client(self) -> nio.AsyncClient | None: ...  # noqa: D102
 
     @property
-    def config(self) -> Config: ...  # noqa: D102
+    def config(self) -> RuntimeConfig: ...  # noqa: D102
 
 
 class SupportsConfigOrchestrator(SupportsConfig, Protocol):

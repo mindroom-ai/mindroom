@@ -7,6 +7,8 @@ agent vs team model-name validation against a config snapshot.
 from __future__ import annotations
 
 import json
+import tempfile
+from pathlib import Path
 
 from fastapi.responses import JSONResponse
 
@@ -20,19 +22,23 @@ from mindroom.api.openai_request_parsing import (
     validate_chat_request,
 )
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 
 
-def _config() -> Config:
-    return Config(
-        agents={
-            "general": AgentConfig(display_name="GeneralAgent", role="General-purpose assistant", rooms=[]),
-            "code": AgentConfig(display_name="CodeAgent", role="Coder", rooms=[]),
-        },
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
-        router=RouterConfig(model="default"),
+def _config() -> RuntimeConfig:
+    runtime_root = Path(tempfile.mkdtemp())
+    return RuntimeConfig.from_authored(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="GeneralAgent", role="General-purpose assistant", rooms=[]),
+                "code": AgentConfig(display_name="CodeAgent", role="Coder", rooms=[]),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        ),
+        resolve_runtime_paths(config_path=runtime_root / "config.yaml", storage_path=runtime_root),
     )
 
 
@@ -169,9 +175,12 @@ class TestValidateChatRequest:
     def test_known_team_is_valid(self) -> None:
         """A configured team model passes validation via the team/ prefix."""
         config = _config()
-        config.teams = {
-            "dev-team": TeamConfig(display_name="Dev Team", role="", agents=["general", "code"], mode="coordinate"),
-        }
+        config.teams["dev-team"] = TeamConfig(
+            display_name="Dev Team",
+            role="",
+            agents=["general", "code"],
+            mode="coordinate",
+        )
         assert validate_chat_request(_request("team/dev-team"), config) is None
 
     def test_unknown_team_404(self) -> None:
@@ -194,9 +203,12 @@ class TestValidateChatRequest:
         """Teams containing unsupported agents are rejected on /v1."""
         config = _config()
         config.agents["code"].worker_scope = "user"
-        config.teams = {
-            "dev-team": TeamConfig(display_name="Dev Team", role="", agents=["general", "code"], mode="coordinate"),
-        }
+        config.teams["dev-team"] = TeamConfig(
+            display_name="Dev Team",
+            role="",
+            agents=["general", "code"],
+            mode="coordinate",
+        )
         response = validate_chat_request(_request("team/dev-team"), config)
         assert isinstance(response, JSONResponse)
         assert response.status_code == 400

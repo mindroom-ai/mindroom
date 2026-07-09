@@ -12,40 +12,40 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-def _agent_uses_file_memory_backend(config: Config, agent_name: str) -> bool:
+def _agent_uses_file_memory_backend(config: RuntimeConfig, agent_name: str) -> bool:
     return config.resolve_entity(agent_name).memory_backend == "file"
 
 
-def _agent_uses_disabled_memory_backend(config: Config, agent_name: str) -> bool:
+def _agent_uses_disabled_memory_backend(config: RuntimeConfig, agent_name: str) -> bool:
     return config.resolve_entity(agent_name).memory_backend == "none"
 
 
-def caller_uses_file_memory_backend(config: Config, caller_context: str | list[str]) -> bool:
+def caller_uses_file_memory_backend(config: RuntimeConfig, caller_context: str | list[str]) -> bool:
     """Return whether the caller context resolves to file-backed memory."""
     if isinstance(caller_context, str):
         return _agent_uses_file_memory_backend(config, caller_context)
     return _team_uses_file_memory_backend(config, caller_context)
 
 
-def caller_uses_disabled_memory_backend(config: Config, caller_context: str | list[str]) -> bool:
+def caller_uses_disabled_memory_backend(config: RuntimeConfig, caller_context: str | list[str]) -> bool:
     """Return whether the caller context resolves to disabled memory."""
     if isinstance(caller_context, str):
         return _agent_uses_disabled_memory_backend(config, caller_context)
     return _team_uses_disabled_memory_backend(config, caller_context)
 
 
-def _team_uses_file_memory_backend(config: Config, agent_names: list[str]) -> bool:
+def _team_uses_file_memory_backend(config: RuntimeConfig, agent_names: list[str]) -> bool:
     """Return whether all team members resolve to file-backed memory."""
     config.assert_team_agents_supported(agent_names)
     return all(_agent_uses_file_memory_backend(config, agent_name) for agent_name in agent_names)
 
 
-def _team_uses_disabled_memory_backend(config: Config, agent_names: list[str]) -> bool:
+def _team_uses_disabled_memory_backend(config: RuntimeConfig, agent_names: list[str]) -> bool:
     """Return whether all team members resolve to disabled memory."""
     config.assert_team_agents_supported(agent_names)
     return all(_agent_uses_disabled_memory_backend(config, agent_name) for agent_name in agent_names)
@@ -54,7 +54,7 @@ def _team_uses_disabled_memory_backend(config: Config, agent_names: list[str]) -
 def effective_storage_paths_for_context(
     caller_context: str | list[str],
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> list[Path]:
@@ -73,7 +73,7 @@ def effective_storage_paths_for_context(
 
 def _effective_storage_path_for_agent(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> Path:
@@ -102,7 +102,7 @@ def agent_name_from_scope_user_id(scope_user_id: str) -> str | None:
     return None
 
 
-def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
+def get_team_ids_for_agent(agent_name: str, config: RuntimeConfig) -> list[str]:
     """Get all team scope IDs that include the specified agent."""
     if not config.teams:
         return []
@@ -114,7 +114,7 @@ def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
     return team_ids
 
 
-def _team_members_from_scope_user_id(scope_user_id: str, config: Config) -> list[str] | None:
+def _team_members_from_scope_user_id(scope_user_id: str, config: RuntimeConfig) -> list[str] | None:
     if not scope_user_id.startswith("team_"):
         return None
     if config.teams:
@@ -128,7 +128,7 @@ def _team_members_from_scope_user_id(scope_user_id: str, config: Config) -> list
 def storage_paths_for_scope_user_id(
     scope_user_id: str,
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> list[Path]:
@@ -150,7 +150,7 @@ def storage_paths_for_scope_user_id(
 def allowed_scope_storage_paths(
     caller_context: str | list[str],
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> Iterator[tuple[str, Path]]:
@@ -165,7 +165,7 @@ def allowed_scope_storage_paths(
             yield scope_user_id, target_storage_path
 
 
-def get_allowed_memory_user_ids(caller_context: str | list[str], config: Config) -> set[str]:
+def get_allowed_memory_user_ids(caller_context: str | list[str], config: RuntimeConfig) -> set[str]:
     """Get all user_id scopes the caller is allowed to access."""
     if isinstance(caller_context, list):
         config.assert_team_agents_supported(caller_context)
@@ -214,7 +214,7 @@ def _storage_paths_match(original_storage_path: Path, resolved_storage_path: Pat
 
 def resolve_file_memory_resolution(
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     *,

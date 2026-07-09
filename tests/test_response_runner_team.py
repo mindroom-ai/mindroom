@@ -507,7 +507,7 @@ class TestAgentBot(AgentBotTestBase):
             "agent_general",
             "actual_general_live",
             TEST_PASSWORD,
-            domain=config.get_domain(runtime_paths),
+            domain=config.get_domain(),
         )
         state.save(runtime_paths=runtime_paths)
         current_member = entity_ids(config, runtime_paths)["general"]

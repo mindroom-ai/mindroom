@@ -23,7 +23,7 @@ from mindroom.ai_runtime import (
     is_empty_completed_run,
 )
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.runtime import ScopeSessionContext
@@ -42,10 +42,13 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
 
-def _config() -> Config:
-    return Config(
-        agents={"general": AgentConfig(display_name="General")},
-        models={"default": ModelConfig(provider="openai", id="test-model")},
+def _config(tmp_path: Path) -> RuntimeConfig:
+    return RuntimeConfig.from_authored(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        _runtime_paths(tmp_path),
     )
 
 
@@ -231,7 +234,7 @@ async def test_ai_response_retries_once_after_empty_completed_run(tmp_path: Path
             make_turn_context("general", session_id="session-1"),
             prompt="test",
             runtime_paths=_runtime_paths(tmp_path),
-            config=_config(),
+            config=_config(tmp_path),
         )
 
     assert result == "Recovered"
@@ -256,7 +259,7 @@ async def test_ai_response_closes_spent_agent_state_dbs_before_empty_retry(tmp_p
             make_turn_context("general", session_id="session-1"),
             prompt="test",
             runtime_paths=_runtime_paths(tmp_path),
-            config=_config(),
+            config=_config(tmp_path),
         )
 
     assert result == "Recovered"
@@ -279,7 +282,7 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(tmp_
             make_turn_context("general", session_id="session-1"),
             prompt="test",
             runtime_paths=_runtime_paths(tmp_path),
-            config=_config(),
+            config=_config(tmp_path),
         )
 
     assert result == EMPTY_RESPONSE_NOTICE
@@ -304,7 +307,7 @@ async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(tmp_pa
             make_turn_context("general", session_id="session-1"),
             prompt="test",
             runtime_paths=_runtime_paths(tmp_path),
-            config=_config(),
+            config=_config(tmp_path),
             turn_recorder=recorder,
         )
 
@@ -339,7 +342,7 @@ async def test_stream_agent_response_retries_once_after_empty_completed_stream(t
                 make_turn_context("general", session_id="session-1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_config(tmp_path),
             )
         ]
 
@@ -376,7 +379,7 @@ async def test_stream_agent_response_closes_spent_agent_state_dbs_before_empty_r
                 make_turn_context("general", session_id="session-1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_config(tmp_path),
             )
         ]
 
@@ -407,7 +410,7 @@ async def test_stream_agent_response_yields_fallback_notice_when_retry_is_also_e
                 make_turn_context("general", session_id="session-1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_config(tmp_path),
             )
         ]
 
@@ -440,7 +443,7 @@ async def test_stream_agent_response_fallback_notice_stays_out_of_the_turn_recor
                 make_turn_context("general", session_id="session-1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_config(tmp_path),
                 turn_recorder=recorder,
             )
         ]

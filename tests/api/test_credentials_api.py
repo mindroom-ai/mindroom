@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from mindroom import constants
 from mindroom.api import credentials_oauth_policy, credentials_target, main
 from mindroom.api.main import app, initialize_api_app
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import mcp_oauth_provider
@@ -54,7 +54,10 @@ def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
     """Publish one committed config snapshot for dashboard credential tests."""
     context = main._app_context(api_app)
     context.config_data = config.authored_model_dump()
-    context.runtime_config = config
+    context.runtime_config = RuntimeConfig.from_authored(
+        Config.model_validate(config.authored_model_dump()),
+        context.runtime_paths,
+    )
     context.config_load_result = main.ConfigLoadResult(success=True)
 
 

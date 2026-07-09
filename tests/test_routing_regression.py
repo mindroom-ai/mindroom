@@ -568,7 +568,7 @@ class TestRoutingRegression:
 
         runtime_paths = runtime_paths_for(test_config)
         state = MatrixState.load(runtime_paths=runtime_paths)
-        state.add_account("agent_news", "mindroom_news_oldns", "pw", domain=test_config.get_domain(runtime_paths))
+        state.add_account("agent_news", "mindroom_news_oldns", "pw", domain=test_config.get_domain())
         state.save(runtime_paths=runtime_paths)
 
         router_agent = AgentMatrixUser(
@@ -1421,7 +1421,7 @@ class TestRoutingRegression:
         mock_from_yaml.return_value = mock_config
 
         # Get the actual domain from config
-        domain = mock_config.get_domain(runtime_paths_for(mock_config))
+        domain = mock_config.get_domain()
 
         # Update mock agents to use the correct domain
         mock_research_agent.user_id = f"@mindroom_research:{domain}"

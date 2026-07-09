@@ -46,6 +46,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_target,
 )
 from tests.api.conftest import trusted_upstream_headers
+from tests.config_test_utils import runtime_config_from_data
 
 
 @pytest.fixture(autouse=True)
@@ -145,7 +146,7 @@ def _publish_config(
     payload: dict[str, Any],
 ) -> None:
     context = main._app_context(api_app)
-    runtime_config = Config.validate_with_runtime(payload, runtime_paths)
+    runtime_config = runtime_config_from_data(payload, runtime_paths)
     context.config_data = runtime_config.authored_model_dump()
     context.runtime_config = runtime_config
     context.config_load_result = main.ConfigLoadResult(success=True)

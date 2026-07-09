@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
@@ -33,7 +33,7 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 
 @pytest.fixture
-def mock_config(runtime_paths: RuntimePaths) -> Config:
+def mock_config(runtime_paths: RuntimePaths) -> RuntimeConfig:
     """Create a typed config with test agents."""
     agent_names = (
         "email_assistant",
@@ -51,8 +51,9 @@ def mock_config(runtime_paths: RuntimePaths) -> Config:
         agents={name: {"display_name": name.replace("_", " ").title()} for name in agent_names},
         models={"default": {"provider": "openai", "id": "gpt-5.4"}},
     )
-    persist_entity_accounts(config, runtime_paths)
-    return config
+    runtime_config = RuntimeConfig.from_authored(config, runtime_paths)
+    persist_entity_accounts(runtime_config, runtime_paths)
+    return runtime_config
 
 
 @pytest.mark.asyncio

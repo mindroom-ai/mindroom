@@ -329,7 +329,7 @@ class TestMemoryFacade:
         storage_path: Path,
         config: Config,
     ) -> None:
-        config.teams = {"test_team": MockTeamConfig(agents=["helper", "test_agent"])}
+        config.teams["test_team"] = MockTeamConfig(agents=["helper", "test_agent"])
         mock_memory.get.return_value = {"id": "mem-team", "memory": "Team memory", "user_id": "team_helper+test_agent"}
 
         with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
@@ -696,7 +696,7 @@ class TestMemoryFacade:
         storage_path: Path,
         config: Config,
     ) -> None:
-        config.teams = {"finance_team": MockTeamConfig(agents=["calculator", "data_analyst", "finance"])}
+        config.teams["finance_team"] = MockTeamConfig(agents=["calculator", "data_analyst", "finance"])
 
         def search_side_effect(query: str, *, filters: dict[str, str], top_k: int) -> dict:  # noqa: ARG001
             del top_k

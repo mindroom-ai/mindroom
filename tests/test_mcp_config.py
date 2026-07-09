@@ -6,9 +6,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.main import ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
 from mindroom.mcp.config import MCPServerConfig, resolved_mcp_tool_prefix
+from tests.config_test_utils import runtime_config_from_data
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -144,7 +145,7 @@ def test_resolved_mcp_tool_prefix_uses_server_id_when_missing() -> None:
 def test_config_accepts_top_level_mcp_servers(tmp_path: Path) -> None:
     """Parse top-level MCP server config and expose the dynamic tool name."""
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "chrome_devtools": {
@@ -171,7 +172,7 @@ def test_config_accepts_top_level_mcp_servers(tmp_path: Path) -> None:
 def test_config_allows_non_oauth_mcp_tools_on_private_per_user_agents(tmp_path: Path) -> None:
     """Private per-user agents may list non-OAuth MCP tools; calls use the shared MCP session."""
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -198,7 +199,7 @@ def test_config_allows_non_oauth_mcp_tools_on_private_per_user_agents(tmp_path: 
 def test_config_allows_non_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> None:
     """Non-OAuth MCP tools are valid on isolating worker scopes and stay shared-session at runtime."""
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -224,7 +225,7 @@ def test_config_allows_non_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path)
 def test_config_allows_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> None:
     """Allow requester-scoped OAuth MCP tools on isolated agents."""
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -255,7 +256,7 @@ def test_config_allows_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> 
 
 def test_config_tracks_initial_deferred_mcp_dependencies_for_agents_and_teams(tmp_path: Path) -> None:
     """Treat initial deferred MCP tools as dependencies for restart planning."""
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -290,7 +291,7 @@ def test_config_tracks_initial_deferred_mcp_dependencies_for_agents_and_teams(tm
 
 def test_config_does_not_treat_deferred_only_mcp_tools_as_hard_dependencies(tmp_path: Path) -> None:
     """Deferred-only tools should stay optional for restart and startup dependency tracking."""
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -324,7 +325,7 @@ def test_config_rejects_invalid_mcp_assignment_overrides(tmp_path: Path) -> None
     runtime_paths = _runtime_paths(tmp_path)
 
     with pytest.raises(ConfigRuntimeValidationError, match="include_tools and exclude_tools overlap"):
-        Config.validate_with_runtime(
+        runtime_config_from_data(
             {
                 "mcp_servers": {
                     "demo": {
@@ -351,7 +352,7 @@ def test_config_rejects_invalid_mcp_assignment_overrides(tmp_path: Path) -> None
         )
 
     with pytest.raises(ConfigRuntimeValidationError, match="greater than 0"):
-        Config.validate_with_runtime(
+        runtime_config_from_data(
             {
                 "mcp_servers": {
                     "demo": {

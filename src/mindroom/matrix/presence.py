@@ -10,7 +10,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
 
 logger = get_logger(__name__)
 
@@ -49,7 +49,7 @@ async def set_presence_status(
 
 def build_agent_status_message(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
 ) -> str:
     """Build status message with model and role information for an agent.
 

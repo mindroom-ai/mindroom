@@ -11,11 +11,11 @@ from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 
-def create_configured_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
+def create_configured_embedder(config: RuntimeConfig, runtime_paths: RuntimePaths) -> Embedder:
     """Create the configured embedding provider used for semantic indexes."""
     provider = config.memory.embedder.provider
     embedder_config = config.memory.embedder.config

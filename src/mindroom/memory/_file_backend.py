@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -72,7 +72,7 @@ def _tag_keyword_mode(result: MemoryResult) -> None:
 def _file_memory_root(
     storage_path: Path,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
     *,
     use_configured_path: bool,
 ) -> Path:
@@ -112,7 +112,7 @@ def _resolve_scope_markdown_path(scope_path: Path, relative_path: str) -> Path |
 def _scope_dir(
     scope_user_id: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
     *,
     create: bool,
 ) -> Path:
@@ -160,7 +160,7 @@ def _normalize_memory_text_for_dedup(text: str) -> str:
 def _load_scope_id_entries(
     scope_user_id: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
 ) -> tuple[list[MemoryResult], dict[str, Path]]:
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
     if not scope_path.exists():
@@ -199,7 +199,7 @@ def _load_scope_id_entries(
 def _load_scope_unstructured_entries(
     scope_user_id: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
     existing_memory_text: set[str],
 ) -> list[MemoryResult]:
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
@@ -236,7 +236,7 @@ def _load_scope_unstructured_entries(
 def _load_scope_entries_for_search(
     scope_user_id: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
 ) -> tuple[list[MemoryResult], dict[str, Path]]:
     return _load_scope_id_entries(scope_user_id, resolution, config)
 
@@ -264,7 +264,7 @@ def _schedule_agent_semantic_refresh(
     agent_name: str,
     scope_user_id: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
@@ -284,7 +284,7 @@ def _schedule_agent_semantic_refresh(
 def _schedule_scope_semantic_refresh(
     scope_user_id: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
@@ -304,7 +304,7 @@ def _append_scope_memory_entry(
     scope_user_id: str,
     content: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
     *,
     memory_id: str | None = None,
     target_relative_path: str | None = None,
@@ -344,7 +344,7 @@ def _search_scope_memory_entries(
     scope_user_id: str,
     query: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
     *,
     limit: int,
 ) -> list[MemoryResult]:
@@ -434,7 +434,7 @@ def _load_scope_path_memory_line(
     scope_user_id: str,
     memory_id: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
 ) -> _PathMemoryLine | None:
     match = FILE_MEMORY_PATH_ID_PATTERN.match(memory_id)
     if match is None:
@@ -474,7 +474,7 @@ def _get_scope_memory_by_path_id(
     scope_user_id: str,
     memory_id: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
 ) -> MemoryResult | None:
     path_memory_line = _load_scope_path_memory_line(scope_user_id, memory_id, resolution, config)
     if path_memory_line is None:
@@ -491,7 +491,7 @@ def _get_scope_memory_by_id(
     scope_user_id: str,
     memory_id: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
 ) -> MemoryResult | None:
     if path_result := _get_scope_memory_by_path_id(scope_user_id, memory_id, resolution, config):
         return path_result
@@ -507,7 +507,7 @@ def _replace_scope_memory_entry(
     memory_id: str,
     content: str | None,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
 ) -> bool:
     if FILE_MEMORY_PATH_ID_PATTERN.match(memory_id):
         return _replace_scope_path_memory_entry(scope_user_id, memory_id, content, resolution, config)
@@ -546,7 +546,7 @@ def _replace_scope_path_memory_entry(
     memory_id: str,
     content: str | None,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
 ) -> bool:
     path_memory_line = _load_scope_path_memory_line(scope_user_id, memory_id, resolution, config)
     if path_memory_line is None:
@@ -569,7 +569,7 @@ def _replace_scope_path_memory_entry(
 def _load_scope_entrypoint_context(
     scope_user_id: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
 ) -> str:
     """Load the scoped `MEMORY.md` entrypoint text."""
     entrypoint_path = _scope_entrypoint_path(_scope_dir(scope_user_id, resolution, config, create=False))
@@ -587,7 +587,7 @@ def _find_file_replica_memory_ids(
     scope_user_id: str,
     anchor_result: MemoryResult,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
 ) -> list[str]:
     anchor_memory = anchor_result.get("memory")
     anchor_metadata = anchor_result.get("metadata")
@@ -613,7 +613,7 @@ def _find_file_anchor_memory_result(
     memory_id: str,
     caller_context: str | list[str],
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -643,7 +643,7 @@ def _file_mutation_target_ids(
     memory_id: str,
     anchor_result: MemoryResult,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
 ) -> list[str]:
     if _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config) is not None:
         return [memory_id]
@@ -660,7 +660,7 @@ def _mutate_file_memory_targets(
     memory_id: str,
     content: str | None,
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     anchor_result: MemoryResult,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -696,7 +696,7 @@ def append_agent_daily_file_memory(
     content: str,
     agent_name: str,
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     *,
@@ -738,7 +738,7 @@ def _search_agent_file_scope_memories(
     query: str,
     agent_name: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
     limit: int,
 ) -> list[MemoryResult]:
     return _search_scope_memory_entries(
@@ -755,7 +755,7 @@ def _search_team_file_scope_memories(
     team_id: str,
     query: str,
     resolution: FileMemoryResolution,
-    config: Config,
+    config: RuntimeConfig,
     limit: int,
 ) -> list[MemoryResult]:
     return _search_scope_memory_entries(
@@ -773,7 +773,7 @@ def _merge_team_scope_results(
     query: str,
     agent_name: str,
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     limit: int,
     execution_identity: ToolExecutionIdentity | None,
@@ -824,7 +824,7 @@ class FileMemoryBackend:
         content: str,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         metadata: dict | None = None,
         execution_identity: ToolExecutionIdentity | None = None,
@@ -857,7 +857,7 @@ class FileMemoryBackend:
         query: str,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
@@ -934,7 +934,7 @@ class FileMemoryBackend:
         self,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         limit: int,
         preserve_resolved_storage_path: bool = False,
@@ -976,7 +976,7 @@ class FileMemoryBackend:
         memory_id: str,
         caller_context: str | list[str],
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryResult | None:
@@ -997,7 +997,7 @@ class FileMemoryBackend:
         content: str,
         caller_context: str | list[str],
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
@@ -1048,7 +1048,7 @@ class FileMemoryBackend:
         memory_id: str,
         caller_context: str | list[str],
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
@@ -1100,7 +1100,7 @@ class FileMemoryBackend:
         agent_name: str | list[str],
         storage_path: Path,
         session_id: str,
-        config: Config,
+        config: RuntimeConfig,
         *,
         thread_history: Sequence[ResolvedVisibleMessage] | None = None,
         user_id: str | None = None,
@@ -1174,7 +1174,7 @@ class FileMemoryBackend:
         self,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> str:

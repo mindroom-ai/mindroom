@@ -529,7 +529,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_get_latest_thread.return_value = "latest_thread_event"
 
         config = self._config_for_storage(tmp_path)
-        mention_id = f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}"
+        mention_id = f"@mindroom_calculator:{config.get_domain()}"
         agent_user = AgentMatrixUser(
             agent_name="calculator",
             password=TEST_PASSWORD,
@@ -784,7 +784,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        config.cache = MagicMock()
+        config = config.model_copy(update={"cache": MagicMock()})
         config.cache.resolve_db_path.side_effect = AssertionError("cache path resolution should be lazy")
 
         AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))

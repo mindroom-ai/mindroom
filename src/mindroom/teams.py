@@ -119,7 +119,7 @@ if TYPE_CHECKING:
     from agno.metrics import RunMetrics
     from agno.models.response import ToolExecution
 
-    from mindroom.config.main import Config, ResolvedRuntimeModel
+    from mindroom.config.main import ResolvedRuntimeModel, RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState
@@ -598,7 +598,7 @@ class _SelectedTeamRequest:
 async def _select_team_mode(
     message: str,
     agent_names: list[str],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> TeamMode:
     """Use AI to determine optimal team collaboration mode.
@@ -650,7 +650,7 @@ def decide_team_formation(
     all_mentioned_in_thread: list[MatrixID],
     room: nio.MatrixRoom | None,
     runtime_paths: RuntimePaths,
-    config: Config | None = None,
+    config: RuntimeConfig | None = None,
     is_dm_room: bool = False,
     is_thread: bool = False,
     available_responders_in_room: list[MatrixID] | None = None,
@@ -731,7 +731,7 @@ def decide_team_formation(
 async def select_ad_hoc_team_mode(
     message: str,
     team_agents: list[MatrixID],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> TeamMode:
     """Select the collaboration mode for one ad-hoc team at execution time.
@@ -745,7 +745,7 @@ async def select_ad_hoc_team_mode(
 
 def _team_member_name(
     agent_id: MatrixID,
-    config: Config | None,
+    config: RuntimeConfig | None,
     runtime_paths: RuntimePaths,
 ) -> str:
     """Return the canonical agent name used throughout team resolution."""
@@ -762,7 +762,7 @@ def _team_member_name(
 
 def _filter_team_request_members(
     agent_ids: list[MatrixID],
-    config: Config | None,
+    config: RuntimeConfig | None,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Keep only actual teamable agents while preserving the requested order."""
@@ -781,7 +781,7 @@ def _filter_team_request_members(
 
 def _normalize_team_request_members(
     agent_ids: list[MatrixID],
-    config: Config | None,
+    config: RuntimeConfig | None,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Deduplicate ad hoc candidates after filtering out non-teamable agents."""
@@ -800,7 +800,7 @@ def _select_team_request(
     all_mentioned_in_thread: list[MatrixID],
     agents_in_thread: list[MatrixID],
     room: nio.MatrixRoom | None,
-    config: Config | None,
+    config: RuntimeConfig | None,
     runtime_paths: RuntimePaths,
     *,
     is_dm_room: bool,
@@ -899,7 +899,7 @@ def _not_materializable_team_agents_message(agent_names: list[str], *, prefix: s
 
 def _evaluate_team_members(
     requested_members: list[MatrixID],
-    config: Config | None,
+    config: RuntimeConfig | None,
     runtime_paths: RuntimePaths,
     *,
     room: nio.MatrixRoom | None,
@@ -965,7 +965,7 @@ def _resolve_team_request(
     intent: TeamIntent,
     requested_members: list[MatrixID],
     member_statuses: list[TeamResolutionMember],
-    config: Config | None,
+    config: RuntimeConfig | None,
     reason_prefix: str,
     mode: TeamMode | None = None,
 ) -> TeamResolution:
@@ -1017,7 +1017,7 @@ def _resolve_team_request(
 
 def _team_resolution_reason(
     rejected_members: list[TeamResolutionMember],
-    config: Config | None,
+    config: RuntimeConfig | None,
     *,
     reason_prefix: str,
 ) -> str:
@@ -1065,7 +1065,7 @@ def _team_resolution_reason(
 
 def _mixed_team_resolution_reason(
     rejected_members: list[TeamResolutionMember],
-    config: Config | None,
+    config: RuntimeConfig | None,
     *,
     reason_prefix: str,
 ) -> str:
@@ -1076,7 +1076,7 @@ def _mixed_team_resolution_reason(
 
 def _unsupported_team_member_detail(
     member: TeamResolutionMember,
-    config: Config | None,
+    config: RuntimeConfig | None,
 ) -> str:
     """Return the unsupported-team explanation for one member."""
     if config is None:
@@ -1103,7 +1103,7 @@ def _unsupported_team_member_detail(
 
 def _team_resolution_member_detail(
     member: TeamResolutionMember,
-    config: Config | None,
+    config: RuntimeConfig | None,
 ) -> str:
     """Return a member-specific reason fragment for mixed team-request rejects."""
     if member.status is TeamMemberStatus.UNSUPPORTED_FOR_TEAM:
@@ -1121,7 +1121,7 @@ def resolve_configured_team(
     team_name: str,
     team_members: list[MatrixID],
     mode: TeamMode,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     materializable_agent_names: set[str] | None = None,
@@ -1276,7 +1276,7 @@ def _aggregate_team_usage_metrics(
 
 def _build_team_run_metadata_content(
     *,
-    config: Config,
+    config: RuntimeConfig,
     prepared_execution: _PreparedMaterializedTeamExecution,
     response: TeamRunOutput | RunOutput,
     session_id: str | None,
@@ -1346,7 +1346,7 @@ class _TeamStreamUsage:
 
 def _build_streamed_team_run_metadata_content(
     *,
-    config: Config,
+    config: RuntimeConfig,
     prepared_execution: _PreparedMaterializedTeamExecution,
     completed_run_event: TeamRunCompletedEvent | None,
     usage: _TeamStreamUsage,
@@ -1528,7 +1528,7 @@ def _build_team_runtime_db_callbacks(
 def materialize_exact_team_members(
     requested_agent_names: list[str],
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     session_id: str | None = None,
@@ -1651,7 +1651,7 @@ def _allow_direct_private_team_agents(
 def _resolve_team_instance_id(
     *,
     agents: list[Agent],
-    config: Config,
+    config: RuntimeConfig,
     team_display_name: str,
     configured_team_name: str | None,
     scope_context: ScopeSessionContext | None,
@@ -1675,7 +1675,7 @@ def _create_team_instance(
     *,
     agents: list[Agent],
     mode: TeamMode,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     team_display_name: str,
     scope_context: ScopeSessionContext | None,
@@ -1759,8 +1759,7 @@ def _create_team_instance(
 def select_model_for_team(
     team_name: str,
     room_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
+    config: RuntimeConfig,
     *,
     thread_id: str | None = None,
 ) -> str:
@@ -1776,7 +1775,6 @@ def select_model_for_team(
         team_name: Name of the team
         room_id: Matrix room ID
         config: Application configuration
-        runtime_paths: Explicit runtime context for room alias resolution
         thread_id: Optional resolved Matrix thread root for thread model overrides
 
     Returns:
@@ -1787,7 +1785,6 @@ def select_model_for_team(
         entity_name=team_name,
         room_id=room_id,
         thread_id=thread_id,
-        runtime_paths=runtime_paths,
     ).model_name
     logger.info("selected_team_model", team_name=team_name, model_name=model_name)
     return model_name
@@ -1798,7 +1795,7 @@ def build_materialized_team_instance(
     requested_agent_names: list[str],
     agents: list[Agent],
     mode: TeamMode,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     scope_context: ScopeSessionContext | None,
     model_name: str,
@@ -1828,7 +1825,7 @@ async def prepare_materialized_team_execution(
     team: Team,
     message: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     runtime_model: ResolvedRuntimeModel,
     response_sender_id: str | None,
@@ -1984,7 +1981,6 @@ async def team_response(  # noqa: C901, PLR0915
             active_model_name=model_name,
             room_id=ctx.room_id,
             thread_id=ctx.thread_id,
-            runtime_paths=orchestrator.runtime_paths,
         )
         team = build_materialized_team_instance(
             requested_agent_names=attempt_members.requested_agent_names,
@@ -2460,7 +2456,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
             active_model_name=model_name,
             room_id=ctx.room_id,
             thread_id=ctx.thread_id,
-            runtime_paths=orchestrator.runtime_paths,
         )
         team = build_materialized_team_instance(
             requested_agent_names=attempt_members.requested_agent_names,

@@ -31,6 +31,7 @@ from mindroom.matrix.users import (
 )
 from mindroom.matrix_identifiers import agent_username_localpart
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths
 
 if TYPE_CHECKING:
@@ -1249,7 +1250,7 @@ class TestAgentUserCreation:
         )
         constants_mod.matrix_state_file(runtime_paths=runtime_paths).unlink(missing_ok=True)
         mindroom_username = agent_username_localpart(colliding_entity_name, runtime_paths=runtime_paths)
-        config = Config.validate_with_runtime(
+        config = runtime_config_from_data(
             {
                 "agents": agents,
                 "teams": teams,

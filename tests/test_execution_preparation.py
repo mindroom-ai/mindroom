@@ -15,7 +15,7 @@ from agno.tools.function import Function
 
 from mindroom import execution_preparation
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import (
@@ -81,14 +81,14 @@ def _tool_trace_content() -> dict[str, object]:
     return content
 
 
-def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
+def _prepared_scope_with_persisted_replay(config: RuntimeConfig) -> PreparedScopeHistory:
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="runs", limit=1),
         max_tool_calls_from_history=None,
     )
     compaction_config = CompactionConfig(enabled=False, reserve_tokens=100)
     execution_plan = resolve_history_execution_plan(
-        config=_config(),
+        config=config,
         compaction_config=compaction_config,
         has_authored_compaction_config=False,
         active_model_name="test-model",
@@ -138,12 +138,14 @@ def test_fallback_static_token_budget_preserves_context_window_bounds() -> None:
 
 @pytest.mark.asyncio
 async def test_prepare_execution_context_skips_fallback_replay_when_persisted_history_replays(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Persisted replay should avoid building unused Matrix fallback context."""
+    config = bind_runtime_paths(_config(), _runtime_paths(tmp_path))
 
     async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
-        return _prepared_scope_with_persisted_replay()
+        return _prepared_scope_with_persisted_replay(config)
 
     def fail_if_fallback_context_is_built(*_args: object, **_kwargs: object) -> tuple[Message, ...]:
         message = "unused Matrix fallback context was built"
@@ -161,7 +163,7 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
         ],
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
-        config=_config(),
+        config=config,
         prepare_scope_history_fn=prepare_scope_history,
         estimate_static_tokens_fn=lambda text: len(text.split()),
         render_messages_text_fn=render_prepared_messages_text,

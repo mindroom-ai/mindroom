@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     import structlog
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.users import AgentMatrixUser
 
@@ -98,7 +98,7 @@ class BotRoomLifecycle:
             raise RuntimeError(msg)
         return client
 
-    def _config(self) -> Config:
+    def _config(self) -> RuntimeConfig:
         return self.deps.runtime.config
 
     def _logger(self) -> structlog.stdlib.BoundLogger:

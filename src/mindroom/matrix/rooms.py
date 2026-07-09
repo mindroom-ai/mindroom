@@ -39,7 +39,7 @@ from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -86,7 +86,7 @@ async def _configure_managed_room_access(
     client: nio.AsyncClient,
     room_key: str,
     room_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     room_alias: str | None = None,
@@ -156,7 +156,7 @@ async def _configure_managed_room_access(
     return False
 
 
-def _managed_room_should_be_encrypted(room_key: str, config: Config) -> bool:
+def _managed_room_should_be_encrypted(room_key: str, config: RuntimeConfig) -> bool:
     """Return whether one managed room is configured for Matrix encryption."""
     room_config = config.rooms.get(room_key)
     if room_config is not None and room_config.encrypted is not None:
@@ -164,7 +164,7 @@ def _managed_room_should_be_encrypted(room_key: str, config: Config) -> bool:
     return config.matrix_room_access.encrypt_managed_rooms
 
 
-def _room_admin_user_ids(config: Config) -> list[str]:
+def _room_admin_user_ids(config: RuntimeConfig) -> list[str]:
     """Return configured managed-room admins, skipping wildcard or placeholder entries."""
     concrete_ids, skipped = split_concrete_matrix_user_ids(config.matrix_room_access.room_admins)
     if skipped:
@@ -212,7 +212,7 @@ async def _reconcile_joined_existing_room(
     client: nio.AsyncClient,
     room_key: str,
     room_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     explicit_room_name: str | None,
@@ -250,7 +250,7 @@ async def _reconcile_joined_existing_room(
 async def _ensure_room_exists(
     client: nio.AsyncClient,
     room_key: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     room_name: str | None = None,
     power_users: list[str] | None = None,
@@ -389,7 +389,7 @@ async def _ensure_room_exists(
 
 async def ensure_all_rooms_exist(
     client: nio.AsyncClient,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> dict[str, str]:
     """Ensure all configured rooms exist and invite user account.
@@ -450,7 +450,7 @@ async def ensure_all_rooms_exist(
 
 async def _ensure_root_space_exists(
     client: nio.AsyncClient,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Ensure the configured root Matrix Space exists and return its room ID."""
@@ -497,7 +497,7 @@ async def _ensure_root_space_exists(
 
 async def ensure_root_space(
     client: nio.AsyncClient,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     room_ids: dict[str, str],
     *,

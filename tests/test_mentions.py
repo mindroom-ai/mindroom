@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
+from tests.config_test_utils import runtime_config_from_data
+
 if TYPE_CHECKING:
     import pytest
 
@@ -43,7 +45,7 @@ def _bind_config(
         teams=teams or {},
         models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
-    bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
+    bound = runtime_config_from_data(config.authored_model_dump(), runtime_paths)
     _persist_mentions_accounts(bound, runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound
@@ -280,7 +282,7 @@ class TestMentionParsing:
             agents={"calculator": AgentConfig(display_name="Calculator")},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
-        config = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
+        config = runtime_config_from_data(config.authored_model_dump(), runtime_paths)
 
         content = format_message_with_mentions(config, runtime_paths, "No mentions here.")
 

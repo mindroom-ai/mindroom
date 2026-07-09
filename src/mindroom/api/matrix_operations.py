@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/matrix", tags=["matrix"])
 
 if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, TeamConfig
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
 
 
 class RoomLeaveRequest(BaseModel):
@@ -77,7 +77,7 @@ def _get_configured_matrix_entity(
     return entities[entity_id]
 
 
-def _get_runtime_matrix_entities(config: Config) -> dict[str, AgentConfig | TeamConfig]:
+def _get_runtime_matrix_entities(config: RuntimeConfig) -> dict[str, AgentConfig | TeamConfig]:
     """Return runtime-validated agents and teams keyed by their Matrix entity ID."""
     return {
         **config.agents,
@@ -85,7 +85,7 @@ def _get_runtime_matrix_entities(config: Config) -> dict[str, AgentConfig | Team
     }
 
 
-def _get_runtime_matrix_entity(config: Config, entity_id: str) -> AgentConfig | TeamConfig:
+def _get_runtime_matrix_entity(config: RuntimeConfig, entity_id: str) -> AgentConfig | TeamConfig:
     """Return one runtime-validated Matrix entity or raise a 404."""
     entities = _get_runtime_matrix_entities(config)
     if entity_id not in entities:

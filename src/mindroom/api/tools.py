@@ -16,7 +16,7 @@ from mindroom.api.dashboard_credential_scope import (
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
-from mindroom.config.main import Config
+from mindroom.config.main import RuntimeConfig
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import (
     get_runtime_credentials_manager,
@@ -121,7 +121,7 @@ def _check_auth_provider_configured(
 def _append_config_only_presets(tools: list[dict[str, Any]]) -> None:
     """Append config-only tool presets so the dashboard can display them."""
     existing_tool_names = {tool.get("name") for tool in tools}
-    for preset_name, expansion in Config.TOOL_PRESETS.items():
+    for preset_name, expansion in RuntimeConfig.TOOL_PRESETS.items():
         if preset_name in existing_tool_names:
             continue
         tools.append(
@@ -198,7 +198,7 @@ def _resolve_tool_availability_context(
     request: Request,
     *,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     agent_name: str | None,
     execution_scope_override_provided: bool,
     execution_scope_override: WorkerScope | None,
@@ -257,7 +257,7 @@ def _resolve_tool_availability_context(
     )
 
 
-def _read_tools_runtime_config(request: Request) -> tuple[Config, RuntimePaths]:
+def _read_tools_runtime_config(request: Request) -> tuple[RuntimeConfig, RuntimePaths]:
     """Read one coherent config/runtime snapshot for the tools dashboard route."""
     return config_lifecycle.read_committed_runtime_config(request)
 

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
@@ -17,7 +17,7 @@ from mindroom.memory.config import _get_memory_config, _memory_collection_name, 
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
-from tests.conftest import orchestrator_runtime_paths
+from tests.conftest import orchestrator_runtime_paths, test_runtime_paths
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -478,7 +478,7 @@ class TestMemoryConfig:
         assert explicit.backend == "none"
         assert shorthand.backend == "none"
 
-    def test_config_accepts_global_disabled_memory_shorthand(self) -> None:
+    def test_config_accepts_global_disabled_memory_shorthand(self, tmp_path: Path) -> None:
         """The root config should normalize memory: none to a disabled memory config."""
         config = Config(
             agents={"scratch": {"display_name": "Scratch"}},
@@ -486,11 +486,12 @@ class TestMemoryConfig:
             router=RouterConfig(model="default"),
         )
 
-        assert config.memory.backend == "none"
-        assert config.resolve_entity("scratch").memory_backend == "none"
-        assert config.uses_file_memory() is False
+        runtime_config = RuntimeConfig.from_authored(config, test_runtime_paths(tmp_path))
+        assert runtime_config.memory.backend == "none"
+        assert runtime_config.resolve_entity("scratch").memory_backend == "none"
+        assert runtime_config.uses_file_memory() is False
 
-    def test_config_accepts_per_agent_disabled_memory_backend(self) -> None:
+    def test_config_accepts_per_agent_disabled_memory_backend(self, tmp_path: Path) -> None:
         """Per-agent memory_backend should support disabling memory for one agent."""
         config = Config(
             agents={
@@ -501,23 +502,25 @@ class TestMemoryConfig:
             router=RouterConfig(model="default"),
         )
 
-        assert config.resolve_entity("general").memory_backend == "mem0"
-        assert config.resolve_entity("scratch").memory_backend == "none"
-        assert config.uses_file_memory() is False
+        runtime_config = RuntimeConfig.from_authored(config, test_runtime_paths(tmp_path))
+        assert runtime_config.resolve_entity("general").memory_backend == "mem0"
+        assert runtime_config.resolve_entity("scratch").memory_backend == "none"
+        assert runtime_config.uses_file_memory() is False
 
 
-def test_memory_search_defaults_to_keyword_daily_files() -> None:
+def test_memory_search_defaults_to_keyword_daily_files(tmp_path: Path) -> None:
     """File-memory search should default to keyword mode over daily memory files."""
     config = Config(router=RouterConfig(model="default"))
 
-    search = config.resolve_entity("missing_agent").memory_search
+    runtime_config = RuntimeConfig.from_authored(config, test_runtime_paths(tmp_path))
+    search = runtime_config.resolve_entity(None).memory_search
 
     assert search.mode == "keyword"
     assert search.include == ["memory/**/*.md"]
     assert search.include_entrypoint is False
 
 
-def test_agent_memory_search_override_merges_per_field() -> None:
+def test_agent_memory_search_override_merges_per_field(tmp_path: Path) -> None:
     """Per-agent memory search overrides should inherit omitted global fields."""
     config = Config(
         memory={
@@ -537,14 +540,15 @@ def test_agent_memory_search_override_merges_per_field() -> None:
         router=RouterConfig(model="default"),
     )
 
-    search = config.resolve_entity("openclaw").memory_search
+    runtime_config = RuntimeConfig.from_authored(config, test_runtime_paths(tmp_path))
+    search = runtime_config.resolve_entity("openclaw").memory_search
 
     assert search.mode == "semantic"
     assert search.include == ["memory/**/*.md"]
     assert search.include_entrypoint is True
 
 
-def test_agent_memory_search_can_override_include_patterns() -> None:
+def test_agent_memory_search_can_override_include_patterns(tmp_path: Path) -> None:
     """Per-agent memory search should support custom include patterns."""
     config = Config(
         memory={
@@ -567,7 +571,8 @@ def test_agent_memory_search_can_override_include_patterns() -> None:
         router=RouterConfig(model="default"),
     )
 
-    search = config.resolve_entity("openclaw").memory_search
+    runtime_config = RuntimeConfig.from_authored(config, test_runtime_paths(tmp_path))
+    search = runtime_config.resolve_entity("openclaw").memory_search
 
     assert search.include == ["memory/**/*.md", "decisions/**/*.md"]
     assert search.include_entrypoint is True

@@ -17,16 +17,16 @@ from mindroom.orchestration.runtime import (
 
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.matrix.stale_stream_cleanup import InterruptedThread
 
 logger = get_logger(__name__)
 
 type _StartupBot = AgentBot | TeamBot
 type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
-type _CleanupStaleStreams = Callable[[list[_StartupBot], Config, int], Awaitable[list[InterruptedThread]]]
-type _AutoResume = Callable[[list[InterruptedThread], Config], Awaitable[None]]
-type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
+type _CleanupStaleStreams = Callable[[list[_StartupBot], RuntimeConfig, int], Awaitable[list[InterruptedThread]]]
+type _AutoResume = Callable[[list[InterruptedThread], RuntimeConfig], Awaitable[None]]
+type _SyncRuntimeSupport = Callable[[RuntimeConfig], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
 type _RunningBots = Callable[[], list[_StartupBot]]
 
@@ -43,7 +43,7 @@ class StartupMaintenanceController:
     task: asyncio.Task[None] | None = field(default=None, init=False)
     startup_cutoff_ms: int | None = field(default=None, init=False)
 
-    def start(self, bots: list[_StartupBot], config: Config, *, startup_cutoff_ms: int) -> None:
+    def start(self, bots: list[_StartupBot], config: RuntimeConfig, *, startup_cutoff_ms: int) -> None:
         """Schedule detached startup maintenance for one startup generation."""
         self.startup_cutoff_ms = startup_cutoff_ms
         self.task = create_logged_task(
@@ -63,7 +63,7 @@ class StartupMaintenanceController:
     def restart_after_config_reload(
         self,
         *,
-        config: Config,
+        config: RuntimeConfig,
         running_bots: _RunningBots,
     ) -> None:
         """Replay canceled startup maintenance after config reload completes."""
@@ -74,7 +74,7 @@ class StartupMaintenanceController:
             return
         self.start(bots, config, startup_cutoff_ms=self.startup_cutoff_ms)
 
-    async def _run(self, bots: list[_StartupBot], config: Config, startup_cutoff_ms: int) -> None:
+    async def _run(self, bots: list[_StartupBot], config: RuntimeConfig, startup_cutoff_ms: int) -> None:
         await self._run_phase(
             "startup_maintenance.rooms_and_memberships",
             lambda: self.setup_rooms_and_memberships(bots),

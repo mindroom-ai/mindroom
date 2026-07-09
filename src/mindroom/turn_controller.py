@@ -1442,7 +1442,6 @@ class TurnController:
         target_thread_mode = (
             self.deps.runtime.config.get_entity_thread_mode(
                 suggested_entity,
-                self.deps.runtime_paths,
                 room_id=room.room_id,
             )
             if suggested_entity

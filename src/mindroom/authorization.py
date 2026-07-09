@@ -23,7 +23,7 @@ from mindroom.matrix_identifiers import room_alias_identifier_candidates
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
 
@@ -61,7 +61,7 @@ def _lookup_managed_room_identifiers(
 
 def is_authorized_sender(
     sender_id: str,
-    config: Config,
+    config: RuntimeConfig,
     room_id: str,
     runtime_paths: RuntimePaths,
 ) -> bool:
@@ -118,7 +118,7 @@ def is_authorized_sender(
 def is_sender_allowed_for_agent_reply(
     sender_id: str,
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Check whether *agent_name* is allowed to reply to *sender_id*.
@@ -134,7 +134,7 @@ def is_sender_allowed_for_agent_reply(
     return sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
 
 
-def _current_internal_sender_ids_for_auth(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+def _current_internal_sender_ids_for_auth(config: RuntimeConfig, runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return internal sender IDs when prepared, or an empty set before provisioning."""
     try:
         return current_internal_sender_ids(config, runtime_paths)
@@ -143,7 +143,7 @@ def _current_internal_sender_ids_for_auth(config: Config, runtime_paths: Runtime
         return frozenset()
 
 
-def _is_sender_allowed_by_agent_reply_allowlist(sender_id: str, agent_name: str, config: Config) -> bool:
+def _is_sender_allowed_by_agent_reply_allowlist(sender_id: str, agent_name: str, config: RuntimeConfig) -> bool:
     """Check only the configured per-agent reply allowlist for one sender."""
     agent_reply_permissions = config.authorization.agent_reply_permissions
     allowed_users = agent_reply_permissions.get(agent_name)
@@ -161,7 +161,7 @@ def _is_sender_allowed_by_agent_reply_allowlist(sender_id: str, agent_name: str,
 def is_sender_allowed_for_agent_credential_management(
     sender_id: str,
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
 ) -> bool:
     """Check whether a dashboard requester may manage credentials for one agent."""
     return _is_sender_allowed_by_agent_reply_allowlist(sender_id, agent_name, config)
@@ -170,7 +170,7 @@ def is_sender_allowed_for_agent_credential_management(
 def get_effective_sender_id_for_reply_permissions(
     sender_id: str,
     event_source: Mapping[str, Any] | None,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> str:
     """Return the sender ID used for per-agent reply permission checks.
@@ -201,7 +201,7 @@ def get_effective_sender_id_for_reply_permissions(
 def filter_responders_by_sender_permissions(
     responders: Sequence[MatrixID],
     sender_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return only responders that may reply to *sender_id* per config rules."""
@@ -216,7 +216,7 @@ def filter_responders_by_sender_permissions(
 
 def _available_responders_from_member_ids(
     member_ids: Iterable[str],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return non-router responder IDs present in one membership snapshot."""
@@ -231,7 +231,7 @@ def _available_responders_from_member_ids(
 
 def get_available_responders_in_room(
     room: nio.MatrixRoom,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Get available responder Matrix IDs in a room.
@@ -250,7 +250,7 @@ def _joined_member_ids(room: nio.MatrixRoom) -> Iterable[str]:
 def _get_available_responders_for_sender(
     room: nio.MatrixRoom,
     sender_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return room responders that may reply to *sender_id*."""
@@ -294,7 +294,7 @@ async def _get_available_responders_for_sender_authoritative(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
     sender_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return sender-visible room responders, refreshing membership while the cache is unsynced."""
@@ -343,7 +343,7 @@ async def _get_available_responders_for_sender_authoritative(
 def responder_candidate_entities_from_cached_room(
     room: nio.MatrixRoom,
     sender_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return sender-visible responder candidates without refreshing Matrix membership."""
@@ -356,7 +356,7 @@ def responder_candidate_entities_from_cached_room(
 def _configured_responder_candidates_for_room(
     room: nio.MatrixRoom,
     sender_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID] | None:
     """Return configured-room responder candidates, or None for ad-hoc rooms."""
@@ -377,7 +377,7 @@ async def responder_candidate_entities_for_room(
     client: nio.AsyncClient | None,
     room: nio.MatrixRoom,
     sender_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return sender-visible responder candidates without widening configured rooms."""

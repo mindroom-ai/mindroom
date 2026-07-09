@@ -15,7 +15,7 @@ from mindroom.matrix.message_content import extract_and_resolve_message, extract
 from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache
 
@@ -133,7 +133,7 @@ class ResolvedVisibleMessage:
 
 
 def trusted_visible_sender_ids(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> frozenset[str]:
     """Return the trusted internal senders for high-level Matrix read helpers."""
@@ -141,7 +141,7 @@ def trusted_visible_sender_ids(
 
 
 def _resolved_trusted_sender_ids(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     trusted_sender_ids: Collection[str] | None,
 ) -> Collection[str]:
@@ -155,7 +155,7 @@ async def extract_visible_message(
     event: nio.RoomMessageText | nio.RoomMessageNotice,
     client: nio.AsyncClient | None = None,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
@@ -175,7 +175,7 @@ async def extract_visible_edit_body(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None = None,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
@@ -196,7 +196,7 @@ async def resolve_visible_event_source(
     client: nio.AsyncClient | None = None,
     *,
     fallback_body: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
@@ -256,7 +256,7 @@ async def bundled_replacement_body(
     event_source: Mapping[str, Any],
     *,
     client: nio.AsyncClient,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
@@ -297,7 +297,7 @@ async def thread_root_body_preview(
     event: nio.Event,
     *,
     client: nio.AsyncClient,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,

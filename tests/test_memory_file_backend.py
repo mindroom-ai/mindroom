@@ -1109,7 +1109,7 @@ async def test_file_backend_team_conversation_memory_reuses_member_agent_roots(
     config.agents["calculator"].memory_backend = "file"
     config.agents["general"].worker_scope = "user"
     config.agents["calculator"].worker_scope = "user"
-    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    config.teams["shared_team"] = MockTeamConfig(agents=["general", "calculator"])
 
     alice_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -1176,7 +1176,7 @@ async def test_file_backend_mixed_private_team_conversation_memory_is_rejected(
     config.agents["general"].memory_backend = "file"
     config.agents["calculator"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
-    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
+    config.teams["mixed_team"] = MockTeamConfig(agents=["general", "calculator"])
 
     with pytest.raises(
         ValueError,
@@ -1200,7 +1200,7 @@ async def test_file_backend_team_search_reuses_shared_team_scope(
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
     config.agents["calculator"].memory_backend = "file"
-    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    config.teams["shared_team"] = MockTeamConfig(agents=["general", "calculator"])
 
     await store_conversation_memory(
         "Team note remains shared",
@@ -1241,7 +1241,7 @@ async def test_file_backend_mixed_private_team_member_crud_is_rejected(
     config.agents["calculator"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
     config.memory.team_reads_member_memory = True
-    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
+    config.teams["mixed_team"] = MockTeamConfig(agents=["general", "calculator"])
 
     await add_agent_memory("Calculator workspace note", "calculator", storage_path, config)
     memory_id = (await list_all_agent_memories("calculator", storage_path, config))[0]["id"]
@@ -1389,6 +1389,7 @@ async def test_file_backend_memory_crud_and_scope(storage_path: Path, config: Co
 
     await add_agent_memory("Private memory", "general", storage_path, config)
     private_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
+    config.agents["other_agent"] = AgentConfig(display_name="Other Agent")
     assert await get_agent_memory(private_id, "other_agent", storage_path, config) is None
     with pytest.raises(ValueError, match=f"No memory found with id={private_id}"):
         await update_agent_memory(private_id, "Tampered", "other_agent", storage_path, config)
@@ -1559,7 +1560,7 @@ async def test_team_can_crud_member_memory_in_canonical_workspace(
     config.agents["general"].memory_backend = "file"
     config.agents["calculator"].memory_backend = "file"
     config.memory.team_reads_member_memory = True
-    config.teams = {"gc": MockTeamConfig(agents=["general", "calculator"])}
+    config.teams["gc"] = MockTeamConfig(agents=["general", "calculator"])
 
     await add_agent_memory("General private note", "general", storage_path, config)
     memory_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
@@ -1597,7 +1598,7 @@ async def test_team_can_crud_member_memory_in_worker_scoped_canonical_workspace(
     config.agents["general"].worker_scope = "user_agent"
     config.agents["calculator"].worker_scope = "user_agent"
     config.memory.team_reads_member_memory = True
-    config.teams = {"gc": MockTeamConfig(agents=["general", "calculator"])}
+    config.teams["gc"] = MockTeamConfig(agents=["general", "calculator"])
     canonical_workspace = agent_workspace_root_path(storage_path, "general")
     canonical_workspace.mkdir(parents=True, exist_ok=True)
     (canonical_workspace / "MEMORY.md").write_text("# Memory\n\nCanonical note.\n", encoding="utf-8")
@@ -1649,7 +1650,7 @@ async def test_worker_scoped_team_file_memory_can_be_read_updated_and_deleted(
     config.memory.backend = "file"
     config.agents["general"].worker_scope = "user_agent"
     config.agents["calculator"].worker_scope = "user_agent"
-    config.teams = {"gc": MockTeamConfig(agents=["general", "calculator"])}
+    config.teams["gc"] = MockTeamConfig(agents=["general", "calculator"])
 
     execution_identity = ToolExecutionIdentity(
         channel="matrix",

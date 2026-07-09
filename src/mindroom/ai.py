@@ -97,7 +97,7 @@ if TYPE_CHECKING:
     from agno.models.response import ToolExecution
 
     from mindroom.ai_turn_state import AITurnState
-    from mindroom.config.main import Config, ResolvedRuntimeModel
+    from mindroom.config.main import ResolvedRuntimeModel, RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle
@@ -360,7 +360,7 @@ def _build_agent_turn_callbacks(
     prompt: str,
     session_id: str,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     execution_identity: ToolExecutionIdentity | None,
 ) -> _AgentTurnCallbacks:
     """Build the entity-specific turn-driver callbacks for one agent response."""
@@ -1039,7 +1039,7 @@ async def _run_non_streaming_agent_attempts(
         )
 
 
-def _assert_agent_target(agent_name: str, config: Config) -> None:
+def _assert_agent_target(agent_name: str, config: RuntimeConfig) -> None:
     """Reject configured team names in the agent-only AI helper path."""
     if agent_name in config.teams:
         msg = (
@@ -1070,7 +1070,7 @@ async def _prepare_agent_and_prompt(
     *,
     prompt: str,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     scope_context: ScopeSessionContext | None = None,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     knowledge: Knowledge | None = None,
@@ -1120,7 +1120,6 @@ async def _prepare_agent_and_prompt(
             entity_name=agent_name,
             room_id=ctx.room_id,
             thread_id=ctx.thread_id,
-            runtime_paths=runtime_paths,
         )
         agent = create_agent(
             agent_name,
@@ -1189,7 +1188,7 @@ async def _prepare_agent_run_context(
     prompt: str,
     session_id: str,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     scope_context: ScopeSessionContext | None,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     knowledge: Knowledge | None,
@@ -1269,7 +1268,7 @@ async def ai_response(
     ctx: ResponseTurnContext,
     prompt: str,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_prompt: str | None = None,
     current_timestamp_ms: float | None = None,
@@ -1730,7 +1729,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     ctx: ResponseTurnContext,
     prompt: str,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_prompt: str | None = None,
     current_timestamp_ms: float | None = None,

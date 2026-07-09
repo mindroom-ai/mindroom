@@ -523,7 +523,6 @@ class DeliveryGateway:
         if (
             config.get_entity_thread_mode(
                 self.deps.agent_name,
-                self.deps.runtime_paths,
                 room_id=target.room_id,
             )
             == "room"

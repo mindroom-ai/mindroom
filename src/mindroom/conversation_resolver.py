@@ -328,7 +328,6 @@ class ConversationResolver:
         config = self.deps.runtime.config
         effective_thread_mode = thread_mode_override or config.get_entity_thread_mode(
             self.deps.agent_name,
-            self.deps.runtime_paths,
             room_id=room_id,
         )
         thread_start_root_event_id = None
@@ -463,7 +462,6 @@ class ConversationResolver:
         if (
             config.get_entity_thread_mode(
                 self.deps.agent_name,
-                self.deps.runtime_paths,
                 room_id=room.room_id,
             )
             == "room"
@@ -698,7 +696,6 @@ class ConversationResolver:
         if (
             config.get_entity_thread_mode(
                 self.deps.agent_name,
-                self.deps.runtime_paths,
                 room_id=room.room_id,
             )
             == "room"
@@ -773,7 +770,6 @@ class ConversationResolver:
         if (
             config.get_entity_thread_mode(
                 self.deps.agent_name,
-                self.deps.runtime_paths,
                 room_id=room.room_id,
             )
             == "room"

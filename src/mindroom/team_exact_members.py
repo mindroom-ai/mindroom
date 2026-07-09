@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.runtime_protocols import OrchestratorRuntime, SupportsRunningState
 
 
@@ -34,7 +34,7 @@ class ResolvedExactTeamMembers:
 def resolve_live_shared_agent_names(
     orchestrator: OrchestratorRuntime,
     *,
-    config: Config | None = None,
+    config: RuntimeConfig | None = None,
 ) -> set[str] | None:
     """Return running shared agent names when runtime availability is known."""
     active_config = config or orchestrator.config
@@ -51,7 +51,7 @@ def resolve_live_shared_agent_names(
 
 
 def resolve_team_materializable_agent_names(
-    config: Config,
+    config: RuntimeConfig,
     materializable_agent_names: set[str] | None,
     *,
     allow_direct_private_agents: bool,

@@ -258,7 +258,7 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
     config.memory.backend = "mem0"
     config.agents["general"].worker_scope = "user"
     config.agents["calculator"].worker_scope = "user"
-    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    config.teams["shared_team"] = MockTeamConfig(agents=["general", "calculator"])
 
     alice_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -364,7 +364,7 @@ async def test_mixed_private_team_mem0_conversation_memory_is_rejected(
     """Mem0 team memory should reject private team members outright."""
     config.memory.backend = "mem0"
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
-    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
+    config.teams["mixed_team"] = MockTeamConfig(agents=["general", "calculator"])
 
     with pytest.raises(
         ValueError,
@@ -389,7 +389,7 @@ async def test_mixed_private_team_mem0_member_crud_is_rejected(
     config.memory.backend = "mem0"
     config.memory.team_reads_member_memory = True
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
-    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
+    config.teams["mixed_team"] = MockTeamConfig(agents=["general", "calculator"])
 
     memories_by_path: dict[Path, FakeMem0ScopedMemory] = {}
 
@@ -458,7 +458,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
     config.memory.backend = "mem0"
     config.agents["general"].worker_scope = "user_agent"
     config.agents["calculator"].worker_scope = "user_agent"
-    config.teams = {"gc": MockTeamConfig(agents=["general", "calculator"])}
+    config.teams["gc"] = MockTeamConfig(agents=["general", "calculator"])
 
     memories_by_path: dict[Path, FakeMem0ScopedMemory] = {}
 

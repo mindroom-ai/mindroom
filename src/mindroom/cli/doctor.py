@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
 
-from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, Config, iter_config_validation_messages
+from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, RuntimeConfig, iter_config_validation_messages
 
 
 def doctor(config_path: Path | None = None, storage_path: Path | None = None) -> None:
@@ -48,7 +48,7 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config_path = runtime_paths.config_path
-    console.print(f"[dim]Config directory: {runtime_paths.config_dir}[/dim]")
+    console.print(f"[dim]RuntimeConfig directory: {runtime_paths.config_dir}[/dim]")
 
     # 1. Config file exists
     p, f, w = _run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path))
@@ -161,7 +161,7 @@ def _check_config_exists(config_path: Path) -> tuple[int, int, int]:
     return 0, 1, 0
 
 
-def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int, int, int]:
+def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[RuntimeConfig | None, int, int, int]:
     """Validate config file. Returns (config_or_none, passed, failed, warnings)."""
     try:
         config = load_config_quiet(runtime_paths=runtime_paths)
@@ -196,7 +196,7 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
 }
 
 
-def _get_custom_base_url(config: Config, provider: str) -> str | None:
+def _get_custom_base_url(config: RuntimeConfig, provider: str) -> str | None:
     """Get custom base_url for a provider from model extra_kwargs, if any."""
     for model in config.models.values():
         if model.provider == provider and model.extra_kwargs:
@@ -431,7 +431,7 @@ def _validate_vertexai_claude_connection(
     return True, ""
 
 
-def _get_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
+def _get_ollama_host(config: RuntimeConfig, runtime_paths: RuntimePaths) -> str:
     """Get the Ollama host from config or environment."""
     for model in config.models.values():
         if model.provider == "ollama" and model.host:
@@ -439,7 +439,7 @@ def _get_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
     return runtime_paths.env_value("OLLAMA_HOST", default=OLLAMA_HOST_DEFAULT) or OLLAMA_HOST_DEFAULT
 
 
-def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+def _check_providers(config: RuntimeConfig, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Print provider summary and validate API keys. Returns (passed, failed, warnings)."""
     provider_models: dict[str, list[str]] = {}
     for name, model in config.models.items():
@@ -489,7 +489,7 @@ def _print_validation(
 
 def _check_single_provider(
     provider: str,
-    config: Config,
+    config: RuntimeConfig,
     validated_keys: set[str],
     runtime_paths: RuntimePaths,
 ) -> tuple[int, int, int]:
@@ -551,7 +551,7 @@ def _check_single_provider(
     )
 
 
-def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+def _check_memory_config(config: RuntimeConfig, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check memory LLM and embedder configuration. Returns (passed, failed, warnings)."""
     backends = (
         {config.memory.backend}
@@ -577,7 +577,7 @@ def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[i
     return p1 + p2, f1 + f2, w1 + w2
 
 
-def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+def _check_memory_llm(config: RuntimeConfig, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check memory LLM configuration. Returns (passed, failed, warnings)."""
     if config.memory.llm is None:
         ollama_host = _get_ollama_host(config, runtime_paths=runtime_paths)
@@ -631,7 +631,7 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     )
 
 
-def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+def _check_memory_embedder(config: RuntimeConfig, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check memory embedder configuration. Returns (passed, failed, warnings)."""
     emb = config.memory.embedder
     if emb.provider == "ollama":

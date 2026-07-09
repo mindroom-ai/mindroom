@@ -142,6 +142,11 @@ class RuntimePaths:
     process_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     env_file_values: Mapping[str, str] = field(default_factory=dict, repr=False)
 
+    def __deepcopy__(self, memo: dict[int, object]) -> "RuntimePaths":
+        """Reuse this immutable runtime context during deep copies."""
+        del memo
+        return self
+
     def env_value(self, name: str, *, default: str | None = None) -> str | None:
         """Resolve one env value against this runtime context."""
         if name == "MINDROOM_CONFIG_PATH":

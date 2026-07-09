@@ -155,8 +155,8 @@ def test_team_bot_uses_persisted_member_usernames(
     config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
     runtime_paths = runtime_paths_for(config_with_rooms)
     state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_agent1", "mindroom_agent1_oldns", "pw", domain=config_with_rooms.get_domain(runtime_paths))
-    state.add_account("agent_agent2", "mindroom_agent2_oldns", "pw", domain=config_with_rooms.get_domain(runtime_paths))
+    state.add_account("agent_agent1", "mindroom_agent1_oldns", "pw", domain=config_with_rooms.get_domain())
+    state.add_account("agent_agent2", "mindroom_agent2_oldns", "pw", domain=config_with_rooms.get_domain())
     state.save(runtime_paths=runtime_paths)
 
     def mock_resolve_room_aliases(

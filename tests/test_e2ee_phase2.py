@@ -154,7 +154,7 @@ class TestManagedRoomEncryptionConfig:
 def _bound_config(tmp_path: Path, **config_data: object) -> Config:
     runtime_paths = _runtime_paths(tmp_path)
     return bind_runtime_paths(
-        Config.model_validate(config_data, context={"runtime_paths": runtime_paths}),
+        Config.model_validate(config_data),
         runtime_paths,
     )
 

@@ -98,7 +98,7 @@ async def test_schedule_validates_agents_in_room() -> None:
     # Create a mock room with the agents - use the actual domain from config
     room = create_mock_room(
         "test_room",
-        [f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}"],
+        [f"@mindroom_assistant:{config.get_domain()}"],
     )
 
     # Mock the workflow parsing to return a workflow with calculator mentioned
@@ -158,7 +158,7 @@ async def test_schedule_validates_agents_in_thread() -> None:
     # Create a mock room with assistant - use the actual domain from config
     room = create_mock_room(
         "test_room",
-        [f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}"],
+        [f"@mindroom_assistant:{config.get_domain()}"],
     )
 
     # Mock the workflow parsing
@@ -220,8 +220,8 @@ async def test_schedule_allows_agents_in_room() -> None:
     room = create_mock_room(
         "test_room",
         [
-            f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}",
-            f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}",
+            f"@mindroom_assistant:{config.get_domain()}",
+            f"@mindroom_calculator:{config.get_domain()}",
         ],
     )
 
@@ -293,8 +293,8 @@ async def test_schedule_with_multiple_agents_validation() -> None:
     room = create_mock_room(
         "test_room",
         [
-            f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}",
-            f"@mindroom_researcher:{config.get_domain(runtime_paths_for(config))}",
+            f"@mindroom_assistant:{config.get_domain()}",
+            f"@mindroom_researcher:{config.get_domain()}",
         ],
     )
 
@@ -356,8 +356,8 @@ async def test_schedule_with_no_agent_mentions() -> None:
     room = create_mock_room(
         "test_room",
         [
-            f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}",
-            f"@mindroom_researcher:{config.get_domain(runtime_paths_for(config))}",
+            f"@mindroom_assistant:{config.get_domain()}",
+            f"@mindroom_researcher:{config.get_domain()}",
         ],
     )
 
@@ -428,8 +428,8 @@ async def test_schedule_validation_respects_sender_reply_permissions() -> None:
     room = create_mock_room(
         "test_room",
         [
-            f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}",
-            f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}",
+            f"@mindroom_assistant:{config.get_domain()}",
+            f"@mindroom_calculator:{config.get_domain()}",
         ],
     )
     mock_workflow = ScheduledWorkflow(
@@ -478,7 +478,7 @@ async def test_schedule_with_nonexistent_agent() -> None:
     # Create a mock room - use the actual domain from config
     room = create_mock_room(
         "test_room",
-        [f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}"],
+        [f"@mindroom_assistant:{config.get_domain()}"],
     )
 
     # Mock workflow mentioning non-existent agent

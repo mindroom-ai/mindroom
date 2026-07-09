@@ -71,7 +71,7 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
 
 def _entity_thread_mode(config: Config, entity_name: str, *, room_id: str | None = None) -> str:
     """Resolve entity thread mode with the config's bound runtime context."""
-    return config.get_entity_thread_mode(entity_name, runtime_paths_for(config), room_id=room_id)
+    return config.get_entity_thread_mode(entity_name, room_id=room_id)
 
 
 def _agent_bot(

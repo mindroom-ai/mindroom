@@ -19,6 +19,7 @@ from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
     Config,
     ConfigRuntimeValidationError,
+    RuntimeConfig,
     iter_config_validation_messages,
 )
 from mindroom.config.yaml_includes import (
@@ -62,7 +63,7 @@ class ApiSnapshot:
     generation: int
     runtime_paths: constants.RuntimePaths
     config_data: dict[str, Any]
-    runtime_config: Config | None = None
+    runtime_config: RuntimeConfig | None = None
     config_load_result: ConfigLoadResult | None = None
     source_fingerprint: str | None = None
     source_files: frozenset[Path] | None = None
@@ -149,7 +150,7 @@ def _source_fingerprint(source: bytes | str) -> str:
 
 def _load_config_result(
     runtime_paths: constants.RuntimePaths,
-) -> tuple[ConfigLoadResult, dict[str, Any] | None, Config | None, str | None, frozenset[Path] | None]:
+) -> tuple[ConfigLoadResult, dict[str, Any] | None, RuntimeConfig | None, str | None, frozenset[Path] | None]:
     """Load and validate one config file without mutating shared app state."""
     source_fingerprint: str | None = None
     source_files: frozenset[Path] | None = None
@@ -161,8 +162,8 @@ def _load_config_result(
         data, source_digests = load_yaml_config_source_with_digests(runtime_paths.config_path, source=source_bytes)
         source_files = frozenset(source_digests)
         source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
-        runtime_config = Config.validate_with_runtime(
-            data,
+        runtime_config = RuntimeConfig.from_authored(
+            Config.model_validate(data),
             runtime_paths,
             tolerate_plugin_load_errors=True,
         )
@@ -322,7 +323,7 @@ def _save_raw_config_source_to_file(
 
 
 def _persist_runtime_validated_config(
-    runtime_config: Config,
+    runtime_config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
 ) -> None:
     """Persist one validated config and immediately publish matching committed API snapshots."""
@@ -364,16 +365,16 @@ def _persist_runtime_validated_config(
 def _validated_config_payload(
     raw_config: dict[str, Any],
     runtime_paths: constants.RuntimePaths,
-) -> tuple[Config, dict[str, Any]]:
+) -> tuple[RuntimeConfig, dict[str, Any]]:
     """Normalize and validate one config payload against the active runtime."""
-    validated_config = Config.validate_with_runtime(raw_config, runtime_paths)
+    validated_config = RuntimeConfig.from_authored(Config.model_validate(raw_config), runtime_paths)
     return validated_config, validated_config.authored_model_dump()
 
 
 def validate_and_persist_config_payload(
     raw_config: dict[str, Any],
     runtime_paths: constants.RuntimePaths,
-) -> Config:
+) -> RuntimeConfig:
     """Validate and persist one authored config payload against the active runtime."""
     validated_config, _ = _validated_config_payload(raw_config, runtime_paths)
     _persist_runtime_validated_config(validated_config, runtime_paths)
@@ -435,7 +436,7 @@ def _published_snapshot(
     increment_generation: bool = True,
     runtime_paths: constants.RuntimePaths | None = None,
     config_data: dict[str, Any] | None = None,
-    runtime_config: Config | None | object = _UNSET,
+    runtime_config: RuntimeConfig | None | object = _UNSET,
     config_load_result: ConfigLoadResult | None | object = _UNSET,
     source_fingerprint: str | None | object = _UNSET,
     source_files: frozenset[Path] | None | object = _UNSET,
@@ -445,7 +446,7 @@ def _published_snapshot(
     updated_runtime_paths = snapshot.runtime_paths if runtime_paths is None else runtime_paths
     updated_config_data = snapshot.config_data if config_data is None else config_data
     updated_runtime_config = (
-        snapshot.runtime_config if runtime_config is _UNSET else cast("Config | None", runtime_config)
+        snapshot.runtime_config if runtime_config is _UNSET else cast("RuntimeConfig | None", runtime_config)
     )
     updated_load_result = (
         snapshot.config_load_result
@@ -502,7 +503,7 @@ def _build_mutated_config[T](
     snapshot: ApiSnapshot,
     mutate: Callable[[dict[str, Any]], T],
     runtime_paths: constants.RuntimePaths,
-) -> tuple[T, dict[str, Any], Config]:
+) -> tuple[T, dict[str, Any], RuntimeConfig]:
     """Build one validated config payload from a committed snapshot off-lock."""
     _raise_for_config_load_result(snapshot.config_load_result)
     if not snapshot.config_data:
@@ -520,7 +521,7 @@ def _commit_mutated_snapshot[T](
     expected_generation: int,
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
-    validated_config: Config,
+    validated_config: RuntimeConfig,
     result: T,
 ) -> T:
     """Commit one previously validated mutation if the targeted snapshot is still current."""
@@ -549,7 +550,7 @@ def _commit_mutated_snapshot[T](
 def _validate_replacement_payload(
     new_config: dict[str, Any],
     runtime_paths: constants.RuntimePaths,
-) -> tuple[Config, dict[str, Any]]:
+) -> tuple[RuntimeConfig, dict[str, Any]]:
     """Validate one replacement config payload off-lock."""
     return _validated_config_payload(new_config, runtime_paths)
 
@@ -557,7 +558,7 @@ def _validate_replacement_payload(
 def _validate_raw_config_source(
     source: str,
     runtime_paths: constants.RuntimePaths,
-) -> tuple[Config, dict[str, Any], frozenset[Path], str]:
+) -> tuple[RuntimeConfig, dict[str, Any], frozenset[Path], str]:
     """Validate raw YAML source against the current runtime without mutating the live file.
 
     Parsing the source as the live config path keeps include semantics identical
@@ -569,7 +570,7 @@ def _validate_raw_config_source(
         runtime_paths.config_path,
         source=source.encode("utf-8"),
     )
-    runtime_config = Config.validate_with_runtime(data, runtime_paths)
+    runtime_config = RuntimeConfig.from_authored(Config.model_validate(data), runtime_paths)
     source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
     return runtime_config, runtime_config.authored_model_dump(), frozenset(source_digests), source_fingerprint
 
@@ -581,7 +582,7 @@ def _commit_replaced_snapshot(
     expected_generation: int,
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
-    validated_config: Config,
+    validated_config: RuntimeConfig,
 ) -> int:
     """Commit one previously validated replacement payload if the snapshot is still current."""
     with initial_state.config_lock:
@@ -612,7 +613,7 @@ def _commit_raw_replaced_snapshot(
     expected_generation: int,
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
-    validated_config: Config,
+    validated_config: RuntimeConfig,
     source: str,
     source_files: frozenset[Path],
     source_fingerprint: str,
@@ -671,7 +672,7 @@ def _build_and_commit_mutation[T](
     except _ConfigComposedFromIncludesError as e:
         raise _composed_from_includes_http_error(e) from e
     except ConfigRuntimeValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors()) from e
+        raise HTTPException(status_code=422, detail=_config_error_detail(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
 
@@ -709,7 +710,7 @@ def _build_and_commit_replacement(
     except _ConfigComposedFromIncludesError as e:
         raise _composed_from_includes_http_error(e) from e
     except ConfigRuntimeValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors()) from e
+        raise HTTPException(status_code=422, detail=_config_error_detail(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
 
@@ -791,7 +792,7 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
 
 
 def _publish_runtime_config_into_app(
-    runtime_config: Config,
+    runtime_config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     api_app: FastAPI,
 ) -> bool:
@@ -837,7 +838,7 @@ def _publish_runtime_config_into_app(
 
 def read_app_committed_runtime_config(
     api_app: FastAPI,
-) -> tuple[Config, constants.RuntimePaths]:
+) -> tuple[RuntimeConfig, constants.RuntimePaths]:
     """Read one validated runtime config and runtime from the same published snapshot."""
     initial_state = require_api_state(api_app)
     with initial_state.config_lock:
@@ -874,7 +875,7 @@ def read_committed_config_and_runtime[T](
 
 def read_committed_runtime_config(
     request: Request,
-) -> tuple[Config, constants.RuntimePaths]:
+) -> tuple[RuntimeConfig, constants.RuntimePaths]:
     """Read one validated runtime config and runtime from one coherent request snapshot."""
     snapshot = _request_or_current_snapshot(request)
     _raise_for_config_load_result(snapshot.config_load_result)

@@ -9,7 +9,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix_identifiers import split_concrete_matrix_user_ids
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -23,7 +23,7 @@ def _filter_concrete_matrix_user_ids(user_ids: set[str], *, warning_message: str
     return set(concrete_user_ids)
 
 
-def get_authorized_user_ids_to_invite(config: Config) -> set[str]:
+def get_authorized_user_ids_to_invite(config: RuntimeConfig) -> set[str]:
     """Collect Matrix users from authorization config that can be invited."""
     user_ids = set(config.authorization.global_users)
     for room_users in config.authorization.room_permissions.values():
@@ -34,7 +34,7 @@ def get_authorized_user_ids_to_invite(config: Config) -> set[str]:
     )
 
 
-def get_root_space_user_ids_to_invite(config: Config, runtime_paths: RuntimePaths) -> set[str]:
+def get_root_space_user_ids_to_invite(config: RuntimeConfig, runtime_paths: RuntimePaths) -> set[str]:
     """Collect Matrix users that should be invited to the private root Space."""
     user_ids = _filter_concrete_matrix_user_ids(
         set(config.authorization.global_users),

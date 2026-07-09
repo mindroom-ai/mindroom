@@ -7,14 +7,14 @@ from typing import TYPE_CHECKING
 from mindroom.constants import ROUTER_AGENT_NAME
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
 
 __all__ = ["describe_agent"]
 
 _MAX_INSTRUCTION_LENGTH = 100
 
 
-def describe_agent(agent_name: str, config: Config) -> str:
+def describe_agent(agent_name: str, config: RuntimeConfig) -> str:
     """Generate a description of an agent or team based on its configuration."""
     if agent_name == ROUTER_AGENT_NAME:
         return (

@@ -24,7 +24,7 @@ from mindroom.memory import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -38,7 +38,7 @@ class MemoryTools(Toolkit):
         self,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         runtime_paths: RuntimePaths,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:

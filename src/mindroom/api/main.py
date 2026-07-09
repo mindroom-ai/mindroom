@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
     from starlette.types import ASGIApp, Receive, Scope, Send
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
 
 logger = get_logger(__name__)
@@ -191,7 +191,7 @@ def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> f
 def _cleanup_workers_once(
     runtime_paths: constants.RuntimePaths,
     *,
-    runtime_config: Config | None = None,
+    runtime_config: RuntimeConfig | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
 ) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
@@ -351,14 +351,14 @@ async def _sync_standalone_knowledge_watchers(api_app: FastAPI) -> None:
     await source_watcher.sync(config=snapshot.runtime_config, runtime_paths=snapshot.runtime_paths)
 
 
-def _read_request_runtime_config_or_none(request: Request) -> tuple[Config, constants.RuntimePaths] | None:
+def _read_request_runtime_config_or_none(request: Request) -> tuple[RuntimeConfig, constants.RuntimePaths] | None:
     try:
         return config_lifecycle.read_committed_runtime_config(request)
     except HTTPException:
         return None
 
 
-def _read_app_runtime_config_or_none(api_app: FastAPI) -> tuple[Config, constants.RuntimePaths] | None:
+def _read_app_runtime_config_or_none(api_app: FastAPI) -> tuple[RuntimeConfig, constants.RuntimePaths] | None:
     try:
         return config_lifecycle.read_app_committed_runtime_config(api_app)
     except HTTPException:
@@ -366,7 +366,7 @@ def _read_app_runtime_config_or_none(api_app: FastAPI) -> tuple[Config, constant
 
 
 def _reconcile_knowledge_mode_transitions(
-    previous: tuple[Config, constants.RuntimePaths] | None,
+    previous: tuple[RuntimeConfig, constants.RuntimePaths] | None,
     api_app: FastAPI,
 ) -> None:
     if previous is None:
@@ -381,7 +381,7 @@ def _reconcile_knowledge_mode_transitions(
 async def _reload_config_into_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> bool:
     """Reload one API app config snapshot from disk."""
     previous = _read_app_runtime_config_or_none(api_app)
-    # Config validation executes plugin modules and walks the filesystem;
+    # RuntimeConfig validation executes plugin modules and walks the filesystem;
     # keep it off the event loop (#1260).
     loaded = await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, api_app)
     if loaded:

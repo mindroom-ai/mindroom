@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     import nio
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.runtime_protocols import OrchestratorRuntime
@@ -23,7 +23,7 @@ class BotRuntimeView(Protocol):
     def client(self) -> nio.AsyncClient | None: ...  # noqa: D102
 
     @property
-    def config(self) -> Config: ...  # noqa: D102
+    def config(self) -> RuntimeConfig: ...  # noqa: D102
 
     @property
     def runtime_paths(self) -> RuntimePaths: ...  # noqa: D102
@@ -52,7 +52,7 @@ class BotRuntimeState:
     """Concrete mutable runtime state shared by extracted collaborators."""
 
     client: nio.AsyncClient | None
-    config: Config
+    config: RuntimeConfig
     runtime_paths: RuntimePaths
     enable_streaming: bool
     orchestrator: OrchestratorRuntime | None

@@ -30,7 +30,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
@@ -162,7 +162,7 @@ class SchedulingRuntime:
     """Live scheduling collaborators required to create or edit running tasks."""
 
     client: nio.AsyncClient
-    config: Config
+    config: RuntimeConfig
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom
     conversation_cache: ConversationCacheProtocol
@@ -402,7 +402,7 @@ def _start_scheduled_task(
     client: nio.AsyncClient,
     task_id: str,
     workflow: ScheduledWorkflow,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
@@ -465,7 +465,7 @@ def _queue_deferred_overdue_task(task_id: str, workflow: ScheduledWorkflow) -> b
 
 async def drain_deferred_overdue_tasks(
     client: nio.AsyncClient,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
@@ -710,7 +710,7 @@ async def _save_pending_scheduled_task(
     room_id: str,
     task_id: str,
     workflow: ScheduledWorkflow,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
@@ -795,7 +795,7 @@ async def save_edited_scheduled_task(
 
 async def _parse_workflow_schedule(
     request: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     available_responders: typing.Sequence[MatrixID],
     current_time: datetime | None = None,
@@ -867,7 +867,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     task_id: str,
     workflow: ScheduledWorkflow,
     running_tasks: dict[str, asyncio.Task],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol,
     matrix_admin: HookMatrixAdmin | None = None,
@@ -982,7 +982,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
     client: nio.AsyncClient,
     task_id: str,
     workflow: ScheduledWorkflow,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     _event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
@@ -1099,7 +1099,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
 async def _validate_agent_mentions(
     message: str,
     allowed_agents: list[MatrixID],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> _AgentValidationResult:
     """Validate that all mentioned agents or teams are accessible.
@@ -1160,7 +1160,7 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
 
 def _extract_mentioned_agents_from_text(
     full_text: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Extract valid agent mentions from scheduling text."""
@@ -1397,7 +1397,7 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str | None = None,
-    config: Config | None = None,
+    config: RuntimeConfig | None = None,
 ) -> str:
     """List scheduled tasks in human-readable format."""
     # Pre-check: surface Matrix errors as user-facing messages
@@ -1562,7 +1562,7 @@ async def cancel_all_scheduled_tasks(
 async def restore_scheduled_tasks(  # noqa: C901
     client: nio.AsyncClient,
     room_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,

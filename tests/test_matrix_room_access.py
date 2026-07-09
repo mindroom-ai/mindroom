@@ -43,7 +43,7 @@ def _config_with_runtime_paths(
 ) -> Config:
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "mindroom_data")
     return bind_runtime_paths(
-        Config.model_validate(config_data, context={"runtime_paths": runtime_paths}),
+        Config.model_validate(config_data),
         runtime_paths,
     )
 

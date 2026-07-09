@@ -115,6 +115,10 @@ if TYPE_CHECKING:
     from mindroom.final_delivery import StreamTransportOutcome
 
 
+def _runtime_config(tmp_path: Path) -> Config:
+    return bind_runtime_paths(_config(), _runtime_paths(tmp_path))
+
+
 def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
     """Metrics serialization should preserve only the provider payload Agno exposes."""
     payload = _serialize_metrics(Metrics(input_tokens=6, output_tokens=0, cache_read_tokens=46449))
@@ -299,8 +303,8 @@ class TestUserIdPassthrough:
         tmp_path: Path,
     ) -> None:
         """Short prompts must not disappear when they happen to occur inside attachment IDs."""
-        config = _config()
         runtime_paths = _runtime_paths(tmp_path)
+        config = _runtime_config(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
         memory_prompt, memory_thread_history, model_prompt, model_thread_history = prepare_memory_and_model_context(
@@ -323,7 +327,7 @@ class TestUserIdPassthrough:
         tmp_path: Path,
     ) -> None:
         """Pre-merged timestamped model prompts should not duplicate the raw prompt on reuse."""
-        config = _config()
+        config = _runtime_config(tmp_path)
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
@@ -344,8 +348,8 @@ class TestUserIdPassthrough:
         tmp_path: Path,
     ) -> None:
         """Current-turn timestamping happens at final model prompt composition."""
-        config = _config()
-        config.timezone = "America/Los_Angeles"
+        config = _runtime_config(tmp_path)
+        config = config.model_copy(update={"timezone": "America/Los_Angeles"})
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
@@ -364,8 +368,8 @@ class TestUserIdPassthrough:
         tmp_path: Path,
     ) -> None:
         """Model-facing thread context should expose the Matrix timestamp for user messages."""
-        config = _config()
-        config.timezone = "America/Los_Angeles"
+        config = _runtime_config(tmp_path)
+        config = config.model_copy(update={"timezone": "America/Los_Angeles"})
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
@@ -389,7 +393,7 @@ class TestUserIdPassthrough:
     async def test_non_streaming_passes_user_id(self, tmp_path: Path) -> None:
         """Test that _process_and_respond passes user_id through to ai_response."""
         runtime_paths = _runtime_paths(tmp_path)
-        config = bind_runtime_paths(_config(), runtime_paths)
+        config = _runtime_config(tmp_path)
         bot = MagicMock(spec=AgentBot)
         bot.logger = MagicMock()
         bot.stop_manager = MagicMock()
@@ -431,7 +435,7 @@ class TestUserIdPassthrough:
     async def test_streaming_passes_user_id(self, tmp_path: Path) -> None:
         """Test that _process_and_respond_streaming passes user_id through to stream_agent_response."""
         runtime_paths = _runtime_paths(tmp_path)
-        config = bind_runtime_paths(_config(), runtime_paths)
+        config = _runtime_config(tmp_path)
         bot = MagicMock(spec=AgentBot)
         bot.logger = MagicMock()
         bot.stop_manager = MagicMock()
@@ -485,7 +489,7 @@ class TestUserIdPassthrough:
     async def test_streaming_tool_context_cleanup_survives_cross_task_close(self, tmp_path: Path) -> None:
         """Wrapped response streams should clean up across task-context boundaries."""
         runtime_paths = _runtime_paths(tmp_path)
-        config = bind_runtime_paths(_config(), runtime_paths)
+        config = _runtime_config(tmp_path)
         bot = MagicMock(spec=AgentBot)
         bot.logger = MagicMock()
         bot.stop_manager = MagicMock()
@@ -570,7 +574,7 @@ class TestUserIdPassthrough:
     async def test_tool_runtime_stream_factory_masks_outer_context(self, tmp_path: Path) -> None:
         """Factory setup should not inherit an outer tool runtime context when None is explicit."""
         runtime_paths = _runtime_paths(tmp_path)
-        config = bind_runtime_paths(_config(), runtime_paths)
+        config = _runtime_config(tmp_path)
         bot = MagicMock(spec=AgentBot)
         bot.logger = MagicMock()
         bot.stop_manager = MagicMock()
@@ -625,14 +629,16 @@ class TestUserIdPassthrough:
         mock_run_output.tools = None
         mock_agent.arun = AsyncMock(return_value=mock_run_output)
 
+        runtime_paths = _runtime_paths(tmp_path)
+        config = _runtime_config(tmp_path)
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
             await ai_response(
                 make_turn_context("general", session_id="session1", requester_id="@user:localhost"),
                 prompt="test",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                runtime_paths=runtime_paths,
+                config=config,
             )
 
             mock_agent.arun.assert_called_once()
@@ -658,7 +664,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", run_id="run-123"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
             )
 
             mock_agent.arun.assert_called_once()
@@ -667,7 +673,7 @@ class TestUserIdPassthrough:
     @pytest.mark.asyncio
     async def test_prepare_agent_and_prompt_threads_config_path_to_create_agent(self, tmp_path: Path) -> None:
         """The shared agent-build helper should preserve an explicit orchestrator config path."""
-        config = _config()
+        config = _runtime_config(tmp_path)
         config_path = tmp_path / "custom-config.yaml"
         runtime_paths = _runtime_paths(tmp_path, config_path=config_path)
         persist_entity_accounts(config, runtime_paths)
@@ -707,7 +713,7 @@ class TestUserIdPassthrough:
         tmp_path: Path,
     ) -> None:
         """Raw prompt should drive memory lookup while session context appends to the system prompt."""
-        config = _config()
+        config = _runtime_config(tmp_path)
         mock_agent = MagicMock()
         mock_agent.additional_context = "existing context"
         prepared_execution = _PreparedExecutionContext(
@@ -769,7 +775,7 @@ class TestUserIdPassthrough:
         expected_sender: str | None,
     ) -> None:
         """OpenAI-compatible preparation suppresses the Matrix sender; Matrix turns keep it."""
-        config = _config()
+        config = _runtime_config(tmp_path)
         mock_agent = MagicMock()
         prepared_execution = _PreparedExecutionContext(
             messages=(Message(role="user", content="prepared prompt"),),
@@ -819,7 +825,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 include_openai_compat_guidance=True,
             )
 
@@ -844,7 +850,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", requester_id="user-123"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 include_openai_compat_guidance=True,
             )
 
@@ -870,7 +876,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", requester_id="@alice:example.com"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
             )
 
         prepare_ctx = mock_prepare.await_args.args[0]
@@ -896,7 +902,7 @@ class TestUserIdPassthrough:
                 prompt="raw prompt",
                 model_prompt="model metadata",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
             )
 
         assert mock_prepare.await_args.kwargs["prompt"] == "raw prompt"
@@ -923,7 +929,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     include_openai_compat_guidance=True,
                 )
             ]
@@ -951,7 +957,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", requester_id="user-123"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     include_openai_compat_guidance=True,
                 )
             ]
@@ -980,7 +986,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", requester_id="@alice:example.com"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                 )
             ]
 
@@ -1011,7 +1017,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", requester_id="@user:localhost"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                 )
             ]
 
@@ -1041,7 +1047,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", run_id="run-456"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                 )
             ]
 
@@ -1077,7 +1083,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                 )
             run_mock.assert_awaited_once()
 
@@ -1117,7 +1123,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     show_tool_calls=False,
                 )
 
@@ -1183,7 +1189,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     show_tool_calls=False,
                 )
 
@@ -1235,7 +1241,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     show_tool_calls=False,
                 )
 
@@ -1292,7 +1298,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     show_tool_calls=False,
                     turn_recorder=recorder,
                 )
@@ -1327,7 +1333,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
             )
 
         assert response == "friendly-error"
@@ -1398,7 +1404,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 media=MediaInputs(files=[pdf_file, zip_file]),
             )
 
@@ -1431,7 +1437,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     media=MediaInputs(files=[pdf_file, zip_file]),
                 )
             ]
@@ -1476,7 +1482,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 media=MediaInputs(files=[document_file]),
             )
 
@@ -1533,14 +1539,14 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 media=MediaInputs(audio=[audio_input], images=[image_input]),
             )
             second_response = await ai_response(
                 make_turn_context("general", session_id="session1"),
                 prompt="test again",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 media=MediaInputs(audio=[audio_input], images=[image_input]),
             )
 
@@ -1612,7 +1618,7 @@ class TestUserIdPassthrough:
                 prompt="raw prompt",
                 model_prompt="expanded prompt",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 media=MediaInputs(files=[document_file]),
             )
 
@@ -1685,7 +1691,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", run_id="run-123"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 run_id_callback=callback_run_ids.append,
                 media=MediaInputs(audio=[MagicMock(name="audio_input")]),
             )
@@ -1738,7 +1744,7 @@ class TestUserIdPassthrough:
                     ),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     run_id_callback=callback_run_ids.append,
                     media=MediaInputs(audio=[MagicMock(name="audio_input")]),
                 )
@@ -1797,7 +1803,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     media=MediaInputs(files=[document_file]),
                 )
             ]
@@ -1861,7 +1867,7 @@ class TestUserIdPassthrough:
                     prompt="raw prompt",
                     model_prompt="expanded prompt",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     media=MediaInputs(files=[document_file]),
                 )
             ]
@@ -1953,7 +1959,7 @@ class TestUserIdPassthrough:
             default_log_dir=tmp_path / "unused",
         )
         agent = _DeferredLoggingAgent(model)
-        config = _config().model_copy(
+        config = _runtime_config(tmp_path).model_copy(
             update={
                 "debug": DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
             },
@@ -2032,7 +2038,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", run_id="run-456"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     run_id_callback=callback_run_ids.append,
                     media=MediaInputs(audio=[MagicMock(name="audio_input")]),
                 )
@@ -2086,7 +2092,7 @@ class TestUserIdPassthrough:
                         make_turn_context("general", session_id="session1", run_id="run-456"),
                         prompt="test",
                         runtime_paths=_runtime_paths(tmp_path),
-                        config=_config(),
+                        config=_runtime_config(tmp_path),
                         run_id_callback=callback_run_ids.append,
                         media=MediaInputs(audio=[MagicMock(name="audio_input")]),
                     )
@@ -2200,7 +2206,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 media=MediaInputs(files=[document_file]),
             )
 
@@ -2254,7 +2260,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     media=MediaInputs(files=[document_file]),
                 )
             ]
@@ -2330,7 +2336,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                 )
             ]
 
@@ -2359,7 +2365,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
             )
 
             mock_agent.arun.assert_called_once()
@@ -2392,7 +2398,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 show_tool_calls=False,
                 tool_trace_collector=tool_trace,
             )
@@ -2455,7 +2461,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", run_id="run-1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 model_prompt="test\n\nUse attachment att_1.",
                 run_id_callback=run_ids.append,
                 show_tool_calls=False,
@@ -2541,7 +2547,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", run_id="run-1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     show_tool_calls=False,
                     turn_recorder=recorder,
                 )
@@ -2605,7 +2611,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", run_id="run-1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     model_prompt="test\n\nUse attachment att_1.",
                     run_id_callback=run_ids.append,
                     show_tool_calls=False,
@@ -2690,7 +2696,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", run_id="run-1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     show_tool_calls=False,
                     turn_recorder=recorder,
                 ):
@@ -2741,7 +2747,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
             )
 
         assert "Dynamic tool calls did not produce a final answer" in response
@@ -2793,7 +2799,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     show_tool_calls=False,
                 )
             ]
@@ -2840,6 +2846,7 @@ class TestUserIdPassthrough:
             agents={"general": AgentConfig(display_name="General")},
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=2000)},
         )
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent, prepared_context_tokens=1500)
@@ -2908,7 +2915,7 @@ class TestUserIdPassthrough:
                 ),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 turn_recorder=recorder,
             )
 
@@ -2948,6 +2955,7 @@ class TestUserIdPassthrough:
             agents={"general": AgentConfig(display_name="General")},
             models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6", context_window=200_000)},
         )
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -3063,6 +3071,7 @@ class TestUserIdPassthrough:
             agents={"general": AgentConfig(display_name="General")},
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
         )
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -3106,14 +3115,16 @@ class TestUserIdPassthrough:
 
         mock_agent.arun = MagicMock(return_value=fake_arun_stream())
         recorder = TurnRecorder(user_message="test")
+        runtime_paths = _runtime_paths(tmp_path)
+        config = _runtime_config(tmp_path)
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             async for _chunk in stream_agent_response(
                 make_turn_context("general", session_id="session1"),
                 prompt="test",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                runtime_paths=runtime_paths,
+                config=config,
                 turn_recorder=recorder,
             ):
                 pass
@@ -3151,7 +3162,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 turn_recorder=recorder,
             ):
                 pass
@@ -3189,7 +3200,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 turn_recorder=recorder,
             ):
                 pass
@@ -3324,6 +3335,8 @@ class TestUserIdPassthrough:
 
         mock_agent.arun = MagicMock(return_value=fake_arun_stream())
         recorder = TurnRecorder(user_message="test")
+        runtime_paths = _runtime_paths(tmp_path)
+        config = _runtime_config(tmp_path)
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent, prepared_context_tokens=5678)
@@ -3335,8 +3348,8 @@ class TestUserIdPassthrough:
                     reply_to_event_id="$event",
                 ),
                 prompt="test",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                runtime_paths=runtime_paths,
+                config=config,
                 turn_recorder=recorder,
             ):
                 pass
@@ -3377,6 +3390,7 @@ class TestUserIdPassthrough:
             agents={"general": AgentConfig(display_name="General")},
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
         )
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -3451,7 +3465,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     show_tool_calls=False,
                 ):
                     pass
@@ -3530,7 +3544,7 @@ class TestUserIdPassthrough:
                     make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
                     prompt="test",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
+                    config=_runtime_config(tmp_path),
                     show_tool_calls=False,
                 ):
                     pass
@@ -3574,7 +3588,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
+                config=_runtime_config(tmp_path),
                 show_tool_calls=False,
             ):
                 first_chunk_seen.set()
@@ -3634,6 +3648,7 @@ class TestUserIdPassthrough:
             agents={"general": AgentConfig(display_name="General")},
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=100)},
         )
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -3686,6 +3701,7 @@ class TestUserIdPassthrough:
             agents={"general": AgentConfig(display_name="General")},
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=100)},
         )
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -3745,6 +3761,7 @@ class TestUserIdPassthrough:
             agents={"general": AgentConfig(display_name="General")},
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
         )
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent, prepared_context_tokens=900)
@@ -3810,6 +3827,7 @@ class TestUserIdPassthrough:
             agents={"general": AgentConfig(display_name="General")},
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
         )
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -3877,6 +3895,7 @@ class TestUserIdPassthrough:
             agents={"general": AgentConfig(display_name="General")},
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
         )
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent, prepared_context_tokens=900)
@@ -3936,6 +3955,7 @@ class TestUserIdPassthrough:
             agents={"general": AgentConfig(display_name="General")},
             models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6", context_window=200_000)},
         )
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -3997,6 +4017,7 @@ class TestUserIdPassthrough:
                 ),
             },
         )
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)

@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 
 def ensure_tool_registry_loaded(
     runtime_paths: RuntimePaths,
-    config: Config | None = None,
+    config: RuntimeConfig | None = None,
     *,
     load_plugin_tools: bool = True,
 ) -> None:

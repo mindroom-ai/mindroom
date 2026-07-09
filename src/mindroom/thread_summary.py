@@ -26,7 +26,7 @@ from mindroom.timing import timed
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -173,7 +173,7 @@ def thread_summary_message_count_hint(
 def _next_thread_summary_threshold(
     room_id: str,
     thread_id: str,
-    config: Config,
+    config: RuntimeConfig,
 ) -> int:
     """Return the next summary threshold using the current in-memory baseline."""
     return _next_threshold(
@@ -186,7 +186,7 @@ def _next_thread_summary_threshold(
 def should_queue_thread_summary(
     room_id: str,
     thread_id: str,
-    config: Config,
+    config: RuntimeConfig,
     *,
     message_count_hint: int | None,
 ) -> bool:
@@ -282,7 +282,7 @@ def _build_conversation_text(thread_history: Sequence[ResolvedVisibleMessage]) -
 
 
 def _resolve_thread_summary_model_name(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     room_id: str | None,
     *,
@@ -308,7 +308,7 @@ def _resolve_thread_summary_model_name(
 
 async def _generate_summary(
     thread_history: Sequence[ResolvedVisibleMessage],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     model_name: str | None = None,
@@ -347,7 +347,7 @@ async def _generate_summary(
 @timed("maybe_generate_thread_summary")
 async def _timed_generate_summary(
     thread_history: Sequence[ResolvedVisibleMessage],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     model_name: str | None = None,
@@ -490,7 +490,7 @@ async def maybe_generate_thread_summary(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     conversation_cache: ConversationCacheProtocol,

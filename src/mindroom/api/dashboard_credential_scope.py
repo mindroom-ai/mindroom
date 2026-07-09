@@ -13,7 +13,7 @@ from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 _OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
@@ -137,7 +137,7 @@ def resolve_dashboard_execution_scope_override(
 
 def resolve_dashboard_agent_execution_scope_request(
     *,
-    config: Config,
+    config: RuntimeConfig,
     agent_name: str | None,
     execution_scope_override_provided: bool,
     execution_scope_override: WorkerScope | None,
@@ -218,7 +218,7 @@ def resolve_dashboard_agent_execution_scope_request(
 def require_agent_credential_management_authorized(
     request: Request,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     agent_name: str,
 ) -> ToolExecutionIdentity:

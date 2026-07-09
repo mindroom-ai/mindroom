@@ -21,7 +21,7 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -39,7 +39,7 @@ class DelegateTools(Toolkit):
         agent_name: str,
         delegate_to: list[str],
         runtime_paths: RuntimePaths,
-        config: Config,
+        config: RuntimeConfig,
         execution_identity: ToolExecutionIdentity | None = None,
         delegation_depth: int = 0,
         refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -195,7 +195,6 @@ class DelegateTools(Toolkit):
             entity_name=agent_name,
             room_id=room_id,
             thread_id=runtime_context.resolved_thread_id,
-            runtime_paths=self._runtime_paths,
         )
         return replace(
             runtime_context,

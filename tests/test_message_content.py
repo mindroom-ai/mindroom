@@ -480,9 +480,9 @@ class TestResolvedMessageExtraction:
         runtime_paths = runtime_paths_for(config)
         persist_entity_accounts(config, runtime_paths, usernames={"general": "mindroom_general_oldns"})
         state = MatrixState.load(runtime_paths=runtime_paths)
-        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain=config.get_domain(runtime_paths))
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain=config.get_domain())
         state.save(runtime_paths=runtime_paths)
-        current_domain = config.get_domain(runtime_paths)
+        current_domain = config.get_domain()
 
         event_source = {
             "sender": f"@mindroom_general_oldns:{current_domain}",
@@ -512,11 +512,11 @@ class TestResolvedMessageExtraction:
         persist_entity_accounts(config, runtime_paths, usernames={"general": "mindroom_general_v2"})
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "mindroom_general_v1", "pw", domain="legacy.example.com")
-        state.add_account("agent_general", "mindroom_general_v2", "pw", domain=config.get_domain(runtime_paths))
+        state.add_account("agent_general", "mindroom_general_v2", "pw", domain=config.get_domain())
         state.save(runtime_paths=runtime_paths)
 
         event_source = {
-            "sender": f"@mindroom_general_v1:{config.get_domain(runtime_paths)}",
+            "sender": f"@mindroom_general_v1:{config.get_domain()}",
             "content": {
                 "msgtype": "m.text",
                 "body": "hello\n\n⏳ Preparing isolated worker...",
@@ -546,7 +546,7 @@ class TestResolvedMessageExtraction:
             runtime_paths,
             usernames={"router": "mindroom_router", "general": "mindroom_general"},
         )
-        current_domain = config.get_domain(runtime_paths)
+        current_domain = config.get_domain()
         event_source = {
             "sender": f"@mindroom_general:{current_domain}",
             "content": {
@@ -580,7 +580,7 @@ class TestResolvedMessageExtraction:
             runtime_paths,
             usernames={"router": "mindroom_router", "general": "mindroom_general"},
         )
-        current_domain = config.get_domain(runtime_paths)
+        current_domain = config.get_domain()
 
         body, content = await extract_visible_edit_body(
             {
@@ -624,7 +624,7 @@ class TestResolvedMessageExtraction:
             runtime_paths,
             usernames={"router": "mindroom_router", "general": "mindroom_general"},
         )
-        current_domain = config.get_domain(runtime_paths)
+        current_domain = config.get_domain()
         event = _make_message_event(
             body="Original root",
             content={"msgtype": "m.text", "body": "Original root"},

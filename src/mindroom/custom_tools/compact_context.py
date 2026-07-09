@@ -8,7 +8,7 @@ from agno.agent import Agent  # noqa: TC002
 from agno.run import RunContext  # noqa: TC002
 from agno.tools import Toolkit
 
-from mindroom.config.main import Config  # noqa: TC001
+from mindroom.config.main import RuntimeConfig  # noqa: TC001
 from mindroom.constants import RuntimePaths  # noqa: TC001
 from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_current_session_id
@@ -23,7 +23,7 @@ class CompactContextTools(Toolkit):
     def __init__(
         self,
         agent_name: str,
-        config: Config,
+        config: RuntimeConfig,
         runtime_paths: RuntimePaths,
         execution_identity: ToolExecutionIdentity | None,
     ) -> None:

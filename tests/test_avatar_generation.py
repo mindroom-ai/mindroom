@@ -20,10 +20,13 @@ from mindroom.prompts import (
     AVATAR_ROOM_SYSTEM_PROMPT,
     AVATAR_TEAM_SYSTEM_PROMPT,
 )
+from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.config.main import RuntimeConfig
 
 
 def _workspace_avatar_path(
@@ -57,9 +60,9 @@ def test_build_router_user_uses_persisted_account_domain(tmp_path: Path) -> None
 def _config_with_runtime_paths(
     raw_config: dict[str, object],
     tmp_path: Path,
-) -> generate_avatars.Config:
+) -> RuntimeConfig:
     runtime_paths = _runtime_paths(tmp_path)
-    return generate_avatars.Config.validate_with_runtime(raw_config, runtime_paths)
+    return runtime_config_from_data(raw_config, runtime_paths)
 
 
 @pytest.fixture
@@ -478,11 +481,11 @@ async def test_run_avatar_generation_accepts_null_optional_sections(
 
 
 @pytest.mark.asyncio
-async def test_generate_prompt_uses_gemini_prompt_model() -> None:
+async def test_generate_prompt_uses_gemini_prompt_model(tmp_path: Path) -> None:
     """Prompt generation should call the Gemini text model and compose the base style."""
     generate_content = AsyncMock(return_value=SimpleNamespace(text="teal and copper, visor eyes"))
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
-    config = generate_avatars.Config()
+    config = _config_with_runtime_paths({}, tmp_path)
 
     prompt = await generate_avatars._generate_prompt(
         client,
@@ -502,11 +505,11 @@ async def test_generate_prompt_uses_gemini_prompt_model() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_prompt_uses_room_style_for_spaces() -> None:
+async def test_generate_prompt_uses_room_style_for_spaces(tmp_path: Path) -> None:
     """Space avatars should use the same icon-style prompt path as rooms."""
     generate_content = AsyncMock(return_value=SimpleNamespace(text="deep blue, doorway outline"))
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
-    config = generate_avatars.Config()
+    config = _config_with_runtime_paths({}, tmp_path)
 
     prompt = await generate_avatars._generate_prompt(
         client,
@@ -551,7 +554,7 @@ async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.Monkey
             role="Helpful assistant",
         ),
         _runtime_paths(tmp_path),
-        generate_avatars.Config(),
+        _config_with_runtime_paths({}, tmp_path),
     )
 
     assert avatar_path.read_bytes() == b"avatar-bytes"
@@ -584,7 +587,7 @@ async def test_generate_avatar_skips_existing_file_without_force(
             role="Helpful assistant",
         ),
         _runtime_paths(tmp_path),
-        generate_avatars.Config(),
+        _config_with_runtime_paths({}, tmp_path),
     )
 
     assert avatar_path.read_bytes() == b"existing-avatar"
@@ -624,7 +627,7 @@ async def test_generate_avatar_force_overwrites_existing_file(
             role="Helpful assistant",
         ),
         _runtime_paths(tmp_path),
-        generate_avatars.Config(),
+        _config_with_runtime_paths({}, tmp_path),
         force=True,
     )
 
@@ -664,7 +667,7 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
         _client: object,
         target: generate_avatars._AvatarTarget,
         runtime_paths: constants_mod.RuntimePaths,
-        _config: generate_avatars.Config,
+        _config: RuntimeConfig,
         *,
         force: bool = False,
     ) -> None:

@@ -19,6 +19,7 @@ from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixRoom, MatrixState
+from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import TEST_PASSWORD
 from tests.identity_helpers import entity_ids, entity_names_for_ids, persist_entity_accounts
 
@@ -38,7 +39,7 @@ def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
             "MINDROOM_NAMESPACE": "",
         },
     )
-    bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
+    bound = runtime_config_from_data(config.authored_model_dump(), runtime_paths)
     persist_entity_accounts(bound, runtime_paths)
     if bound.mindroom_user is not None:
         state = MatrixState.load(runtime_paths=runtime_paths)
@@ -47,7 +48,7 @@ def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
             bound.mindroom_user.username,
             TEST_PASSWORD,
             requested_username=bound.mindroom_user.username,
-            domain=bound.get_domain(runtime_paths),
+            domain=bound.get_domain(),
         )
         state.save(runtime_paths=runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
@@ -127,7 +128,7 @@ def _isolated_config(tmp_path: Path, **kwargs: object) -> Config:
             "MINDROOM_NAMESPACE": "",
         },
     )
-    bound = Config.validate_with_runtime(Config(**kwargs).authored_model_dump(), runtime_paths)
+    bound = runtime_config_from_data(Config(**kwargs).authored_model_dump(), runtime_paths)
     persist_entity_accounts(bound, runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound
@@ -601,7 +602,7 @@ def test_internal_system_user_always_allowed(
     )
 
     # Same username from a different domain should NOT be allowed
-    current_domain = mock_config_with_restrictions.get_domain(runtime_paths)
+    current_domain = mock_config_with_restrictions.get_domain()
     wrong_domain_id = internal_user_id.replace(f":{current_domain}", ":different.com")
     assert not is_authorized_sender(wrong_domain_id, mock_config_with_restrictions, "!test:server")
 
@@ -1710,7 +1711,7 @@ def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
     config_path = tmp_path / "config.yaml"
     storage_path = tmp_path / "mindroom_data"
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env={})
-    bound = Config.validate_with_runtime(_config(**config_data).authored_model_dump(), runtime_paths)
+    bound = runtime_config_from_data(_config(**config_data).authored_model_dump(), runtime_paths)
     persist_entity_accounts(bound, runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound

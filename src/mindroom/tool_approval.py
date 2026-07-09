@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from mindroom.config.approval import ApprovalRuleConfig
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.matrix.cache.event_cache import ConversationEventCache
 
 __all__ = [
@@ -82,7 +82,7 @@ class ToolCallWorkflowOrigin:
 class ToolApprovalCall:
     """One tool call that may require a Matrix approval card."""
 
-    config: Config
+    config: RuntimeConfig
     runtime_paths: RuntimePaths
     tool_name: str
     arguments: dict[str, Any]
@@ -173,12 +173,12 @@ def _clear_script_cache() -> None:
         _SCRIPT_CACHE.clear()
 
 
-def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
+def _matching_tool_approval_rule(config: RuntimeConfig, tool_name: str) -> ApprovalRuleConfig | None:
     return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
 
 
 def tool_requires_approval_for_openai_compat(
-    config: Config,
+    config: RuntimeConfig,
     tool_name: str,
 ) -> bool:
     """Return whether one `/v1` tool must be hidden because approval may be required."""
@@ -192,7 +192,7 @@ def tool_requires_approval_for_openai_compat(
 
 
 def resolve_tool_approval_approver(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     requester_id: str | None,
 ) -> str | None:
@@ -209,7 +209,7 @@ def resolve_tool_approval_approver(
 
 
 async def evaluate_tool_approval(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     tool_name: str,
     arguments: dict[str, Any],

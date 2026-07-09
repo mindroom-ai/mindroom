@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
     from agno.session.agent import AgentSession
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.config.memory import MemoryAutoFlushConfig
     from mindroom.constants import RuntimePaths
 logger = get_logger(__name__)
@@ -88,7 +88,7 @@ def _session_key(agent_name: str, session_id: str, worker_key: str | None = None
 
 
 def _resolve_flush_scope(
-    config: Config,
+    config: RuntimeConfig,
     agent_name: str,
     execution_identity: ToolExecutionIdentity | None,
 ) -> tuple[str | None, SerializedToolExecutionIdentity | None]:
@@ -128,7 +128,7 @@ def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
 
 
 def _stale_private_session_entry(
-    config: Config,
+    config: RuntimeConfig,
     agent_name: str,
     entry: _FlushSessionEntry,
 ) -> bool:
@@ -186,12 +186,12 @@ def _notify_workers() -> None:
         wake_event.set()
 
 
-def auto_flush_enabled(config: Config) -> bool:
+def auto_flush_enabled(config: RuntimeConfig) -> bool:
     """Return whether file-memory auto-flush is enabled."""
     return config.memory.auto_flush.enabled and config.uses_file_memory()
 
 
-def _agent_uses_file_memory(config: Config, agent_name: str) -> bool:
+def _agent_uses_file_memory(config: RuntimeConfig, agent_name: str) -> bool:
     if agent_name not in config.agents:
         return False
     return config.resolve_entity(agent_name).memory_backend == "file"
@@ -199,7 +199,7 @@ def _agent_uses_file_memory(config: Config, agent_name: str) -> bool:
 
 def mark_auto_flush_dirty_session(
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     *,
     agent_name: str,
     session_id: str,
@@ -245,7 +245,7 @@ def mark_auto_flush_dirty_session(
 
 def reprioritize_auto_flush_sessions(
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     *,
     agent_name: str,
     active_session_id: str,
@@ -282,7 +282,7 @@ def reprioritize_auto_flush_sessions(
 
 
 def _load_agent_session(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     agent_name: str,
     session_id: str,
@@ -304,7 +304,7 @@ def _entry_priority_key(entry: _FlushSessionEntry, now: int) -> tuple[int, int]:
     return (priority_rank, entry.get("first_dirty_at", now))
 
 
-def _flush_batch_key(config: Config, agent_name: str, entry: _FlushSessionEntry) -> str:
+def _flush_batch_key(config: RuntimeConfig, agent_name: str, entry: _FlushSessionEntry) -> str:
     agent_config = config.agents.get(agent_name)
     worker_key = entry.get("worker_key")
     if agent_config is not None and agent_config.private is not None and isinstance(worker_key, str):
@@ -388,7 +388,7 @@ async def _build_existing_memory_context(
     *,
     agent_name: str,
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     preserve_resolved_storage_path: bool = False,
@@ -427,7 +427,7 @@ async def _build_existing_memory_context(
 
 async def _extract_memory_summary(
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     storage_path: Path,
     agent_name: str,
@@ -491,7 +491,7 @@ class MemoryAutoFlushWorker:
 
     storage_path: Path
     runtime_paths: RuntimePaths
-    config_provider: Callable[[], Config | None]
+    config_provider: Callable[[], RuntimeConfig | None]
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
 
@@ -518,7 +518,7 @@ class MemoryAutoFlushWorker:
         finally:
             _WAKE_EVENTS.discard(self._wake_event)
 
-    async def _run_cycle(self, config: Config) -> None:  # noqa: C901, PLR0912, PLR0915
+    async def _run_cycle(self, config: RuntimeConfig) -> None:  # noqa: C901, PLR0912, PLR0915
         now = _now_ts()
         settings = config.memory.auto_flush
 
@@ -628,7 +628,7 @@ class MemoryAutoFlushWorker:
         for key in selected_keys:
             await self._process_session_key(config, key)
 
-    async def _process_session_key(self, config: Config, key: str) -> None:  # noqa: PLR0915
+    async def _process_session_key(self, config: RuntimeConfig, key: str) -> None:  # noqa: PLR0915
         now = _now_ts()
         settings = config.memory.auto_flush
         with _STATE_LOCK:
@@ -740,7 +740,7 @@ class MemoryAutoFlushWorker:
 
     async def _flush_session(
         self,
-        config: Config,
+        config: RuntimeConfig,
         *,
         agent_name: str,
         session_id: str,

@@ -22,7 +22,7 @@ from mindroom.path_globs import matches_root_glob
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
 
 _GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS = 5.0
 _GLOB_CHARS = frozenset("*?[")
@@ -134,7 +134,7 @@ def _is_hidden_relative_path(relative_path: Path) -> bool:
     return any(part.startswith(".") for part in relative_path.parts)
 
 
-def _include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
+def _include_knowledge_relative_path(config: RuntimeConfig, base_id: str, relative_path: str) -> bool:
     """Return whether a relative path is managed by the base path filters."""
     path_obj = Path(relative_path)
     if path_obj.is_absolute() or ".." in path_obj.parts:
@@ -162,7 +162,7 @@ def _include_knowledge_relative_path(config: Config, base_id: str, relative_path
     return git_included and not git_excluded
 
 
-def include_semantic_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
+def include_semantic_knowledge_relative_path(config: RuntimeConfig, base_id: str, relative_path: str) -> bool:
     """Return whether a relative path is semantically indexable for one base."""
     if not _include_knowledge_relative_path(config, base_id, relative_path):
         return False
@@ -179,7 +179,7 @@ def include_semantic_knowledge_relative_path(config: Config, base_id: str, relat
     return suffix not in base_config.exclude_extensions
 
 
-def include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
+def include_knowledge_relative_path(config: RuntimeConfig, base_id: str, relative_path: str) -> bool:
     """Return whether a relative path belongs to the active source set for one base."""
     if config.get_knowledge_base_config(base_id).mode == "files":
         return _include_knowledge_relative_path(config, base_id, relative_path)
@@ -244,7 +244,7 @@ def _resolve_safe_file(root: Path, candidate: Path) -> Path | None:
     return resolved
 
 
-def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
+def list_knowledge_files(config: RuntimeConfig, base_id: str, knowledge_root: Path) -> list[Path]:
     """List managed files without constructing a knowledge manager."""
     root = knowledge_root.resolve()
     if not root.is_dir():
@@ -264,7 +264,7 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
 
 
 def knowledge_files_from_relative_paths(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     knowledge_root: Path,
     relative_paths: Iterable[str],
@@ -316,7 +316,7 @@ def git_checkout_present(root: Path, *, timeout_seconds: float | None = None) ->
 
 
 def git_tracked_relative_paths_from_checkout(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     knowledge_root: Path,
     *,
@@ -358,7 +358,7 @@ def git_tracked_relative_paths_from_checkout(
 
 
 def list_git_tracked_knowledge_files(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     knowledge_root: Path,
     *,

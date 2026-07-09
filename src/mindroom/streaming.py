@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.message_target import MessageTarget
@@ -342,7 +342,7 @@ class _PreparedStreamingDelivery:
 class _StreamingDeliverySnapshot:
     """Immutable state needed to format one outbound streaming payload."""
 
-    config: Config
+    config: RuntimeConfig
     runtime_paths: RuntimePaths
     accumulated_text: str
     event_id: str | None
@@ -413,7 +413,7 @@ class StreamingResponse:
     """Manages a streaming response with incremental message updates."""
 
     target: MessageTarget
-    config: Config
+    config: RuntimeConfig
     runtime_paths: RuntimePaths
     room_id: str = field(init=False)
     reply_to_event_id: str | None = field(init=False)
@@ -1698,7 +1698,7 @@ async def _consume_stream_with_progress_supervision(
 async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     client: nio.AsyncClient,
     target: MessageTarget,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     response_stream: AsyncIterator[StreamInputChunk],
     *,

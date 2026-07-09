@@ -318,7 +318,7 @@ class TestVoiceHandler:
         )
 
         client = AsyncMock()
-        domain = config.get_domain(runtime_paths_for(config))
+        domain = config.get_domain()
         room = _matrix_room(
             "!voice:localhost",
             members=(

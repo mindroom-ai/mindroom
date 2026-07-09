@@ -38,7 +38,7 @@ import mindroom.bot  # noqa: F401
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config, RuntimeConfig, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
@@ -882,12 +882,12 @@ def orchestrator_runtime_paths(
     )
 
 
-def load_config_yaml(config_path: Path) -> Config:
+def load_config_yaml(config_path: Path) -> RuntimeConfig:
     """Load a config YAML file through the production runtime-aware loader."""
     return load_config(resolve_runtime_paths(config_path=Path(config_path).expanduser().resolve()))
 
 
-def write_config_yaml(config: Config, config_path: Path) -> None:
+def write_config_yaml(config: Config | RuntimeConfig, config_path: Path) -> None:
     """Write a test config using the authored YAML representation."""
     path = Path(config_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -905,11 +905,11 @@ def write_config_yaml(config: Config, config_path: Path) -> None:
 
 
 def bind_runtime_paths(
-    config: Config,
+    config: Config | RuntimeConfig,
     runtime_paths: RuntimePaths,
-) -> Config:
+) -> RuntimeConfig:
     """Return a runtime-bound copy of a test config."""
-    bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
+    bound = RuntimeConfig.from_authored(Config.model_validate(config.authored_model_dump()), runtime_paths)
     _persist_bound_entity_accounts(bound, runtime_paths)
     authored_coalescing = config.defaults.coalescing
     if "debounce_ms" not in authored_coalescing.model_fields_set:
@@ -918,7 +918,7 @@ def bind_runtime_paths(
     return bound
 
 
-def _persist_bound_entity_accounts(config: Config, runtime_paths: RuntimePaths) -> None:
+def _persist_bound_entity_accounts(config: RuntimeConfig, runtime_paths: RuntimePaths) -> None:
     """Prepare managed Matrix accounts for tests that bind runtime config."""
     persist_entity_accounts(config, runtime_paths)
 
@@ -931,8 +931,10 @@ def bind_mock_config_cache(mock_config: MagicMock, runtime_root: Path) -> Path:
     return cache_path
 
 
-def runtime_paths_for(config: Config) -> RuntimePaths:
+def runtime_paths_for(config: Config | RuntimeConfig) -> RuntimePaths:
     """Return the explicit runtime context previously bound to a test config."""
+    if isinstance(config, RuntimeConfig):
+        return config.runtime_paths
     runtime_paths = _TEST_RUNTIME_PATHS_BY_CONFIG_ID.get(id(config))
     if runtime_paths is None:
         msg = "Test config is missing bound RuntimePaths"
@@ -949,7 +951,7 @@ def create_mock_room(
     room = MagicMock()
     room.room_id = room_id
     if agents:
-        domain = config.get_domain(runtime_paths_for(config)) if config is not None else "localhost"
+        domain = config.get_domain() if config is not None else "localhost"
         room.users = {f"@mindroom_{agent}:{domain}": None for agent in agents}
     else:
         room.users = {}

@@ -17,7 +17,6 @@ from mindroom.agents import (
     get_agent_toolkit_names,
 )
 from mindroom.claude_prompt_cache import _DEFERRED_TOOL_NAMES_ATTR
-from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
@@ -30,7 +29,11 @@ from mindroom.tool_system.dynamic_toolkits import (
     save_loaded_tools_for_session,
     visible_tool_surface,
 )
+from tests.config_test_utils import runtime_config_from_data
 from tests.identity_helpers import persist_entity_accounts
+
+if TYPE_CHECKING:
+    from mindroom.config.main import Config
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -77,7 +80,7 @@ def _clear_loaded_tools_state() -> Generator[None, None, None]:
 
 def _validated_config(tmp_path: Path, raw: dict[str, object]) -> Config:
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(raw, runtime_paths)
+    config = runtime_config_from_data(raw, runtime_paths)
     persist_entity_accounts(config, runtime_paths)
     return config
 

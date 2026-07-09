@@ -9,13 +9,13 @@ from mindroom.history.types import CompactionAvailabilityReason, CompactionDecis
 from mindroom.token_budget import compute_compaction_input_budget
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.config.models import CompactionConfig
 
 
 def resolve_history_execution_plan(
     *,
-    config: Config,
+    config: RuntimeConfig,
     compaction_config: CompactionConfig,
     has_authored_compaction_config: bool,
     active_model_name: str,
@@ -257,7 +257,7 @@ def _normalize_compaction_budget_tokens(tokens: int, context_window: int | None)
 
 def _resolve_compaction_runtime_settings(
     *,
-    config: Config,
+    config: RuntimeConfig,
     compaction_config: CompactionConfig,
     active_model_name: str,
     active_context_window: int | None,

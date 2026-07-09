@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     import httpx
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.thread_export import ThreadExportStats
 
@@ -143,7 +143,7 @@ def run(
     )
 
 
-def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
+def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> RuntimeConfig:
     """Load the active config file or exit with friendly validation errors."""
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
     from mindroom.constants import ensure_writable_config_path  # noqa: PLC0415

@@ -23,7 +23,7 @@ from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
@@ -543,7 +543,7 @@ def build_threaded_edit_content(
     *,
     new_text: str,
     thread_id: str | None,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     tool_trace: list[Any] | None = None,
     extra_content: dict[str, Any] | None = None,

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.knowledge import KnowledgeBaseMode
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
 
 _INDEXING_MODES: set[str] = {"semantic", "files"}
 
@@ -219,7 +219,12 @@ def _filter_settings_key(values: Iterable[str]) -> str:
     return str(tuple(sorted(values)))
 
 
-def indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> IndexingSettings:
+def indexing_settings_key(
+    config: RuntimeConfig,
+    storage_path: Path,
+    base_id: str,
+    knowledge_path: Path,
+) -> IndexingSettings:
     """Derive the indexing-compatibility settings for one knowledge base binding."""
     base_config = config.get_knowledge_base_config(base_id)
     git_config = base_config.git

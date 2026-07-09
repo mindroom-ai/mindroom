@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from fastapi import Request
     from fastapi.responses import JSONResponse
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.tool_system.worker_routing import WorkerScope
 
 AUTO_MODEL_NAME = "auto"
@@ -208,7 +208,7 @@ def derive_session_id(
 # ---------------------------------------------------------------------------
 
 
-def openai_compatible_agent_names(config: Config) -> list[str]:
+def openai_compatible_agent_names(config: RuntimeConfig) -> list[str]:
     """Return the configured agents that can be exposed as /v1 models."""
     delegation_closures: dict[str, frozenset[str]] = {}
     return [
@@ -219,7 +219,7 @@ def openai_compatible_agent_names(config: Config) -> list[str]:
     ]
 
 
-def openai_incompatible_agents(agent_names: list[str], config: Config) -> list[str]:
+def openai_incompatible_agents(agent_names: list[str], config: RuntimeConfig) -> list[str]:
     """Return the requested agents whose delegation closure is unsupported on /v1."""
     delegation_closures: dict[str, frozenset[str]] = {}
     return [
@@ -232,7 +232,7 @@ def openai_incompatible_agents(agent_names: list[str], config: Config) -> list[s
 
 def _openai_incompatible_agent_closure(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     *,
     delegation_closures: dict[str, frozenset[str]],
 ) -> frozenset[str]:
@@ -248,7 +248,7 @@ def _openai_incompatible_agent_closure(
     )
 
 
-def _unsupported_worker_scope_error(agent_names: list[str], config: Config) -> JSONResponse:
+def _unsupported_worker_scope_error(agent_names: list[str], config: RuntimeConfig) -> JSONResponse:
     invalid_agents = ", ".join(agent_names)
     delegation_closures: dict[str, frozenset[str]] = {}
     invalid_scope_agents = {
@@ -289,7 +289,7 @@ def _unsupported_worker_scope_error(agent_names: list[str], config: Config) -> J
     )
 
 
-def _validate_team_model_request(team_name: str, config: Config) -> JSONResponse | None:
+def _validate_team_model_request(team_name: str, config: RuntimeConfig) -> JSONResponse | None:
     if not config.teams or team_name not in config.teams:
         return error_response(
             404,
@@ -303,7 +303,7 @@ def _validate_team_model_request(team_name: str, config: Config) -> JSONResponse
     return None
 
 
-def _validate_agent_model_request(agent_name: str, config: Config) -> JSONResponse | None:
+def _validate_agent_model_request(agent_name: str, config: RuntimeConfig) -> JSONResponse | None:
     if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME or agent_name in RESERVED_MODEL_NAMES:
         return error_response(
             404,
@@ -319,7 +319,7 @@ def _validate_agent_model_request(agent_name: str, config: Config) -> JSONRespon
 
 def validate_chat_request(
     req: ChatCompletionRequest,
-    config: Config,
+    config: RuntimeConfig,
 ) -> JSONResponse | None:
     """Validate a chat completion request. Returns error response or None if valid."""
     if not req.messages:

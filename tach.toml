@@ -1328,6 +1328,14 @@ path = "mindroom.config.entity_view"
 depends_on = []
 
 [[modules]]
+path = "mindroom.config.errors"
+depends_on = []
+
+[[modules]]
+path = "mindroom.config.validation"
+depends_on = []
+
+[[modules]]
 path = "mindroom.config.yaml_includes"
 depends_on = []
 
@@ -1336,25 +1344,45 @@ path = "mindroom.config.main"
 depends_on = [
     "mindroom.agent_policy",
     "mindroom.config.agent",
+    "mindroom.config.approval",
     "mindroom.config.auth",
-    "mindroom.config.entity_view",
+    "mindroom.config.errors",
+    "mindroom.config.external_trigger_policy",
     "mindroom.config.knowledge",
     "mindroom.config.matrix",
     "mindroom.config.memory",
     "mindroom.config.models",
     "mindroom.config.plugin",
+    "mindroom.config.runtime",
+    "mindroom.config.tool_entries",
+    "mindroom.config.validation",
     "mindroom.config.voice",
     "mindroom.config.yaml_includes",
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.mcp.config",
+    "mindroom.prompt_templates",
+    "mindroom.prompts",
+]
+
+[[modules]]
+path = "mindroom.config.runtime"
+depends_on = [
+    "mindroom.agent_policy",
+    "mindroom.config.entity_view",
+    "mindroom.config.errors",
+    "mindroom.config.knowledge",
+    "mindroom.config.models",
+    "mindroom.config.runtime_overlays",
+    "mindroom.config.validation",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.git_urls",
     "mindroom.history.types",
     "mindroom.logging_config",
     "mindroom.matrix_identifiers",
-    "mindroom.mcp.config",
-    "mindroom.prompt_templates",
-    "mindroom.prompts",
     "mindroom.room_thread_modes",
+    "mindroom.runtime_env_policy",
     "mindroom.thread_models",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",

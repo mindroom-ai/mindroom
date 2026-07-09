@@ -112,7 +112,7 @@ if TYPE_CHECKING:
 
     from mindroom.api.openai_request_parsing import ChatCompletionRequest
     from mindroom.api.openai_streaming_protocol import ToolStreamState
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
@@ -200,7 +200,7 @@ def _load_config(
     request: Request,
     *,
     runtime_paths: RuntimePaths | None = None,
-) -> tuple[Config, RuntimePaths]:
+) -> tuple[RuntimeConfig, RuntimePaths]:
     """Load the current runtime config and return it with its path."""
     config, committed_runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     if runtime_paths is not None and committed_runtime_paths != runtime_paths:
@@ -309,7 +309,7 @@ def _parse_chat_request(
     body: bytes,
     *,
     runtime_paths: RuntimePaths | None = None,
-) -> tuple[ChatCompletionRequest, Config, RuntimePaths, str, list[ResolvedVisibleMessage] | None] | JSONResponse:
+) -> tuple[ChatCompletionRequest, RuntimeConfig, RuntimePaths, str, list[ResolvedVisibleMessage] | None] | JSONResponse:
     """Parse and validate a chat completion request body.
 
     Returns (request, config, runtime_paths, prompt, thread_history) on success, or a JSONResponse error.
@@ -332,7 +332,7 @@ def _parse_chat_request(
 
 async def _resolve_auto_route(
     prompt: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
 ) -> str | JSONResponse:
@@ -590,7 +590,7 @@ async def _non_stream_completion(
     agent_name: str,
     prompt: str,
     session_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     _user: str | None,
@@ -640,7 +640,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
     agent_name: str,
     prompt: str,
     session_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     _user: str | None,
@@ -759,7 +759,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
 
 def _build_team(
     team_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     scope_context: ScopeSessionContext | None = None,
@@ -827,7 +827,7 @@ async def _prepare_openai_team_prompt(
     agents: list[Agent],
     team: Team,
     prompt: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -868,7 +868,7 @@ async def _non_stream_team_completion(
     model_id: str,
     prompt: str,
     session_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None = None,
@@ -992,7 +992,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     model_id: str,
     prompt: str,
     session_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None = None,

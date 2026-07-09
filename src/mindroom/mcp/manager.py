@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from agno.tools.function import ToolResult
     from mcp.client.session import MessageHandlerFnT
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
@@ -94,7 +94,7 @@ class MCPServerManager:
         self._scoped_states: dict[_MCPSessionKey, MCPServerState] = {}
         self._catalog_validation_lock = asyncio.Lock()
         self._on_catalog_change = on_catalog_change
-        self._config: Config | None = None
+        self._config: RuntimeConfig | None = None
         self._shutdown = False
 
     def has_server(self, server_id: str) -> bool:
@@ -123,7 +123,7 @@ class MCPServerManager:
         msg = f"MCP server '{server_id}' is not connected"
         raise MCPConnectionError(server_id, msg)
 
-    async def sync_servers(self, config: Config) -> set[str]:
+    async def sync_servers(self, config: RuntimeConfig) -> set[str]:
         """Reconcile live server sessions against the active config."""
         self._config = config
         changed_server_ids: set[str] = set()
@@ -1033,7 +1033,7 @@ class MCPServerManager:
         loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None,
     ) -> tuple[EffectiveToolConfig, ...]:
         """Return provider-visible tool configs for one agent surface."""
-        config = cast("Config", self._config)
+        config = cast("RuntimeConfig", self._config)
         return visible_tool_surface(
             agent_name=agent_name,
             config=config,
@@ -1065,7 +1065,7 @@ class MCPServerManager:
         return local_tool_configs, {server_id: tuple(configs) for server_id, configs in mcp_tool_configs.items()}
 
     @staticmethod
-    def _metadata_only_tool_function_names(tool_name: str, *, config: Config, agent_name: str) -> set[str]:
+    def _metadata_only_tool_function_names(tool_name: str, *, config: RuntimeConfig, agent_name: str) -> set[str]:
         """Return provider-visible names for context-built tools declared in metadata."""
         metadata = TOOL_METADATA.get(tool_name)
         if metadata is None or metadata.factory is not None:
@@ -1078,7 +1078,7 @@ class MCPServerManager:
         self,
         tool_names: set[str],
         *,
-        config: Config,
+        config: RuntimeConfig,
         agent_name: str,
     ) -> set[str]:
         """Return provider-visible function names for metadata-only configured tools."""

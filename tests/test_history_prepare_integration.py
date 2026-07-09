@@ -801,7 +801,7 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path, num_history_runs=10)
-    config.timezone = "America/Los_Angeles"
+    config = config.model_copy(update={"timezone": "America/Los_Angeles"})
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     recording_model = RecordingModel(id="recording-model", provider="fake")
     recorded_requests: list[list[dict[str, str]]] = []

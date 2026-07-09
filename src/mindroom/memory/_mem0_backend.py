@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -58,7 +58,7 @@ def _scope_filter(scope_user_id: str) -> dict[str, object]:
 def _primary_mem0_storage_path(
     agent_name: str,
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> Path:
@@ -75,7 +75,7 @@ def _primary_mem0_storage_path(
 @timed("system_prompt_assembly.memory_search.mem0.create_memory_instance")
 async def _create_mem0_memory_instance(
     resolved_storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     create_memory: _MemoryFactory,
 ) -> ScopedMemoryCrud:
     return await create_memory(resolved_storage_path, config)
@@ -111,7 +111,7 @@ async def _get_scoped_memory_by_id(
     memory: ScopedMemoryCrud,
     memory_id: str,
     caller_context: str | list[str],
-    config: Config,
+    config: RuntimeConfig,
 ) -> MemoryResult | None:
     result = await memory.get(memory_id)
     if not isinstance(result, dict):
@@ -187,7 +187,7 @@ async def _find_mem0_anchor_memory_result(
     memory_id: str,
     caller_context: str | list[str],
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     create_memory: _MemoryFactory,
@@ -212,7 +212,7 @@ async def _mem0_mutation_target_ids(
     scope_user_id: str,
     caller_context: str | list[str],
     anchor_result: MemoryResult,
-    config: Config,
+    config: RuntimeConfig,
 ) -> list[str]:
     direct_match = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
     if direct_match is not None and isinstance(direct_match.get("id"), str):
@@ -231,7 +231,7 @@ async def _mutate_mem0_memory_targets(
     operation: str,
     caller_context: str | list[str],
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     anchor_result: MemoryResult,
     create_memory: _MemoryFactory,
@@ -292,7 +292,7 @@ class Mem0MemoryBackend:
         content: str,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         metadata: dict | None = None,
         execution_identity: ToolExecutionIdentity | None = None,
@@ -322,7 +322,7 @@ class Mem0MemoryBackend:
         query: str,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
@@ -358,7 +358,7 @@ class Mem0MemoryBackend:
         self,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         limit: int,
         preserve_resolved_storage_path: bool = False,
@@ -381,7 +381,7 @@ class Mem0MemoryBackend:
         memory_id: str,
         caller_context: str | list[str],
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryResult | None:
@@ -402,7 +402,7 @@ class Mem0MemoryBackend:
         content: str,
         caller_context: str | list[str],
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
@@ -442,7 +442,7 @@ class Mem0MemoryBackend:
         memory_id: str,
         caller_context: str | list[str],
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
@@ -483,7 +483,7 @@ class Mem0MemoryBackend:
         agent_name: str | list[str],
         storage_path: Path,
         session_id: str,
-        config: Config,
+        config: RuntimeConfig,
         *,
         thread_history: Sequence[ResolvedVisibleMessage] | None = None,
         user_id: str | None = None,
@@ -552,7 +552,7 @@ class Mem0MemoryBackend:
         self,
         agent_name: str,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> str:

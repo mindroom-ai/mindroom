@@ -17,7 +17,7 @@ from mindroom.matrix.identity import MatrixID
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -35,7 +35,7 @@ class _RoutingSuggestion(BaseModel):
 async def suggest_responder(
     message: str,
     available_entity_names: list[str],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     thread_context: Sequence[ResolvedVisibleMessage] | None = None,
 ) -> str | None:
@@ -125,7 +125,7 @@ async def suggest_responder(
 async def suggest_responder_for_message(
     message: str,
     available_entities: list[MatrixID],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     thread_context: Sequence[ResolvedVisibleMessage] | None = None,
 ) -> str | None:

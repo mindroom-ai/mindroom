@@ -46,7 +46,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
         ),
         orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
     )
-    domain = config.get_domain(runtime_paths_for(config))
+    domain = config.get_domain()
 
     # Create GeneralAgent bot
     general_bot = AgentBot(
@@ -136,7 +136,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
         ),
         orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
     )
-    domain = config.get_domain(runtime_paths_for(config))
+    domain = config.get_domain()
 
     # Create GeneralAgent bot
     general_bot = AgentBot(

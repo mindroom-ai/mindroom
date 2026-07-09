@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     from agno.knowledge.reader.base import Reader
 
     from mindroom.config.knowledge import KnowledgeGitConfig
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
 
 logger = get_logger(__name__)
 
@@ -134,7 +134,7 @@ def _collection_name(base_id: str, knowledge_path: Path) -> str:
     return f"{_COLLECTION_PREFIX}_{storage_key_for_base(base_id, knowledge_path)}"
 
 
-def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
+def _semantic_indexing_enabled(config: RuntimeConfig, base_id: str) -> bool:
     return config.get_knowledge_base_config(base_id).mode == "semantic"
 
 
@@ -265,7 +265,7 @@ def _file_content_digest(file_path: Path) -> str:
 
 
 def knowledge_source_signature(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     knowledge_root: Path,
     *,
@@ -322,7 +322,7 @@ class KnowledgeManager:
     """Manage indexing for one knowledge base folder."""
 
     base_id: str
-    config: Config
+    config: RuntimeConfig
     runtime_paths: RuntimePaths
     storage_path: Path | None = None
     knowledge_path: Path | None = None
@@ -382,7 +382,7 @@ class KnowledgeManager:
 
     def _set_settings(
         self,
-        config: Config,
+        config: RuntimeConfig,
         runtime_paths: RuntimePaths,
         storage_path: Path,
         knowledge_path: Path,

@@ -3066,7 +3066,6 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
         ),
         patch("mindroom.response_runner.reprioritize_auto_flush_sessions"),
         patch("mindroom.response_runner.mark_auto_flush_dirty_session"),
-        patch.object(Config, "_agent_memory_backend", return_value="none"),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
         ),
@@ -3526,7 +3525,6 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         ),
         patch("mindroom.response_runner.reprioritize_auto_flush_sessions"),
         patch("mindroom.response_runner.mark_auto_flush_dirty_session"),
-        patch.object(Config, "_agent_memory_backend", return_value="none"),
     ):
         resolution = await bot._response_runner.generate_response(
             ResponseRequest(

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.config.models import ModelConfig
 from mindroom.egress.policy import (
     EgressGrantSubject,
@@ -25,6 +25,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_target,
 )
 from mindroom.tools import approved_egress as approved_egress_module
+from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -221,7 +222,10 @@ def test_resolve_grant_subject_requires_resolvable_user_agent_key(
         )
 
 
-def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tool_and_worker_provisioning_resolve_the_same_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """The grant subject the tool POSTs equals the worker key the provisioning path uses.
 
     This is the cross-layer egress boundary: a worker_key grant created via the
@@ -252,9 +256,12 @@ def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytes
         captured.update(payload)
         return {"expires_at": 123}
 
-    real_config = Config(
-        agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="user_agent")},
-        models={"default": ModelConfig(provider="openai", id="test-model")},
+    real_config = RuntimeConfig.from_authored(
+        Config(
+            agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="user_agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        test_runtime_paths(tmp_path),
     )
 
     class Context:

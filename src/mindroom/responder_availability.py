@@ -10,7 +10,7 @@ from mindroom.team_exact_members import resolve_live_shared_agent_names
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
     from mindroom.runtime_protocols import OrchestratorRuntime, SupportsRunningState
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 def materializable_agent_names_for_orchestrator(
     orchestrator: OrchestratorRuntime | None,
-    config: Config,
+    config: RuntimeConfig,
 ) -> set[str] | None:
     """Return concrete agents that can currently produce a response when known."""
     if orchestrator is None:
@@ -28,7 +28,7 @@ def materializable_agent_names_for_orchestrator(
 
 def live_responder_entity_names(
     orchestrator: OrchestratorRuntime | None,
-    config: Config,
+    config: RuntimeConfig,
 ) -> set[str] | None:
     """Return running agent/team responder bot names when runtime state is known."""
     if orchestrator is None:
@@ -47,7 +47,7 @@ def live_responder_entity_names(
 
 def _configured_team_is_materializable(
     team_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     materializable_agent_names: set[str],
@@ -76,7 +76,7 @@ def _configured_team_is_materializable(
 
 def filter_materializable_responders(
     responder_ids: list[MatrixID],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     materializable_agent_names: set[str] | None,

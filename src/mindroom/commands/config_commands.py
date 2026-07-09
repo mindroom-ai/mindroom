@@ -13,6 +13,7 @@ from mindroom.api import config_lifecycle
 from mindroom.config.main import (
     Config,
     ConfigRuntimeValidationError,
+    RuntimeConfig,
     format_invalid_config_message,
     load_config_or_user_error,
 )
@@ -199,7 +200,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     path = runtime_paths.config_path
     load_error_footer = _CONFIG_CHANGE_REJECTED_MESSAGE if operation == "set" else None
 
-    # Config loading and validation execute plugin modules and walk the
+    # RuntimeConfig loading and validation execute plugin modules and walk the
     # filesystem; keep them off the event loop (#1260).
     config, load_error = await asyncio.to_thread(
         load_config_or_user_error,
@@ -262,7 +263,8 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             _set_nested_value(test_config_dict, config_path_str, value)
 
             # Validate the modified config
-            await asyncio.to_thread(Config.validate_with_runtime, test_config_dict, runtime_paths)
+            authored = Config.model_validate(test_config_dict)
+            await asyncio.to_thread(RuntimeConfig.from_authored, authored, runtime_paths)
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
         except (ValidationError, ConfigRuntimeValidationError) as e:

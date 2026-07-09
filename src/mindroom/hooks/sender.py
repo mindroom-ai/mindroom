@@ -11,7 +11,7 @@ from mindroom.hooks.types import HookMessageSender  # noqa: TC001
 if TYPE_CHECKING:
     import nio
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -44,7 +44,7 @@ async def send_and_track_message(
 
 async def send_hook_message(
     client: nio.AsyncClient,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     room_id: str,
     body: str,
@@ -84,7 +84,7 @@ async def send_hook_message(
 
 def build_hook_message_sender(
     client: nio.AsyncClient,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     conversation_cache: ConversationCacheProtocol,

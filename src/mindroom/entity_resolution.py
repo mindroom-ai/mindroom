@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from mindroom.config.agent import AgentConfig, TeamConfig
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 _INTERNAL_USER_ENTITY_NAME = "user"
@@ -32,7 +32,7 @@ class DuplicateManagedEntityIdentityError(RuntimeError):
 
 
 def configured_bot_user_ids_for_room(
-    config: Config,
+    config: RuntimeConfig,
     room_id: str,
     runtime_paths: RuntimePaths,
     *,
@@ -57,7 +57,7 @@ def configured_bot_user_ids_for_room(
 
 
 def is_configured_room(
-    config: Config,
+    config: RuntimeConfig,
     room_id: str,
     runtime_paths: RuntimePaths,
     *,
@@ -69,7 +69,7 @@ def is_configured_room(
 
 
 def configured_routable_entity_names_for_room(
-    config: Config,
+    config: RuntimeConfig,
     room_id: str,
     runtime_paths: RuntimePaths,
     *,
@@ -146,7 +146,7 @@ def _add_room_alias_identifiers(
 
 
 def configured_routable_entity_ids_for_room(
-    config: Config,
+    config: RuntimeConfig,
     room_id: str,
     runtime_paths: RuntimePaths,
     *,
@@ -165,7 +165,7 @@ def configured_routable_entity_ids_for_room(
 
 def managed_entity_power_user_ids_for_room(
     room_key: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[str]:
     """Return managed bot Matrix IDs that should receive create-time room power."""
@@ -216,7 +216,7 @@ class EntityIdentityRegistry:
         return frozenset(matrix_id.full_id for matrix_id in self.current_ids.values())
 
 
-def entity_identity_registry(config: Config, runtime_paths: RuntimePaths) -> EntityIdentityRegistry:
+def entity_identity_registry(config: RuntimeConfig, runtime_paths: RuntimePaths) -> EntityIdentityRegistry:
     """Return current persisted Matrix identities for configured runtime entities."""
     current_ids = _persisted_entity_id_map(config, runtime_paths)
     _validate_unique_entity_ids(current_ids)
@@ -229,7 +229,7 @@ def current_entity_id(entity_name: str, runtime_paths: RuntimePaths) -> MatrixID
     return _persisted_entity_matrix_id(entity_name, _matrix_domain(runtime_paths), runtime_paths)
 
 
-def _persisted_entity_id_map(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
+def _persisted_entity_id_map(config: RuntimeConfig, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
     domain = _matrix_domain(runtime_paths)
     return {
         entity_name: _persisted_entity_matrix_id(entity_name, domain, runtime_paths)
@@ -264,7 +264,7 @@ def _validate_unique_entity_ids(current_ids: dict[str, MatrixID]) -> None:
 
 
 def _validate_internal_user_id_is_unique(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     current_ids: dict[str, MatrixID],
 ) -> None:
@@ -281,7 +281,7 @@ def _validate_internal_user_id_is_unique(
         raise DuplicateManagedEntityIdentityError(msg)
 
 
-def mindroom_user_id(config: Config, runtime_paths: RuntimePaths) -> str | None:
+def mindroom_user_id(config: RuntimeConfig, runtime_paths: RuntimePaths) -> str | None:
     """Return the configured internal user's full Matrix ID."""
     if config.mindroom_user is None:
         return None
@@ -293,7 +293,7 @@ def mindroom_user_id(config: Config, runtime_paths: RuntimePaths) -> str | None:
     )
 
 
-def current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+def current_internal_sender_ids(config: RuntimeConfig, runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return current runtime-owned Matrix IDs trusted as internal senders."""
     sender_ids = set(entity_identity_registry(config, runtime_paths).internal_sender_ids)
     if internal_user_id := mindroom_user_id(config, runtime_paths):
@@ -355,7 +355,7 @@ def router_agents_for_room(
 
 
 def effective_entity_model_name(
-    config: Config,
+    config: RuntimeConfig,
     entity_name: str,
     room_id: str | None,
     runtime_paths: RuntimePaths,

@@ -26,7 +26,7 @@ from mindroom.tool_system.worker_routing import agent_workspace_root_path
 if TYPE_CHECKING:
     from agno.skills.skill import Skill
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -53,7 +53,7 @@ class _MindroomSkillsLoader(SkillLoader):
     """Load skills via Agno with OpenClaw compatibility filtering."""
 
     roots: Sequence[Path]
-    config: Config
+    config: RuntimeConfig
     runtime_paths: RuntimePaths
     allowlist: Sequence[str] | None = None
     env_vars: Mapping[str, str] | None = None
@@ -155,7 +155,7 @@ class _MindroomSkills(Skills):
 
 def build_agent_skills(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     skill_roots: Sequence[Path] | None = None,
@@ -614,7 +614,7 @@ def _config_path_truthy(config_data: Mapping[str, Any], path: str) -> bool:
     return bool(current)
 
 
-def _collect_credential_keys(_config: Config, runtime_paths: RuntimePaths) -> set[str]:
+def _collect_credential_keys(_config: RuntimeConfig, runtime_paths: RuntimePaths) -> set[str]:
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     keys: set[str] = set()
     for service in credentials_manager.list_services():

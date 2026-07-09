@@ -745,11 +745,11 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
 
     room = _make_room(
         "@mindroom_router:example.com",
-        f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}",
+        f"@mindroom_assistant:{config.get_domain()}",
         "@alice:example.com",
     )
     event = _make_voice_event(
-        sender=f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}",
+        sender=f"@mindroom_assistant:{config.get_domain()}",
         event_id="$agent_audio_event",
         body="generated_audio.ogg",
         source={"content": {"body": "generated_audio.ogg", "msgtype": "m.audio"}},

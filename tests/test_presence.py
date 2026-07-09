@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,15 +11,34 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.config.models import ModelConfig
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.presence import (
     build_agent_status_message,
     is_user_online,
     set_presence_status,
     should_use_streaming,
 )
+from mindroom.tool_system.catalog import resolved_tool_validation_snapshot_for_runtime
+from mindroom.tool_system.metadata import ToolValidationInfo
+
+
+def _runtime_config(config: Config) -> RuntimeConfig:
+    """Materialize status-test configs, including intentionally synthetic tool names."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=Path(tempfile.gettempdir()) / "mindroom-presence-tests/config.yaml",
+        process_env={},
+    )
+    tool_validation_snapshot = dict(resolved_tool_validation_snapshot_for_runtime(runtime_paths, Config()))
+    entries = [*config.defaults.tools, *(entry for agent in config.agents.values() for entry in agent.tools)]
+    for entry in entries:
+        tool_validation_snapshot.setdefault(entry.name, ToolValidationInfo(name=entry.name))
+    return RuntimeConfig.from_authored(
+        config,
+        runtime_paths,
+        tool_validation_snapshot=tool_validation_snapshot,
+    )
 
 
 class TestSetPresenceStatus:
@@ -55,6 +76,7 @@ class TestBuildAgentStatusMessage:
             router={"model": "gpt-4"},
             models={"gpt-4": ModelConfig(provider="openai", id="gpt-4-turbo")},
         )
+        config = _runtime_config(config)
 
         status = build_agent_status_message(ROUTER_AGENT_NAME, config)
 
@@ -75,6 +97,7 @@ class TestBuildAgentStatusMessage:
             models={"claude": ModelConfig(provider="anthropic", id="claude-opus-4-8")},
             defaults={"tools": []},
         )
+        config = _runtime_config(config)
 
         status = build_agent_status_message("researcher", config)
 
@@ -95,6 +118,7 @@ class TestBuildAgentStatusMessage:
             models={"default": ModelConfig(provider="ollama", id="llama3")},
             defaults={"tools": []},
         )
+        config = _runtime_config(config)
 
         status = build_agent_status_message("assistant", config)
 
@@ -123,6 +147,7 @@ class TestBuildAgentStatusMessage:
             },
             models={"gpt-4": ModelConfig(provider="openai", id="gpt-4")},
         )
+        config = _runtime_config(config)
 
         status = build_agent_status_message("research_team", config)
 
@@ -150,6 +175,7 @@ class TestBuildAgentStatusMessage:
             },
             defaults={"tools": []},
         )
+        config = _runtime_config(config)
 
         status = build_agent_status_message("agent", config)
 
@@ -168,6 +194,7 @@ class TestBuildAgentStatusMessage:
                 ),
             },
         )
+        config = _runtime_config(config)
 
         status = build_agent_status_message("agent", config)
 
@@ -187,6 +214,7 @@ class TestBuildAgentStatusMessage:
             models={"default": ModelConfig(provider="ollama", id="llama3")},
             defaults={"tools": ["scheduler", "calculator"]},
         )
+        config = _runtime_config(config)
 
         status = build_agent_status_message("assistant", config)
 
@@ -207,6 +235,7 @@ class TestBuildAgentStatusMessage:
             models={"default": ModelConfig(provider="ollama", id="llama3")},
             defaults={"tools": ["scheduler", "calculator"]},
         )
+        config = _runtime_config(config)
 
         status = build_agent_status_message("assistant", config)
 

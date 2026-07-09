@@ -26,7 +26,7 @@ from mindroom.tool_approval import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache
 
@@ -52,7 +52,7 @@ class _ApprovalTransportBot(Protocol):
         ...
 
 
-def _approval_startup_lookback_hours(config: Config) -> int:
+def _approval_startup_lookback_hours(config: RuntimeConfig) -> int:
     """Return the cache lookback window needed to clean up live-only approval cards."""
     timeout_days = config.tool_approval.timeout_days
     for rule in config.tool_approval.rules:
@@ -72,7 +72,7 @@ class ApprovalMatrixTransport:
 
     runtime_paths: RuntimePaths
     bot_provider: Callable[[str], _ApprovalTransportBot | None]
-    config_provider: Callable[[], Config | None]
+    config_provider: Callable[[], RuntimeConfig | None]
     event_cache_provider: Callable[[], ConversationEventCache]
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _cache_write_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)

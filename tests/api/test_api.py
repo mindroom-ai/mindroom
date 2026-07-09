@@ -28,7 +28,7 @@ from mindroom.api import sandbox_runner as sandbox_runner_api
 from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
@@ -37,6 +37,7 @@ from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_r
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers.models import WorkerHandle
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
+from tests.config_test_utils import runtime_config_from_data
 
 TEST_WORKER_AUTH = "token"
 
@@ -86,14 +87,15 @@ def _config_with_worker_scope(
     *,
     authorization: dict[str, Any] | None = None,
     worker_grantable_credentials: list[str] | None = None,
-) -> Config:
+    runtime_paths: constants.RuntimePaths | None = None,
+) -> RuntimeConfig:
     payload: dict[str, Any] = {
         "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
         "agents": {
             "general": {
                 "display_name": "General",
                 "role": "test",
-                "tools": ["homeassistant"],
+                "tools": ["calculator"],
                 "instructions": ["hi"],
                 "rooms": ["lobby"],
             },
@@ -107,7 +109,7 @@ def _config_with_worker_scope(
         payload["authorization"] = authorization
     config = Config.model_validate(payload)
     config.agents["general"].worker_scope = worker_scope
-    return config
+    return RuntimeConfig.from_authored(config, runtime_paths or main._app_runtime_paths(main.app))
 
 
 def _authored_config_payload(agent_name: str) -> dict[str, Any]:
@@ -128,7 +130,7 @@ def _validated_authored_payload(
     runtime_paths: constants.RuntimePaths,
     agent_name: str,
 ) -> dict[str, Any]:
-    return Config.validate_with_runtime(
+    return runtime_config_from_data(
         _authored_config_payload(agent_name),
         runtime_paths,
     ).authored_model_dump()
@@ -142,7 +144,7 @@ def _publish_committed_runtime_config(
     """Publish one committed config snapshot for request-bound API tests."""
     main.initialize_api_app(api_app, runtime_paths)
     context = main._app_context(api_app)
-    runtime_config = Config.validate_with_runtime(authored_payload, runtime_paths)
+    runtime_config = runtime_config_from_data(authored_payload, runtime_paths)
     context.config_data = runtime_config.authored_model_dump()
     context.runtime_config = runtime_config
     context.config_load_result = config_lifecycle.ConfigLoadResult(success=True)
@@ -173,7 +175,7 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
         config_path=tmp_path / "second.yaml",
         process_env={},
     )
-    runtime_config = Config.validate_with_runtime(_authored_config_payload("old"), first_runtime)
+    runtime_config = runtime_config_from_data(_authored_config_payload("old"), first_runtime)
     load_result = config_lifecycle.ConfigLoadResult(success=True)
     auth_state = cast("auth.ApiAuthState", object())
     snapshot = main.ApiSnapshot(
@@ -639,7 +641,13 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
 
     def _fake_load_result(
         runtime_paths: constants.RuntimePaths,
-    ) -> tuple[config_lifecycle.ConfigLoadResult, dict[str, Any] | None, Config | None, str | None]:
+    ) -> tuple[
+        config_lifecycle.ConfigLoadResult,
+        dict[str, Any] | None,
+        RuntimeConfig | None,
+        str | None,
+        frozenset[Path] | None,
+    ]:
         if runtime_paths == first_runtime:
             started.set()
             allow_finish.wait(timeout=1)
@@ -652,6 +660,7 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
                 None,
                 None,
                 "stale-old-source",
+                frozenset({first_runtime.config_path.resolve()}),
             )
         return original_load_result(runtime_paths)
 
@@ -1130,7 +1139,7 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(main, "get_primary_worker_manager", _fake_get_primary_worker_manager)
 
     runtime_paths = main._app_runtime_paths(main.app)
-    runtime_config = Config.validate_with_runtime({}, runtime_paths)
+    runtime_config = runtime_config_from_data({}, runtime_paths)
     assert (
         main._cleanup_workers_once(
             runtime_paths,
@@ -1168,7 +1177,7 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
     monkeypatch.setattr(main, "reconcile_drifted_worker_templates", _fake_reconcile)
 
     runtime_paths = main._app_runtime_paths(main.app)
-    runtime_config = Config.validate_with_runtime({}, runtime_paths)
+    runtime_config = runtime_config_from_data({}, runtime_paths)
     main._cleanup_workers_once(
         runtime_paths,
         runtime_config=runtime_config,
@@ -1990,7 +1999,7 @@ def test_get_tools_uses_one_runtime_snapshot(
     def _read_tools_runtime_config(_request: object) -> tuple[Config, constants.RuntimePaths]:
         main.initialize_api_app(main.app, second_runtime)
         config_lifecycle.load_config_into_app(second_runtime, main.app)
-        return _config_with_worker_scope("shared"), first_runtime
+        return _config_with_worker_scope("shared", runtime_paths=first_runtime), first_runtime
 
     def _resolve_tool_availability_context(
         _request: object,
@@ -3997,7 +4006,7 @@ def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None
         )
 
     assert response.status_code == 409
-    assert Config.validate_with_runtime(yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8")), runtime_b)
+    assert runtime_config_from_data(yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8")), runtime_b)
     assert yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8"))["agents"] == payload_b["agents"]
 
 
@@ -4129,7 +4138,7 @@ def test_protected_crud_write_rejects_runtime_swap_after_auth(tmp_path: Path) ->
         )
 
     assert response.status_code == 409
-    assert Config.validate_with_runtime(yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8")), runtime_b)
+    assert runtime_config_from_data(yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8")), runtime_b)
     assert yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8"))["agents"] == payload_b["agents"]
 
 

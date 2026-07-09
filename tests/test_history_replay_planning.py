@@ -40,6 +40,7 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
 )
 from mindroom.token_budget import estimate_text_tokens
+from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import (
     FakeModel,
     bind_runtime_paths,
@@ -267,7 +268,7 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
 
 def test_authored_empty_defaults_compaction_enables_destructive_compaction(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "agents": {
                 "test_agent": {
@@ -303,7 +304,7 @@ def test_authored_empty_defaults_compaction_enables_destructive_compaction(tmp_p
 
 def test_omitted_defaults_compaction_enables_destructive_compaction(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "agents": {
                 "test_agent": {
@@ -338,7 +339,7 @@ def test_omitted_defaults_compaction_enables_destructive_compaction(tmp_path: Pa
 
 def test_empty_agent_compaction_override_stays_disabled_with_disabled_defaults(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "agents": {
                 "test_agent": {
@@ -377,7 +378,7 @@ def test_empty_agent_compaction_override_stays_disabled_with_disabled_defaults(t
 
 def test_validate_compaction_model_references_does_not_emit_availability_warnings(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
-    with patch("mindroom.config.main.logger.warning") as mock_warning:
+    with patch("mindroom.config.runtime.logger.warning") as mock_warning:
         bind_runtime_paths(
             Config(
                 agents={
@@ -612,7 +613,6 @@ def test_resolve_runtime_model_uses_room_override_for_team(
     runtime_model = config.resolve_runtime_model(
         entity_name="team_123",
         room_id="!room:localhost",
-        runtime_paths=runtime_paths,
     )
 
     assert runtime_model.model_name == "large"
@@ -641,7 +641,6 @@ def test_resolve_runtime_model_uses_room_override_for_agent(
     runtime_model = config.resolve_runtime_model(
         entity_name="test_agent",
         room_id="!room:localhost",
-        runtime_paths=runtime_paths,
     )
 
     assert runtime_model.model_name == "large"

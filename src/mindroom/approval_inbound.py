@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.runtime_protocols import OrchestratorRuntime
 
@@ -67,7 +67,7 @@ async def handle_tool_approval_action(
     *,
     room: nio.MatrixRoom,
     sender_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     orchestrator: OrchestratorRuntime | None,
     logger: structlog.stdlib.BoundLogger,
@@ -112,7 +112,7 @@ async def maybe_handle_tool_approval_reply(
     *,
     room: nio.MatrixRoom,
     event: nio.RoomMessageText,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     orchestrator: OrchestratorRuntime | None,
     logger: structlog.stdlib.BoundLogger,

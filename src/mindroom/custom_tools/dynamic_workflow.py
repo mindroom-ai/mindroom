@@ -39,7 +39,7 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor, ParticipantExecutor
 
 # Agent-infrastructure toolkits that are built outside the tool registry and presume
@@ -543,7 +543,6 @@ async def _aexecute_room_agent_participant(
         entity_name=agent_name,
         room_id=context.room_id,
         thread_id=context.resolved_thread_id,
-        runtime_paths=context.runtime_paths,
     )
     active_model_name = runtime_model.model_name
     session_id = _participant_session_id(context, participant_id, run_scope=run_scope)
@@ -750,7 +749,7 @@ def _reject_unavailable_workflow_tools(tool_names: list[str]) -> None:
             raise DynamicWorkflowError(msg)
 
 
-def _participant_run_config(context: ToolRuntimeContext, toolkits_by_name: dict[str, Toolkit]) -> Config:
+def _participant_run_config(context: ToolRuntimeContext, toolkits_by_name: dict[str, Toolkit]) -> RuntimeConfig:
     """Return a config that requires per-call approval for granted tools that are not pre-approved."""
     if not toolkits_by_name:
         return context.config
@@ -873,7 +872,6 @@ def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dic
                 entity_name=agent_name,
                 room_id=context.room_id,
                 thread_id=context.resolved_thread_id,
-                runtime_paths=context.runtime_paths,
             ).model_name
         else:
             model_name = _resolve_participant_model_name(
@@ -944,7 +942,6 @@ def _caller_runtime_model_name(context: ToolRuntimeContext) -> str:
         entity_name=context.agent_name,
         room_id=context.room_id,
         thread_id=context.resolved_thread_id,
-        runtime_paths=context.runtime_paths,
     ).model_name
 
 

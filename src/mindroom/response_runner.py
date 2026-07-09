@@ -89,7 +89,7 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
@@ -146,7 +146,7 @@ def _materialize_matrix_run_metadata(
     return dict(matrix_run_metadata)
 
 
-def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id: str | None) -> bool:
+def _agent_has_matrix_messaging_tool(config: RuntimeConfig, agent_name: str, session_id: str | None) -> bool:
     """Return whether one agent can issue Matrix message actions."""
     try:
         surface = visible_tool_surface(
@@ -187,7 +187,7 @@ def _append_matrix_prompt_context(
 def _timestamp_thread_history_user_turns(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[ResolvedVisibleMessage]:
     """Add local timestamps to user-authored thread history entries."""
@@ -215,7 +215,7 @@ def prepare_memory_and_model_context(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     model_prompt: str | None = None,
 ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
@@ -1140,7 +1140,6 @@ class ResponseRunner:
             self.deps.agent_name,
             request.room_id,
             self.deps.runtime.config,
-            self.deps.runtime_paths,
             thread_id=resolved_target.resolved_thread_id,
         )
         use_streaming = await should_use_streaming(
@@ -1733,7 +1732,6 @@ class ResponseRunner:
             entity_name=self.deps.agent_name,
             room_id=resolved_target.room_id,
             thread_id=response_thread_id,
-            runtime_paths=self.deps.runtime_paths,
         )
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
@@ -1775,7 +1773,6 @@ class ResponseRunner:
         room_mode = (
             self.deps.runtime.config.get_entity_thread_mode(
                 self.deps.agent_name,
-                self.deps.runtime_paths,
                 room_id=request.room_id,
             )
             == "room"

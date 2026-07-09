@@ -24,6 +24,7 @@ from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_provi
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import get_configured_plugin_roots, load_plugins, reload_plugins
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
+from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -201,7 +202,7 @@ def _preserved_plugin_loader_state(*, module_prefixes: tuple[str, ...] = ()) -> 
                 sys.modules.pop(module_name, None)
 
 
-def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_type_errors(
+def test_runtime_validation_does_not_mask_unexpected_tool_validation_type_errors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -209,13 +210,13 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_type_err
     runtime_paths = _minimal_runtime_paths(tmp_path)
     message = "unexpected backend type error"
 
-    def _raise_type_error(_self: Config, _runtime_paths: object) -> None:
+    def _raise_type_error(_config: Config, _snapshot: object) -> None:
         raise TypeError(message)
 
-    monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_type_error)
+    monkeypatch.setattr("mindroom.config.runtime._validate_authored_tool_entries", _raise_type_error)
 
     with pytest.raises(TypeError, match="unexpected backend type error"):
-        Config.validate_with_runtime(
+        runtime_config_from_data(
             {
                 "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
                 "router": {"model": "default"},
@@ -225,7 +226,7 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_type_err
         )
 
 
-def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_value_errors(
+def test_runtime_validation_does_not_mask_unexpected_tool_validation_value_errors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -233,13 +234,13 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_value_er
     runtime_paths = _minimal_runtime_paths(tmp_path)
     message = "unexpected backend value error"
 
-    def _raise_value_error(_self: Config, _runtime_paths: object) -> None:
+    def _raise_value_error(_config: Config, _snapshot: object) -> None:
         raise ValueError(message)
 
-    monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_value_error)
+    monkeypatch.setattr("mindroom.config.runtime._validate_authored_tool_entries", _raise_value_error)
 
     with pytest.raises(ValueError, match="unexpected backend value error"):
-        Config.validate_with_runtime(
+        runtime_config_from_data(
             {
                 "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
                 "router": {"model": "default"},
@@ -796,7 +797,7 @@ def test_load_plugins_rejects_missing_tools_module(tmp_path: Path) -> None:
         _bind_runtime_paths(Config(plugins=["./plugins/bad-plugin"]), config_path)
 
 
-def test_validate_with_runtime_does_not_mutate_plugin_skill_roots(tmp_path: Path) -> None:
+def test_runtime_validation_does_not_mutate_plugin_skill_roots(tmp_path: Path) -> None:
     """Runtime validation should not swap global plugin skill roots before activation."""
     original_plugin_roots = _get_plugin_skill_roots()
     sentinel_root = tmp_path / "existing-plugin-skills"
@@ -914,7 +915,7 @@ def test_load_plugins_revalidates_skill_dirs_when_manifest_cache_is_warm(tmp_pat
         set_plugin_skill_roots(original_plugin_roots)
 
 
-def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path: Path) -> None:
+def test_runtime_validation_does_not_leak_plugin_tools_after_failure(tmp_path: Path) -> None:
     """Runtime validation should roll back plugin tool registration when validation fails later."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
@@ -989,7 +990,7 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
 
 
-def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp_path: Path) -> None:
+def test_runtime_validation_does_not_mutate_live_tool_registry_on_success(tmp_path: Path) -> None:
     """Successful runtime validation should not publish plugin tools into the live registry."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
@@ -1044,7 +1045,7 @@ def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
     try:
-        validated = Config.validate_with_runtime(authored_config, runtime_paths)
+        validated = runtime_config_from_data(authored_config, runtime_paths)
         assert validated.get_agent("assistant").tool_names == ["validated_plugin_tool"]
         assert "validated_plugin_tool" not in TOOL_REGISTRY
         assert "validated_plugin_tool" not in TOOL_METADATA
@@ -1058,7 +1059,7 @@ def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
 
 
-def test_validate_with_runtime_rejects_invalid_dedicated_hooks_module(tmp_path: Path) -> None:
+def test_runtime_validation_rejects_invalid_dedicated_hooks_module(tmp_path: Path) -> None:
     """Runtime validation should fail when a dedicated hooks module cannot be imported."""
     plugin_root = tmp_path / "plugins" / "broken-hooks"
     plugin_root.mkdir(parents=True)
@@ -1088,7 +1089,7 @@ def test_validate_with_runtime_rejects_invalid_dedicated_hooks_module(tmp_path: 
     )
 
     with pytest.raises(ConfigRuntimeValidationError, match=r"hooks\.py"):
-        Config.validate_with_runtime(
+        runtime_config_from_data(
             {
                 "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
                 "router": {"model": "default"},
@@ -1099,7 +1100,7 @@ def test_validate_with_runtime_rejects_invalid_dedicated_hooks_module(tmp_path: 
         )
 
 
-def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_imports(
+def test_runtime_validation_does_not_mutate_live_registry_for_package_helper_imports(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1150,7 +1151,7 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
     try:
-        validated = Config.validate_with_runtime(
+        validated = runtime_config_from_data(
             {
                 "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
                 "router": {"model": "default"},
@@ -1791,7 +1792,7 @@ def test_load_config_tolerates_agent_reference_to_tool_declared_by_broken_plugin
         },
     )
     mock_logger = MagicMock()
-    monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
+    monkeypatch.setattr("mindroom.config.runtime.logger", mock_logger)
 
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
@@ -1844,7 +1845,7 @@ def test_load_config_tolerates_unavailable_ast_plugin_tool_with_authored_overrid
         },
     )
     mock_logger = MagicMock()
-    monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
+    monkeypatch.setattr("mindroom.config.runtime.logger", mock_logger)
 
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
@@ -1947,7 +1948,7 @@ def test_load_config_tolerates_tool_declared_after_broken_plugin_registration(
         },
     )
     mock_logger = MagicMock()
-    monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
+    monkeypatch.setattr("mindroom.config.runtime.logger", mock_logger)
 
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
@@ -1999,7 +2000,7 @@ def test_load_config_tolerates_deferred_reference_to_tool_declared_by_broken_plu
         },
     )
     mock_logger = MagicMock()
-    monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
+    monkeypatch.setattr("mindroom.config.runtime.logger", mock_logger)
 
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)

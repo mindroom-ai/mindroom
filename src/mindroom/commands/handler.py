@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
@@ -81,7 +81,7 @@ class CommandHandlerContext:
     """Dependencies required by command handling."""
 
     client: nio.AsyncClient
-    config: Config
+    config: RuntimeConfig
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
     conversation_cache: ConversationCacheProtocol
@@ -94,7 +94,7 @@ class CommandHandlerContext:
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]] | None = None
 
 
-def _format_agent_description(agent_name: str, config: Config) -> str:
+def _format_agent_description(agent_name: str, config: RuntimeConfig) -> str:
     """Format a concise agent description for the welcome message."""
     if agent_name in config.agents:
         agent_config = config.agents[agent_name]
@@ -130,7 +130,7 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
 
 def _format_welcome_message(
     candidate_entities: Iterable[MatrixID],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> str:
     """Generate the welcome message text for resolved responder candidates."""
@@ -178,7 +178,7 @@ async def generate_welcome_message_for_room(
     client: nio.AsyncClient | None,
     room: nio.MatrixRoom,
     sender_id: str | None,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> str:
     """Generate a welcome message for callers without a live turn-policy candidate source."""

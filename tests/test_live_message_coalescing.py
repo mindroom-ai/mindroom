@@ -76,6 +76,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
+from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -202,7 +203,7 @@ async def _admit_ready(
 def test_coalescing_config_rejects_removed_enabled_flag(tmp_path: Path) -> None:
     """Reject the removed defaults.coalescing.enabled toggle."""
     with pytest.raises(ValidationError, match="enabled"):
-        Config.validate_with_runtime(
+        runtime_config_from_data(
             {
                 "agents": {"test_agent": {"display_name": "TestAgent"}},
                 "models": {"default": {"provider": "test", "id": "test-model"}},

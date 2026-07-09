@@ -17,7 +17,7 @@ from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, TypedDict
 
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.knowledge.availability import KnowledgeAvailability
@@ -186,7 +186,7 @@ def is_refresh_active(key: KnowledgeRefreshTarget) -> bool:
 def is_refresh_active_for_binding(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> bool:
@@ -207,7 +207,7 @@ def is_refresh_active_for_binding(
 async def refresh_knowledge_binding_in_subprocess(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     force_reindex: bool = False,
@@ -275,7 +275,7 @@ async def refresh_knowledge_binding_in_subprocess(
 def _serialize_subprocess_refresh_request(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
@@ -349,7 +349,7 @@ async def _cleanup_cancelled_refresh_subprocess(
     key: PublishedIndexKey,
     *,
     initial_state: PublishedIndexState | None,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> None:
     try:
@@ -387,7 +387,7 @@ async def _reconcile_failed_refresh_subprocess(
 async def knowledge_binding_mutation_lock(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
@@ -408,7 +408,7 @@ async def knowledge_binding_mutation_lock(
 async def refresh_knowledge_binding(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     force_reindex: bool = False,
@@ -433,7 +433,7 @@ async def refresh_knowledge_binding(
 async def _refresh_resolved_knowledge_binding(
     key: PublishedIndexKey,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
@@ -487,7 +487,7 @@ async def _save_refreshing_state(key: PublishedIndexKey) -> None:
 async def _refresh_knowledge_binding_locked(
     key: PublishedIndexKey,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     force_reindex: bool = False,
@@ -592,7 +592,7 @@ async def _publish_file_mode_source_metadata(
 async def publish_file_mode_source_metadata_for_base(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> KnowledgeRefreshResult:
@@ -615,7 +615,7 @@ async def publish_file_mode_source_metadata_for_base(
 async def _publish_file_mode_source_metadata_for_resolved(
     key: PublishedIndexKey,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> KnowledgeRefreshResult:
@@ -641,7 +641,7 @@ async def _publish_file_mode_source_metadata_for_resolved(
 async def _refresh_file_mode_binding_locked(
     key: PublishedIndexKey,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> KnowledgeRefreshResult:
@@ -721,7 +721,7 @@ async def _refresh_result_from_persisted_state(
     key: PublishedIndexKey,
     *,
     indexed_count: int,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> KnowledgeRefreshResult:
     state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
@@ -918,7 +918,7 @@ async def _reconcile_cancelled_refresh(
     key: PublishedIndexKey,
     *,
     initial_state: PublishedIndexState | None,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> None:
     state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
@@ -993,7 +993,11 @@ async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshRes
         storage_path=Path(request.storage_root),
         process_env=dict(os.environ),
     )
-    config = Config.validate_with_runtime(request.config_data, runtime_paths, tolerate_plugin_load_errors=True)
+    config = RuntimeConfig.from_authored(
+        Config.model_validate(request.config_data),
+        runtime_paths,
+        tolerate_plugin_load_errors=True,
+    )
     execution_identity = (
         None
         if request.execution_identity is None

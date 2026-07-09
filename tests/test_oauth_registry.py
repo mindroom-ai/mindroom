@@ -9,6 +9,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth.providers import OAuthProvider
+from tests.config_test_utils import runtime_config_from_data
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -125,7 +126,7 @@ def test_load_oauth_providers_for_snapshot_uses_runtime_config_and_cache_key(
 ) -> None:
     """Snapshot loading should pass the snapshot's runtime config and cache key shape through."""
     runtime_paths = _runtime_paths(tmp_path)
-    runtime_config = Config.validate_with_runtime({"agents": {}}, runtime_paths)
+    runtime_config = runtime_config_from_data({"agents": {}}, runtime_paths)
     snapshot = ApiSnapshot(
         generation=7,
         runtime_paths=runtime_paths,

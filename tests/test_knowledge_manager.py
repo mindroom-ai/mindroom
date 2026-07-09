@@ -55,6 +55,7 @@ from mindroom.knowledge.registry import (
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -4614,7 +4615,7 @@ async def test_subprocess_refresh_tolerates_broken_unused_plugin(tmp_path: Path)
     )
     (plugin_root / "tools.py").write_text("import definitely_missing_refresh_plugin_dependency\n", encoding="utf-8")
     runtime_paths = test_runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "agents": {"helper": {"display_name": "Helper", "knowledge_bases": ["docs"]}},
             "models": {},

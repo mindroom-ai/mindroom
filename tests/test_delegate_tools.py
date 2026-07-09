@@ -11,7 +11,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.agents import create_agent, describe_agent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
@@ -85,30 +85,33 @@ class TestDelegateTools:
         return tmp_path
 
     @pytest.fixture
-    def config(self) -> Config:
+    def config(self, storage_path: Path) -> RuntimeConfig:
         """Create a test config with leader, code, and research agents."""
-        return _make_config(
-            {
-                "leader": AgentConfig(
-                    display_name="Leader",
-                    role="Orchestrate tasks",
-                    delegate_to=["code", "research"],
-                ),
-                "code": AgentConfig(
-                    display_name="CodeAgent",
-                    role="Generate code",
-                    tools=["file"],
-                ),
-                "research": AgentConfig(
-                    display_name="ResearchAgent",
-                    role="Research topics",
-                    tools=["duckduckgo"],
-                ),
-            },
+        return _bind_runtime_paths(
+            _make_config(
+                {
+                    "leader": AgentConfig(
+                        display_name="Leader",
+                        role="Orchestrate tasks",
+                        delegate_to=["code", "research"],
+                    ),
+                    "code": AgentConfig(
+                        display_name="CodeAgent",
+                        role="Generate code",
+                        tools=["file"],
+                    ),
+                    "research": AgentConfig(
+                        display_name="ResearchAgent",
+                        role="Research topics",
+                        tools=["duckduckgo"],
+                    ),
+                },
+            ),
+            storage_path,
         )
 
     @pytest.fixture
-    def tools(self, storage_path: Path, config: Config) -> DelegateTools:
+    def tools(self, storage_path: Path, config: RuntimeConfig) -> DelegateTools:
         """Create a DelegateTools instance for testing."""
         runtime_paths = resolve_runtime_paths(
             config_path=storage_path / "config.yaml",
@@ -884,7 +887,7 @@ class TestDelegateAutoInjection:
 class TestDescribeAgentDelegation:
     """Test that describe_agent includes delegation info."""
 
-    def test_describe_agent_with_delegation(self) -> None:
+    def test_describe_agent_with_delegation(self, tmp_path: Path) -> None:
         """Test that describe_agent output includes delegation targets."""
         config = _make_config(
             {
@@ -897,15 +900,15 @@ class TestDescribeAgentDelegation:
                 "research": AgentConfig(display_name="ResearchAgent", role="Research"),
             },
         )
-        description = describe_agent("leader", config)
+        description = describe_agent("leader", _bind_runtime_paths(config, tmp_path))
         assert "Can delegate to: code, research" in description
 
-    def test_describe_agent_without_delegation(self) -> None:
+    def test_describe_agent_without_delegation(self, tmp_path: Path) -> None:
         """Test that describe_agent output omits delegation when not configured."""
         config = _make_config(
             {
                 "worker": AgentConfig(display_name="Worker", role="Do work"),
             },
         )
-        description = describe_agent("worker", config)
+        description = describe_agent("worker", _bind_runtime_paths(config, tmp_path))
         assert "delegate" not in description.lower()

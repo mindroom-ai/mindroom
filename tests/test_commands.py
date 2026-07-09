@@ -19,7 +19,7 @@ from mindroom.commands.parsing import (
     get_compact_command_entries,
 )
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.constants import RuntimePaths
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
@@ -316,7 +316,7 @@ async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None
     """The welcome quick commands should match the parser-owned compact docs."""
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
     runtime_paths = _test_runtime_paths(tmp_path)
-    config = Config()
+    config = RuntimeConfig.from_authored(Config(), runtime_paths)
     persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router_oldns"})
     welcome_message = await generate_welcome_message_for_room(
         None,
@@ -348,6 +348,7 @@ async def test_welcome_message_lists_configured_teams(tmp_path: Path) -> None:
         },
     )
     runtime_paths = _test_runtime_paths(tmp_path)
+    config = RuntimeConfig.from_authored(config, runtime_paths)
     persist_entity_accounts(
         config,
         runtime_paths,
@@ -397,6 +398,7 @@ async def test_senderless_welcome_lists_configured_room_responders(tmp_path: Pat
         },
     )
     runtime_paths = _test_runtime_paths(tmp_path)
+    config = RuntimeConfig.from_authored(config, runtime_paths)
     persist_entity_accounts(
         config,
         runtime_paths,
@@ -434,6 +436,7 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
         },
     )
     runtime_paths = _test_runtime_paths(tmp_path)
+    config = RuntimeConfig.from_authored(config, runtime_paths)
     persist_entity_accounts(
         config,
         runtime_paths,
@@ -492,6 +495,7 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
         },
     )
     runtime_paths = _test_runtime_paths(tmp_path)
+    config = RuntimeConfig.from_authored(config, runtime_paths)
     persist_entity_accounts(
         config,
         runtime_paths,

@@ -14,6 +14,14 @@ CONCRETE_ORCHESTRATOR_IMPORT_ALLOWLIST = {
 }
 RUNTIME_PROTOCOLS_MODULE = Path("src/mindroom/runtime_protocols.py")
 CONFIG_MAIN_MODULE = Path("src/mindroom/config/main.py")
+AUTHORED_CONFIG_FORBIDDEN_RUNTIME_IMPORTS = frozenset(
+    {
+        "mindroom.config.runtime_overlays",
+        "mindroom.matrix_identifiers",
+        "mindroom.tool_system.catalog",
+        "mindroom.tool_system.plugin_imports",
+    },
+)
 APPROVAL_CONFIG_MODULE = Path("src/mindroom/config/approval.py")
 MATRIX_MESSAGE_TOOL_MODULE = Path("src/mindroom/custom_tools/matrix_message.py")
 RESPONSE_RUNNER_MODULE = Path("src/mindroom/response_runner.py")
@@ -64,6 +72,23 @@ def test_config_modules_do_not_import_matrix_runtime_modules() -> None:
                     for alias in node.names
                     if _is_matrix_runtime_module(alias.name)
                 )
+
+    assert forbidden == []
+
+
+def test_authored_config_does_not_import_runtime_registries() -> None:
+    """The authored root model parses without loading runtime registries or overlays."""
+    tree = ast.parse(CONFIG_MAIN_MODULE.read_text(encoding="utf-8"))
+    forbidden: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in AUTHORED_CONFIG_FORBIDDEN_RUNTIME_IMPORTS:
+            forbidden.append(f"{CONFIG_MAIN_MODULE}:{node.lineno}: from {node.module}")
+        if isinstance(node, ast.Import):
+            forbidden.extend(
+                f"{CONFIG_MAIN_MODULE}:{node.lineno}: import {alias.name}"
+                for alias in node.names
+                if alias.name in AUTHORED_CONFIG_FORBIDDEN_RUNTIME_IMPORTS
+            )
 
     assert forbidden == []
 

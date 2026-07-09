@@ -19,7 +19,7 @@ from mindroom.tool_system.dynamic_toolkits import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.tool_system.dynamic_toolkits import DeferredToolCatalogEntry
 
 
@@ -37,7 +37,7 @@ class DynamicToolsToolkit(Toolkit):
         self,
         *,
         agent_name: str,
-        config: Config,
+        config: RuntimeConfig,
         session_id: str | None,
         stop_after_tool_call: bool = False,
         hidden_tool_names: frozenset[str] = frozenset(),

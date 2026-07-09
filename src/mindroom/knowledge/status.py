@@ -9,7 +9,7 @@ from mindroom.knowledge import registry
 from mindroom.knowledge.availability import KnowledgeAvailability
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -52,7 +52,7 @@ def _indexed_count_for_state(
 def get_knowledge_index_status(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
@@ -87,7 +87,7 @@ def get_knowledge_index_status(
 def _mark_existing_semantic_state_stale(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     reason: str,
 ) -> bool:
@@ -103,8 +103,8 @@ def _mark_existing_semantic_state_stale(
 
 
 def reconcile_knowledge_mode_transition_states(
-    previous_config: Config,
-    current_config: Config,
+    previous_config: RuntimeConfig,
+    current_config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, ...]:
     """Mark semantic indexes stale when config changes cross the files/semantic boundary."""
@@ -141,7 +141,7 @@ def reconcile_knowledge_mode_transition_states(
 async def mark_knowledge_source_changed_async(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     reason: str = "source_mutated",

@@ -45,7 +45,7 @@ def _contract_config(tmp_path: Path, memory_backend: str) -> Config:
         runtime_paths,
     )
     config.memory.backend = memory_backend
-    config.teams = {"pair": MockTeamConfig(agents=["alpha", "beta"])}
+    config.teams["pair"] = MockTeamConfig(agents=["alpha", "beta"])
     return config
 
 

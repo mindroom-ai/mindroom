@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import mcp_oauth_providers_for_config
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
@@ -76,7 +76,7 @@ def _coerce_oauth_providers(registered: Any) -> list[OAuthProvider]:  # noqa: AN
 
 
 def _load_plugin_oauth_providers(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     skip_broken_plugins: bool,
@@ -184,7 +184,7 @@ def _reject_tool_service_collisions(providers: Iterable[OAuthProvider]) -> None:
 
 
 def _load_oauth_provider_registry(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     cache_key: tuple[object, ...],
     *,
@@ -209,7 +209,7 @@ def _load_oauth_provider_registry(
 
 
 def load_oauth_providers(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     skip_broken_plugins: bool = True,
@@ -229,7 +229,7 @@ def load_oauth_providers_for_snapshot(
     config = snapshot.runtime_config
     if config is None:
         # Only pre-first-load snapshots lack a runtime config; they expose built-in providers only.
-        config = Config.model_validate({}, context={"runtime_paths": snapshot.runtime_paths})
+        config = RuntimeConfig.from_authored(Config.model_validate({}), snapshot.runtime_paths)
     return _load_oauth_provider_registry(
         config,
         snapshot.runtime_paths,

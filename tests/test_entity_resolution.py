@@ -16,6 +16,7 @@ from mindroom.entity_resolution import (
     entity_identity_registry,
 )
 from mindroom.matrix.state import MatrixState
+from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -134,7 +135,7 @@ def test_entity_identity_registry_requires_prepared_entity_accounts(tmp_path: Pa
         storage_path=tmp_path / "mindroom_data",
         process_env={},
     )
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         Config(agents={"general": AgentConfig(display_name="General", role="General agent")}).authored_model_dump(),
         runtime_paths,
     )

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.message_target import MessageTarget
     from mindroom.stop import StopManager
@@ -39,7 +39,7 @@ class ResponseAttemptDeps:
     stop_manager: StopManager
     logger: structlog.stdlib.BoundLogger
     show_stop_button: Callable[[], bool]
-    config: Config
+    config: RuntimeConfig
     notify_outbound_event: Callable[[str, dict[str, object]], None]
     notify_outbound_redaction: Callable[[str, str], None]
 

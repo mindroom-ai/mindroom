@@ -4,22 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.config.models import ModelConfig
 from mindroom.egress import policy as egress_policy_module
 from mindroom.tools import approved_egress as approved_egress_module
+from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from agno.tools import Toolkit
 
 
@@ -169,6 +170,7 @@ def test_request_network_access_skips_grant_when_static_allowed(
 
 def test_request_network_access_posts_worker_key_grant(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """User-agent workers should receive worker-key scoped grants."""
     captured: dict[str, object] = {}
@@ -195,9 +197,13 @@ def test_request_network_access_posts_worker_key_grant(
     monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_API_URL", f"http://127.0.0.1:{server.server_port}")
     monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_TOKEN", "token")
 
-    config = Config(
-        agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="user_agent")},
-        models={"default": ModelConfig(provider="openai", id="test-model")},
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = RuntimeConfig.from_authored(
+        Config(
+            agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="user_agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
     )
 
     context = SimpleNamespace(
@@ -207,7 +213,7 @@ def test_request_network_access_posts_worker_key_grant(
         thread_id="$thread",
         requester_id="@user:server",
         config=config,
-        runtime_paths=object(),
+        runtime_paths=runtime_paths,
     )
     monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", lambda: context)
     monkeypatch.setattr(
@@ -313,6 +319,7 @@ def test_post_grant_rejects_success_payload_from_http_error(monkeypatch: pytest.
 
 def test_request_network_access_posts_grant_without_blocking_event_loop(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Grant posting should not block other coroutines on the event loop."""
     marker = threading.Event()
@@ -323,9 +330,13 @@ def test_request_network_access_posts_grant_without_blocking_event_loop(
             raise AssertionError(msg)
         return {"expires_at": 123}
 
-    config = Config(
-        agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="shared")},
-        models={"default": ModelConfig(provider="openai", id="test-model")},
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = RuntimeConfig.from_authored(
+        Config(
+            agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="shared")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
     )
 
     context = SimpleNamespace(
@@ -335,7 +346,7 @@ def test_request_network_access_posts_grant_without_blocking_event_loop(
         thread_id="$thread",
         requester_id="@user:server",
         config=config,
-        runtime_paths=object(),
+        runtime_paths=runtime_paths,
     )
     monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
     monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", lambda: context)
@@ -358,9 +369,13 @@ def test_request_network_access_posts_grant_without_blocking_event_loop(
 
 
 def _shared_worker_context() -> SimpleNamespace:
-    config = Config(
-        agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="shared")},
-        models={"default": ModelConfig(provider="openai", id="test-model")},
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    config = RuntimeConfig.from_authored(
+        Config(
+            agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="shared")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
     )
     return SimpleNamespace(
         agent_name="assistant",
@@ -369,7 +384,7 @@ def _shared_worker_context() -> SimpleNamespace:
         thread_id="$thread",
         requester_id="@user:server",
         config=config,
-        runtime_paths=object(),
+        runtime_paths=runtime_paths,
     )
 
 

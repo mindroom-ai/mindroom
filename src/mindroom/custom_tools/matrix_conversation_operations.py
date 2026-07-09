@@ -204,7 +204,6 @@ class MatrixMessageOperations:
             room_mode = (
                 context.config.get_entity_thread_mode(
                     context.agent_name,
-                    context.runtime_paths,
                     room_id=room_id,
                 )
                 == "room"

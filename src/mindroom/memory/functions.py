@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -39,7 +39,7 @@ async def add_agent_memory(
     content: str,
     agent_name: str,
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     metadata: dict | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -61,7 +61,7 @@ def append_agent_daily_memory(
     content: str,
     agent_name: str,
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     *,
@@ -84,7 +84,7 @@ async def search_agent_memories(
     query: str,
     agent_name: str,
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     limit: int = 3,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -105,7 +105,7 @@ async def search_agent_memories(
 async def list_all_agent_memories(
     agent_name: str,
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     limit: int = 100,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -129,7 +129,7 @@ async def get_agent_memory(
     memory_id: str,
     caller_context: str | list[str],
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> MemoryResult | None:
@@ -150,7 +150,7 @@ async def update_agent_memory(
     content: str,
     caller_context: str | list[str],
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
@@ -171,7 +171,7 @@ async def delete_agent_memory(
     memory_id: str,
     caller_context: str | list[str],
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
@@ -192,7 +192,7 @@ async def build_memory_prompt_parts(
     prompt: str,
     agent_name: str,
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> MemoryPromptParts:
@@ -244,7 +244,7 @@ async def build_memory_enhanced_prompt(
     prompt: str,
     agent_name: str,
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> str:
@@ -266,7 +266,7 @@ async def store_conversation_memory(
     agent_name: str | list[str],
     storage_path: Path,
     session_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     user_id: str | None = None,

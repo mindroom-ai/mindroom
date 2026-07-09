@@ -29,8 +29,8 @@ class ConfigLike(Protocol):
     teams: Mapping[str, object]
     mindroom_user: MindRoomUserLike | None
 
-    def get_domain(self, runtime_paths: RuntimePaths) -> str:
-        """Return the Matrix domain for the runtime paths."""
+    def get_domain(self) -> str:
+        """Return the Matrix domain bound to the runtime config."""
         ...
 
 
@@ -44,7 +44,7 @@ def persist_entity_accounts(
     """Persist managed Matrix accounts for tests that need prepared runtime identity."""
     usernames = usernames or {}
     state = MatrixState.load(runtime_paths=runtime_paths)
-    domain = config.get_domain(runtime_paths)
+    domain = config.get_domain()
     changed = False
     for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
         account_key = managed_account_key(entity_name)

@@ -34,7 +34,7 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 
@@ -54,13 +54,13 @@ class _FileListInfo:
     error: str | None = None
 
 
-def _ensure_base_exists(config: Config, base_id: str) -> None:
+def _ensure_base_exists(config: RuntimeConfig, base_id: str) -> None:
     if base_id not in config.knowledge_bases:
         raise HTTPException(status_code=404, detail=f"Knowledge base '{base_id}' not found")
 
 
 def _knowledge_root(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     runtime_paths: RuntimePaths,
     *,
@@ -88,7 +88,7 @@ def _resolve_within_root(root: Path, relative_path: str) -> Path:
 
 
 async def _list_file_info(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     root: Path,
 ) -> _FileListInfo:
@@ -123,7 +123,7 @@ async def _list_file_info(
     return _FileListInfo(files=files, total_size=total_size)
 
 
-async def _list_managed_file_paths(config: Config, base_id: str, root: Path) -> tuple[set[Path], str | None]:
+async def _list_managed_file_paths(config: RuntimeConfig, base_id: str, root: Path) -> tuple[set[Path], str | None]:
     base_config = config.knowledge_bases[base_id]
     if base_config.git is None:
         return set(await asyncio.to_thread(list_managed_knowledge_files, config, base_id, root)), None
@@ -147,7 +147,7 @@ def _request_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler | 
 
 
 def _schedule_refresh(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     runtime_paths: RuntimePaths,
     *,
@@ -164,7 +164,7 @@ def _schedule_refresh(
 
 
 def _schedule_refreshes(
-    config: Config,
+    config: RuntimeConfig,
     base_ids: tuple[str, ...],
     runtime_paths: RuntimePaths,
     *,
@@ -177,7 +177,7 @@ def _schedule_refreshes(
 
 
 def _same_source_base_ids(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, ...]:
@@ -194,7 +194,7 @@ def _same_source_base_ids(
 async def _mark_source_changed_after_committed_mutation(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     reason: str,
 ) -> tuple[tuple[str, ...], bool]:
@@ -215,7 +215,7 @@ async def _mark_source_changed_after_committed_mutation(
 async def _publish_file_mode_metadata_after_committed_mutation(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> bool:
     base_config = config.get_knowledge_base_config(base_id)
@@ -237,7 +237,7 @@ async def _publish_file_mode_metadata_after_committed_mutation(
 async def _mark_committed_mutation_and_schedule_refresh(
     base_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     request: Request,
     reason: str,
@@ -265,7 +265,7 @@ async def _mark_committed_mutation_and_schedule_refresh(
 
 
 def _index_status_sync(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     runtime_paths: RuntimePaths,
 ) -> KnowledgeIndexStatus:
@@ -285,7 +285,7 @@ def _index_status_sync(
 
 
 async def _index_status(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     runtime_paths: RuntimePaths,
 ) -> KnowledgeIndexStatus:
@@ -299,7 +299,7 @@ def _redacted_last_error(value: str | None) -> str | None:
 
 
 def _is_refreshing(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     runtime_paths: RuntimePaths,
     *,
@@ -320,7 +320,7 @@ def _is_refreshing(
 
 
 async def _git_status(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     runtime_paths: RuntimePaths,
     *,
@@ -356,7 +356,7 @@ def _path_overlaps(left: Path, right: Path) -> bool:
 
 
 def _git_backed_bases_for_target(
-    config: Config,
+    config: RuntimeConfig,
     target: Path,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, ...]:
@@ -372,7 +372,7 @@ def _git_backed_bases_for_target(
 
 
 def _reject_git_file_mutation(
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     runtime_paths: RuntimePaths,
     target: Path,
@@ -439,7 +439,7 @@ def _reject_non_file_upload_destination(destination: Path, relative_path: str) -
         )
 
 
-def _reject_unmanaged_knowledge_file_path(config: Config, base_id: str, relative_path: str) -> None:
+def _reject_unmanaged_knowledge_file_path(config: RuntimeConfig, base_id: str, relative_path: str) -> None:
     if include_knowledge_relative_path(config, base_id, relative_path):
         return
     raise HTTPException(
@@ -492,7 +492,7 @@ async def _stage_upload(upload: UploadFile, destination: Path, filename: str, re
 async def _write_uploads(
     files: list[UploadFile],
     *,
-    config: Config,
+    config: RuntimeConfig,
     base_id: str,
     runtime_paths: RuntimePaths,
     root: Path,

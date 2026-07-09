@@ -31,7 +31,7 @@ from mindroom.matrix_identifiers import agent_username_localpart, extract_server
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 _TRIGGER_ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
@@ -242,7 +242,7 @@ class ExternalTriggerStore:
         replay_window_seconds: int | None = None,
         max_body_bytes: int | None = None,
         enabled: bool = True,
-        config: Config,
+        config: RuntimeConfig,
     ) -> ExternalTriggerRecord:
         """Create one trigger record after validating current config policy."""
         _validate_trigger_id(trigger_id)
@@ -293,7 +293,7 @@ class ExternalTriggerStore:
         *,
         enabled: bool,
         actor_user_id: str,
-        config: Config,
+        config: RuntimeConfig,
     ) -> ExternalTriggerRecord:
         """Enable or disable one trigger record."""
         with advisory_file_lock(self._lock_path):
@@ -315,7 +315,7 @@ class ExternalTriggerStore:
         public_key: str,
         key_id: str,
         actor_user_id: str,
-        config: Config,
+        config: RuntimeConfig,
     ) -> ExternalTriggerRecord:
         """Rotate one trigger public key and advance the replay scope."""
         normalized_public_key, public_key_bytes = _normalize_public_key(public_key)
@@ -338,7 +338,7 @@ class ExternalTriggerStore:
             self._write_records(records)
             return updated
 
-    def delete_record(self, trigger_id: str, *, actor_user_id: str, config: Config) -> None:
+    def delete_record(self, trigger_id: str, *, actor_user_id: str, config: RuntimeConfig) -> None:
         """Delete one trigger record."""
         with advisory_file_lock(self._lock_path):
             records = self._read_records()
@@ -350,7 +350,7 @@ class ExternalTriggerStore:
         self,
         trigger_id: str,
         *,
-        config: Config,
+        config: RuntimeConfig,
         config_generation: int,
     ) -> TriggerDeliverySnapshot | None:
         """Return one delivery snapshot after revalidating against current config."""
@@ -393,7 +393,7 @@ class ExternalTriggerStore:
         records: _SerializedTriggerRecords,
         trigger_id: str,
         actor_user_id: str,
-        config: Config,
+        config: RuntimeConfig,
     ) -> ExternalTriggerRecord:
         record = records.triggers.get(trigger_id)
         if record is None:
@@ -404,7 +404,7 @@ class ExternalTriggerStore:
             raise ExternalTriggerStoreError(msg)
         return record
 
-    def _validate_record_against_config(self, record: ExternalTriggerRecord, config: Config) -> None:
+    def _validate_record_against_config(self, record: ExternalTriggerRecord, config: RuntimeConfig) -> None:
         _validate_owner(record.owner_user_id, config, self._runtime_paths)
         _validate_target(record, config, self._runtime_paths)
 
@@ -465,7 +465,7 @@ def _public_key_fingerprint_from_bytes(public_key_bytes: bytes) -> str:
     return f"sha256:{hashlib.sha256(public_key_bytes).hexdigest()}"
 
 
-def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePaths) -> None:
+def _validate_owner(owner_user_id: str, config: RuntimeConfig, runtime_paths: RuntimePaths) -> None:
     """Require an external human owner, not a managed bot identity."""
     parsed_owner = MatrixID.parse(owner_user_id)
     if owner_user_id in config.bot_accounts:
@@ -507,7 +507,7 @@ def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePa
         raise ExternalTriggerStoreError(msg)
 
 
-def _validate_target(record: ExternalTriggerRecord, config: Config, runtime_paths: RuntimePaths) -> None:
+def _validate_target(record: ExternalTriggerRecord, config: RuntimeConfig, runtime_paths: RuntimePaths) -> None:
     """Require a configured entity and a deliverable room target."""
     target = record.target
     if target.agent not in config.agents and target.agent not in config.teams:
@@ -532,7 +532,7 @@ def _validate_target(record: ExternalTriggerRecord, config: Config, runtime_path
 
 def _targets_private_current_room(
     record: ExternalTriggerRecord,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Allow private current-agent triggers for dynamic rooms created outside config."""

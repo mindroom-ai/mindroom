@@ -722,7 +722,7 @@ async def test_sessions_send_checks_target_room_thread_mode(
             "research": _make_agent_config(role="Research topics"),
         },
     )
-    config.get_entity_thread_mode.side_effect = lambda _agent_name, _runtime_paths, room_id=None: (
+    config.get_entity_thread_mode.side_effect = lambda _agent_name, room_id=None: (
         "room" if room_id == target_room_id else "thread"
     )
     ctx = _make_context(tmp_path, config=config)
@@ -743,7 +743,6 @@ async def test_sessions_send_checks_target_room_thread_mode(
     send_mock.assert_not_awaited()
     config.get_entity_thread_mode.assert_called_with(
         "openclaw",
-        ctx.runtime_paths,
         room_id=target_room_id,
     )
 

@@ -9,7 +9,7 @@ import nio
 import pytest
 
 from mindroom import constants as constants_mod
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.state import MatrixState
@@ -28,6 +28,10 @@ def _runtime_paths(tmp_path: Path) -> constants_mod.RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
     return constants_mod.resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
+
+
+def _runtime_config(data: object, runtime_paths: constants_mod.RuntimePaths) -> RuntimeConfig:
+    return RuntimeConfig.from_authored(Config.model_validate(data), runtime_paths)
 
 
 @pytest.fixture(autouse=True)
@@ -353,16 +357,16 @@ def test_mindroom_user_username_rejects_persisted_router_collision(tmp_path: Pat
     state.save(runtime_paths=runtime_paths)
 
     with pytest.raises(ValueError, match="conflicts with router 'router'"):
-        Config.model_validate(
+        _runtime_config(
             {"mindroom_user": {"username": "mindroom_router", "display_name": "Alice"}},
-            context={"runtime_paths": runtime_paths},
+            runtime_paths,
         )
 
 
 def test_mindroom_user_username_allows_unprepared_agent_proposal_name(tmp_path: Path) -> None:
     """Generated account proposals are not reserved runtime identities before provisioning."""
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.model_validate(
+    config = _runtime_config(
         {
             "agents": {
                 "assistant": {
@@ -373,7 +377,7 @@ def test_mindroom_user_username_allows_unprepared_agent_proposal_name(tmp_path: 
             },
             "mindroom_user": {"username": "mindroom_assistant", "display_name": "Alice"},
         },
-        context={"runtime_paths": runtime_paths},
+        runtime_paths,
     )
 
     assert config.mindroom_user is not None
@@ -388,7 +392,7 @@ def test_mindroom_user_username_rejects_persisted_agent_username_collision(tmp_p
     state.save(runtime_paths=runtime_paths)
 
     with pytest.raises(ValueError, match="conflicts with agent 'assistant'"):
-        Config.model_validate(
+        _runtime_config(
             {
                 "agents": {
                     "assistant": {
@@ -399,7 +403,7 @@ def test_mindroom_user_username_rejects_persisted_agent_username_collision(tmp_p
                 },
                 "mindroom_user": {"username": "actual_assistant", "display_name": "Alice"},
             },
-            context={"runtime_paths": runtime_paths},
+            runtime_paths,
         )
 
 
@@ -410,7 +414,7 @@ def test_mindroom_user_username_allows_prepared_agent_proposal_name(tmp_path: Pa
     state.add_account("agent_assistant", "actual_assistant", TEST_PASSWORD, domain="localhost")
     state.save(runtime_paths=runtime_paths)
 
-    config = Config.model_validate(
+    config = _runtime_config(
         {
             "agents": {
                 "assistant": {
@@ -421,7 +425,7 @@ def test_mindroom_user_username_allows_prepared_agent_proposal_name(tmp_path: Pa
             },
             "mindroom_user": {"username": "mindroom_assistant", "display_name": "Alice"},
         },
-        context={"runtime_paths": runtime_paths},
+        runtime_paths,
     )
 
     assert config.mindroom_user is not None

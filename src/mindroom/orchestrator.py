@@ -82,7 +82,7 @@ from mindroom.workers.runtime import clear_worker_validation_snapshot_cache, shu
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
-from .config.main import Config, load_config
+from .config.main import RuntimeConfig, load_config
 from .credentials_sync import sync_env_to_credentials
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
@@ -209,7 +209,7 @@ class _MultiAgentOrchestrator:
     config_path: Path = field(init=False)
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
-    config: Config | None = field(default=None, init=False)
+    config: RuntimeConfig | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _bot_start_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
@@ -368,7 +368,7 @@ class _MultiAgentOrchestrator:
         )
         self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
 
-    async def _sync_event_cache_service(self, config: Config) -> None:
+    async def _sync_event_cache_service(self, config: RuntimeConfig) -> None:
         """Ensure the runtime has one initialized shared event-cache service."""
         self._runtime_support = await sync_owned_runtime_support(
             self._runtime_support,
@@ -389,7 +389,7 @@ class _MultiAgentOrchestrator:
         """Close the shared runtime-owned cache services."""
         await close_owned_runtime_support(self._runtime_support, logger=logger)
 
-    async def _ensure_user_account(self, config: Config) -> None:
+    async def _ensure_user_account(self, config: RuntimeConfig) -> None:
         """Ensure a user account exists, creating one if necessary.
 
         This reuses the same `create_agent_user` flow that agents use,
@@ -409,7 +409,7 @@ class _MultiAgentOrchestrator:
         )
         logger.info("user_account_ready", user_id=user_account.user_id)
 
-    def _require_config(self) -> Config:
+    def _require_config(self) -> RuntimeConfig:
         """Return the active config or fail fast if it has not been loaded."""
         config = self.config
         if config is None:
@@ -419,7 +419,7 @@ class _MultiAgentOrchestrator:
 
     async def _prepare_user_account(
         self,
-        config: Config,
+        config: RuntimeConfig,
         *,
         update_runtime_state: bool,
     ) -> None:
@@ -560,10 +560,10 @@ class _MultiAgentOrchestrator:
 
     async def _sync_runtime_support_services(
         self,
-        config: Config,
+        config: RuntimeConfig,
         *,
         start_watcher: bool,
-        previous_config: Config | None = None,
+        previous_config: RuntimeConfig | None = None,
     ) -> None:
         """Refresh runtime support services that depend on the active config."""
         if previous_config is not None:
@@ -590,7 +590,7 @@ class _MultiAgentOrchestrator:
         if manager is not None:
             await manager.shutdown()
 
-    async def _sync_mcp_manager(self, config: Config) -> set[str]:
+    async def _sync_mcp_manager(self, config: RuntimeConfig) -> set[str]:
         """Create or refresh the orchestrator-owned MCP manager."""
         manager = self._mcp_manager
         if manager is None:
@@ -602,7 +602,7 @@ class _MultiAgentOrchestrator:
         bind_mcp_server_manager(manager)
         return await manager.sync_servers(config)
 
-    def _entities_blocked_by_failed_mcp_servers(self, entity_names: set[str], config: Config) -> set[str]:
+    def _entities_blocked_by_failed_mcp_servers(self, entity_names: set[str], config: RuntimeConfig) -> set[str]:
         """Return entities blocked because a required MCP server is currently unavailable."""
         manager = self._mcp_manager
         if manager is None:
@@ -615,7 +615,7 @@ class _MultiAgentOrchestrator:
         )
         return blocked_entities & entity_names
 
-    def _log_mcp_degraded_entities(self, config: Config) -> None:
+    def _log_mcp_degraded_entities(self, config: RuntimeConfig) -> None:
         """Warn once per unavailable optional MCP server about entities running without its tools."""
         manager = self._mcp_manager
         if manager is None:
@@ -632,7 +632,7 @@ class _MultiAgentOrchestrator:
             )
 
     @staticmethod
-    def _entity_display_name(config: Config, entity_name: str) -> str:
+    def _entity_display_name(config: RuntimeConfig, entity_name: str) -> str:
         """Return the Matrix display name for one configured managed entity."""
         if entity_name == ROUTER_AGENT_NAME:
             return "RouterAgent"
@@ -644,7 +644,7 @@ class _MultiAgentOrchestrator:
 
     async def _prepare_entity_accounts(
         self,
-        config: Config,
+        config: RuntimeConfig,
         entity_names: Iterable[str],
     ) -> dict[str, AgentMatrixUser]:
         """Ensure managed Matrix accounts exist before runtime bot construction."""
@@ -674,7 +674,7 @@ class _MultiAgentOrchestrator:
         )
         return users
 
-    def _validate_entity_accounts(self, config: Config) -> None:
+    def _validate_entity_accounts(self, config: RuntimeConfig) -> None:
         """Validate persisted Matrix identities for all configured runtime entities."""
         try:
             entity_identity_registry(config, self.runtime_paths)
@@ -683,7 +683,7 @@ class _MultiAgentOrchestrator:
 
     def _preflight_account_provisioning(
         self,
-        config: Config,
+        config: RuntimeConfig,
         *,
         entity_names: Iterable[str],
         include_internal_user: bool,
@@ -707,7 +707,7 @@ class _MultiAgentOrchestrator:
     def _create_managed_bot(
         self,
         entity_name: str,
-        config: Config,
+        config: RuntimeConfig,
         agent_user: AgentMatrixUser,
     ) -> AgentBot | TeamBot:
         """Create and register one runtime-managed bot."""
@@ -728,7 +728,7 @@ class _MultiAgentOrchestrator:
         self.agent_bots[entity_name] = bot
         return bot
 
-    def _build_hook_registry(self, config: Config) -> HookRegistry:
+    def _build_hook_registry(self, config: RuntimeConfig) -> HookRegistry:
         """Load plugins and rebuild the immutable hook-registry snapshot."""
         plugins = load_plugins(config, self.runtime_paths)
         return HookRegistry.from_plugins(plugins)
@@ -783,8 +783,8 @@ class _MultiAgentOrchestrator:
     async def _apply_plugin_changes_for_config_update(
         self,
         *,
-        current_config: Config,
-        new_config: Config,
+        current_config: RuntimeConfig,
+        new_config: RuntimeConfig,
         changed_server_ids: set[str],
     ) -> set[str]:
         """Stage and commit plugin changes without interleaving live reloads."""
@@ -862,7 +862,7 @@ class _MultiAgentOrchestrator:
     async def _create_and_start_entities(
         self,
         entity_names: set[str],
-        config: Config,
+        config: RuntimeConfig,
         *,
         start_sync_tasks: bool,
     ) -> EntityStartResults:
@@ -975,7 +975,7 @@ class _MultiAgentOrchestrator:
     async def _cleanup_stale_streams_after_restart(
         self,
         bots: list[AgentBot | TeamBot],
-        config: Config,
+        config: RuntimeConfig,
         startup_cutoff_ms: int | None = None,
     ) -> list[InterruptedThread]:
         """Cleanup stale streams for started bots after restart."""
@@ -1014,7 +1014,7 @@ class _MultiAgentOrchestrator:
     async def _auto_resume_after_restart(
         self,
         interrupted_threads: list[InterruptedThread],
-        config: Config,
+        config: RuntimeConfig,
     ) -> None:
         """Queue visible Matrix resume relays from the router."""
         if not config.defaults.auto_resume_after_restart or not interrupted_threads:
@@ -1038,7 +1038,7 @@ class _MultiAgentOrchestrator:
         except Exception as exc:
             logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
 
-    def _resolve_bot_room_aliases(self, bots: list[AgentBot | TeamBot], config: Config) -> None:
+    def _resolve_bot_room_aliases(self, bots: list[AgentBot | TeamBot], config: RuntimeConfig) -> None:
         """Resolve currently known room aliases into each bot's configured room IDs."""
         for bot in bots:
             room_aliases = get_rooms_for_entity(bot.agent_name, config)
@@ -1107,7 +1107,7 @@ class _MultiAgentOrchestrator:
         # config-triggered restart look like normal orchestrator completion.
         await runtime_shutdown_event.wait()
 
-    async def _load_initial_config(self, new_config: Config) -> bool:
+    async def _load_initial_config(self, new_config: RuntimeConfig) -> bool:
         """Handle config loading before the runtime has an active config."""
         hook_registry = self._build_hook_registry(new_config)
         entity_names = configured_entity_names(new_config)
@@ -1139,7 +1139,7 @@ class _MultiAgentOrchestrator:
     async def _emit_config_reloaded(
         self,
         *,
-        new_config: Config,
+        new_config: RuntimeConfig,
         changed_entities: set[str],
         added_entities: set[str],
         removed_entities: set[str],
@@ -1186,8 +1186,8 @@ class _MultiAgentOrchestrator:
 
     async def _stop_entities_before_mcp_sync(
         self,
-        current_config: Config,
-        new_config: Config,
+        current_config: RuntimeConfig,
+        new_config: RuntimeConfig,
         changed_server_ids: set[str],
     ) -> set[str]:
         """Stop MCP-dependent entities before removing or reconfiguring their servers."""
@@ -1298,7 +1298,7 @@ class _MultiAgentOrchestrator:
             room_ids = await self._ensure_rooms_exist()
             await self._ensure_root_space(room_ids)
 
-    async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
+    async def _prepare_accounts_for_config_update(self, new_config: RuntimeConfig, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
         entities_requiring_account_check = plan.added_entities | (plan.entities_to_restart & plan.configured_entities)
         self._preflight_account_provisioning(
@@ -1316,8 +1316,8 @@ class _MultiAgentOrchestrator:
     async def _finalize_config_reload(
         self,
         *,
-        new_config: Config,
-        current_config: Config,
+        new_config: RuntimeConfig,
+        current_config: RuntimeConfig,
         changed_entities: set[str],
         added_entities: set[str],
         removed_entities: set[str],
@@ -1341,7 +1341,7 @@ class _MultiAgentOrchestrator:
 
     async def _apply_config_update_plan(
         self,
-        current_config: Config,
+        current_config: RuntimeConfig,
         plan: ConfigUpdatePlan,
         plugin_changes: tuple[str, ...],
     ) -> bool:
@@ -1570,7 +1570,7 @@ class _MultiAgentOrchestrator:
 
     async def _invite_internal_user_to_rooms(
         self,
-        config: Config,
+        config: RuntimeConfig,
         joined_rooms: list[str],
         authorized_user_ids: set[str],
     ) -> set[str]:
@@ -1608,7 +1608,7 @@ class _MultiAgentOrchestrator:
         room_id: str,
         current_members: set[str],
         authorized_user_ids: set[str],
-        config: Config,
+        config: RuntimeConfig,
     ) -> None:
         """Invite authorized human users who can access a given room."""
         for authorized_user_id in authorized_user_ids:
@@ -1709,7 +1709,7 @@ class _MultiAgentOrchestrator:
 
 
 def _recover_failed_plugin_reload(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> tuple[PluginReloadResult, str, dict[str, object]]:
     """Return the fail-broken recovery result after one strict reload failure."""

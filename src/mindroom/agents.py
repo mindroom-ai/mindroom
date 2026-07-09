@@ -73,7 +73,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_knowledge_descriptions import KnowledgeSourceDescription
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.config.models import DefaultsConfig
     from mindroom.credentials import CredentialsManager
     from mindroom.hooks import HookRegistryPlugin
@@ -162,7 +162,7 @@ _PRIVATE_CULTURE_MANAGER_CACHE: WeakValueDictionary[
 ] = WeakValueDictionary()
 
 
-def show_tool_calls_for_agent(config: Config, agent_name: str) -> bool:
+def show_tool_calls_for_agent(config: RuntimeConfig, agent_name: str) -> bool:
     """Resolve tool-call visibility for one agent from current config."""
     agent_config = config.agents.get(agent_name)
     if agent_config and agent_config.show_tool_calls is not None:
@@ -184,7 +184,7 @@ def _ensure_default_mind_workspace(storage_path: Path) -> None:
     ensure_workspace_template(workspace_path, template="mind")
 
 
-def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
+def ensure_default_agent_workspaces(config: RuntimeConfig, storage_path: Path) -> None:
     """Materialize built-in starter workspaces under the active runtime storage root."""
     for agent_name, agent_config in config.agents.items():
         if _uses_default_mind_workspace_scaffold(agent_name, agent_config):
@@ -421,7 +421,7 @@ def _build_additional_context(
 
 def _file_mode_knowledge_instruction_block(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     agent_runtime: ResolvedAgentRuntime,
 ) -> str | None:
     """Describe workspace-accessible file-only knowledge bases to the model."""
@@ -557,7 +557,7 @@ def _wrap_direct_agent_toolkit_for_output_files(
 
 @timed("system_prompt_assembly.agent_create.model_instance")
 def _load_agent_model_instance(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     model_name: str,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -576,7 +576,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     tool_name: str,
     *,
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     worker_tools: list[str],
     runtime_overrides: dict[str, object] | None,
@@ -766,7 +766,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
 
 def get_agent_toolkit_names(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     *,
     session_id: str | None = None,
     delegation_depth: int = 0,
@@ -786,7 +786,7 @@ def get_agent_toolkit_names(
 
 def resolve_runtime_worker_tools(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     runtime_tool_names: list[str],
     *,
@@ -818,7 +818,7 @@ def _context_hidden_toolkits(execution_identity: ToolExecutionIdentity | None) -
 
 
 def _visible_deferred_tool_names(
-    config: Config,
+    config: RuntimeConfig,
     agent_name: str,
     *,
     hidden_tool_names: frozenset[str] = frozenset(),
@@ -850,7 +850,7 @@ def _resolve_agent_learning(
 
 
 def _build_dynamic_tooling_instruction_block(
-    config: Config,
+    config: RuntimeConfig,
     agent_name: str,
     *,
     enable_dynamic_tools_manager: bool,
@@ -883,7 +883,7 @@ def _build_dynamic_tooling_instruction_block(
 
 
 def _build_dynamic_tooling_state_suffix(
-    config: Config,
+    config: RuntimeConfig,
     agent_name: str,
     *,
     loaded_tools: tuple[str, ...],
@@ -989,7 +989,7 @@ def _culture_signature(culture_config: CultureConfig) -> tuple[str, str]:
 @timed("system_prompt_assembly.agent_create.culture_manager")
 def _resolve_agent_culture(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     storage_path: Path,
     model: Model,
     *,
@@ -1037,12 +1037,12 @@ def _resolve_agent_culture(
 
 
 @timed("system_prompt_assembly.agent_create.load_plugins")
-def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -> list[HookRegistryPlugin]:
+def _load_agent_plugins(config: RuntimeConfig, runtime_paths: constants.RuntimePaths) -> list[HookRegistryPlugin]:
     return cast("list[HookRegistryPlugin]", load_plugins(config, runtime_paths))
 
 
 @timed("system_prompt_assembly.agent_create.tool_registry_sync")
-def _sync_agent_tool_registry(config: Config, runtime_paths: constants.RuntimePaths) -> None:
+def _sync_agent_tool_registry(config: RuntimeConfig, runtime_paths: constants.RuntimePaths) -> None:
     ensure_tool_registry_loaded(runtime_paths, config, load_plugin_tools=False)
 
 
@@ -1053,7 +1053,7 @@ def _build_agent_tool_hook_bridge(
     plugins: list[HookRegistryPlugin],
     agent_name: str,
     dispatch_context: ToolDispatchContext | None,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
 ) -> Callable[..., Any] | None:
     active_hook_registry = hook_registry if hook_registry is not None else HookRegistry.from_plugins(plugins)
@@ -1069,7 +1069,7 @@ def _build_agent_tool_hook_bridge(
 def _prune_openai_incompatible_tools(
     toolkit: Toolkit,
     *,
-    config: Config,
+    config: RuntimeConfig,
     execution_identity: ToolExecutionIdentity | None,
 ) -> Toolkit | None:
     """Hide tools from OpenAI-compatible agents when `/v1` cannot run them."""
@@ -1102,7 +1102,7 @@ def _prune_openai_incompatible_tools(
 def _resolve_agent_dynamic_tool_selection(
     *,
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     session_id: str | None,
     delegation_depth: int,
     native_deferred_tools: bool,
@@ -1129,7 +1129,7 @@ def _resolve_agent_dynamic_tool_selection(
 def _render_agent_identity_context(
     agent_name: str,
     display_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     *,
     model_provider: str,
@@ -1175,7 +1175,7 @@ def _render_agent_identity_context(
 @timed("system_prompt_assembly.agent_create.skills_load")
 def _load_agent_skills(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     *,
     workspace_skills_root: Path | None = None,
@@ -1205,7 +1205,7 @@ def _agent_create_timing(label: str, **event_data: object) -> AbstractContextMan
 
 def _assemble_agent_toolkits(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     agent_runtime: ResolvedAgentRuntime,
     *,
@@ -1348,7 +1348,7 @@ def _open_agent_session_storage(
 def _build_agent_role_context(
     agent_name: str,
     agent_config: AgentConfig,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     agent_runtime: ResolvedAgentRuntime,
     *,
@@ -1407,7 +1407,7 @@ def _build_agent_role_context(
 def _build_agent_instructions(
     agent_name: str,
     agent_config: AgentConfig,
-    config: Config,
+    config: RuntimeConfig,
     agent_runtime: ResolvedAgentRuntime,
     *,
     skills: Skills | None,
@@ -1474,7 +1474,7 @@ def _build_agent_instructions(
 
 def _resolve_agent_culture_state(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     agent_runtime: ResolvedAgentRuntime,
     model: Model,
@@ -1535,7 +1535,7 @@ def _resolve_agent_culture_state(
 @timed("system_prompt_assembly.agent_create")
 def create_agent(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,

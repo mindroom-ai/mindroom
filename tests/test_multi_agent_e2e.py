@@ -134,7 +134,7 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         bot.running = True
 
         # Create a message mentioning the calculator agent
-        message_body = f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
+        message_body = f"@mindroom_calculator:{config.get_domain()} What's 15% of 200?"
         message_event = nio.RoomMessageText(
             body=message_body,
             formatted_body=message_body,
@@ -144,7 +144,7 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
                     "msgtype": "m.text",
                     "body": message_body,
                     "m.mentions": {
-                        "user_ids": [f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}"],
+                        "user_ids": [f"@mindroom_calculator:{config.get_domain()}"],
                     },
                     "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
                 },
@@ -187,14 +187,8 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         ai_kwargs = mock_ai.call_args.kwargs
         ai_ctx = mock_ai.call_args.args[0]
         assert ai_ctx.entity_label == "calculator"
-        assert (
-            ai_kwargs["prompt"]
-            == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
-        )
-        assert (
-            ai_kwargs["model_prompt"]
-            == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
-        )
+        assert ai_kwargs["prompt"] == f"@mindroom_calculator:{config.get_domain()} What's 15% of 200?"
+        assert ai_kwargs["model_prompt"] == f"@mindroom_calculator:{config.get_domain()} What's 15% of 200?"
         assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
         assert ai_ctx.session_id == f"{test_room_id}:$thread_root:localhost"
         assert ai_kwargs["thread_history"] == []
@@ -277,7 +271,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     """Test that agents respond in threads based on whether other agents are participating."""
     # Create the config first to get the actual domain
     mock_config = _make_config(tmp_path)
-    mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")}
+    mock_config.models["default"] = ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")
     mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
     fake_member = MagicMock()
     fake_member.name = "MockAgent"
@@ -285,7 +279,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     mock_create_agent.return_value = fake_member
 
     # Use the actual domain from config (which comes from MATRIX_HOMESERVER env var)
-    domain = mock_config.get_domain(runtime_paths_for(mock_config))
+    domain = mock_config.get_domain()
     test_room_id = "!test:localhost"  # Room ID can stay as localhost
     test_user_id = f"@alice:{domain}"
     thread_root_id = f"$thread_root:{domain}"

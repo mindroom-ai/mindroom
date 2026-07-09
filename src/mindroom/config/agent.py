@@ -288,24 +288,6 @@ class AgentConfig(BaseModel):
         """Return authored tool names without inline override details."""
         return [entry.name for entry in self.tools]
 
-    def get_tool_overrides(self, tool_name: str) -> dict[str, object] | None:
-        """Return normalized per-agent runtime overrides for one configured tool."""
-        # why-lazy: config.agent is imported by config.main; the tool catalog loads hook/runtime helpers.
-        from mindroom.tool_system.catalog import TOOL_METADATA, normalize_authored_tool_overrides  # noqa: PLC0415
-
-        for entry in self.tools:
-            if entry.name == tool_name and entry.overrides:
-                metadata = TOOL_METADATA.get(tool_name)
-                allowed_fields = {field.name for field in metadata.agent_override_fields or []} if metadata else set()
-                if not allowed_fields:
-                    return None
-                overrides = {name: value for name, value in entry.overrides.items() if name in allowed_fields}
-                if not overrides:
-                    return None
-                normalized = normalize_authored_tool_overrides(tool_name, overrides)
-                return normalized or None
-        return None
-
     def authored_model_dump(self) -> dict[str, object]:
         """Serialize the authored agent config."""
         return self.model_dump(exclude_unset=True)

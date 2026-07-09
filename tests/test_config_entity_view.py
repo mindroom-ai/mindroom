@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
+from mindroom.config.errors import ConfigRuntimeValidationError
 from mindroom.config.knowledge import KnowledgeBaseConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryConfig, MemorySearchConfig
 from mindroom.config.models import (
     CompactionConfig,
@@ -16,12 +19,17 @@ from mindroom.config.models import (
     ModelConfig,
     ToolConfigEntry,
 )
+from mindroom.config.runtime import expand_tool_names
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.types import HistoryPolicy
+from tests.conftest import test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
-def _representative_config() -> Config:
-    return Config(
+def _representative_config(tmp_path: Path) -> RuntimeConfig:
+    authored = Config(
         agents={
             "overriding_agent": AgentConfig(
                 display_name="Overriding Agent",
@@ -84,10 +92,11 @@ def _representative_config() -> Config:
         },
         knowledge_bases={"engineering_docs": KnowledgeBaseConfig(path="./knowledge_docs")},
     )
+    return RuntimeConfig.from_authored(authored, test_runtime_paths(tmp_path))
 
 
-def test_history_settings_resolution() -> None:
-    config = _representative_config()
+def test_history_settings_resolution(tmp_path: Path) -> None:
+    config = _representative_config(tmp_path)
 
     assert config.resolve_entity("overriding_agent").history_settings.policy == HistoryPolicy(mode="runs", limit=7)
     assert config.resolve_entity("overriding_agent").history_settings.max_tool_calls_from_history == 3
@@ -100,8 +109,8 @@ def test_history_settings_resolution() -> None:
         assert settings.system_message_role == "system"
 
 
-def test_compaction_resolution() -> None:
-    config = _representative_config()
+def test_compaction_resolution(tmp_path: Path) -> None:
+    config = _representative_config(tmp_path)
 
     merged = config.resolve_entity("overriding_agent").compaction_config
     assert merged.enabled is True
@@ -125,8 +134,8 @@ def test_compaction_resolution() -> None:
         assert config.resolve_entity(inheriting_scope).has_authored_compaction_config is True
 
 
-def test_memory_resolution() -> None:
-    config = _representative_config()
+def test_memory_resolution(tmp_path: Path) -> None:
+    config = _representative_config(tmp_path)
 
     assert config.resolve_entity("overriding_agent").memory_backend == "file"
     overridden_search = config.resolve_entity("overriding_agent").memory_search
@@ -139,8 +148,8 @@ def test_memory_resolution() -> None:
         assert config.resolve_entity(inheriting_scope).memory_search.include == ["notes/**/*.md"]
 
 
-def test_model_name_resolution() -> None:
-    config = _representative_config()
+def test_model_name_resolution(tmp_path: Path) -> None:
+    config = _representative_config(tmp_path)
 
     assert config.resolve_entity("overriding_agent").model_name == "summary-model"
     assert config.resolve_entity("inheriting_agent").model_name == "default"
@@ -150,13 +159,13 @@ def test_model_name_resolution() -> None:
         _ = config.resolve_entity(None).model_name
 
 
-def test_tool_resolution() -> None:
-    config = _representative_config()
+def test_tool_resolution(tmp_path: Path) -> None:
+    config = _representative_config(tmp_path)
     view = config.resolve_entity("overriding_agent")
 
-    assert view.available_tools == Config.expand_tool_names(["calculator", "shell"])
+    assert view.available_tools == expand_tool_names(config, ["calculator", "shell"])
     assert [entry.name for entry in view.tool_configs] == (
-        Config.expand_tool_names(["calculator"]) + Config.expand_tool_names(["shell"])
+        expand_tool_names(config, ["calculator"]) + expand_tool_names(config, ["shell"])
     )
     shell_entry = next(entry for entry in view.tool_configs if entry.name == "shell")
     assert shell_entry.defer is True
@@ -176,8 +185,8 @@ def test_tool_resolution() -> None:
     assert inheriting.authored_deferred_tool_configs == []
 
 
-def test_scope_resolution() -> None:
-    config = _representative_config()
+def test_scope_resolution(tmp_path: Path) -> None:
+    config = _representative_config(tmp_path)
 
     assert config.resolve_entity("overriding_agent").execution_scope == "user_agent"
     assert config.resolve_entity("overriding_agent").scope_label == "worker_scope=user_agent"
@@ -185,8 +194,8 @@ def test_scope_resolution() -> None:
     assert config.resolve_entity("inheriting_agent").scope_label == "unscoped"
 
 
-def test_culture_and_knowledge_resolution() -> None:
-    config = _representative_config()
+def test_culture_and_knowledge_resolution(tmp_path: Path) -> None:
+    config = _representative_config(tmp_path)
 
     culture = config.resolve_entity("overriding_agent").culture
     assert culture is not None
@@ -204,45 +213,58 @@ def test_culture_and_knowledge_resolution() -> None:
     assert config.resolve_entity("overriding_agent").private_knowledge_base_id is None
 
 
-def test_unauthored_compaction_reports_not_authored() -> None:
-    config = Config(
-        agents={"plain_agent": AgentConfig(display_name="Plain Agent")},
-        defaults=DefaultsConfig(tools=[], compaction=None),
-        models={"default": ModelConfig(provider="openai", id="test-model")},
+def test_unauthored_compaction_reports_not_authored(tmp_path: Path) -> None:
+    config = RuntimeConfig.from_authored(
+        Config(
+            agents={"plain_agent": AgentConfig(display_name="Plain Agent")},
+            defaults=DefaultsConfig(tools=[], compaction=None),
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        test_runtime_paths(tmp_path),
     )
 
     assert config.resolve_entity("plain_agent").has_authored_compaction_config is False
     assert config.resolve_entity(None).has_authored_compaction_config is False
 
 
-def test_resolve_entity_returns_a_fresh_view_per_call() -> None:
-    config = _representative_config()
+def test_resolve_entity_returns_a_fresh_view_per_call(tmp_path: Path) -> None:
+    config = _representative_config(tmp_path)
 
     assert config.resolve_entity("overriding_agent") is not config.resolve_entity("overriding_agent")
 
 
-def test_agent_only_fields_raise_for_defaults_scope() -> None:
-    view = _representative_config().resolve_entity(None)
+def test_agent_only_fields_raise_for_defaults_scope(tmp_path: Path) -> None:
+    view = _representative_config(tmp_path).resolve_entity(None)
 
     with pytest.raises(ValueError, match="defaults-only scope has no per-agent config"):
         _ = view.available_tools
 
 
-def test_agent_only_fields_raise_for_team_names() -> None:
-    view = _representative_config().resolve_entity("overriding_team")
+def test_agent_only_fields_raise_for_team_names(tmp_path: Path) -> None:
+    view = _representative_config(tmp_path).resolve_entity("overriding_team")
 
     with pytest.raises(ValueError, match="Unknown agent: overriding_team"):
         _ = view.available_tools
 
 
-def test_unknown_entity_raises_on_field_access() -> None:
-    view = _representative_config().resolve_entity("missing")
+def test_unknown_entity_is_rejected_before_view_construction(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Unknown entity: missing"):
+        _representative_config(tmp_path).resolve_entity("missing")
 
-    with pytest.raises(ValueError, match="Unknown entity: missing"):
-        _ = view.history_settings
-    with pytest.raises(ValueError, match="Unknown entity: missing"):
-        _ = view.compaction_config
-    with pytest.raises(ValueError, match="Unknown entity: missing"):
-        _ = view.has_authored_compaction_config
-    with pytest.raises(ValueError, match="Unknown entity: missing"):
-        _ = view.model_name
+
+def test_authored_config_parses_without_runtime_tool_catalog(tmp_path: Path) -> None:
+    authored = Config(defaults=DefaultsConfig(tools=["not_registered_at_runtime"]))
+
+    assert authored.defaults.tool_names == ["not_registered_at_runtime"]
+    with pytest.raises(ConfigRuntimeValidationError, match="Unknown tool 'not_registered_at_runtime'"):
+        RuntimeConfig.from_authored(authored, test_runtime_paths(tmp_path))
+
+
+def test_resolved_entity_is_materialized_at_construction(tmp_path: Path) -> None:
+    config = _representative_config(tmp_path)
+    view = config.resolve_entity("overriding_agent")
+
+    config.agents["overriding_agent"].memory_backend = "none"
+
+    assert view.memory_backend == "file"
+    assert config.resolve_entity("overriding_agent").memory_backend == "none"

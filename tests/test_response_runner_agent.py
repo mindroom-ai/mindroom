@@ -1697,7 +1697,7 @@ class TestAgentBot(AgentBotTestBase):
             return task
 
         config = self._config_for_storage(tmp_path)
-        config.timezone = "America/Los_Angeles"
+        config = config.model_copy(update={"timezone": "America/Los_Angeles"})
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
@@ -1812,7 +1812,7 @@ class TestAgentBot(AgentBotTestBase):
 
         config = self._config_for_storage(tmp_path)
         config.memory.backend = "mem0"
-        config.timezone = "America/Los_Angeles"
+        config = config.model_copy(update={"timezone": "America/Los_Angeles"})
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)

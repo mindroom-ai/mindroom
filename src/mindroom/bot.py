@@ -124,7 +124,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
 
     from mindroom.coalescing_batch import CoalescedBatch
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
@@ -191,7 +191,7 @@ def _create_task_wrapper(
 def create_bot_for_entity(
     entity_name: str,
     agent_user: AgentMatrixUser,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     storage_path: Path,
     config_path: Path | None = None,
@@ -304,7 +304,7 @@ class AgentBot:
         self,
         agent_user: AgentMatrixUser,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         runtime_paths: RuntimePaths,
         rooms: list[str] | None = None,
         config_path: Path | None = None,
@@ -569,7 +569,6 @@ class AgentBot:
         return (
             self.config.get_entity_thread_mode(
                 self.agent_name,
-                self.runtime_paths,
                 room_id=room_id,
             )
             == "room"
@@ -595,12 +594,12 @@ class AgentBot:
         self._runtime_view.client = value
 
     @property
-    def config(self) -> Config:
+    def config(self) -> RuntimeConfig:
         """Return the canonical live config."""
         return self._runtime_view.config
 
     @config.setter
-    def config(self, value: Config) -> None:
+    def config(self, value: RuntimeConfig) -> None:
         """Update the canonical live config."""
         self._runtime_view.config = value
 
@@ -2015,7 +2014,7 @@ class TeamBot(AgentBot):
         self,
         agent_user: AgentMatrixUser,
         storage_path: Path,
-        config: Config,
+        config: RuntimeConfig,
         runtime_paths: RuntimePaths,
         rooms: list[str] | None = None,
         config_path: Path | None = None,

@@ -12,7 +12,7 @@ from mindroom.constants import AI_RUN_METADATA_KEY
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.config.models import ModelConfig
     from mindroom.history.types import PreparedHistoryState
 
@@ -213,7 +213,7 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
 
 def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     *,
-    config: Config,
+    config: RuntimeConfig,
     model_name: str,
     run_id: str | None,
     session_id: str | None,

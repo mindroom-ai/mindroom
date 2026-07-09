@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot, TeamBot
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.orchestration.config_updates import ConfigUpdatePlan
 
@@ -102,11 +102,11 @@ class ConfigReloadLifecycle:
 
     runtime_paths: RuntimePaths
     is_running: Callable[[], bool]
-    current_config: Callable[[], Config | None]
+    current_config: Callable[[], RuntimeConfig | None]
     agent_bots: Callable[[], Mapping[str, AgentBot | TeamBot]]
     in_flight_response_count: Callable[[], int]
-    load_initial_config: Callable[[Config], Awaitable[bool]]
-    apply_update_plan: Callable[[Config, ConfigUpdatePlan, tuple[str, ...]], Awaitable[bool]]
+    load_initial_config: Callable[[RuntimeConfig], Awaitable[bool]]
+    apply_update_plan: Callable[[RuntimeConfig, ConfigUpdatePlan, tuple[str, ...]], Awaitable[bool]]
     _reload_task: asyncio.Task | None = field(default=None, init=False)
     _requested_at: float | None = field(default=None, init=False)
     # Source files of the last reload attempt that failed to load, so the
@@ -138,7 +138,7 @@ class ConfigReloadLifecycle:
 
     async def update_config(self) -> bool:
         """Reload configuration from disk and dispatch the resulting update plan."""
-        # Config validation executes plugin modules and walks the filesystem;
+        # RuntimeConfig validation executes plugin modules and walks the filesystem;
         # keep it off the event loop (#1260).
         new_config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
         current_config = self.current_config()

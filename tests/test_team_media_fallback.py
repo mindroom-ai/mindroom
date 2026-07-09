@@ -1973,7 +1973,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -2053,7 +2053,7 @@ async def test_team_response_stream_records_hidden_interrupted_tool_state() -> N
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -2154,7 +2154,7 @@ async def test_team_response_stream_marks_tool_call_timing_for_agent_and_team_to
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -2287,7 +2287,7 @@ async def test_team_response_stream_records_interrupted_snapshot_after_external_
         team_agent_ids = [
             fixture_entity_matrix_id(
                 "general",
-                config.get_domain(runtime_paths),
+                config.get_domain(),
                 runtime_paths,
             ),
         ]
@@ -2387,12 +2387,12 @@ async def test_team_response_stream_preserves_pending_tool_scope_for_same_named_
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
         fixture_entity_matrix_id(
             "research",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -2478,7 +2478,7 @@ async def test_team_response_stream_preserves_pending_tool_identity_within_membe
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -2555,7 +2555,7 @@ async def test_team_response_stream_does_not_retry_after_hidden_tool_progress_on
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -2623,7 +2623,7 @@ async def test_team_response_stream_does_not_retry_after_hidden_tool_progress_on
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -2683,7 +2683,7 @@ async def test_team_response_stream_emits_team_run_output_fallback() -> None:
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -2743,7 +2743,7 @@ async def test_team_response_stream_marks_successful_event_stream_completed() ->
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -2814,7 +2814,7 @@ async def test_team_response_stream_emits_plain_run_output_fallback_with_team_fo
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -2873,7 +2873,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_output_f
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -2925,7 +2925,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -2981,7 +2981,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_plain_run
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -3047,7 +3047,7 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]
@@ -3123,7 +3123,7 @@ async def test_team_response_stream_tracks_retry_run_id_after_hard_cancellation(
     team_agent_ids = [
         fixture_entity_matrix_id(
             "general",
-            config.get_domain(runtime_paths),
+            config.get_domain(),
             runtime_paths,
         ),
     ]

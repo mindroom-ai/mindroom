@@ -18,7 +18,7 @@ from mindroom.cancellation import (
     cancel_failure_reason,
     cancel_message_for_source,
 )
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.constants import RuntimePaths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import runtime as runtime_helpers
@@ -1476,6 +1476,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
             },
             models={"default": {"provider": "test", "id": "test-model"}},
         )
+        old_config = RuntimeConfig.from_authored(old_config, orchestrator.runtime_paths)
         orchestrator.config = old_config
 
         mock_existing_bot = AsyncMock()

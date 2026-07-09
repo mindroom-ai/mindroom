@@ -12,18 +12,19 @@ import yaml
 from mindroom.api import config_lifecycle
 from mindroom.api import main as api_main
 from mindroom.bot import AgentBot
-from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.config_test_utils import runtime_config_from_data
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 
@@ -32,7 +33,7 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 
 def _config(tmp_path: Path, *, tool_name: str = "mcp_demo", command: str = "npx", required: bool = False) -> Config:
-    return Config.validate_with_runtime(
+    return runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -80,7 +81,7 @@ def _config_with_code_agent(
     }
     if external_trigger_policy is not None:
         payload["external_trigger_policy"] = external_trigger_policy
-    return Config.validate_with_runtime(
+    return runtime_config_from_data(
         payload,
         _runtime_paths(tmp_path),
     )
@@ -586,7 +587,7 @@ async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_re
     """MCP restarts refresh rooms before publishing trigger runtime."""
     runtime_paths = _runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator.config = Config.validate_with_runtime(
+    orchestrator.config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -944,7 +945,7 @@ async def test_handle_mcp_catalog_change_serializes_overlapping_restarts(tmp_pat
     """Do not run overlapping restart cycles when multiple MCP servers hit the same entity."""
     runtime_paths = _runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator.config = Config.validate_with_runtime(
+    orchestrator.config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -1012,7 +1013,7 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
         "code": MagicMock(spec=AgentBot),
     }
-    updated_config = Config.validate_with_runtime(
+    updated_config = runtime_config_from_data(
         {
             "agents": {
                 "code": {

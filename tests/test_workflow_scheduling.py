@@ -276,7 +276,7 @@ class TestParseWorkflowSchedule:
         mock_config: MagicMock,
     ) -> None:
         """The parse prompt must carry the user's timezone and local wall-clock time."""
-        mock_config.timezone = "America/Los_Angeles"
+        mock_config = mock_config.model_copy(update={"timezone": "America/Los_Angeles"})
         mock_agent = AsyncMock()
         mock_response = MagicMock()
         mock_response.content = ScheduledWorkflow(

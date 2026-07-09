@@ -6,7 +6,7 @@ from typing import Any
 
 from mem0 import AsyncMemory
 
-from mindroom.config.main import Config
+from mindroom.config.main import RuntimeConfig
 from mindroom.constants import RuntimePaths
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
 
 
-def _memory_collection_name(config: Config) -> str:
+def _memory_collection_name(config: RuntimeConfig) -> str:
     """Return a stable Chroma collection name for the active embedder settings."""
     embedder = config.memory.embedder
     embedder_config = embedder.config
@@ -34,7 +34,7 @@ def _memory_collection_name(config: Config) -> str:
     return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
-def _get_memory_config(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> dict:  # noqa: C901, PLR0912
+def _get_memory_config(storage_path: Path, config: RuntimeConfig, runtime_paths: RuntimePaths) -> dict:  # noqa: C901, PLR0912
     """Get Mem0 configuration with ChromaDB backend.
 
     Args:
@@ -140,7 +140,7 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
 @timed("system_prompt_assembly.memory_search.mem0.async_memory_from_config")
 async def create_memory_instance(
     storage_path: Path,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> AsyncMemory:
     """Create a Mem0 memory instance with ChromaDB backend.

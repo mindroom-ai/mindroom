@@ -2175,7 +2175,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
         runtime_paths,
         usernames={"router": "mindroom_router_oldns", "assistant": "mindroom_assistant_oldns"},
     )
-    room.add_member(f"@mindroom_router_oldns:{config.get_domain(runtime_paths)}", "Router", None)
+    room.add_member(f"@mindroom_router_oldns:{config.get_domain()}", "Router", None)
     runtime = _scheduling_runtime(client=client, config=config, runtime_paths=runtime_paths, room=room)
     parse_result = ScheduledWorkflow(
         schedule_type="once",
@@ -2188,8 +2188,8 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
     client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
         {
             "joined": {
-                f"@mindroom_router_oldns:{config.get_domain(runtime_paths)}": {"display_name": "Router"},
-                f"@mindroom_assistant_oldns:{config.get_domain(runtime_paths)}": {"display_name": "Assistant"},
+                f"@mindroom_router_oldns:{config.get_domain()}": {"display_name": "Router"},
+                f"@mindroom_assistant_oldns:{config.get_domain()}": {"display_name": "Assistant"},
             },
         },
         room_id="!test:server",
@@ -2207,7 +2207,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
             runtime=runtime,
             room_id="!test:server",
             thread_id=None,
-            scheduled_by=f"@alice:{config.get_domain(runtime_paths)}",
+            scheduled_by=f"@alice:{config.get_domain()}",
             full_text="in 5 minutes check logs",
         )
 

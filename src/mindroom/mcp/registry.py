@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from agno.tools import Toolkit
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import Config, RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.mcp.config import MCPServerConfig
@@ -223,7 +223,7 @@ def _desired_server_entries(config: Config | None) -> dict[str, MCPServerConfig]
     }
 
 
-def sync_mcp_tool_registry(config: Config | None) -> None:
+def sync_mcp_tool_registry(config: RuntimeConfig | None) -> None:
     """Reconcile the dynamic registry entries for configured MCP servers."""
     desired_registry, desired_metadata = resolved_mcp_tool_state(config)
     desired_tool_names = reconcile_dynamic_tool_state(

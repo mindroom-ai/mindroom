@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
@@ -20,13 +20,18 @@ from tests.identity_helpers import entity_ids
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
 
-def _test_config() -> Config:
+
+def _test_config(runtime_paths: RuntimePaths) -> RuntimeConfig:
     """Return one typed config for edit-after-restart tests."""
-    return Config(
-        agents={"test_agent": AgentConfig(display_name="Test Agent")},
-        authorization={"default_room_access": True},
-        mindroom_user={"username": "mindroom"},
+    return RuntimeConfig.from_authored(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            authorization={"default_room_access": True},
+            mindroom_user={"username": "mindroom"},
+        ),
+        runtime_paths,
     )
 
 
@@ -48,7 +53,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
         storage_path=tmp_path,
         process_env={},
     )
-    config = _test_config()
+    config = _test_config(runtime_paths)
 
     # Create a typed agent user
     agent_user = AgentMatrixUser(
@@ -158,7 +163,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
         storage_path=tmp_path,
         process_env={},
     )
-    config = _test_config()
+    config = _test_config(runtime_paths)
 
     # Create a typed agent user
     agent_user = AgentMatrixUser(

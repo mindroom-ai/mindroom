@@ -26,7 +26,7 @@ from mindroom.message_target import MessageTarget
 if TYPE_CHECKING:
     import nio
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -60,7 +60,7 @@ def _raise_scheduled_workflow_send_error() -> typing.NoReturn:
 async def _build_workflow_message_content(
     workflow: ScheduledWorkflow,
     target: MessageTarget,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     message_text: str,
     conversation_cache: ConversationCacheProtocol,
@@ -159,7 +159,7 @@ async def _notify_scheduled_workflow_failure(
 async def execute_scheduled_workflow(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol,
     task_id: str = "scheduled-task",

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
     from pathlib import Path
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -123,7 +123,7 @@ def _mark_room_member_join_seen(storage_root: Path, *, room_id: str, user_id: st
 def _human_join_user_id(
     event: nio.RoomMemberEvent,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Return the joined human user ID for one membership event, or None."""
@@ -144,7 +144,7 @@ def _record_room_member_join_seen_from_event(
     room: nio.MatrixRoom,
     event: nio.RoomMemberEvent,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     storage_root: Path,
 ) -> bool:
@@ -160,7 +160,7 @@ def room_member_join_from_event(
     room: nio.MatrixRoom,
     event: nio.RoomMemberEvent,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     storage_root: Path,
     require_previous_membership: bool = True,
@@ -209,7 +209,7 @@ def room_member_joins_from_sync_state(
     response: nio.SyncResponse,
     *,
     rooms: Mapping[str, nio.MatrixRoom],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     storage_root: Path,
     record_only: bool = False,
@@ -252,7 +252,7 @@ def room_member_joins_from_sync_timeline(
     response: nio.SyncResponse,
     *,
     rooms: Mapping[str, nio.MatrixRoom],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     storage_root: Path,
 ) -> tuple[RoomMemberJoin, ...]:

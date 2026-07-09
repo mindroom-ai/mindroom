@@ -14,7 +14,7 @@ from mindroom.matrix_identifiers import unnamespaced_agent_name_from_username_lo
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.entity_resolution import EntityIdentityRegistry
     from mindroom.tool_system.events import ToolTraceEntry
@@ -47,7 +47,7 @@ class _MentionReplacement(_MentionResolution):
 
 def parse_mentions_in_text(
     text: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     allow_generated_agent_localparts: bool = True,
@@ -85,7 +85,7 @@ def parse_mentions_in_text(
 
 def resolve_mentioned_user_ids_from_text(
     text: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> list[str]:
     """Resolve visible text mention tokens to Matrix user IDs."""
@@ -105,7 +105,7 @@ def resolve_mentioned_user_ids_from_text(
 
 def format_entity_mention(
     entity_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, list[str], str]:
     """Return one configured entity mention without resolving unrelated entities."""
@@ -191,7 +191,7 @@ def _resolve_mention_tokens(
     tokens: list[_MentionToken],
     *,
     registry: EntityIdentityRegistry,
-    config: Config,
+    config: RuntimeConfig,
     allow_generated_agent_localparts: bool,
 ) -> list[_MentionReplacement]:
     """Resolve scanned tokens into render-ready replacements."""
@@ -221,7 +221,7 @@ def _resolve_mention_token(
     token: _MentionToken,
     *,
     registry: EntityIdentityRegistry,
-    config: Config,
+    config: RuntimeConfig,
     allow_generated_agent_localparts: bool,
 ) -> _MentionResolution | None:
     """Resolve one scanned mention token into an entity or literal-user target."""
@@ -244,7 +244,7 @@ def _resolve_explicit_matrix_id_token(
     token: _MentionToken,
     *,
     registry: EntityIdentityRegistry,
-    config: Config,
+    config: RuntimeConfig,
 ) -> _MentionResolution | None:
     """Resolve one explicit full MXID token."""
     explicit_user_id = token.explicit_user_id
@@ -266,7 +266,7 @@ def _resolve_entity_alias_token(
     *,
     has_server_name: bool,
     registry: EntityIdentityRegistry,
-    config: Config,
+    config: RuntimeConfig,
     allow_generated_agent_localparts: bool,
 ) -> _MentionResolution | None:
     """Resolve one alias-style token to a local configured agent or team, if any."""
@@ -289,7 +289,7 @@ def _entity_mention_resolution(
     entity_name: str,
     *,
     registry: EntityIdentityRegistry,
-    config: Config,
+    config: RuntimeConfig,
 ) -> _MentionResolution:
     """Return rendering data for one resolved local agent or team mention."""
     return _entity_mention_resolution_from_user_id(
@@ -303,7 +303,7 @@ def _entity_mention_resolution_from_user_id(
     entity_name: str,
     resolved_user_id: str,
     *,
-    config: Config,
+    config: RuntimeConfig,
 ) -> _MentionResolution:
     """Return rendering data for one resolved entity user ID."""
     entity_config = config.agents.get(entity_name) or config.teams[entity_name]
@@ -343,7 +343,7 @@ def _is_valid_explicit_matrix_user_id(candidate: str) -> bool:
 
 def _find_matching_entity_name_for_localpart(
     localpart: str,
-    config: Config,
+    config: RuntimeConfig,
     *,
     allow_generated_agent_localparts: bool,
 ) -> str | None:
@@ -378,7 +378,7 @@ def _find_matching_entity_name(
 
 def resolve_entity_name_for_mention_localpart(
     localpart: str,
-    config: Config,
+    config: RuntimeConfig,
     *,
     allow_generated_agent_localparts: bool = True,
 ) -> str | None:
@@ -426,7 +426,7 @@ def _is_wrapped_in_single_backticks(text: str, start: int, end: int) -> bool:
 
 
 def format_message_with_mentions(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     text: str,
     thread_event_id: str | None = None,

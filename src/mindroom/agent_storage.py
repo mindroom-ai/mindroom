@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.session import Session
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -85,7 +85,7 @@ def _create_sqlite_state_storage(
 
 def create_session_storage(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> BaseDb:
@@ -103,7 +103,7 @@ def create_session_storage(
 
 def _create_agent_state_db(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,

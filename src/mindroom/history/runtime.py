@@ -71,7 +71,7 @@ if TYPE_CHECKING:
     from agno.session.team import TeamSession
     from agno.team import Team
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome
@@ -103,7 +103,7 @@ def _compaction_failure_status(error: BaseException) -> Literal["failed", "timeo
 
 @timed("system_prompt_assembly.history_prepare.compaction_model_init")
 def _load_compaction_model(
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     model_name: str,
 ) -> Model:
@@ -298,7 +298,7 @@ async def prepare_scope_history(
     agent_name: str,
     resolved_inputs: _HistoryPreparationInputs,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     scope_context: ScopeSessionContext | None = None,
     scope: HistoryScope | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
@@ -416,7 +416,7 @@ async def _run_scope_compaction_with_lifecycle(
     history_budget: int | None,
     current_history_tokens: int,
     runs_before: int,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     compaction_lifecycle: CompactionLifecycle | None,
 ) -> _ScopeCompactionLifecycleResult:
@@ -512,7 +512,7 @@ async def _run_scope_compaction(
     state: HistoryScopeState,
     resolved_inputs: _HistoryPreparationInputs,
     history_budget: int | None,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
@@ -545,7 +545,7 @@ async def _run_scope_compaction(
 def finalize_history_preparation(
     *,
     prepared_scope_history: PreparedScopeHistory,
-    config: Config,
+    config: RuntimeConfig,
     static_prompt_tokens: int | None = None,
     available_history_budget: int | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
@@ -662,7 +662,7 @@ async def prepare_bound_scope_history(
     team: Team | None = None,
     full_prompt: str,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     scope_context: ScopeSessionContext | None = None,
     team_name: str | None = None,
     active_model_name: str | None = None,
@@ -748,7 +748,7 @@ def _resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str
 def resolve_bound_team_scope_context(
     *,
     agents: list[Agent],
-    config: Config,
+    config: RuntimeConfig,
     team_name: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> _BoundTeamScopeContext | None:
@@ -798,7 +798,7 @@ def _open_scope_storage(
     agent_name: str,
     scope: HistoryScope,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     execution_identity: ToolExecutionIdentity | None,
 ) -> Iterator[BaseDb]:
     """Open the canonical storage for one persisted history scope."""
@@ -848,7 +848,7 @@ def open_resolved_scope_session_context(
     scope: HistoryScope | None,
     session_id: str | None,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     execution_identity: ToolExecutionIdentity | None,
     create_session_if_missing: bool = False,
 ) -> Iterator[ScopeSessionContext | None]:
@@ -881,7 +881,7 @@ def open_scope_session_context(
     agent_name: str,
     session_id: str | None,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     execution_identity: ToolExecutionIdentity | None,
     scope: HistoryScope | None = None,
     create_session_if_missing: bool = False,
@@ -906,7 +906,7 @@ def open_bound_scope_session_context(
     agents: list[Agent],
     session_id: str | None,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     execution_identity: ToolExecutionIdentity | None,
     team_name: str | None = None,
     create_session_if_missing: bool = False,
@@ -950,7 +950,7 @@ def create_scope_session_storage(
     *,
     agent_name: str,
     scope: HistoryScope,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> BaseDb:
@@ -1053,7 +1053,7 @@ def _history_settings_from_agent(agent: Agent) -> ResolvedHistorySettings:
 
 def _resolve_entity_preparation_inputs(
     *,
-    config: Config,
+    config: RuntimeConfig,
     entity_name: str | None,
     static_prompt_tokens: int,
     active_model_name: str | None,
@@ -1110,7 +1110,7 @@ def resolve_agent_preparation_inputs(
     agent: Agent,
     agent_name: str,
     full_prompt: str,
-    config: Config,
+    config: RuntimeConfig,
     history_settings: ResolvedHistorySettings | None = None,
     compaction_config: CompactionConfig | None = None,
     has_authored_compaction_config: bool | None = None,

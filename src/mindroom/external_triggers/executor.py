@@ -15,7 +15,7 @@ from mindroom.matrix.message_builder import build_message_content, markdown_to_h
 if TYPE_CHECKING:
     import nio
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.external_triggers.models import ExternalTriggerPayload
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
@@ -48,7 +48,7 @@ async def execute_external_trigger(
     client: nio.AsyncClient,
     snapshot: TriggerDeliverySnapshot,
     payload: ExternalTriggerPayload,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol,
 ) -> str | None:

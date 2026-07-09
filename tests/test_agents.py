@@ -39,7 +39,7 @@ from mindroom.config.agent import (
     TeamConfig,
 )
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ConfigRuntimeValidationError, RuntimeConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
@@ -74,6 +74,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workspaces import _copy_workspace_template
+from tests.config_test_utils import runtime_config_from_data
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -89,7 +90,7 @@ def _runtime_paths(storage_path: Path, *, config_path: Path | None = None) -> Ru
     )
 
 
-def _test_config() -> Config:
+def _test_config() -> RuntimeConfig:
     """Create a self-contained test config with standard agents."""
     runtime_paths = _runtime_paths(Path(tempfile.mkdtemp()))
     return _bind_runtime_paths(
@@ -135,7 +136,7 @@ def _test_config() -> Config:
     )
 
 
-def _bind_runtime_paths(config: Config, runtime_paths: RuntimePaths) -> Config:
+def _bind_runtime_paths(config: Config | RuntimeConfig, runtime_paths: RuntimePaths) -> RuntimeConfig:
     """Bind explicit RuntimePaths to a test config."""
     from tests.conftest import bind_runtime_paths  # noqa: PLC0415
 
@@ -148,7 +149,7 @@ def _bind_runtime_paths(config: Config, runtime_paths: RuntimePaths) -> Config:
     return bound_config
 
 
-def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> Agent:
+def _create_agent_for_test(agent_name: str, config: RuntimeConfig, **kwargs: object) -> Agent:
     """Create an agent with the test config's explicit runtime context."""
     from tests.conftest import runtime_paths_for  # noqa: PLC0415
 
@@ -242,13 +243,17 @@ def _patch_published_knowledge(
 def test_agent_identity_prompt_can_be_overridden_from_config() -> None:
     """Agent identity prompt assembly should honor the configured template override."""
     config = _test_config()
-    config.prompts = {
-        "AGENT_IDENTITY_CONTEXT_TEMPLATE": (
-            "## Custom Identity\n"
-            "Name={display_name}; Matrix={matrix_id}; Provider={model_provider}; Model={model_id}.\n"
-            "{openai_compat_history_guidance}"
-        ),
-    }
+    config = config.model_copy(
+        update={
+            "prompts": {
+                "AGENT_IDENTITY_CONTEXT_TEMPLATE": (
+                    "## Custom Identity\n"
+                    "Name={display_name}; Matrix={matrix_id}; Provider={model_provider}; Model={model_id}.\n"
+                    "{openai_compat_history_guidance}"
+                ),
+            },
+        },
+    )
 
     agent = _create_agent_for_test("general", config)
     openai_compat_agent = _create_agent_for_test(
@@ -326,7 +331,7 @@ def test_create_agent_includes_matrix_reply_targeting_policy() -> None:
 def test_config_round_trips_structured_agent_tool_entries() -> None:
     """Structured tool entries should stay authored while runtime access stays name-based."""
     runtime_paths = _runtime_paths(Path(tempfile.mkdtemp()))
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "agents": {
                 "openclaw": {
@@ -356,10 +361,6 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
 
     agent_config = config.agents["openclaw"]
     assert agent_config.tool_names == ["shell", "browser"]
-    assert agent_config.get_tool_overrides("shell") == {
-        "extra_env_passthrough": ["GITEA_TOKEN", "WHISPER_URL"],
-        "shell_path_prepend": ["/run/wrappers/bin"],
-    }
     assert config.authored_model_dump()["agents"]["openclaw"]["tools"] == [
         {
             "shell": {
@@ -414,7 +415,7 @@ def test_get_agent_runtime_state_dbs_accepts_backend_neutral_agno_storage() -> N
 def test_get_agent_runtime_state_dbs_includes_learning_storage(tmp_path: Path) -> None:
     """Runtime-owned agent DB cleanup should include the separate learning storage."""
     config = _test_config()
-    config.models = {"default": ModelConfig(provider="ollama", id="test-model")}
+    config = config.model_copy(update={"models": {"default": ModelConfig(provider="ollama", id="test-model")}})
     config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
     agent = _create_agent_for_test("general", config=config)
@@ -2389,7 +2390,7 @@ def test_agent_preload_cap_truncates_context_files_in_order(
     config = _test_config()
     authored_defaults = config.defaults.model_dump(mode="python")
     authored_defaults["max_preload_chars"] = 420
-    config.defaults = DefaultsConfig(**authored_defaults)
+    config = config.model_copy(update={"defaults": DefaultsConfig(**authored_defaults)})
 
     workspace = agent_workspace_root_path(tmp_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -3085,7 +3086,7 @@ def test_config_rejects_duplicate_agent_knowledge_base_assignment() -> None:
         )
 
 
-def test_config_resolves_per_agent_memory_backend_override() -> None:
+def test_config_resolves_per_agent_memory_backend_override(tmp_path: Path) -> None:
     """Per-agent memory backend overrides should take precedence over global defaults."""
     config = Config(
         agents={
@@ -3094,12 +3095,13 @@ def test_config_resolves_per_agent_memory_backend_override() -> None:
         },
         memory={"backend": "mem0"},
     )
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
     assert config.resolve_entity("general").memory_backend == "mem0"
     assert config.resolve_entity("writer").memory_backend == "file"
 
 
-def test_config_reports_mixed_memory_backend_usage() -> None:
+def test_config_reports_mixed_memory_backend_usage(tmp_path: Path) -> None:
     """Config helper methods should report effective mixed backend usage."""
     config = Config(
         agents={
@@ -3108,6 +3110,7 @@ def test_config_reports_mixed_memory_backend_usage() -> None:
         },
         memory={"backend": "mem0"},
     )
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
     assert config.uses_file_memory() is True
     assert config.resolve_entity("general").memory_backend == "file"
@@ -3255,16 +3258,20 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources(
     """The model-facing knowledge search tool should explain what each source contains."""
     config = _test_config()
     config.agents["general"].knowledge_bases = ["engineering", "product"]
-    config.knowledge_bases = {
-        "engineering": KnowledgeBaseConfig(
-            description="Architecture docs, ADRs, deployment runbooks, and coding conventions.",
-            path="./knowledge_docs/engineering",
-        ),
-        "product": KnowledgeBaseConfig(
-            description="Product requirements, feature specs, roadmap notes, and user-facing behavior decisions.",
-            path="./knowledge_docs/product",
-        ),
-    }
+    config = config.model_copy(
+        update={
+            "knowledge_bases": {
+                "engineering": KnowledgeBaseConfig(
+                    description="Architecture docs, ADRs, deployment runbooks, and coding conventions.",
+                    path="./knowledge_docs/engineering",
+                ),
+                "product": KnowledgeBaseConfig(
+                    description="Product requirements, feature specs, roadmap notes, and user-facing behavior decisions.",
+                    path="./knowledge_docs/product",
+                ),
+            },
+        },
+    )
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(config, runtime_paths)
     _patch_published_knowledge(
@@ -3319,16 +3326,20 @@ def test_agent_knowledge_search_tool_description_preserves_colon_space_source_id
     base_id = "foo: bar"
     config = _test_config()
     config.agents["general"].knowledge_bases = [base_id, "product"]
-    config.knowledge_bases = {
-        base_id: KnowledgeBaseConfig(
-            description="Special source with punctuation in its ID.",
-            path="./knowledge_docs/special",
-        ),
-        "product": KnowledgeBaseConfig(
-            description="Product requirements and feature specs.",
-            path="./knowledge_docs/product",
-        ),
-    }
+    config = config.model_copy(
+        update={
+            "knowledge_bases": {
+                base_id: KnowledgeBaseConfig(
+                    description="Special source with punctuation in its ID.",
+                    path="./knowledge_docs/special",
+                ),
+                "product": KnowledgeBaseConfig(
+                    description="Product requirements and feature specs.",
+                    path="./knowledge_docs/product",
+                ),
+            },
+        },
+    )
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(config, runtime_paths)
     _patch_published_knowledge(
@@ -3374,16 +3385,20 @@ def test_agent_knowledge_search_tool_description_excludes_unavailable_sources(tm
     """The model-facing knowledge search tool should only list queryable sources."""
     config = _test_config()
     config.agents["general"].knowledge_bases = ["engineering", "legal"]
-    config.knowledge_bases = {
-        "engineering": KnowledgeBaseConfig(
-            description="Architecture docs, ADRs, deployment runbooks, and coding conventions.",
-            path="./knowledge_docs/engineering",
-        ),
-        "legal": KnowledgeBaseConfig(
-            description="Contracts, regulatory notes, and legal review records.",
-            path="./knowledge_docs/legal",
-        ),
-    }
+    config = config.model_copy(
+        update={
+            "knowledge_bases": {
+                "engineering": KnowledgeBaseConfig(
+                    description="Architecture docs, ADRs, deployment runbooks, and coding conventions.",
+                    path="./knowledge_docs/engineering",
+                ),
+                "legal": KnowledgeBaseConfig(
+                    description="Contracts, regulatory notes, and legal review records.",
+                    path="./knowledge_docs/legal",
+                ),
+            },
+        },
+    )
     config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
     ready_knowledge = Knowledge(
         name="engineering",
@@ -3439,12 +3454,16 @@ def test_agent_accepts_custom_knowledge_protocol_without_source_metadata(tmp_pat
 
     config = _test_config()
     config.agents["general"].knowledge_bases = ["custom"]
-    config.knowledge_bases = {
-        "custom": KnowledgeBaseConfig(
-            description="Custom protocol-backed search.",
-            path="./knowledge_docs/custom",
-        ),
-    }
+    config = config.model_copy(
+        update={
+            "knowledge_bases": {
+                "custom": KnowledgeBaseConfig(
+                    description="Custom protocol-backed search.",
+                    path="./knowledge_docs/custom",
+                ),
+            },
+        },
+    )
     config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
     agent = _create_agent_for_test("general", config, knowledge=CustomKnowledge())
@@ -3616,7 +3635,7 @@ def test_config_rejects_blank_private_knowledge_path(path: str) -> None:
         )
 
 
-def test_config_accepts_private_knowledge_path_dot_for_private_root() -> None:
+def test_config_accepts_private_knowledge_path_dot_for_private_root(tmp_path: Path) -> None:
     """A dot path is allowed to index the entire private root explicitly."""
     config = Config(
         agents={
@@ -3630,6 +3649,7 @@ def test_config_accepts_private_knowledge_path_dot_for_private_root() -> None:
             ),
         },
     )
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
     private_base_id = config.resolve_entity("mind").private_knowledge_base_id
     assert private_base_id is not None
@@ -3718,41 +3738,47 @@ def test_config_rejects_teams_with_members_that_delegate_to_private_agents() -> 
         )
 
 
-def test_config_rejects_shared_only_integrations_for_isolating_worker_scope() -> None:
+def test_config_rejects_shared_only_integrations_for_isolating_worker_scope(tmp_path: Path) -> None:
     """Agents with isolating worker scope must not use shared-only integrations."""
     with pytest.raises(
-        ValidationError,
+        ConfigRuntimeValidationError,
         match=r"general -> homeassistant \(worker_scope=user\)",
     ):
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    tools=["homeassistant"],
-                    worker_scope="user",
-                ),
-            },
+        _bind_runtime_paths(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="General",
+                        tools=["homeassistant"],
+                        worker_scope="user",
+                    ),
+                },
+            ),
+            _runtime_paths(tmp_path),
         )
 
 
-def test_config_rejects_shared_only_integrations_inherited_from_defaults() -> None:
+def test_config_rejects_shared_only_integrations_inherited_from_defaults(tmp_path: Path) -> None:
     """Shared-only defaults.tools must still be rejected for isolating agents."""
     with pytest.raises(
-        ValidationError,
+        ConfigRuntimeValidationError,
         match=r"mind -> homeassistant \(private\.per=user_agent\)",
     ):
-        Config(
-            agents={
-                "mind": AgentConfig(
-                    display_name="Mind",
-                    private=AgentPrivateConfig(per="user_agent", root="mind_data"),
-                ),
-            },
-            defaults=DefaultsConfig(tools=["homeassistant"]),
+        _bind_runtime_paths(
+            Config(
+                agents={
+                    "mind": AgentConfig(
+                        display_name="Mind",
+                        private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+                    ),
+                },
+                defaults=DefaultsConfig(tools=["homeassistant"]),
+            ),
+            _runtime_paths(tmp_path),
         )
 
 
-def test_config_private_and_shared_knowledge_coexist() -> None:
+def test_config_private_and_shared_knowledge_coexist(tmp_path: Path) -> None:
     """Agents can combine requester-private knowledge with shared top-level knowledge bases."""
     config = Config(
         agents={
@@ -3760,7 +3786,7 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
                 display_name="Mind",
                 private=AgentPrivateConfig(
                     per="user",
-                    template_dir="./mind_template",
+                    template_dir=str(tmp_path / "mind_template"),
                     knowledge=AgentPrivateKnowledgeConfig(path="memory"),
                 ),
                 knowledge_bases=["company_docs"],
@@ -3770,6 +3796,8 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
             "company_docs": KnowledgeBaseConfig(path="./company_docs"),
         },
     )
+    (tmp_path / "mind_template").mkdir()
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
     private_base_id = config.resolve_entity("mind").private_knowledge_base_id
     assert private_base_id is not None
@@ -3778,7 +3806,7 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
     assert private_config.path == "memory"
 
 
-def test_template_dir_does_not_imply_private_knowledge() -> None:
+def test_template_dir_does_not_imply_private_knowledge(tmp_path: Path) -> None:
     """Copying from a template directory alone should not create a private knowledge base."""
     config = Config(
         agents={
@@ -3786,17 +3814,19 @@ def test_template_dir_does_not_imply_private_knowledge() -> None:
                 display_name="Mind",
                 private=AgentPrivateConfig(
                     per="user",
-                    template_dir="./mind_template",
+                    template_dir=str(tmp_path / "mind_template"),
                 ),
             ),
         },
     )
+    (tmp_path / "mind_template").mkdir()
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
     assert config.resolve_entity("mind").private_knowledge_base_id is None
     assert config.resolve_entity("mind").knowledge_base_ids == []
 
 
-def test_get_private_knowledge_base_agent_requires_active_private_knowledge() -> None:
+def test_get_private_knowledge_base_agent_requires_active_private_knowledge(tmp_path: Path) -> None:
     """Synthetic private base IDs should resolve only while private knowledge is actually active."""
     config = Config(
         agents={
@@ -3804,7 +3834,7 @@ def test_get_private_knowledge_base_agent_requires_active_private_knowledge() ->
                 display_name="Mind",
                 private=AgentPrivateConfig(
                     per="user",
-                    template_dir="./mind_template",
+                    template_dir=str(tmp_path / "mind_template"),
                     knowledge=AgentPrivateKnowledgeConfig(path="memory"),
                 ),
             ),
@@ -3814,6 +3844,8 @@ def test_get_private_knowledge_base_agent_requires_active_private_knowledge() ->
             "company_docs": KnowledgeBaseConfig(path="./company_docs"),
         },
     )
+    (tmp_path / "mind_template").mkdir()
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
     assert config.get_private_knowledge_base_agent("__agent_private__:mind") == "mind"
     assert config.get_private_knowledge_base_agent("__agent_private__:assistant") is None
@@ -3862,7 +3894,7 @@ def test_config_rejects_agents_in_multiple_cultures() -> None:
         )
 
 
-def test_config_accepts_valid_culture_assignment() -> None:
+def test_config_accepts_valid_culture_assignment(tmp_path: Path) -> None:
     """Config should expose culture assignment helpers for valid culture definitions."""
     config = Config(
         agents={
@@ -3877,13 +3909,15 @@ def test_config_accepts_valid_culture_assignment() -> None:
             ),
         },
     )
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
     assignment = config.resolve_entity("calculator").culture
     assert assignment is not None
     culture_name, culture_config = assignment
     assert culture_name == "engineering"
     assert culture_config.mode == "automatic"
-    assert config.resolve_entity("unknown").culture is None
+    with pytest.raises(ValueError, match="Unknown entity: unknown"):
+        config.resolve_entity("unknown")
 
 
 def test_config_rejects_git_backed_private_knowledge_inside_private_memory_tree() -> None:
@@ -3999,7 +4033,7 @@ def test_config_rejects_git_backed_private_knowledge_overlapping_template_conten
     runtime_paths = _runtime_paths(tmp_path)
 
     with pytest.raises(
-        ValidationError,
+        ConfigRuntimeValidationError,
         match=r"git-backed private knowledge at 'docs'.*scaffolded private workspace content",
     ):
         bind_runtime_paths(

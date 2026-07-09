@@ -23,6 +23,7 @@ from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import load_config_yaml, make_conversation_cache_mock, make_event_cache_mock, write_config_yaml
 from tests.identity_helpers import persist_entity_accounts
 
@@ -184,7 +185,7 @@ class TestConsolidatedConfigManager:
         write_config_yaml(config, config_path)
         cm = _config_manager(config_path)
         persist_entity_accounts(
-            config,
+            load_config_yaml(config_path),
             cm.runtime_paths,
             usernames={
                 "router": "mindroom_router_oldns",
@@ -579,7 +580,7 @@ class TestConsolidatedConfigManager:
 
     def test_tool_config_entries_parse_and_merge(self) -> None:
         """Mixed string and mapping syntax should normalize and merge defaults with agent overrides."""
-        config = Config.validate_with_runtime(
+        config = runtime_config_from_data(
             {
                 "defaults": {
                     "tools": [
@@ -613,7 +614,7 @@ class TestConsolidatedConfigManager:
 
     def test_tool_config_inherit_sentinel_clears_required_default_override(self) -> None:
         """A per-agent sentinel should remove an inherited required override and fall back to lower layers."""
-        config = Config.validate_with_runtime(
+        config = runtime_config_from_data(
             {
                 "defaults": {
                     "tools": [
@@ -650,7 +651,7 @@ class TestConsolidatedConfigManager:
             process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
         )
 
-        config = Config.validate_with_runtime(
+        config = runtime_config_from_data(
             {
                 "defaults": {"tools": ["scheduler"]},
                 "tool_approval": {
@@ -675,13 +676,13 @@ class TestConsolidatedConfigManager:
             process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
         )
 
-        config = Config.validate_with_runtime(
+        config = runtime_config_from_data(
             {
                 "defaults": {"tools": ["scheduler"]},
             },
             runtime_paths,
         )
-        empty_config = Config.validate_with_runtime({}, runtime_paths)
+        empty_config = runtime_config_from_data({}, runtime_paths)
 
         assert config.defaults.tool_names == ["scheduler", "approved_egress"]
         assert config.authored_model_dump()["defaults"]["tools"] == ["scheduler"]
@@ -696,7 +697,7 @@ class TestConsolidatedConfigManager:
             process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
         )
 
-        config = Config.validate_with_runtime(
+        config = runtime_config_from_data(
             {
                 "tool_approval": {
                     "rules": [
@@ -777,7 +778,7 @@ class TestConsolidatedConfigManager:
 
     def test_implied_tools_do_not_receive_preset_overrides(self) -> None:
         """Only explicit tool entries should carry overrides after preset expansion."""
-        config = Config.validate_with_runtime(
+        config = runtime_config_from_data(
             {
                 "agents": {
                     "code": {
@@ -837,14 +838,14 @@ class TestConsolidatedConfigManager:
             pytest.param({"does_not_exist": {}}, "agents.code.tools[0].does_not_exist", id="empty-mapping"),
         ],
     )
-    def test_validate_with_runtime_rejects_unknown_tool_names(
+    def test_runtime_validation_rejects_unknown_tool_names(
         self,
         tool_entry: object,
         expected_path: str,
     ) -> None:
         """Runtime config validation should reject unknown tool names before agent construction."""
         with pytest.raises(ValueError, match=r"Unknown tool 'does_not_exist'") as exc_info:
-            Config.validate_with_runtime(
+            runtime_config_from_data(
                 {
                     "agents": {
                         "code": {
@@ -1191,6 +1192,7 @@ class TestAgentWorkerScope:
                 "code": AgentConfig(display_name="Code", worker_scope="user_agent"),
             },
         )
+        config = runtime_config_from_data(config.authored_model_dump(), _runtime_paths())
         assert config.resolve_entity("code").execution_scope == "user_agent"
 
     def test_worker_scope_falls_back_to_defaults(self) -> None:
@@ -1201,6 +1203,7 @@ class TestAgentWorkerScope:
                 "code": AgentConfig(display_name="Code"),
             },
         )
+        config = runtime_config_from_data(config.authored_model_dump(), _runtime_paths())
         assert config.resolve_entity("code").execution_scope == "user"
 
 
@@ -1210,6 +1213,7 @@ class TestWorkerGrantableCredentials:
     def test_worker_grantable_credentials_none_uses_builtin_default(self) -> None:
         """An explicit or implicit None should preserve the built-in deny-all default."""
         config = Config(defaults=DefaultsConfig(worker_grantable_credentials=None))
+        config = runtime_config_from_data(config.authored_model_dump(), _runtime_paths())
 
         assert config.get_worker_grantable_credentials() == DEFAULT_WORKER_GRANTABLE_CREDENTIALS == frozenset()
 
@@ -1232,6 +1236,7 @@ class TestWorkerGrantableCredentials:
     def test_worker_grantable_credentials_empty_list_denies_all(self) -> None:
         """An explicit empty worker_grantable_credentials list should deny all worker credential mirroring."""
         config = Config(defaults=DefaultsConfig(worker_grantable_credentials=[]))
+        config = runtime_config_from_data(config.authored_model_dump(), _runtime_paths())
 
         assert config.get_worker_grantable_credentials() == frozenset()
 

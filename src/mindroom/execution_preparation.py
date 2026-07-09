@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from agno.team import Team
 
     from mindroom.attachments import AttachmentRecord
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ResolvedReplayPlan
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import ResponseTurnContext
@@ -220,7 +220,7 @@ def _cap_visible_message_body(body: str, max_length: int | None) -> str:
 def _build_unseen_messages_header(
     partial_reply_kinds: set[_PartialReplyKind],
     *,
-    config: Config,
+    config: RuntimeConfig,
 ) -> str:
     """Choose the unseen-context guidance for the partial-reply mix present."""
     if not partial_reply_kinds:
@@ -318,7 +318,7 @@ def _messages_with_capped_context(
     current_sender_id: str | None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    config: Config,
+    config: RuntimeConfig,
     static_token_budget: int,
     estimate_static_tokens_fn: Callable[[str], int],
     render_messages_text_fn: Callable[[Sequence[Message]], str],
@@ -366,7 +366,7 @@ def _messages_with_current_prompt(
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    config: Config,
+    config: RuntimeConfig,
 ) -> tuple[Message, ...]:
     """Return canonical live request messages with the current user turn last."""
     messages = [message.model_copy(deep=True) for message in context_messages]
@@ -415,7 +415,7 @@ def _build_unseen_context_messages(
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    config: Config,
+    config: RuntimeConfig,
     attachment_context: _ThreadAttachmentContext | None = None,
 ) -> tuple[tuple[Message, ...], list[str]]:
     """Return canonical request messages for unseen thread context plus the current turn."""
@@ -460,7 +460,7 @@ def _build_thread_history_messages(
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    config: Config,
+    config: RuntimeConfig,
     max_messages: int | None = None,
     max_message_length: int | None = None,
     missing_sender_label: str | None = None,
@@ -625,7 +625,7 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
 def _finalize_prepared_history(
     *,
     prepared_scope_history: PreparedScopeHistory,
-    config: Config,
+    config: RuntimeConfig,
     static_prompt_tokens: int,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedHistoryState:
@@ -647,7 +647,7 @@ async def _prepare_execution_context_common(
     current_sender_id: str | None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    config: Config,
+    config: RuntimeConfig,
     prepare_scope_history_fn: Callable[[str], Awaitable[PreparedScopeHistory]],
     estimate_static_tokens_fn: Callable[[str], int],
     render_messages_text_fn: Callable[[Sequence[Message]], str],
@@ -770,7 +770,7 @@ async def prepare_agent_execution_context(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     compaction_lifecycle: CompactionLifecycle | None = None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
@@ -788,7 +788,6 @@ async def prepare_agent_execution_context(
         entity_name=agent_name,
         room_id=ctx.room_id,
         thread_id=ctx.thread_id,
-        runtime_paths=runtime_paths,
     )
     static_token_estimator = agent_static_token_estimator(agent)
 
@@ -855,7 +854,7 @@ async def _prepare_bound_team_execution_context(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     team_name: str | None,
     active_model_name: str | None,
     active_context_window: int | None,
@@ -943,7 +942,7 @@ async def prepare_bound_team_run_context(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     entity_name: str | None,
     active_model_name: str | None,
     active_context_window: int | None,

@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
@@ -67,7 +67,7 @@ class ToolRuntimeContext:
     resolved_thread_id: str | None
     requester_id: str
     client: nio.AsyncClient
-    config: Config
+    config: RuntimeConfig
     runtime_paths: RuntimePaths
     event_cache: ConversationEventCache
     conversation_cache: ConversationCacheProtocol

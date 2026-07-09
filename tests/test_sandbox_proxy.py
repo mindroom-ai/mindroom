@@ -32,7 +32,7 @@ import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
 import mindroom.tools.shell as shell_tool_module
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config, RuntimeConfig, load_config
 from mindroom.constants import (
     RuntimePaths,
     build_execution_tool_env,
@@ -90,6 +90,11 @@ _TEST_KUBERNETES_VALIDATION_SNAPSHOT = {
     },
 }
 _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
+
+
+def _runtime_config(config: Config, runtime_paths: RuntimePaths) -> RuntimeConfig:
+    """Materialize authored test data at the production runtime boundary."""
+    return RuntimeConfig.from_authored(config, runtime_paths)
 
 
 def test_approved_egress_tool_stays_primary_even_when_sandbox_mode_all(tmp_path: Path) -> None:
@@ -880,7 +885,10 @@ async def test_sandbox_runner_save_attachment_supports_static_unkeyed_workspace(
         storage_path=tmp_path / "storage",
         process_env={"MINDROOM_SANDBOX_PROXY_TOKEN": _TEST_AUTH_TOKEN},
     )
-    config = Config(agents={"code": AgentConfig(display_name="Code", memory_backend="file")}, models={})
+    config = _runtime_config(
+        Config(agents={"code": AgentConfig(display_name="Code", memory_backend="file")}, models={}),
+        runtime_paths,
+    )
     app = SimpleNamespace(
         state=SimpleNamespace(
             sandbox_runner_context=sandbox_runner_module._SandboxRunnerContext(
@@ -940,9 +948,12 @@ async def test_static_runner_redirect_resolves_agent_workspace_without_prepared_
         storage_path=storage_root,
         process_env={},
     )
-    config = Config(
-        agents={"general": AgentConfig(display_name="General", memory_backend="file")},
-        models={},
+    config = _runtime_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General", memory_backend="file")},
+            models={},
+        ),
+        runtime_paths,
     )
     request = sandbox_runner_module.SandboxRunnerExecuteRequest(
         tool_name=tool_name,
@@ -992,9 +1003,12 @@ async def test_worker_redirect_uses_agent_workspace_not_worker_scratch(tmp_path:
         storage_path=storage_root,
         process_env={},
     )
-    config = Config(
-        agents={"general": AgentConfig(display_name="General", memory_backend="file")},
-        models={},
+    config = _runtime_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General", memory_backend="file")},
+            models={},
+        ),
+        runtime_paths,
     )
     execution_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -2372,7 +2386,10 @@ def test_dedicated_worker_runtime_config_resolves_include_tags(
     monkeypatch.setattr(
         sandbox_runner_module,
         "_upstream_tool_validation_snapshot",
-        lambda _runtime_paths: {"shell": object()},
+        lambda _runtime_paths: {
+            "scheduler": ToolValidationInfo(name="scheduler"),
+            "shell": ToolValidationInfo(name="shell"),
+        },
     )
 
     config = sandbox_runner_module._dedicated_worker_runtime_config_or_empty(runtime_paths)
@@ -2819,14 +2836,17 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
         resolved_thread_id="$thread",
         requester_id="@alice:example.org",
         client=object(),
-        config=Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    worker_scope="user",
-                ),
-            },
-            models={},
+        config=_runtime_config(
+            Config(
+                agents={
+                    "code": AgentConfig(
+                        display_name="Code",
+                        worker_scope="user",
+                    ),
+                },
+                models={},
+            ),
+            runtime_paths,
         ),
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
@@ -2914,14 +2934,17 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         resolved_thread_id="$thread",
         requester_id="alice",
         client=object(),
-        config=Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    private=AgentPrivateConfig(per="user_agent"),
-                ),
-            },
-            models={},
+        config=_runtime_config(
+            Config(
+                agents={
+                    "code": AgentConfig(
+                        display_name="Code",
+                        private=AgentPrivateConfig(per="user_agent"),
+                    ),
+                },
+                models={},
+            ),
+            runtime_paths,
         ),
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
@@ -3022,14 +3045,17 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
         resolved_thread_id="$thread",
         requester_id="alice",
         client=object(),
-        config=Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    worker_scope="user_agent",
-                ),
-            },
-            models={},
+        config=_runtime_config(
+            Config(
+                agents={
+                    "code": AgentConfig(
+                        display_name="Code",
+                        worker_scope="user_agent",
+                    ),
+                },
+                models={},
+            ),
+            runtime_paths,
         ),
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
@@ -4325,7 +4351,7 @@ def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="off",
     )
-    runtime_config = Config()
+    runtime_config = _runtime_config(Config(), runtime_paths)
     resolver_call_count = 0
     captured_snapshots: list[dict[str, dict[str, object]]] = []
 

@@ -181,7 +181,7 @@ class TestDMPreservationDuringCleanup:
                 ),
             },
         )
-        current_domain = config.get_domain(runtime_paths_for(config))
+        current_domain = config.get_domain()
         # Mock room members - includes an orphaned bot
         members = ["@user:server", "@mindroom_orphaned:server", f"@mindroom_configured_agent:{current_domain}"]
 
@@ -229,7 +229,7 @@ class TestDMPreservationDuringCleanup:
                 ),
             },
         )
-        current_domain = config.get_domain(runtime_paths_for(config))
+        current_domain = config.get_domain()
         members = ["@user:server", "@mindroom_orphaned:server", f"@mindroom_configured_agent:{current_domain}"]
 
         with (
@@ -273,7 +273,7 @@ class TestDMPreservationDuringCleanup:
                 ),
             },
         )
-        current_domain = config.get_domain(runtime_paths_for(config))
+        current_domain = config.get_domain()
         # The client's own account comes first so a naive sweep would leave before kicking
         members = ["@mindroom_self:server", "@mindroom_orphaned:server"]
 
@@ -331,10 +331,10 @@ class TestDMPreservationDuringCleanup:
             "agent_configured_agent",
             "mindroom_configured_agent_oldns",
             "pw",
-            domain=config.get_domain(runtime_paths),
+            domain=config.get_domain(),
         )
         state.save(runtime_paths=runtime_paths)
-        members = [f"@mindroom_configured_agent_oldns:{config.get_domain(runtime_paths)}"]
+        members = [f"@mindroom_configured_agent_oldns:{config.get_domain()}"]
 
         with (
             patch("mindroom.matrix.room_cleanup.get_room_members", return_value=members),
@@ -364,7 +364,7 @@ class TestDMPreservationDuringCleanup:
         )
         runtime_paths = runtime_paths_for(config)
         state = MatrixState.load(runtime_paths=runtime_paths)
-        state.add_account("agent_agent", "actual_agent", "pw", domain=config.get_domain(runtime_paths))
+        state.add_account("agent_agent", "actual_agent", "pw", domain=config.get_domain())
         state.save(runtime_paths=runtime_paths)
 
         with (
@@ -458,7 +458,7 @@ class TestDMPreservationDuringCleanup:
             patch("mindroom.matrix.room_cleanup.get_joined_rooms", return_value=["!ad-hoc:server"]),
             patch(
                 "mindroom.matrix.room_cleanup.get_room_members",
-                return_value=[f"@mindroom_agent:{config.get_domain(rp)}"],
+                return_value=[f"@mindroom_agent:{config.get_domain()}"],
             ),
             patch("mindroom.matrix.room_cleanup.is_dm_room", new=AsyncMock(return_value=False)),
         ):
@@ -485,7 +485,7 @@ class TestDMPreservationDuringCleanup:
         )
         rp = runtime_paths_for(config)
         state = MatrixState.load(runtime_paths=rp)
-        state.add_account("agent_agent", "mindroom_agent_oldns", "pw", domain=config.get_domain(rp))
+        state.add_account("agent_agent", "mindroom_agent_oldns", "pw", domain=config.get_domain())
         state.save(runtime_paths=rp)
         invited_rooms_path = agent_state_root_path(rp.storage_root, "agent") / "invited_rooms.json"
         invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
@@ -495,7 +495,7 @@ class TestDMPreservationDuringCleanup:
             patch("mindroom.matrix.room_cleanup.get_joined_rooms", return_value=["!ad-hoc:server"]),
             patch(
                 "mindroom.matrix.room_cleanup.get_room_members",
-                return_value=[f"@mindroom_agent_oldns:{config.get_domain(rp)}"],
+                return_value=[f"@mindroom_agent_oldns:{config.get_domain()}"],
             ),
             patch("mindroom.matrix.room_cleanup.is_dm_room", new=AsyncMock(return_value=False)),
         ):
@@ -563,7 +563,7 @@ class TestDMPreservationDuringCleanup:
             },
         )
         rp = runtime_paths_for(config)
-        current_domain = config.get_domain(rp)
+        current_domain = config.get_domain()
 
         # Persist root space
         state = MatrixState.load(runtime_paths=rp)

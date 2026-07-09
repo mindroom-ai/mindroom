@@ -70,6 +70,7 @@ from mindroom.workers.backends import local as local_workers_module
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.kubernetes_resources import worker_auth_token
 from mindroom.workers.models import WorkerHandle, WorkerSpec
+from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import requires_linux
 
 if TYPE_CHECKING:
@@ -127,7 +128,7 @@ def _set_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
 def _set_worker_tool_validation_snapshot(*tool_names: str) -> None:
     """Set the upstream-authored validation snapshot visible to one worker runtime."""
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
-    config = Config.validate_with_runtime({}, runtime_paths)
+    config = runtime_config_from_data({}, runtime_paths)
     snapshot = serialize_tool_validation_snapshot(
         resolved_tool_validation_snapshot_for_runtime(runtime_paths, config),
     )
@@ -168,7 +169,7 @@ def _set_startup_manifest(
 def test_worker_tool_validation_snapshot_reads_from_startup_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
     """Dedicated workers should load tool validation snapshots from the startup manifest."""
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
-    config = Config.validate_with_runtime({}, runtime_paths)
+    config = runtime_config_from_data({}, runtime_paths)
     snapshot = serialize_tool_validation_snapshot(
         resolved_tool_validation_snapshot_for_runtime(runtime_paths, config),
     )
@@ -5435,7 +5436,7 @@ def test_workspace_env_hook_uses_routed_agent_workspace_without_base_dir(tmp_pat
     config_path = tmp_path / "config.yaml"
     storage_root = tmp_path / "storage"
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
             "agents": {
@@ -5484,7 +5485,7 @@ def test_workspace_env_hook_user_agent_routed_request_uses_prepared_private_base
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
             "agents": {},
@@ -5605,7 +5606,7 @@ def test_workspace_env_hook_subprocess_serializes_overlay_execution_env(
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage", process_env={})
-    config = Config.validate_with_runtime({}, runtime_paths)
+    config = runtime_config_from_data({}, runtime_paths)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_workspace_env_hook(workspace, "export PATH=/hook/bin:$PATH\n")
@@ -5667,7 +5668,7 @@ def test_workspace_env_hook_shell_side_effects_do_not_reach_command(tmp_path: Pa
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage", process_env={})
-    config = Config.validate_with_runtime({}, runtime_paths)
+    config = runtime_config_from_data({}, runtime_paths)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_workspace_env_hook(workspace, "export WORKSPACE_HOOK_TOKEN=hooked\ncd /\n")
@@ -5693,7 +5694,7 @@ def test_workspace_env_hook_skips_non_execution_tools_for_routed_agent(tmp_path:
     config_path = tmp_path / "config.yaml"
     storage_root = tmp_path / "storage"
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
             "agents": {

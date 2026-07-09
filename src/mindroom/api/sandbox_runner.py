@@ -29,7 +29,7 @@ from mindroom.api.worker_responses import (
     serialize_sandbox_worker_response,
 )
 from mindroom.attachment_ids import normalize_attachment_id
-from mindroom.config.main import Config, load_config, normalized_config_data
+from mindroom.config.main import Config, RuntimeConfig, load_config, normalized_config_data
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
@@ -222,16 +222,16 @@ def _upstream_tool_validation_snapshot(runtime_paths: RuntimePaths) -> dict[str,
     return deserialize_tool_validation_snapshot(tool_validation_snapshot)
 
 
-def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
+def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> RuntimeConfig:
     """Return the runtime config visible inside one sandbox runner."""
     if runtime_paths.config_path.exists():
         if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
             return load_config(runtime_paths)
         return _dedicated_worker_runtime_config_or_empty(runtime_paths)
-    return Config.validate_with_runtime({}, runtime_paths)
+    return RuntimeConfig.from_authored(Config.model_validate({}), runtime_paths)
 
 
-def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
+def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> RuntimeConfig:
     """Return dedicated-worker config, tolerating plugins unavailable in that worker image."""
     # The authored config may be split across !include files; a plain
     # yaml.safe_load crashes the worker on the include tags.
@@ -245,14 +245,20 @@ def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Co
     # plugin entries that actually exist in that runtime filesystem. The primary
     # runtime is authoritative for full authored tool validation; workers
     # validate the requested tool at execution time with their local registry.
-    config = Config.model_validate(
-        normalized_config_data(data),
-        context={"runtime_paths": runtime_paths},
+    authored = Config.model_validate(normalized_config_data(data))
+    known_tool_names = tool_validation_snapshot.keys() | authored.TOOL_PRESETS.keys()
+    authored.defaults.tools = [entry for entry in authored.defaults.tools if entry.name in known_tool_names]
+    for agent_config in authored.agents.values():
+        agent_config.tools = [entry for entry in agent_config.tools if entry.name in known_tool_names]
+    config = RuntimeConfig.from_authored(
+        authored,
+        runtime_paths,
+        tool_validation_snapshot=tool_validation_snapshot,
     )
     return _config_with_available_plugins(config, runtime_paths)
 
 
-def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) -> Config:
+def _config_with_available_plugins(config: RuntimeConfig, runtime_paths: RuntimePaths) -> RuntimeConfig:
     """Return one config snapshot filtered to plugin entries visible in this runtime."""
     if not config.plugins:
         return config
@@ -284,10 +290,10 @@ def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) 
         "sandbox_runner_skipping_unavailable_plugins",
         plugin_paths=sorted(skipped_plugin_paths),
     )
-    return config.model_copy(update={"plugins": available_plugins}, deep=True)
+    return config.model_copy(update={"plugins": available_plugins})
 
 
-def load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
+def load_config_from_startup_runtime() -> tuple[RuntimePaths, RuntimeConfig]:
     """Read the sandbox runner runtime context from explicit startup payload."""
     runtime_paths = _startup_runtime_paths_from_env()
     return runtime_paths, _runtime_config_or_empty(runtime_paths)
@@ -297,7 +303,7 @@ def initialize_sandbox_runner_app(
     api_app: FastAPI,
     runtime_paths: RuntimePaths,
     *,
-    config: Config | None = None,
+    config: RuntimeConfig | None = None,
     runner_token: str | None = None,
 ) -> None:
     """Attach one explicit runtime context to a sandbox-runner app instance."""
@@ -311,7 +317,7 @@ def initialize_sandbox_runner_app(
     )
 
 
-def _ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config) -> None:
+def _ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: RuntimeConfig) -> None:
     """Load config from env and ensure the tool registry is populated.
 
     Used by both the FastAPI startup and the subprocess worker so that
@@ -381,7 +387,7 @@ def _subprocess_credential_overrides(
     request: SandboxRunnerExecuteRequest,
     *,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     execution_identity: ToolExecutionIdentity | None,
 ) -> dict[str, Any]:
     """Preload persisted execution-tool config before serializing a keyless child runtime."""
@@ -518,7 +524,7 @@ class SandboxRunnerSaveAttachmentResponse(BaseModel):
 @dataclass(frozen=True)
 class _SandboxRunnerContext:
     runtime_paths: RuntimePaths
-    config: Config
+    config: RuntimeConfig
     tool_metadata: dict[str, Any]
     runner_token: str | None
 
@@ -555,7 +561,7 @@ def app_runtime_paths(app: FastAPI) -> RuntimePaths:
     return _app_context(app).runtime_paths
 
 
-def app_runtime_config(app: FastAPI) -> Config:
+def app_runtime_config(app: FastAPI) -> RuntimeConfig:
     """Return sandbox runner config stored on the FastAPI app."""
     return _app_context(app).config
 
@@ -625,7 +631,7 @@ def _runtime_paths_for_runner_agent_paths(runtime_paths: RuntimePaths) -> Runtim
 
 def _runner_tool_output_workspace_root(
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     runtime_overrides: dict[str, object] | None,
     execution_identity: ToolExecutionIdentity | None,
@@ -652,7 +658,7 @@ def _runner_tool_output_workspace_root(
 
 def _optional_runner_tool_output_workspace_root(
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     runtime_overrides: dict[str, object] | None,
     execution_identity: ToolExecutionIdentity | None,
@@ -681,7 +687,7 @@ def _optional_runner_tool_output_workspace_root(
 def _resolve_entrypoint(
     *,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     tool_name: str,
     function_name: str,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -733,7 +739,7 @@ def _resolve_request_workspace(
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     *,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
 ) -> Path | None:
     """Return the resolved workspace whose `.mindroom/worker-env.sh` and HOME contract apply.
 
@@ -757,7 +763,7 @@ def _workspace_env_hook_workspace_for_request(
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     *,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
 ) -> Path | None:
     """Return the workspace root whose `.mindroom/worker-env.sh` applies.
 
@@ -886,7 +892,7 @@ def _prepare_execute_request(
     runtime_paths: RuntimePaths,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
-    config: Config | None = None,
+    config: RuntimeConfig | None = None,
     runner_token: str | None = None,
     apply_workspace_home_contract: bool = True,
     apply_workspace_env_hook: bool = True,
@@ -1032,7 +1038,7 @@ def _prepare_subprocess_context(
 async def _execute_prepared_request_inprocess(
     prepared: PreparedSandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     *,
     credentials_manager: CredentialsManager | None = None,
 ) -> SandboxRunnerExecuteResponse:
@@ -1100,7 +1106,7 @@ async def _execute_prepared_request_inprocess(
 async def _execute_request_inprocess(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
-    config: Config,
+    config: RuntimeConfig,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
@@ -1236,7 +1242,7 @@ def _shell_subprocess_dispatch_context(
 def _execute_request_subprocess_sync(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
-    config: Config | None = None,
+    config: RuntimeConfig | None = None,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,

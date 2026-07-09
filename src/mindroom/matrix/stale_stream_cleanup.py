@@ -53,7 +53,7 @@ from mindroom.streaming import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
@@ -128,7 +128,7 @@ class _CleanupScanPolicy:
     max_extra_old_pages: int
 
 
-def _cleanup_scan_policy(config: Config, *, startup_cutoff_ms: int | None) -> _CleanupScanPolicy:
+def _cleanup_scan_policy(config: RuntimeConfig, *, startup_cutoff_ms: int | None) -> _CleanupScanPolicy:
     """Return history scan policy for one stale-stream cleanup run."""
     collect_terminal_interrupted_for_resume = config.defaults.auto_resume_after_restart
     return _CleanupScanPolicy(
@@ -165,7 +165,7 @@ async def cleanup_stale_streaming_messages(
     *,
     bot_user_id: str,
     bot_user_ids: set[str] | None = None,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     startup_cutoff_ms: int | None = None,
@@ -208,7 +208,7 @@ async def auto_resume_interrupted_threads(
     client: nio.AsyncClient,
     interrupted: list[InterruptedThread],
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     max_resumes: int | None = None,
@@ -273,7 +273,7 @@ async def _cleanup_room_stale_streaming_messages(
     room_id: str,
     bot_user_id: str,
     bot_user_ids: set[str],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     scan_policy: _CleanupScanPolicy,
@@ -369,7 +369,7 @@ async def _handle_interrupted_message(
     auto_resume_target_event_ids: set[str],
     can_auto_resume: bool,
     bot_user_ids: set[str],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
@@ -410,7 +410,7 @@ async def _repair_restart_marked_message_metadata(
     room_id: str,
     target_event_id: str,
     state: _MessageState,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     prior_edit_succeeded: bool,
@@ -452,7 +452,7 @@ async def _cleanup_one_stale_message(
     target_event_id: str,
     state: _MessageState,
     bot_user_ids: set[str],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
@@ -502,7 +502,7 @@ async def _cleanup_candidate_message(
     target_event_id: str,
     state: _MessageState,
     bot_user_ids: set[str],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
@@ -539,7 +539,7 @@ async def _scan_room_message_states(
     room_id: str,
     bot_user_id: str,
     bot_user_ids: set[str],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     now_ms: int,
     scan_policy: _CleanupScanPolicy,
@@ -800,7 +800,7 @@ async def _derive_requester_ids_for_bot_messages(
     *,
     room_id: str,
     bot_user_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> dict[str, str]:
     """Return effective requester IDs for bot-authored messages."""
@@ -863,7 +863,7 @@ async def _resolve_requester_for_bot_message(
     scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
     requester_cache: dict[str, str | None],
     fetched_message_data_by_event_id: dict[str, ResolvedVisibleMessage | None],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     trusted_sender_ids: set[str],
 ) -> str | None:
@@ -907,7 +907,7 @@ async def _resolve_requester_for_event_id(
     scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
     requester_cache: dict[str, str | None],
     fetched_message_data_by_event_id: dict[str, ResolvedVisibleMessage | None],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     trusted_sender_ids: set[str],
     visited_event_ids: set[str],
@@ -998,7 +998,7 @@ async def _resolve_requester_from_internal_reply(
     scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
     requester_cache: dict[str, str | None],
     fetched_message_data_by_event_id: dict[str, ResolvedVisibleMessage | None],
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     trusted_sender_ids: set[str],
     visited_event_ids: set[str],
@@ -1151,7 +1151,7 @@ def _as_string_keyed_dict(value: object) -> dict[str, object] | None:
 
 def _is_internal_sender(
     sender_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Return whether the sender is one of MindRoom's own Matrix accounts."""
@@ -1161,7 +1161,7 @@ def _is_internal_sender(
 def _cleanup_trusted_sender_ids(
     *,
     bot_user_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> frozenset[str]:
     """Return the exact sender IDs cleanup may trust for canonical visible-body metadata."""
@@ -1173,7 +1173,7 @@ def _cleanup_trusted_sender_ids(
 def _effective_requester_for_message(
     message_data: ResolvedVisibleMessage,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Resolve the effective requester for one visible message."""
@@ -1219,7 +1219,7 @@ async def _edit_stale_message(
     preserved_content: dict[str, Any] | None,
     thread_id: str | None,
     latest_thread_event_id: str | None,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
 ) -> bool:
@@ -1559,7 +1559,7 @@ def _lookback_scan_state(
 def _build_auto_resume_content(
     interrupted_thread: InterruptedThread,
     *,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> dict[str, object]:
     """Build the router-authored visible resume relay for one interrupted agent."""
@@ -1594,7 +1594,7 @@ def _build_auto_resume_content(
 
 def _current_configured_entity_user_id(
     entity_name: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Return one configured entity user ID without resolving unrelated entities."""
@@ -1607,7 +1607,7 @@ def _current_configured_entity_user_id(
         return None
 
 
-def _entity_display_name(agent_name: str, config: Config) -> str:
+def _entity_display_name(agent_name: str, config: RuntimeConfig) -> str:
     """Return the configured display name for an agent or team."""
     if agent_name in config.agents:
         return config.agents[agent_name].display_name
@@ -1618,7 +1618,7 @@ def _entity_display_name(agent_name: str, config: Config) -> str:
 
 def _agent_name_for_bot_user_id(
     bot_user_id: str,
-    config: Config,
+    config: RuntimeConfig,
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Resolve a bot user ID back to its configured agent or team name."""

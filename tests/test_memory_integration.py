@@ -11,7 +11,7 @@ from agno.models.ollama import Ollama
 
 from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.memory import MemoryPromptParts
@@ -74,6 +74,7 @@ class TestMemoryIntegration:
         """Test that AI response uses memory enhancement."""
         mock_build = mock_memory_functions
         runtime_paths = self._runtime_paths(tmp_path)
+        config = RuntimeConfig.from_authored(config, runtime_paths)
         persist_entity_accounts(config, runtime_paths)
 
         with (
@@ -121,6 +122,7 @@ class TestMemoryIntegration:
         """Test AI response without room context."""
         mock_build = mock_memory_functions
         runtime_paths = self._runtime_paths(tmp_path)
+        config = RuntimeConfig.from_authored(config, runtime_paths)
 
         with (
             patch("mindroom.ai_runtime.cached_agent_run", mock_agent_run),
@@ -149,6 +151,8 @@ class TestMemoryIntegration:
     @pytest.mark.asyncio
     async def test_ai_response_error_handling(self, tmp_path: Path, config: Config) -> None:
         """Test error handling in AI response."""
+        runtime_paths = self._runtime_paths(tmp_path)
+        config = RuntimeConfig.from_authored(config, runtime_paths)
         # Mock memory to prevent real memory instance creation during error handling
         mock_memory = AsyncMock()
         mock_memory.search.return_value = {"results": []}
@@ -160,7 +164,7 @@ class TestMemoryIntegration:
             response = await ai_response(
                 make_turn_context("general", session_id="session"),
                 prompt="Test",
-                runtime_paths=self._runtime_paths(tmp_path),
+                runtime_paths=runtime_paths,
                 config=config,
             )
 
@@ -170,6 +174,8 @@ class TestMemoryIntegration:
     @pytest.mark.asyncio
     async def test_memory_persistence_across_calls(self, tmp_path: Path, config: Config) -> None:
         """Test that memory persists across multiple AI calls."""
+        runtime_paths = self._runtime_paths(tmp_path)
+        config = RuntimeConfig.from_authored(config, runtime_paths)
         # This is more of a documentation test showing expected behavior
         mock_memory = AsyncMock()
 
@@ -186,7 +192,7 @@ class TestMemoryIntegration:
             await ai_response(
                 make_turn_context("general", session_id="session1"),
                 prompt="Remember this: A=1",
-                runtime_paths=self._runtime_paths(tmp_path),
+                runtime_paths=runtime_paths,
                 config=config,
             )
 
@@ -202,7 +208,7 @@ class TestMemoryIntegration:
             await ai_response(
                 make_turn_context("general", session_id="session2"),
                 prompt="What is A?",
-                runtime_paths=self._runtime_paths(tmp_path),
+                runtime_paths=runtime_paths,
                 config=config,
             )
 

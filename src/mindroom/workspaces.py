@@ -14,7 +14,7 @@ from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
 
 _MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mind_data"
 
@@ -327,7 +327,7 @@ def ensure_workspace_knowledge_links(
         _apply_workspace_knowledge_links(desired_links)
 
 
-def _private_root_name(agent_name: str, config: Config) -> str:
+def _private_root_name(agent_name: str, config: RuntimeConfig) -> str:
     agent_config = config.agents.get(agent_name)
     if agent_config is None or agent_config.private is None or agent_config.private.root is None:
         return f"{agent_name}_data"
@@ -336,7 +336,7 @@ def _private_root_name(agent_name: str, config: Config) -> str:
 
 def _effective_workspace(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     *,
     runtime_paths: RuntimePaths,
 ) -> _EffectiveAgentWorkspace | None:
@@ -367,7 +367,7 @@ def _template_unavailable_for_dedicated_worker(template_dir: Path, runtime_paths
 
 def _resolve_workspace(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     *,
     runtime_paths: RuntimePaths,
     state_storage_path: Path,
@@ -443,7 +443,7 @@ def _resolve_workspace(
 
 def resolve_agent_workspace_from_state_path(
     agent_name: str,
-    config: Config,
+    config: RuntimeConfig,
     *,
     runtime_paths: RuntimePaths,
     state_storage_path: Path,

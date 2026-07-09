@@ -35,6 +35,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_target,
     supports_tool_name_for_worker_scope,
 )
+from tests.config_test_utils import runtime_config_from_data
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -75,7 +76,7 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 
 def _config(tmp_path: Path) -> Config:
-    return Config.validate_with_runtime(
+    return runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -96,7 +97,7 @@ def _config(tmp_path: Path) -> Config:
 
 
 def _oauth_config(tmp_path: Path) -> Config:
-    return Config.validate_with_runtime(
+    return runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {
@@ -167,7 +168,7 @@ def test_sync_mcp_tool_registry_removes_deleted_servers(tmp_path: Path) -> None:
     config = _config(tmp_path)
     sync_mcp_tool_registry(config)
     sync_mcp_tool_registry(
-        Config.validate_with_runtime(
+        runtime_config_from_data(
             {
                 "agents": {
                     "code": {
@@ -204,7 +205,7 @@ def test_sync_mcp_tool_registry_removes_untracked_dynamic_entries(tmp_path: Path
     sync_mcp_tool_registry(config)
     _MCP_TOOL_NAMES.clear()
     sync_mcp_tool_registry(
-        Config.validate_with_runtime(
+        runtime_config_from_data(
             {
                 "agents": {
                     "code": {
@@ -276,7 +277,7 @@ def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -
     )
 
     with pytest.raises(ConfigRuntimeValidationError, match="conflicts with an existing registered tool"):
-        Config.validate_with_runtime(
+        runtime_config_from_data(
             {
                 "plugins": ["./plugins/demo"],
                 "mcp_servers": {
@@ -324,7 +325,7 @@ def test_config_validation_allows_non_mcp_prefixed_plugin_tools_on_isolating_sco
         encoding="utf-8",
     )
 
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "plugins": ["./plugins/demo"],
             "agents": {
@@ -397,7 +398,7 @@ def test_mcp_tool_registry_degrades_when_optional_server_unavailable(tmp_path: P
 
 def test_mcp_tool_registry_fails_when_required_server_unavailable(tmp_path: Path) -> None:
     """A failed required MCP server keeps the old hard-fail toolkit behavior."""
-    config = Config.validate_with_runtime(
+    config = runtime_config_from_data(
         {
             "mcp_servers": {
                 "demo": {

@@ -30,7 +30,7 @@ from mindroom.scheduling import (
 if TYPE_CHECKING:
     from nio import AsyncClient
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
 _SCHEDULER_ERROR_PREFIX = "❌ "
@@ -86,7 +86,7 @@ IncludeCancelled = Annotated[bool, Query(description="Include cancelled schedule
 CancelRoomId = Annotated[str, Query(description="Room ID or alias containing the task")]
 
 
-def _configured_room_ids(runtime_config: Config, runtime_paths: RuntimePaths) -> list[str]:
+def _configured_room_ids(runtime_config: RuntimeConfig, runtime_paths: RuntimePaths) -> list[str]:
     """Return configured rooms resolved to Matrix room IDs."""
     configured_rooms = sorted(runtime_config.get_all_configured_rooms())
     resolved_rooms = resolve_room_aliases(configured_rooms, runtime_paths=runtime_paths)

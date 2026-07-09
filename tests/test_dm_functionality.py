@@ -307,8 +307,10 @@ class TestDMIntegration:
         # This is a more complex integration test
         orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
-        config = _config(tmp_path)
-        config.agents = {"researcher": MagicMock()}
+        config = _config(
+            tmp_path,
+            agents={"researcher": AgentConfig(display_name="Researcher", role="Research")},
+        )
 
         # Create and configure a bot
         # Use the correct MatrixID from config

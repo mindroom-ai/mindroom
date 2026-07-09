@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 def duplicate_items(values: list[str]) -> list[str]:
     """Return duplicate items while preserving first duplicate order."""
@@ -32,3 +37,8 @@ def non_empty_stripped(value: str, *, field_name: str) -> str:
         msg = f"{field_name} must not be empty"
         raise ValueError(msg)
     return stripped
+
+
+def relative_paths_overlap(left: Path, right: Path) -> bool:
+    """Return whether two relative paths overlap by equality, ancestry, or descent."""
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)

@@ -188,6 +188,7 @@ def test_flattened_seams_reject_legacy_delegation_signature_shims() -> None:
             ),
         },
     )
+    config = _runtime_bound_config(config)
     agent_policy_module = importlib.import_module("mindroom.agent_policy")
     agent_policy_get_closure = cast("Any", agent_policy_module.get_agent_delegation_closure)
     config_get_closure = cast("Any", config.get_agent_delegation_closure)

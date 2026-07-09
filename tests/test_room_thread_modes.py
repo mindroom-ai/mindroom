@@ -228,10 +228,10 @@ def test_get_entity_thread_mode_prefers_runtime_room_override(tmp_path: Path) ->
         set_by="@admin:localhost",
     )
 
-    assert config.get_entity_thread_mode("assistant", runtime_paths, room_id=ROOM_ID) == "room"
-    assert config.get_entity_thread_mode("ops", runtime_paths, room_id=ROOM_ID) == "room"
-    assert config.get_entity_thread_mode(ROUTER_AGENT_NAME, runtime_paths, room_id=ROOM_ID) == "room"
-    assert config.get_entity_thread_mode("assistant", runtime_paths, room_id="!other:localhost") == "thread"
+    assert config.get_entity_thread_mode("assistant", room_id=ROOM_ID) == "room"
+    assert config.get_entity_thread_mode("ops", room_id=ROOM_ID) == "room"
+    assert config.get_entity_thread_mode(ROUTER_AGENT_NAME, room_id=ROOM_ID) == "room"
+    assert config.get_entity_thread_mode("assistant", room_id="!other:localhost") == "thread"
 
 
 def test_thread_mode_command_parsing() -> None:

@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     import structlog
     from agno.models.message import Message
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.cache import AgentMessageSnapshot
@@ -303,7 +303,7 @@ class HookContext:
     event_name: str
     plugin_name: str
     settings: dict[str, Any]
-    config: Config
+    config: RuntimeConfig
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
     correlation_id: str
@@ -637,7 +637,7 @@ class ToolBeforeCallContext:
     event_name: str = EVENT_TOOL_BEFORE_CALL
     plugin_name: str = ""
     settings: dict[str, Any] = field(default_factory=dict)
-    config: Config | None = None
+    config: RuntimeConfig | None = None
     runtime_paths: RuntimePaths | None = None
     logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
     correlation_id: str = ""
@@ -732,7 +732,7 @@ class ToolAfterCallContext:
     event_name: str = EVENT_TOOL_AFTER_CALL
     plugin_name: str = ""
     settings: dict[str, Any] = field(default_factory=dict)
-    config: Config | None = None
+    config: RuntimeConfig | None = None
     runtime_paths: RuntimePaths | None = None
     logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
     correlation_id: str = ""
