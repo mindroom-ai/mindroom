@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -17,17 +17,20 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.durable_write import _override_load_cache
 from mindroom.handled_turns import HandledTurnState
 from mindroom.message_target import MessageTarget
 from mindroom.room_thread_modes import (
     _get_room_thread_mode_override,
-    _load_cache,
     _store_path,
     clear_room_thread_mode_override,
     get_room_thread_mode_override,
     set_room_thread_mode_override,
 )
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 ROOM_ID = "!room:localhost"
 
@@ -114,7 +117,7 @@ def test_room_thread_mode_store_ignores_corrupt_file(tmp_path: Path) -> None:
     path.write_text("not json", encoding="utf-8")
 
     assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) is None
-    assert _load_cache[path] == (path.stat().st_mtime_ns, {})
+    assert _override_load_cache[path] == (path.stat().st_mtime_ns, {})
 
     set_room_thread_mode_override(
         runtime_paths,
@@ -164,18 +167,24 @@ def test_room_thread_mode_store_removes_temp_file_when_replace_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Failed atomic replacement should not leave orphaned .tmp files."""
+    """Failed durable replacement should preserve cache and remove its temp file."""
     runtime_paths = test_runtime_paths(tmp_path)
     path = _store_path(runtime_paths)
-    real_replace = Path.replace
+    set_room_thread_mode_override(
+        runtime_paths,
+        room_id=ROOM_ID,
+        mode="thread",
+        set_by="@admin:localhost",
+    )
+    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) == "thread"
+    cached = _override_load_cache[path]
 
-    def fail_room_mode_replace(self: Path, target: Path) -> Path:
+    def fail_room_mode_replace(_temp_path: Path, target: Path) -> None:
         if target == path:
             message = "replace failed"
             raise OSError(message)
-        return real_replace(self, target)
 
-    monkeypatch.setattr(Path, "replace", fail_room_mode_replace)
+    monkeypatch.setattr("mindroom.durable_write.safe_replace", fail_room_mode_replace)
 
     with pytest.raises(OSError, match="replace failed"):
         set_room_thread_mode_override(
@@ -186,7 +195,8 @@ def test_room_thread_mode_store_removes_temp_file_when_replace_fails(
         )
 
     assert not list(path.parent.glob("*.tmp"))
-    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) is None
+    assert _override_load_cache[path] == cached
+    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) == "thread"
 
 
 def test_get_entity_thread_mode_prefers_runtime_room_override(tmp_path: Path) -> None:

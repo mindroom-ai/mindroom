@@ -66,11 +66,11 @@ visibility = [
 
 [[modules]]
 path = "mindroom.dynamic_workflows"
-depends_on = []
+depends_on = ["mindroom.durable_write"]
 
 [[modules]]
 path = "mindroom.report_publishing"
-depends_on = []
+depends_on = ["mindroom.durable_write"]
 
 # Keep memory consumers explicit so imports are enforced rather than merely
 # interface-checked.
@@ -1998,12 +1998,14 @@ depends_on = [
 path = "mindroom.thread_models"
 depends_on = [
     "mindroom.constants",
+    "mindroom.durable_write",
 ]
 
 [[modules]]
 path = "mindroom.room_thread_modes"
 depends_on = [
     "mindroom.constants",
+    "mindroom.durable_write",
 ]
 
 [[modules]]
