@@ -267,6 +267,7 @@ It must remain accurate whether the thread has 5 messages or 50+.
 
 RULES:
 - One line only, plain text only.
+- Write the summary in the thread's language: use the dominant language of the messages, and fall back to English only when no single language dominates.
 - Under 160 characters is preferred.
 - Hard max 300 characters after normalization.
 - Prefer stable noun phrases such as "Fixing X", "Review of Y", "Discussion of Z", "Live test of A", or "Investigation of B".
