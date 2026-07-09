@@ -208,7 +208,46 @@ def _remove_room(room_key: str, runtime_paths: RuntimePaths) -> bool:
     return False
 
 
-async def _ensure_room_exists(  # noqa: C901, PLR0912
+async def _reconcile_joined_existing_room(
+    client: nio.AsyncClient,
+    room_key: str,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    explicit_room_name: str | None,
+    room_alias: str,
+) -> None:
+    """Reconcile name, topic, power levels, encryption, and access policy for one joined managed room."""
+    topic_room_name = explicit_room_name or _room_key_to_name(room_key)
+    if explicit_room_name is not None:
+        await ensure_room_name(client, room_id, explicit_room_name)
+    await ensure_room_has_topic(client, room_id, room_key, topic_room_name, config, runtime_paths)
+    await ensure_thread_tags_power_level(client, room_id)
+    await ensure_room_admin_power_levels(client, room_id, _room_admin_user_ids(config))
+    if _managed_room_should_be_encrypted(room_key, config):
+        await ensure_room_encryption_enabled(client, room_id)
+
+    if config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.reconcile_existing_rooms:
+        await _configure_managed_room_access(
+            client=client,
+            room_key=room_key,
+            room_id=room_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            room_alias=room_alias,
+            context="existing_room_reconciliation",
+        )
+    elif config.matrix_room_access.is_multi_user_mode():
+        logger.info(
+            "Skipping existing room access reconciliation",
+            room_key=room_key,
+            room_id=room_id,
+            reason="matrix_room_access.reconcile_existing_rooms is false",
+        )
+
+
+async def _ensure_room_exists(
     client: nio.AsyncClient,
     room_key: str,
     config: Config,
@@ -260,33 +299,15 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
             joined_room = joined_room_ids is not None and room_id in joined_room_ids
 
         if joined_room:
-            # For existing rooms, ensure they have a topic set
-            topic_room_name = explicit_room_name or _room_key_to_name(room_key)
-            if explicit_room_name is not None:
-                await ensure_room_name(client, room_id, explicit_room_name)
-            await ensure_room_has_topic(client, room_id, room_key, topic_room_name, config, runtime_paths)
-            await ensure_thread_tags_power_level(client, room_id)
-            await ensure_room_admin_power_levels(client, room_id, _room_admin_user_ids(config))
-            if _managed_room_should_be_encrypted(room_key, config):
-                await ensure_room_encryption_enabled(client, room_id)
-
-            if config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.reconcile_existing_rooms:
-                await _configure_managed_room_access(
-                    client=client,
-                    room_key=room_key,
-                    room_id=room_id,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    room_alias=full_alias,
-                    context="existing_room_reconciliation",
-                )
-            elif config.matrix_room_access.is_multi_user_mode():
-                logger.info(
-                    "Skipping existing room access reconciliation",
-                    room_key=room_key,
-                    room_id=room_id,
-                    reason="matrix_room_access.reconcile_existing_rooms is false",
-                )
+            await _reconcile_joined_existing_room(
+                client,
+                room_key,
+                room_id,
+                config,
+                runtime_paths,
+                explicit_room_name=explicit_room_name,
+                room_alias=full_alias,
+            )
         else:
             logger.warning(
                 "Managed room exists but service account is not joined; skipping existing-room reconciliation",
