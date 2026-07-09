@@ -47,6 +47,7 @@ async def _snapshot_from_event(
     namespace: str,
     room_id: str,
     thread_id: str | None,
+    sender: str,
     event: dict[str, Any],
     cached_at: float | None,
     runtime_started_at: float | None,
@@ -60,6 +61,7 @@ async def _snapshot_from_event(
         namespace=namespace,
         room_id=room_id,
         original_event_id=event_id,
+        sender=sender,
     )
     return snapshot_lookup_result(
         event,
@@ -130,6 +132,7 @@ async def _load_scope_snapshot(
                 namespace=namespace,
                 room_id=room_id,
                 thread_id=thread_id,
+                sender=sender,
                 event=event,
                 cached_at=None if row[1] is None else float(row[1]),
                 runtime_started_at=runtime_started_at,

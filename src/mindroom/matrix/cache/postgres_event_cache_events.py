@@ -125,6 +125,7 @@ async def load_latest_edit_row(
     namespace: str,
     room_id: str,
     original_event_id: str,
+    sender: str,
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
     row = await fetchone(
@@ -138,10 +139,11 @@ async def load_latest_edit_row(
         WHERE mindroom_event_cache_event_edits.namespace = %s
             AND mindroom_event_cache_event_edits.room_id = %s
             AND mindroom_event_cache_event_edits.original_event_id = %s
+            AND mindroom_event_cache_events.event_json::jsonb ->> 'sender' = %s
         ORDER BY mindroom_event_cache_event_edits.origin_server_ts DESC, mindroom_event_cache_events.write_seq DESC
         LIMIT 1
         """,
-        (namespace, room_id, original_event_id),
+        (namespace, room_id, original_event_id, sender),
     )
     if row is None:
         return None

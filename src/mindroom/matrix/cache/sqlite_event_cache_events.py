@@ -116,6 +116,7 @@ async def load_latest_edit_row(
     *,
     room_id: str,
     original_event_id: str,
+    sender: str,
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
     cursor = await db.execute(
@@ -123,11 +124,13 @@ async def load_latest_edit_row(
         SELECT events.event_json, events.cached_at
         FROM event_edits
         JOIN events ON events.event_id = event_edits.edit_event_id
-        WHERE event_edits.room_id = ? AND event_edits.original_event_id = ?
+        WHERE event_edits.room_id = ?
+            AND event_edits.original_event_id = ?
+            AND json_extract(events.event_json, '$.sender') = ?
         ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
         LIMIT 1
         """,
-        (room_id, original_event_id),
+        (room_id, original_event_id, sender),
     )
     row = await cursor.fetchone()
     await cursor.close()
