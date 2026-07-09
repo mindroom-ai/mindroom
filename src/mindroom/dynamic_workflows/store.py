@@ -17,6 +17,7 @@ from uuid import uuid4
 
 import yaml
 
+from mindroom.durable_write import write_json_file_durable
 from mindroom.dynamic_workflows.validation import (
     ID_RE,
     DynamicWorkflowError,
@@ -390,7 +391,7 @@ class DynamicWorkflowStore:
 
     def _write_run(self, run: DynamicWorkflowRun) -> None:
         run_path = self._workflow_dir(run.scope, run.owner_id, run.workflow_id) / "runs" / f"{run.run_id}.json"
-        _atomic_write_json(run_path, _run_to_json(run))
+        write_json_file_durable(run_path, _run_to_json(run), indent=2, sort_keys=True, trailing_newline=True)
 
     def _write_run_artifacts(
         self,
@@ -406,7 +407,7 @@ class DynamicWorkflowStore:
         step_outputs_path = artifact_dir / "step_outputs.json"
         _atomic_write_text(report_path, _render_report_html(title=title, markdown=report_markdown))
         _atomic_write_text(report_markdown_path, report_markdown)
-        _atomic_write_json(step_outputs_path, step_outputs)
+        write_json_file_durable(step_outputs_path, step_outputs, indent=2, sort_keys=True, trailing_newline=True)
         return {
             "report_markdown": _relative_artifact_path(report_markdown_path, self._storage_root),
             "report_html": _relative_artifact_path(report_path, self._storage_root),
@@ -636,10 +637,6 @@ def _load_json_mapping(path: Path) -> dict[str, object]:
 
 def _atomic_write_yaml(path: Path, data: dict[str, object]) -> None:
     _atomic_write_text(path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
-
-
-def _atomic_write_json(path: Path, data: dict[str, object]) -> None:
-    _atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
