@@ -69,6 +69,10 @@ from mindroom.scheduling_executor import set_scheduling_hook_registry
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
 from mindroom.tool_approval import shutdown_approval_runtime
+from mindroom.tool_system.catalog import (
+    bind_resolved_tool_state_cache,
+    resolved_tool_validation_snapshot_for_runtime,
+)
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
@@ -82,7 +86,7 @@ from mindroom.workers.runtime import clear_worker_validation_snapshot_cache, shu
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
-from .config.main import RuntimeConfig, load_config
+from .config.main import Config, RuntimeConfig, load_config
 from .credentials_sync import sync_env_to_credentials
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
@@ -758,7 +762,25 @@ class _MultiAgentOrchestrator:
                 changed_paths=[str(path) for path in changed_paths],
             )
             try:
-                result = reload_plugins(config, self.runtime_paths)
+                authored_config = Config.model_validate(config.authored_model_dump())
+                tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
+                    self.runtime_paths,
+                    authored_config,
+                )
+                refreshed_config = RuntimeConfig.from_authored(
+                    authored_config,
+                    self.runtime_paths,
+                    source_files=config.source_files,
+                    tool_validation_snapshot=tool_validation_snapshot,
+                )
+                bind_resolved_tool_state_cache(
+                    self.runtime_paths,
+                    authored_config,
+                    refreshed_config,
+                )
+                result = reload_plugins(refreshed_config, self.runtime_paths)
+                self.plugin_watch.refresh(refreshed_config)
+                await self._external_trigger_runtime.sync_api_config_snapshot(refreshed_config)
             except Exception:
                 recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
                     config,
@@ -769,9 +791,11 @@ class _MultiAgentOrchestrator:
                 self.plugin_watch.refresh(config)
                 logger.warning(warning_message, source=source, **warning_kwargs)
                 raise
+            self.config = refreshed_config
+            for bot in self.agent_bots.values():
+                bot.config = refreshed_config
             self._activate_hook_registry(result.hook_registry)
             clear_worker_validation_snapshot_cache()
-            self.plugin_watch.refresh(config)
             logger.info(
                 "Plugin reload complete",
                 source=source,

@@ -1188,6 +1188,7 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.runtime_support",
     "mindroom.scheduling_executor",
+    "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
     "mindroom.tool_approval",

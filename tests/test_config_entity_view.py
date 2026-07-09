@@ -319,3 +319,29 @@ def test_runtime_tool_overrides_use_bound_validation_snapshot(tmp_path: Path) ->
     )
 
     assert config.resolve_entity("test_agent").tool_runtime_overrides(tool_name) == {"paths": "one, two"}
+
+
+def test_model_less_team_materializes_non_model_fields(tmp_path: Path) -> None:
+    config = RuntimeConfig.from_authored(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            teams={
+                "test_team": TeamConfig(
+                    display_name="Test Team",
+                    role="Test team",
+                    agents=["test_agent"],
+                    model=None,
+                    num_history_runs=2,
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+    view = config.resolve_entity("test_team")
+
+    assert view.history_settings.policy == HistoryPolicy(mode="runs", limit=2)
+    assert view.compaction_config == config.defaults.compaction
+    with pytest.raises(ValueError, match="Team test_team has no model configured"):
+        _ = view.model_name

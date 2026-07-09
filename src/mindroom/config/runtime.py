@@ -734,6 +734,9 @@ def resolve_entity(config: RuntimeConfig, entity_name: str | None) -> ResolvedEn
         knowledge_base_ids = [*config.get_agent(agent_name).knowledge_bases]
         if private_base_id is not None:
             knowledge_base_ids.append(private_base_id)
+    model_name = None
+    if entity_name is not None:
+        model_name = config.teams[entity_name].model if kind == "team" else _entity_model_name(config, entity_name)
     return ResolvedEntityView(
         name=entity_name,
         _kind=kind,
@@ -757,7 +760,7 @@ def resolve_entity(config: RuntimeConfig, entity_name: str | None) -> ResolvedEn
         _memory_search=_agent_memory_search(config, agent_name)
         if agent_name is not None
         else config.memory.search.model_copy(deep=True),
-        _model_name=_entity_model_name(config, entity_name) if entity_name is not None else None,
+        _model_name=model_name,
         _available_tools=tuple(_agent_available_tools(config, agent_name)) if agent_name is not None else None,
         _tool_configs=tuple(deepcopy(_agent_tool_configs(config, agent_name))) if agent_name is not None else None,
         _authored_tool_configs=tuple(deepcopy(authored_tools)) if authored_tools is not None else None,

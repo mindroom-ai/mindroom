@@ -97,6 +97,9 @@ class ResolvedEntityView:
         if self._kind == "defaults":
             msg = "The defaults-only scope has no authored model"
             raise ValueError(msg)
+        if self._kind == "team" and self._model_name is None:
+            msg = f"Team {self.name} has no model configured"
+            raise ValueError(msg)
         assert self._model_name is not None
         return self._model_name
 

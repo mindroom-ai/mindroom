@@ -32,6 +32,7 @@ from mindroom.orchestration.runtime import log_startup_phase_finished, log_start
 from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_system.plugins import PluginReloadResult
+from mindroom.tool_system.registry_state import TOOL_METADATA, TOOL_REGISTRY
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import (
     TEST_PASSWORD,
@@ -687,6 +688,94 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
             await watcher_task
 
     assert reload_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_plugin_reload_rebuilds_runtime_tool_overrides(tmp_path: Path) -> None:
+    """A plugin metadata edit should publish one newly resolved runtime config everywhere."""
+    plugin_root = tmp_path / "plugins" / "override-reload"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "override_reload", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    tools_path = plugin_root / "tools.py"
+
+    def write_tool(agent_override_type: str) -> None:
+        tools_path.write_text(
+            "from agno.tools import Toolkit\n"
+            "from mindroom.tool_system.metadata import ConfigField, ToolCategory, register_tool_with_metadata\n"
+            "\n"
+            "class ReloadOverrideTool(Toolkit):\n"
+            "    def __init__(self) -> None:\n"
+            "        super().__init__(name='reload_override', tools=[])\n"
+            "\n"
+            "@register_tool_with_metadata(\n"
+            "    name='reload_override_tool',\n"
+            "    display_name='Reload Override Tool',\n"
+            "    description='Tool with reloadable override metadata',\n"
+            "    category=ToolCategory.DEVELOPMENT,\n"
+            "    config_fields=[ConfigField(name='paths', label='Paths', type='text')],\n"
+            f"    agent_override_fields=[ConfigField(name='paths', label='Paths', type='{agent_override_type}')],\n"
+            ")\n"
+            "def reload_override_tools():\n"
+            "    return ReloadOverrideTool\n",
+            encoding="utf-8",
+        )
+
+    write_tool("text")
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    tools=[{"reload_override_tool": {"paths": "one,\ntwo"}}],
+                ),
+            },
+            defaults={"tools": []},
+            plugins=["./plugins/override-reload"],
+        ),
+        tmp_path,
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), api_enabled=False)
+    orchestrator.config = config
+    orchestrator.running = True
+    bot = MagicMock(config=config)
+    orchestrator.agent_bots["general"] = bot
+
+    original_registry = TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    try:
+        await orchestrator.reload_plugins_now(source="test")
+        assert orchestrator.config is not None
+        assert orchestrator.config.resolve_entity("general").tool_runtime_overrides("reload_override_tool") == {
+            "paths": "one,\ntwo",
+        }
+
+        write_tool("string[]")
+        await orchestrator.reload_plugins_now(source="test")
+
+        assert orchestrator.config.resolve_entity("general").tool_runtime_overrides("reload_override_tool") == {
+            "paths": "one, two",
+        }
+        assert bot.config is orchestrator.config
+    finally:
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
 
 
 def test_plugin_tree_snapshot_ignores_git_metadata(tmp_path: Path) -> None:
