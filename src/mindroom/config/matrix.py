@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from mindroom.config.validation import duplicate_items
 from mindroom.constants import resolve_config_relative_path, runtime_mindroom_namespace
@@ -133,26 +133,15 @@ class MatrixRoomAccessConfig(BaseModel):
         ),
     )
 
-    @field_validator("invite_only_rooms")
+    @field_validator("invite_only_rooms", "room_admins")
     @classmethod
-    def validate_unique_invite_only_rooms(cls, invite_only_rooms: list[str]) -> list[str]:
-        """Ensure each invite-only room identifier appears at most once."""
-        if len(invite_only_rooms) != len(set(invite_only_rooms)):
-            seen: set[str] = set()
-            duplicates = {r for r in invite_only_rooms if r in seen or seen.add(r)}
-            msg = f"Duplicate invite_only_rooms are not allowed: {', '.join(sorted(duplicates))}"
-            raise ValueError(msg)
-        return invite_only_rooms
-
-    @field_validator("room_admins")
-    @classmethod
-    def validate_unique_room_admins(cls, room_admins: list[str]) -> list[str]:
-        """Ensure each room admin user ID appears at most once."""
-        duplicates = duplicate_items(room_admins)
+    def validate_unique_entries(cls, values: list[str], info: ValidationInfo) -> list[str]:
+        """Ensure each configured entry appears at most once."""
+        duplicates = duplicate_items(values)
         if duplicates:
-            msg = f"Duplicate room_admins are not allowed: {', '.join(duplicates)}"
+            msg = f"Duplicate {info.field_name} are not allowed: {', '.join(duplicates)}"
             raise ValueError(msg)
-        return room_admins
+        return values
 
     def is_multi_user_mode(self) -> bool:
         """Return whether multi-user room access mode is enabled."""

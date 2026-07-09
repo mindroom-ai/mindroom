@@ -13,16 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/use-toast";
 import { showSaveFailureToastIfNeeded } from "@/components/shared";
 import { useConfigStore } from "@/store/configStore";
-
-export function isConcreteMatrixUserId(userId: string): boolean {
-  return (
-    userId.startsWith("@") &&
-    userId.includes(":") &&
-    !userId.includes("*") &&
-    !userId.includes("?") &&
-    !userId.includes(" ")
-  );
-}
+import { isConcreteMatrixUserId } from "@/lib/matrixIds";
 
 export function RoomAdmins() {
   const { config, isLoading, saveConfig, updateMatrixRoomAccess } =
@@ -40,6 +31,7 @@ export function RoomAdmins() {
   };
 
   const handleAdd = () => {
+    if (!config) return;
     const trimmed = newAdminId.trim();
     if (!trimmed) return;
     if (!isConcreteMatrixUserId(trimmed)) {
@@ -93,7 +85,8 @@ export function RoomAdmins() {
         <CardDescription>
           Matrix users automatically granted admin power (100) in every managed
           room. Membership is unchanged: listed users become admins once they
-          are in the room.
+          are in the room. Removing a user stops future grants but does not
+          lower admin power they already have.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -136,11 +129,15 @@ export function RoomAdmins() {
               type="button"
               variant="outline"
               onClick={handleAdd}
-              disabled={!newAdminId.trim()}
+              disabled={!newAdminId.trim() || !config}
             >
               Add
             </Button>
-            <Button type="button" onClick={handleSave} disabled={isLoading}>
+            <Button
+              type="button"
+              onClick={handleSave}
+              disabled={isLoading || !config}
+            >
               Save
             </Button>
           </div>

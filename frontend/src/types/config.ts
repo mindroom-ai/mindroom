@@ -281,6 +281,7 @@ export interface MatrixRoomAccessConfig {
   publish_to_room_directory?: boolean;
   invite_only_rooms?: string[];
   reconcile_existing_rooms?: boolean;
+  encrypt_managed_rooms?: boolean;
   room_admins?: string[]; // Matrix user IDs granted admin power (100) in every managed room
 }
 

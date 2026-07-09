@@ -186,7 +186,7 @@ class TestManagedRoomEncryptionReconcile:
         monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
         monkeypatch.setattr(matrix_rooms, "ensure_room_name", AsyncMock(return_value=True))
         monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
-        monkeypatch.setattr(matrix_rooms, "ensure_thread_tags_power_level", AsyncMock(return_value=True))
+        monkeypatch.setattr(matrix_rooms, "ensure_managed_room_power_levels", AsyncMock(return_value=True))
         enable_encryption = AsyncMock(return_value=True)
         monkeypatch.setattr(matrix_rooms, "ensure_room_encryption_enabled", enable_encryption)
 

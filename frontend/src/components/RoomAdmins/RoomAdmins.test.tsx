@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { RoomAdmins, isConcreteMatrixUserId } from "./RoomAdmins";
+import { RoomAdmins } from "./RoomAdmins";
+import { isConcreteMatrixUserId } from "@/lib/matrixIds";
 import { useConfigStore } from "@/store/configStore";
 import type { ConfigDiagnostic } from "@/lib/configValidation";
 import { Config } from "@/types/config";
@@ -101,6 +102,20 @@ describe("RoomAdmins", () => {
         room_admins: ["@alice:example.com", "@bob:example.com"],
       });
     });
+  });
+
+  it("disables Add and Save while the config has not loaded", () => {
+    setMockStore(null as unknown as Partial<Config>);
+
+    render(<RoomAdmins />);
+
+    fireEvent.change(screen.getByPlaceholderText("@alice:example.com"), {
+      target: { value: "@bob:example.com" },
+    });
+
+    expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(mockUpdateMatrixRoomAccess).not.toHaveBeenCalled();
   });
 
   it("adds an admin when the config has no matrix_room_access section", async () => {

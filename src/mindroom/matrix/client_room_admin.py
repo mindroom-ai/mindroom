@@ -149,15 +149,21 @@ def _with_thread_tags_power_level(power_levels_content: dict[str, Any]) -> dict[
     return next_content
 
 
-async def ensure_thread_tags_power_level(
+async def ensure_managed_room_power_levels(
     client: nio.AsyncClient,
     room_id: str,
+    admin_user_ids: Iterable[str] = (),
 ) -> bool:
-    """Ensure managed rooms allow PL0 users to send the thread-tags state event."""
+    """Reconcile managed-room power levels with one read-modify-write.
+
+    Applies the thread-tags override (PL0 users may send thread-tag state
+    events) and grants configured room admins power level 100 in a single
+    conditional PUT, so the two reconciliations cannot clobber each other.
+    """
     current_response = await client.room_get_state_event(room_id, _POWER_LEVELS_EVENT_TYPE)
     if not isinstance(current_response, nio.RoomGetStateEventResponse):
         logger.error(
-            "Failed to read room power levels for thread tags reconciliation",
+            "Failed to read room power levels for managed room reconciliation",
             room_id=room_id,
             error=_describe_matrix_response_error(current_response),
         )
@@ -172,12 +178,14 @@ async def ensure_thread_tags_power_level(
     current_content = current_response.content
 
     desired_content = _with_thread_tags_power_level(current_content)
+    concrete_admin_ids = {user_id for user_id in admin_user_ids if user_id}
+    if concrete_admin_ids:
+        desired_content = _with_room_admin_power_levels(desired_content, concrete_admin_ids)
     if desired_content == current_content:
         logger.debug(
-            "Thread tags power level already configured",
+            "Managed room power levels already configured",
             room_id=room_id,
-            event_type=THREAD_TAGS_EVENT_TYPE,
-            power_level=_THREAD_TAGS_POWER_LEVEL,
+            admin_user_ids=sorted(concrete_admin_ids),
         )
         return True
 
@@ -188,16 +196,16 @@ async def ensure_thread_tags_power_level(
     )
     if isinstance(response, nio.RoomPutStateResponse):
         logger.info(
-            "Updated room power levels for thread tags",
+            "Updated managed room power levels",
             room_id=room_id,
-            event_type=THREAD_TAGS_EVENT_TYPE,
-            power_level=_THREAD_TAGS_POWER_LEVEL,
+            admin_user_ids=sorted(concrete_admin_ids),
         )
         return True
 
     logger.error(
-        "Failed to update room power levels for thread tags",
+        "Failed to update managed room power levels",
         room_id=room_id,
+        admin_user_ids=sorted(concrete_admin_ids),
         error=_describe_matrix_response_error(response),
         hint="Ensure the service account is joined and can update m.room.power_levels.",
     )
@@ -654,12 +662,12 @@ __all__ = [
     "add_room_to_space",
     "create_room",
     "create_space",
+    "ensure_managed_room_power_levels",
     "ensure_room_admin_power_levels",
     "ensure_room_directory_visibility",
     "ensure_room_encryption_enabled",
     "ensure_room_join_rule",
     "ensure_room_name",
-    "ensure_thread_tags_power_level",
     "get_joined_rooms",
     "get_room_members",
     "get_room_name",

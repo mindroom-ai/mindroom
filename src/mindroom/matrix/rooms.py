@@ -16,12 +16,12 @@ from mindroom.matrix.client_room_admin import (
     add_room_to_space,
     create_room,
     create_space,
+    ensure_managed_room_power_levels,
     ensure_room_admin_power_levels,
     ensure_room_directory_visibility,
     ensure_room_encryption_enabled,
     ensure_room_join_rule,
     ensure_room_name,
-    ensure_thread_tags_power_level,
     get_joined_rooms,
     join_room,
     leave_room,
@@ -30,13 +30,15 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, AgentMatrixUser, login_agent_user
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
-    is_concrete_matrix_user_id,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
+    split_concrete_matrix_user_ids,
 )
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -164,9 +166,7 @@ def _managed_room_should_be_encrypted(room_key: str, config: Config) -> bool:
 
 def _room_admin_user_ids(config: Config) -> list[str]:
     """Return configured managed-room admins, skipping wildcard or placeholder entries."""
-    admin_ids = config.matrix_room_access.room_admins
-    concrete_ids = [user_id for user_id in admin_ids if is_concrete_matrix_user_id(user_id)]
-    skipped = sorted(set(admin_ids) - set(concrete_ids))
+    concrete_ids, skipped = split_concrete_matrix_user_ids(config.matrix_room_access.room_admins)
     if skipped:
         logger.warning("Skipping non-concrete room admin user IDs", user_ids=skipped)
     return concrete_ids
@@ -217,14 +217,14 @@ async def _reconcile_joined_existing_room(
     *,
     explicit_room_name: str | None,
     room_alias: str,
+    admin_user_ids: Sequence[str] = (),
 ) -> None:
     """Reconcile name, topic, power levels, encryption, and access policy for one joined managed room."""
     topic_room_name = explicit_room_name or _room_key_to_name(room_key)
     if explicit_room_name is not None:
         await ensure_room_name(client, room_id, explicit_room_name)
     await ensure_room_has_topic(client, room_id, room_key, topic_room_name, config, runtime_paths)
-    await ensure_thread_tags_power_level(client, room_id)
-    await ensure_room_admin_power_levels(client, room_id, _room_admin_user_ids(config))
+    await ensure_managed_room_power_levels(client, room_id, admin_user_ids)
     if _managed_room_should_be_encrypted(room_key, config):
         await ensure_room_encryption_enabled(client, room_id)
 
@@ -254,6 +254,7 @@ async def _ensure_room_exists(
     runtime_paths: RuntimePaths,
     room_name: str | None = None,
     power_users: list[str] | None = None,
+    admin_user_ids: Sequence[str] = (),
 ) -> str | None:
     """Ensure a room exists, creating it if necessary.
 
@@ -264,6 +265,7 @@ async def _ensure_room_exists(
         runtime_paths: Explicit runtime context for room aliases, topics, and avatars
         room_name: Display name for the room (defaults to room_key with underscores replaced)
         power_users: List of user IDs to grant power levels to
+        admin_user_ids: Concrete Matrix user IDs granted room admin power (100)
 
     Returns:
         Room ID if room exists or was created, None on failure
@@ -307,6 +309,7 @@ async def _ensure_room_exists(
                 runtime_paths,
                 explicit_room_name=explicit_room_name,
                 room_alias=full_alias,
+                admin_user_ids=admin_user_ids,
             )
         else:
             logger.warning(
@@ -341,7 +344,7 @@ async def _ensure_room_exists(
         alias=alias_localpart,
         topic=topic,
         power_users=power_users or [],
-        admin_users=_room_admin_user_ids(config),
+        admin_users=list(admin_user_ids),
         encrypted=_managed_room_should_be_encrypted(room_key, config),
     )
 
@@ -405,6 +408,9 @@ async def ensure_all_rooms_exist(
     # Get all configured rooms
     all_rooms = config.get_all_configured_rooms()
 
+    # Configured room admins are room-independent; filter and warn once per pass.
+    admin_user_ids = _room_admin_user_ids(config)
+
     for room_key in all_rooms:
         # Skip if this is a room ID (starts with !)
         if room_key.startswith("!"):
@@ -427,6 +433,7 @@ async def ensure_all_rooms_exist(
                 runtime_paths=runtime_paths,
                 room_name=room_name,
                 power_users=power_users,
+                admin_user_ids=admin_user_ids,
             )
         except RuntimeError:
             logger.exception(
