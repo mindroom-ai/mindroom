@@ -48,6 +48,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Knowledge Bases | `knowledge.md` | `knowledge/index.md` | `page__knowledge__index.md` |
 | Memory System | `memory.md` | `memory/index.md` | `page__memory__index.md` |
 | Voice Messages | `voice.md` | `voice/index.md` | `page__voice__index.md` |
+| Voice Calls | `voice-calls.md` | `voice-calls/index.md` | `page__voice-calls__index.md` |
 | Image Messages | `images.md` | `images/index.md` | `page__images__index.md` |
 | File & Video Attachments | `attachments.md` | `attachments/index.md` | `page__attachments__index.md` |
 | Chat Commands | `chat-commands.md` | `chat-commands/index.md` | `page__chat-commands__index.md` |

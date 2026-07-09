@@ -56,6 +56,7 @@ from mindroom.matrix.sync_certification import (
 )
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
+from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
@@ -341,6 +342,7 @@ class AgentBot:
         )
         self._deferred_overdue_task_drain_task = None
         self._startup_thread_prewarm_task = None
+        self._call_manager: CallManager | None = None
 
         async def send_room_lifecycle_response(
             *,
@@ -1373,6 +1375,31 @@ class AgentBot:
                 ),
                 nio.MegolmEvent,
             )
+            self._call_manager = maybe_build_call_manager(
+                agent_name=self.agent_name,
+                config=self.config,
+                client=client,
+                runtime_paths=self.runtime_paths,
+                homeserver_url=constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+                ssl_verify=constants.runtime_matrix_ssl_verify(self.runtime_paths),
+            )
+            if self._call_manager is not None:
+                client.add_event_callback(
+                    _create_task_wrapper(
+                        self._call_manager.on_room_event,
+                        owner=self._runtime_view,
+                        on_error=self._mark_callback_failed,
+                    ),
+                    nio.UnknownEvent,
+                )
+                client.add_to_device_callback(
+                    _create_task_wrapper(  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
+                        self._call_manager.on_to_device_event,
+                        owner=self._runtime_view,
+                        on_error=self._mark_callback_failed,
+                    ),
+                    nio.UnknownToDeviceEvent,
+                )
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
@@ -1459,6 +1486,11 @@ class AgentBot:
         self._room_member_callback_registered = False
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=shutdown_intent.stop_reason)
+
+        call_manager = self._call_manager
+        self._call_manager = None
+        if call_manager is not None:
+            await call_manager.shutdown()
 
         await self.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
 

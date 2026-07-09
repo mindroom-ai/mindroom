@@ -932,6 +932,7 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     bot.logger = MagicMock()
     bot.prepare_for_sync_shutdown = AsyncMock()
     bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._call_manager = None
 
     await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 

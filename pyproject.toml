@@ -262,6 +262,9 @@ lumalabs = [
   "lumaai",
 ]
 matrix_api = []
+matrix_calls = [
+  "livekit-agents[openai]>=1.5",
+]
 matrix-e2ee = []
 matrix_message = []
 matrix_room = []

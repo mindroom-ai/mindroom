@@ -1338,6 +1338,7 @@ depends_on = [
     "mindroom.agent_policy",
     "mindroom.config.agent",
     "mindroom.config.auth",
+    "mindroom.config.calls",
     "mindroom.config.entity_view",
     "mindroom.config.knowledge",
     "mindroom.config.matrix",
@@ -2088,6 +2089,53 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.matrix_rtc"
+depends_on = ["mindroom.matrix_rtc.call_manager"]
+
+[[modules]]
+path = "mindroom.matrix_rtc.call_manager"
+depends_on = [
+    "mindroom.credentials_sync",
+    "mindroom.logging_config",
+    "mindroom.matrix_rtc.call_session",
+    "mindroom.matrix_rtc.events",
+    "mindroom.matrix_rtc.focus",
+    "mindroom.matrix_rtc.key_transport",
+    "mindroom.matrix_rtc.voice_agent",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.call_session"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.matrix_rtc.events",
+    "mindroom.matrix_rtc.frame_keys",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.events"
+depends_on = []
+
+[[modules]]
+path = "mindroom.matrix_rtc.focus"
+depends_on = ["mindroom.logging_config"]
+
+[[modules]]
+path = "mindroom.matrix_rtc.frame_keys"
+depends_on = ["mindroom.matrix_rtc.events"]
+
+[[modules]]
+path = "mindroom.matrix_rtc.key_transport"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.matrix_rtc.events",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.voice_agent"
+depends_on = ["mindroom.logging_config"]
+
+[[modules]]
 path = "mindroom.conversation_resolver"
 depends_on = [
     "mindroom.constants",
@@ -2143,6 +2191,7 @@ depends_on = [
     "mindroom.matrix.state",
     "mindroom.matrix.users",
     "mindroom.matrix.visible_body",
+    "mindroom.matrix_rtc.call_manager",
     "mindroom.memory",
     "mindroom.post_response_effects",
     "mindroom.response_payload_preparation",

@@ -56,6 +56,7 @@ nav = [
   { "Knowledge Bases" = "knowledge.md" },
   { "Memory System" = "memory.md" },
   { "Voice Messages" = "voice.md" },
+  { "Voice Calls" = "voice-calls.md" },
   { "Image Messages" = "images.md" },
   { "File & Video Attachments" = "attachments.md" },
   { "Chat Commands" = "chat-commands.md" },

@@ -142,7 +142,7 @@ SENTENCE_TRANSFORMERS_DEFAULT = "sentence-transformers/all-MiniLM-L6-v2"
 OPENAI_TRANSCRIPTION = "gpt-4o-transcribe"
 OPENAI_REALTIME_TRANSCRIPTION = "gpt-realtime-whisper"
 OPENAI_TTS = "gpt-4o-mini-tts"
-OPENAI_REALTIME = "gpt-realtime-2"
+OPENAI_REALTIME = "gpt-realtime-2.1"
 OPENAI_IMAGE = "gpt-image-2"
 OPENAI_DALLE = "dall-e-3"
 
