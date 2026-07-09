@@ -3,6 +3,9 @@
 Developer note:
 - `event_cache.py` owns the storage-agnostic durable cache protocol.
 - `event_normalization.py` owns storage-agnostic event payload shaping before backend writes.
+- `event_cache_events.py` owns backend-neutral serialized event values, indexes, and redaction decisions.
+- `thread_cache_state.py` owns backend-neutral durable state values and comparison rules.
+- `agent_message_snapshot_semantics.py` owns backend-neutral latest-message selection rules.
 - `sqlite_event_cache.py` owns the SQLite implementation, runtime, locking, and schema lifecycle.
 - `postgres_event_cache.py` owns the PostgreSQL implementation, runtime, advisory locking, and schema lifecycle.
 - `sqlite_event_cache_events.py` owns SQLite lookup/index rows, edits, and redaction tombstones.
