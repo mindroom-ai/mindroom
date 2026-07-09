@@ -839,8 +839,7 @@ async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) ->
 
 
 def _participant_session_id(context: ToolRuntimeContext, participant_id: str, *, run_scope: str) -> str:
-    base_session_id = context.session_id or context.resolved_thread_id or context.thread_id or context.room_id
-    return f"{base_session_id}:dynamic_workflow:{run_scope}:{participant_id}"
+    return f"{context.session_id}:dynamic_workflow:{run_scope}:{participant_id}"
 
 
 def _resolve_participant_model_name(

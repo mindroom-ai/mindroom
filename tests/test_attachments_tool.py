@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools, send_context_attachments
 from mindroom.message_target import MessageTarget
+from mindroom.session_ids import create_session_id
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -109,7 +110,7 @@ def _tool_context_with_thread_scope(
             context.target,
             source_thread_id=thread_id,
             resolved_thread_id=resolved_thread_id,
-            session_id=(context.room_id if resolved_thread_id is None else f"{context.room_id}:{resolved_thread_id}"),
+            session_id=create_session_id(context.room_id, resolved_thread_id),
         ),
     )
 
