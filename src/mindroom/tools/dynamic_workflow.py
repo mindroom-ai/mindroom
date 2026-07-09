@@ -1,13 +1,13 @@
 """Dynamic Workflow tool metadata registration."""
 
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolMetadata,
     ToolStatus,
-    register_builtin_tool_metadata,
 )
+from mindroom.tool_system.registration import register_builtin_tool_metadata
 
 register_builtin_tool_metadata(
     ToolMetadata(

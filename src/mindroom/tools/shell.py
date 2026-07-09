@@ -31,15 +31,15 @@ from mindroom.shell_supervisor import (
     kill_command_via_supervisor,
     run_command_via_supervisor,
 )
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
     ToolManagedInitArg,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
 _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(

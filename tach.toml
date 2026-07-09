@@ -2386,6 +2386,7 @@ path = "mindroom.tool_system.metadata"
 depends_on = [
     "mindroom.constants",
     "mindroom.mcp.registry",
+    "mindroom.tool_system.declarations",
     "mindroom.tool_system.dependencies",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugin_imports",
@@ -2398,7 +2399,19 @@ depends_on = [
 path = "mindroom.tool_system.catalog"
 depends_on = [
     "mindroom.tool_system.bootstrap",
+    "mindroom.tool_system.declarations",
     "mindroom.tool_system.metadata",
+]
+
+[[modules]]
+path = "mindroom.tool_system.declarations"
+depends_on = []
+
+[[modules]]
+path = "mindroom.tool_system.registration"
+depends_on = [
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registry_state",
 ]
 
 [[modules]]
@@ -3290,18 +3303,31 @@ from = ["mindroom.runtime_support"]
 
 [[interfaces]]
 expose = [
-    "TOOL_METADATA",
     "ConfigField",
     "SetupType",
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
-    "ToolConfigOverrideError",
-    "ToolInitOverrideError",
+    "ToolExecutionTarget",
     "ToolManagedInitArg",
     "ToolMetadata",
-    "ToolMetadataValidationError",
     "ToolStatus",
     "ToolValidationInfo",
+]
+from = ["mindroom.tool_system.declarations"]
+
+[[interfaces]]
+expose = [
+    "register_builtin_tool_metadata",
+    "register_tool_with_metadata",
+]
+from = ["mindroom.tool_system.registration"]
+
+[[interfaces]]
+expose = [
+    "TOOL_METADATA",
+    "ToolConfigOverrideError",
+    "ToolInitOverrideError",
+    "ToolMetadataValidationError",
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
     "default_worker_routed_tools",
@@ -3387,6 +3413,7 @@ visibility = [
     "mindroom.mcp.registry",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.registration",
 ]
 exclusive = true
 

@@ -225,12 +225,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit
@@ -339,13 +339,13 @@ Each `ConfigField` describes one constructor parameter that can be configured th
 Example — a tool that requires an API key:
 
 ```python
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 @register_tool_with_metadata(
     name="weather",
@@ -388,7 +388,8 @@ Example:
 
 ```python
 from agno.tools import Toolkit
-from mindroom.tool_system.metadata import ToolCategory, ToolManagedInitArg, register_tool_with_metadata
+from mindroom.tool_system.declarations import ToolCategory, ToolManagedInitArg
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 
 @register_tool_with_metadata(
@@ -429,12 +430,12 @@ This plugin pattern is still useful when you want a custom wrapper around Agno `
 
 ```python
 from agno.tools.mcp import MCPTools
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 
 class FilesystemMCPTools(MCPTools):

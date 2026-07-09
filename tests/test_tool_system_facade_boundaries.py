@@ -19,6 +19,13 @@ PRIVATE_REGISTRY_STATE_INTERFACE_VISIBILITY = {
     "mindroom.mcp.registry",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.registration",
+}
+FORBIDDEN_BUILTIN_TOOL_DEPENDENCIES = {
+    "mindroom.tool_system.bootstrap",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.metadata",
+    "mindroom.tool_system.registry_state",
 }
 ALLOWED_PUBLIC_CATALOG_REEXPORTS = {
     "TOOL_METADATA",
@@ -220,6 +227,50 @@ def _function_local_imports(py_path: Path) -> set[str]:
     return local_imports
 
 
+def _builtin_tool_forbidden_importers() -> dict[str, set[str]]:
+    importers: dict[str, set[str]] = {}
+    for py_path in (SOURCE_ROOT / "tools").glob("*.py"):
+        importer_module = f"mindroom.tools.{py_path.stem}"
+        imported_modules = {
+            module_name
+            for node in ast.walk(ast.parse(py_path.read_text()))
+            for module_name in _imported_module_names(node)
+            if module_name in FORBIDDEN_BUILTIN_TOOL_DEPENDENCIES
+        }
+        if imported_modules:
+            importers[importer_module] = imported_modules
+    return importers
+
+
+def _builtin_registration_modules() -> list[str]:
+    modules: list[str] = []
+    for py_path in (SOURCE_ROOT / "tools").glob("*.py"):
+        if py_path.name == "__init__.py":
+            continue
+        imported_modules = {
+            module_name
+            for node in ast.walk(ast.parse(py_path.read_text()))
+            for module_name in _imported_module_names(node)
+        }
+        if "mindroom.tool_system.registration" in imported_modules:
+            modules.append(f"mindroom.tools.{py_path.stem}")
+    return sorted(modules)
+
+
+def _manifest_modules() -> list[str]:
+    tree = ast.parse((SOURCE_ROOT / "tools" / "__init__.py").read_text())
+    modules: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names if alias.name.startswith("mindroom.tools."))
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "mindroom.tools":
+                modules.extend(f"mindroom.tools.{alias.name}" for alias in node.names)
+            elif node.module and node.module.startswith("mindroom.tools."):
+                modules.append(node.module)
+    return modules
+
+
 def test_tool_system_runtime_and_extensions_modules_are_removed() -> None:
     """The runtime and extensions facade modules should no longer exist."""
     assert not (SOURCE_ROOT / "tool_system" / "runtime.py").exists()
@@ -270,6 +321,18 @@ def test_catalog_private_registry_helpers_have_no_importers() -> None:
     assert not _catalog_private_importers()
 
 
+def test_builtin_tools_depend_only_on_declaration_and_registration_leaves() -> None:
+    """Built-in tool modules must never import the runtime catalog or its private state."""
+    assert not _builtin_tool_forbidden_importers()
+
+
+def test_builtin_tool_manifest_explicitly_imports_every_registration_module() -> None:
+    """The deterministic manifest should list every built-in registration module exactly once."""
+    manifest_modules = _manifest_modules()
+    assert len(manifest_modules) == len(set(manifest_modules))
+    assert sorted(manifest_modules) == _builtin_registration_modules()
+
+
 def test_tach_does_not_expose_catalog_private_registry_helpers() -> None:
     """Tach should not publish catalog private registry helpers as public interfaces."""
     forbidden_catalog_exports = _private_registry_state_exports()
@@ -313,15 +376,27 @@ def test_tach_breaks_metadata_plugins_cycle_with_private_split_modules() -> None
     plugins_deps = _tach_module_depends_on("mindroom.tool_system.plugins")
     catalog_deps = _tach_module_depends_on("mindroom.tool_system.catalog")
     bootstrap_deps = _tach_module_depends_on("mindroom.tool_system.bootstrap")
+    declarations_deps = _tach_module_depends_on("mindroom.tool_system.declarations")
+    registration_deps = _tach_module_depends_on("mindroom.tool_system.registration")
 
     assert "mindroom.tool_system.plugins" not in metadata_deps
     assert "mindroom.tool_system.metadata" not in plugins_deps
+    assert "mindroom.tool_system.declarations" in metadata_deps
     assert "mindroom.tool_system.registry_state" in metadata_deps
     assert "mindroom.tool_system.plugin_imports" in metadata_deps
     assert "mindroom.tool_system.registry_state" in plugins_deps
     assert "mindroom.tool_system.plugin_imports" in plugins_deps
-    assert catalog_deps == {"mindroom.tool_system.bootstrap", "mindroom.tool_system.metadata"}
+    assert catalog_deps == {
+        "mindroom.tool_system.bootstrap",
+        "mindroom.tool_system.declarations",
+        "mindroom.tool_system.metadata",
+    }
     assert bootstrap_deps == {"mindroom.mcp.registry", "mindroom.tool_system.plugins"}
+    assert declarations_deps == set()
+    assert registration_deps == {
+        "mindroom.tool_system.declarations",
+        "mindroom.tool_system.registry_state",
+    }
 
 
 def test_selected_modules_do_not_hide_tool_system_imports_inside_functions() -> None:
