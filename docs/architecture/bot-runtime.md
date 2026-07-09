@@ -65,6 +65,14 @@ It no longer sends messages, runs AI, or writes persistence state.
 `TurnController` and `EditRegenerator` read and write through `TurnStore` instead of owning their own persistence helpers.
 Command handling now records terminal outcomes through `TurnStore` as well.
 
+`TurnRecord` is the single immutable schema for turn identity, outcome, and regeneration facts.
+One codec projects that schema into the versioned handled-turn ledger and recoverable Agno run metadata.
+The two physical stores remain intentionally redundant so run metadata can repair a ledger write lost during a crash.
+`TurnStore` applies deterministic field precedence: a present ledger record owns source identity, anchor, completion, timestamp, and every populated optional fact.
+Run metadata supplies a complete record only when the ledger row is absent, or backfills optional facts that are missing from an existing ledger row.
+`TurnStore` immediately writes a recovered or enriched record back to the ledger, so callers never own backfill or repair decisions.
+Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
+
 ## Tool Dispatch Contracts
 
 There are now four active runtime contracts for tool and scheduling dispatch.

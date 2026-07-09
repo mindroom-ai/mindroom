@@ -9,7 +9,6 @@ from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.response_runner import ResponseRequest
@@ -67,10 +66,6 @@ class EditRegenerator:
             msg = "Matrix client is not ready for edit regeneration"
             raise RuntimeError(msg)
         return client
-
-    def _record_turn_record(self, turn_record: HandledTurnRecord) -> None:
-        """Persist one exact handled-turn record without losing its anchor event."""
-        self.deps.turn_store.record_turn_record(turn_record)
 
     async def edit_regeneration_context(
         self,
@@ -136,7 +131,7 @@ class EditRegenerator:
                 original_event_id=original_event_id,
             )
             return
-        turn_record = loaded_turn.record
+        turn_record = loaded_turn
         if (
             turn_record.conversation_target is None
             or turn_record.history_scope is None
@@ -169,7 +164,6 @@ class EditRegenerator:
                 response_owner=regeneration_response_owner,
             )
             return
-        needs_turn_record_backfill = loaded_turn.requires_backfill
         coalesced_source_event_prompts = turn_record.source_event_prompts
 
         self._logger().info(
@@ -187,13 +181,6 @@ class EditRegenerator:
         if edited_content is None:
             self._logger().debug("Edited message missing resolved body", event_id=event.event_id)
             return
-        regeneration_handled_turn = HandledTurnState.create(
-            turn_record.source_event_ids,
-            response_event_id=response_event_id,
-            response_owner=regeneration_response_owner,
-            history_scope=regeneration_history_scope,
-            conversation_target=regeneration_target,
-        )
         regeneration_turn_record = replace(
             turn_record,
             response_event_id=response_event_id,
@@ -229,27 +216,18 @@ class EditRegenerator:
                 tagged_prompt = tagged_coalesced_prompt(
                     list(regeneration_turn_record.source_event_ids),
                     updated_prompt_map,
-                    regeneration_turn_record.source_event_metadata,
+                    dict(regeneration_turn_record.source_event_metadata),
                     timestamp_formatter=self.deps.timestamp_formatter,
                 )
                 if tagged_prompt is not None:
                     regeneration_prompt = tagged_prompt
                     current_prompt_is_structured = True
-            regeneration_handled_turn = HandledTurnState.create(
-                regeneration_turn_record.source_event_ids,
-                response_event_id=response_event_id,
-                source_event_prompts=updated_prompt_map,
-                source_event_metadata=regeneration_turn_record.source_event_metadata,
-                response_owner=regeneration_response_owner,
-                history_scope=regeneration_history_scope,
-                conversation_target=regeneration_target,
-            )
             regeneration_turn_record = replace(regeneration_turn_record, source_event_prompts=updated_prompt_map)
         else:
             regeneration_prompt = edited_content
             current_prompt_is_structured = False
         regeneration_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
-            regeneration_handled_turn,
+            regeneration_turn_record,
             additional_source_event_ids=(
                 (original_event_id,)
                 if not regeneration_turn_record.is_coalesced
@@ -272,7 +250,7 @@ class EditRegenerator:
             correlation_id=event.event_id,
             policy=ingress_policy,
         ):
-            self._record_turn_record(regeneration_turn_record)
+            self.deps.turn_store.record_turn(regeneration_turn_record)
             return
 
         regenerated_event_id = await self.deps.generate_response(
@@ -287,17 +265,14 @@ class EditRegenerator:
                 current_timestamp_ms=normalize_timestamp_ms(event.server_timestamp),
                 current_prompt_is_structured=current_prompt_is_structured,
                 on_lifecycle_lock_acquired=lambda: self.deps.turn_store.remove_stale_runs_for_edit(
-                    loaded_turn=replace(
-                        loaded_turn,
-                        record=regeneration_turn_record,
-                    ),
+                    turn_record=regeneration_turn_record,
                     requester_user_id=requester_user_id,
                 ),
             ),
         )
 
         if regenerated_event_id is not None:
-            self._record_turn_record(
+            self.deps.turn_store.record_turn(
                 replace(
                     regeneration_turn_record,
                     response_event_id=regenerated_event_id,
@@ -305,8 +280,6 @@ class EditRegenerator:
             )
             self._logger().info("Successfully regenerated response for edited message")
         else:
-            if needs_turn_record_backfill:
-                self._record_turn_record(regeneration_turn_record)
             self._logger().info(
                 "Suppressed regeneration left existing response unchanged",
                 original_event_id=original_event_id,

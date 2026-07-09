@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -35,7 +35,7 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
@@ -316,15 +316,16 @@ def _agent_response_handled_turn(
     requester_id: str | None = None,
     correlation_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
-) -> HandledTurnState:
+) -> TurnRecord:
     """Return the handled-turn state persisted for one direct agent response."""
-    return HandledTurnState.from_source_event_id(
-        event_id,
-        response_event_id=response_event_id,
-        requester_id=requester_id,
-        correlation_id=correlation_id,
-        source_event_prompts=source_event_prompts,
-    ).with_response_context(
+    return replace(
+        TurnRecord.create(
+            [event_id],
+            response_event_id=response_event_id,
+            requester_id=requester_id,
+            correlation_id=correlation_id,
+            source_event_prompts=source_event_prompts,
+        ),
         response_owner=agent_name,
         history_scope=HistoryScope(kind="agent", scope_id=agent_name),
         conversation_target=MessageTarget.resolve(

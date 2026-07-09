@@ -7,6 +7,7 @@ import json
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,9 +16,9 @@ import mindroom.handled_turns as handled_turns_module
 from mindroom.file_locks import advisory_file_lock
 from mindroom.handled_turns import (
     HandledTurnLedger,
-    HandledTurnRecord,
-    HandledTurnState,
     SourceEventMetadata,
+    TurnRecord,
+    TurnRecordCodec,
     _reset_handled_turn_ledger_runtime,
 )
 from mindroom.history.types import HistoryScope
@@ -43,8 +44,50 @@ def _write_responses_file(
     tracker: HandledTurnLedger,
     responses: dict[str, dict[str, object]],
 ) -> None:
-    """Seed the persisted ledger file for tests that exercise reload semantics."""
-    tracker._responses_file.write_text(json.dumps(responses), encoding="utf-8")
+    """Seed current-schema ledger records for reload and cleanup tests."""
+    serialized_records: dict[str, dict[str, object]] = {}
+    for event_id, raw_record in responses.items():
+        raw_source_event_ids = raw_record.get("source_event_ids")
+        source_event_ids = raw_source_event_ids if isinstance(raw_source_event_ids, list) else [event_id]
+        record = TurnRecord.create(
+            source_event_ids,
+            anchor_event_id=raw_record.get("anchor_event_id")
+            if isinstance(raw_record.get("anchor_event_id"), str)
+            else None,
+            response_event_id=raw_record.get("response_event_id")
+            if isinstance(raw_record.get("response_event_id"), str)
+            else None,
+            completed=raw_record.get("completed") if isinstance(raw_record.get("completed"), bool) else True,
+            visible_echo_event_id=raw_record.get("visible_echo_event_id")
+            if isinstance(raw_record.get("visible_echo_event_id"), str)
+            else None,
+            source_event_prompts=raw_record.get("source_event_prompts")
+            if isinstance(raw_record.get("source_event_prompts"), dict)
+            else None,
+            source_event_metadata=raw_record.get("source_event_metadata")
+            if isinstance(raw_record.get("source_event_metadata"), dict)
+            else None,
+            response_owner=raw_record.get("response_owner")
+            if isinstance(raw_record.get("response_owner"), str)
+            else None,
+            requester_id=raw_record.get("requester_id") if isinstance(raw_record.get("requester_id"), str) else None,
+            correlation_id=raw_record.get("correlation_id")
+            if isinstance(raw_record.get("correlation_id"), str)
+            else None,
+            history_scope=HistoryScope.from_metadata(raw_record.get("history_scope")),
+            conversation_target=MessageTarget.from_metadata(raw_record.get("conversation_target")),
+            timestamp=float(raw_record.get("timestamp", 0.0)),
+        )
+        serialized_records[event_id] = TurnRecordCodec.to_ledger_record(record)
+    tracker._responses_file.write_text(
+        json.dumps(
+            {
+                "schema_version": TurnRecordCodec.schema_version(),
+                "records": serialized_records,
+            },
+        ),
+        encoding="utf-8",
+    )
 
 
 def _record_handled_turn(
@@ -61,7 +104,7 @@ def _record_handled_turn(
 ) -> None:
     """Record one normalized handled turn through the typed carrier."""
     tracker.record_handled_turn(
-        HandledTurnState.create(
+        TurnRecord.create(
             source_event_ids,
             response_event_id=response_event_id,
             source_event_prompts=source_event_prompts,
@@ -77,6 +120,14 @@ def _record_handled_turn(
 def _get_response_event_id(tracker: HandledTurnLedger, source_event_id: str) -> str | None:
     turn_record = tracker.get_turn_record(source_event_id)
     return turn_record.response_event_id if turn_record is not None else None
+
+
+def _read_persisted_records(tracker: HandledTurnLedger) -> dict[str, object]:
+    payload = json.loads(tracker._responses_file.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == TurnRecordCodec.schema_version()
+    records = payload["records"]
+    assert isinstance(records, dict)
+    return records
 
 
 def test_handled_turn_ledger_init(temp_dir: Path) -> None:
@@ -98,7 +149,7 @@ def test_has_responded_empty(temp_dir: Path) -> None:
 
 def test_handled_turn_state_normalizes_ids_and_prompt_map() -> None:
     """The handled-turn carrier should normalize IDs, prompts, and empty event IDs."""
-    handled_turn = HandledTurnState.create(
+    handled_turn = TurnRecord.create(
         ["$a", "", "$a", "$b"],
         response_event_id="",
         visible_echo_event_id="",
@@ -122,7 +173,7 @@ def test_handled_turn_state_preserves_response_context() -> None:
     )
     history_scope = HistoryScope(kind="team", scope_id="team_scope")
 
-    handled_turn = HandledTurnState.create(
+    handled_turn = TurnRecord.create(
         ["$event:example.com"],
         response_owner="test_agent",
         history_scope=history_scope,
@@ -136,17 +187,13 @@ def test_handled_turn_state_preserves_response_context() -> None:
 
 def test_handled_turn_state_preserves_requester_and_correlation() -> None:
     """The handled-turn carrier should keep requester and correlation ids intact."""
-    handled_turn = HandledTurnState.create(
+    handled_turn = TurnRecord.create(
         ["$event:example.com"],
         requester_id="@user:example.com",
         correlation_id="corr-123",
     )
 
-    updated = handled_turn.with_response_context(
-        response_owner="agent",
-        history_scope=None,
-        conversation_target=None,
-    )
+    updated = replace(handled_turn, response_owner="agent")
 
     assert updated.requester_id == "@user:example.com"
     assert updated.correlation_id == "corr-123"
@@ -163,7 +210,7 @@ def test_record_outcome_marks_single_source_event(temp_dir: Path) -> None:
     assert tracker.has_responded("event123")
     assert _get_response_event_id(tracker, "event123") is None
     record = tracker.get_turn_record("event123")
-    assert record == HandledTurnRecord(
+    assert record == TurnRecord(
         anchor_event_id="event123",
         source_event_ids=("event123",),
         timestamp=record.timestamp if record is not None else 0.0,
@@ -184,7 +231,7 @@ def test_record_handled_turn_tracks_typed_carrier(temp_dir: Path) -> None:
     )
 
     tracker.record_handled_turn(
-        HandledTurnState.create(
+        TurnRecord.create(
             ["$first", "$second"],
             response_event_id="$response",
             source_event_prompts={"$first": "first prompt", "$second": "second prompt"},
@@ -215,7 +262,7 @@ def test_record_outcome_tracks_response_event_id(temp_dir: Path) -> None:
 
     assert tracker.has_responded("event123")
     assert _get_response_event_id(tracker, "event123") == "$response"
-    assert tracker.get_turn_record("event123") == HandledTurnRecord(
+    assert tracker.get_turn_record("event123") == TurnRecord(
         anchor_event_id="event123",
         source_event_ids=("event123",),
         response_event_id="$response",
@@ -291,47 +338,13 @@ def test_record_outcome_filters_prompt_map_to_source_ids(temp_dir: Path) -> None
     assert turn_record.source_event_prompts == {"$a": "prompt a"}
 
 
-def test_record_outcome_preserves_existing_prompt_map_when_omitted(temp_dir: Path) -> None:
-    """A later outcome write without prompts should keep the existing prompt map."""
-    tracker = HandledTurnLedger("test_prompt_preserve", base_path=temp_dir)
-
-    _record_handled_turn(
-        tracker,
-        ["$a", "$b"],
-        response_event_id="$response-1",
-        source_event_prompts={"$a": "prompt a", "$b": "prompt b"},
-    )
-    _record_handled_turn(tracker, ["$a", "$b"], response_event_id="$response-2")
-
-    turn_record = tracker.get_turn_record("$b")
-    assert turn_record is not None
-    assert turn_record.response_event_id == "$response-2"
-    assert turn_record.source_event_prompts == {"$a": "prompt a", "$b": "prompt b"}
-
-
-def test_record_outcome_preserves_existing_prompt_map_when_empty_dict(temp_dir: Path) -> None:
-    """An empty prompt map should behave like omission rather than clearing stored prompts."""
-    tracker = HandledTurnLedger("test_prompt_empty_dict", base_path=temp_dir)
-
-    _record_handled_turn(
-        tracker,
-        ["$a", "$b"],
-        response_event_id="$response-1",
-        source_event_prompts={"$a": "prompt a", "$b": "prompt b"},
-    )
-    _record_handled_turn(tracker, ["$a", "$b"], response_event_id="$response-2", source_event_prompts={})
-
-    turn_record = tracker.get_turn_record("$a")
-    assert turn_record is not None
-    assert turn_record.response_event_id == "$response-2"
-    assert turn_record.source_event_prompts == {"$a": "prompt a", "$b": "prompt b"}
-
-
 def test_visible_echo_tracking_stays_partial_until_completed(temp_dir: Path) -> None:
-    """Visible echoes should dedupe retries without completing the turn."""
+    """The ledger should persist an exact partial record without completing it."""
     tracker = HandledTurnLedger("test_visible_echo", base_path=temp_dir)
 
-    tracker.record_visible_echo("event123", "$echo")
+    tracker.record_handled_turn(
+        TurnRecord.create(["event123"], completed=False, visible_echo_event_id="$echo"),
+    )
 
     assert not tracker.has_responded("event123")
     assert _get_response_event_id(tracker, "event123") is None
@@ -342,35 +355,13 @@ def test_visible_echo_tracking_stays_partial_until_completed(temp_dir: Path) -> 
     assert turn_record.visible_echo_event_id == "$echo"
 
 
-def test_record_outcome_preserves_existing_visible_echo(temp_dir: Path) -> None:
-    """Completing a partially echoed turn should keep the visible echo ID."""
-    tracker = HandledTurnLedger("test_visible_echo_completion", base_path=temp_dir)
-
-    tracker.record_visible_echo("event123", "$echo")
-    _record_handled_turn(tracker, ["event123"])
-
-    assert tracker.has_responded("event123")
-    assert tracker.get_visible_echo_event_id("event123") == "$echo"
-
-
-def test_record_outcome_propagates_visible_echo_to_coalesced_sources(temp_dir: Path) -> None:
-    """When one source already has a visible echo, terminal completion should copy it to the batch."""
-    tracker = HandledTurnLedger("test_visible_echo_batch", base_path=temp_dir)
-
-    tracker.record_visible_echo("$voice", "$echo")
-    _record_handled_turn(tracker, ["$voice", "$text"], response_event_id="$echo")
-
-    assert tracker.has_responded("$voice")
-    assert tracker.has_responded("$text")
-    assert tracker.get_visible_echo_event_id("$voice") == "$echo"
-    assert tracker.get_visible_echo_event_id("$text") == "$echo"
-
-
 def test_visible_echo_persists_across_reload(temp_dir: Path) -> None:
     """Visible echoes should survive a new ledger instance on the same storage path."""
     tracker1 = HandledTurnLedger("test_visible_echo_reload", base_path=temp_dir)
 
-    tracker1.record_visible_echo("event123", "$echo")
+    tracker1.record_handled_turn(
+        TurnRecord.create(["event123"], completed=False, visible_echo_event_id="$echo"),
+    )
 
     tracker2 = _reload_ledger("test_visible_echo_reload", temp_dir)
 
@@ -386,7 +377,7 @@ def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
     """Coalesced source-event metadata should survive a ledger reload from disk as floats."""
     tracker1 = HandledTurnLedger("test_source_metadata_reload", base_path=temp_dir)
     tracker1.record_handled_turn(
-        HandledTurnState.create(
+        TurnRecord.create(
             ["$first", "$second"],
             response_event_id="$response",
             source_event_prompts={"$first": "first", "$second": "second"},
@@ -505,75 +496,27 @@ def test_persistence_round_trip_preserves_requester_and_correlation(temp_dir: Pa
     assert turn_record.correlation_id == "corr-123"
 
 
-def test_updates_preserve_requester_and_correlation_when_not_reprovided(temp_dir: Path) -> None:
-    """Later updates should keep stored requester and correlation values."""
-    tracker = HandledTurnLedger("test_request_context_updates", base_path=temp_dir)
-    _record_handled_turn(
-        tracker,
-        ["$event"],
-        response_event_id="$response-1",
-        requester_id="@user:example.com",
-        correlation_id="corr-123",
-    )
-    _record_handled_turn(tracker, ["$event"], response_event_id="$response-2")
-
-    turn_record = tracker.get_turn_record("$event")
-    assert turn_record is not None
-    assert turn_record.response_event_id == "$response-2"
-    assert turn_record.requester_id == "@user:example.com"
-    assert turn_record.correlation_id == "corr-123"
-
-
-def test_removed_response_id_aliases_do_not_populate_current_event_ids(temp_dir: Path) -> None:
-    """Removed response ID aliases should not act as an alternate schema."""
-    tracker_file = temp_dir / "removed_aliases_responded.json"
+def test_unversioned_ledger_is_quarantined_instead_of_migrated(temp_dir: Path) -> None:
+    """Pre-schema ledgers should be discarded rather than adding migration scaffolding."""
+    tracker_file = temp_dir / "unversioned_responded.json"
     tracker_file.write_text(
         json.dumps(
             {
                 "$event": {
                     "timestamp": time.time(),
-                    "response_id": "$response",
+                    "response_event_id": "$response",
                     "completed": True,
-                    "visible_echo_response_id": "$echo",
                 },
             },
         ),
         encoding="utf-8",
     )
 
-    tracker = HandledTurnLedger("removed_aliases", base_path=temp_dir)
+    tracker = HandledTurnLedger("unversioned", base_path=temp_dir)
 
-    assert tracker.has_responded("$event")
-    assert _get_response_event_id(tracker, "$event") is None
-    assert tracker.get_visible_echo_event_id("$event") is None
-    turn_record = tracker.get_turn_record("$event")
-    assert turn_record is not None
-    assert turn_record.anchor_event_id == "$event"
-    assert turn_record.source_event_ids == ("$event",)
-
-
-def test_record_without_completed_flag_defaults_to_terminal(temp_dir: Path) -> None:
-    """Records without `completed` normalize to a terminal handled turn."""
-    tracker_file = temp_dir / "default_completed_responded.json"
-    tracker_file.write_text(
-        json.dumps(
-            {
-                "$event": {
-                    "timestamp": time.time(),
-                    "response_event_id": None,
-                },
-            },
-        ),
-        encoding="utf-8",
-    )
-
-    tracker = HandledTurnLedger("default_completed", base_path=temp_dir)
-
-    assert tracker.has_responded("$event")
-    assert _get_response_event_id(tracker, "$event") is None
-    turn_record = tracker.get_turn_record("$event")
-    assert turn_record is not None
-    assert turn_record.completed
+    assert not tracker.has_responded("$event")
+    assert tracker.get_turn_record("$event") is None
+    assert len(list(temp_dir.glob("unversioned_responded.json.corrupt-*"))) == 1
 
 
 def test_record_without_requester_or_correlation_loads_cleanly(temp_dir: Path) -> None:
@@ -598,88 +541,9 @@ def test_record_without_requester_or_correlation_loads_cleanly(temp_dir: Path) -
     assert turn_record.correlation_id is None
 
 
-def test_removed_response_id_aliases_do_not_populate_coalesced_event_ids(temp_dir: Path) -> None:
-    """Removed response aliases should not populate coalesced response metadata."""
-    tracker_file = temp_dir / "removed_aliases_coalesced_responded.json"
-    tracker_file.write_text(
-        json.dumps(
-            {
-                "$first": {
-                    "timestamp": time.time(),
-                    "response_id": "$response",
-                    "visible_echo_response_id": "$echo",
-                    "source_event_ids": ["$first", "$primary"],
-                    "source_event_prompts": {
-                        "$first": "first",
-                        "$primary": "primary",
-                    },
-                },
-                "$primary": {
-                    "timestamp": time.time(),
-                    "response_id": "$response",
-                    "visible_echo_response_id": "$echo",
-                    "source_event_ids": ["$first", "$primary"],
-                    "source_event_prompts": {
-                        "$first": "first",
-                        "$primary": "primary",
-                    },
-                },
-            },
-        ),
-        encoding="utf-8",
-    )
-
-    tracker = HandledTurnLedger("removed_aliases_coalesced", base_path=temp_dir)
-
-    turn_record = tracker.get_turn_record("$first")
-    assert turn_record is not None
-    assert turn_record.source_event_ids == ("$first", "$primary")
-    assert turn_record.response_event_id is None
-    assert turn_record.visible_echo_event_id is None
-    assert turn_record.source_event_prompts == {
-        "$first": "first",
-        "$primary": "primary",
-    }
-
-
-def test_normalizes_empty_record_dict_to_terminal_self_anchored_turn(temp_dir: Path) -> None:
-    """Semantically partial on-disk records should normalize to one terminal self-anchored turn."""
-    tracker = HandledTurnLedger("test_empty_record", base_path=temp_dir)
-    _write_responses_file(tracker, {"$event": {}})
-
-    turn_record = tracker.get_turn_record("$event")
-    assert turn_record is not None
-    assert turn_record.source_event_ids == ("$event",)
-    assert turn_record.anchor_event_id == "$event"
-    assert turn_record.response_event_id is None
-    assert turn_record.source_event_prompts is None
-    assert turn_record.completed
-    assert turn_record.timestamp == 0.0
-
-
-def test_normalizes_empty_source_ids_and_filters_partial_prompt_map(temp_dir: Path) -> None:
-    """Invalid source lists should fall back to the event ID and keep only matching prompt entries."""
-    tracker = HandledTurnLedger("test_partial_record", base_path=temp_dir)
-    _write_responses_file(
-        tracker,
-        {
-            "$event": {
-                "timestamp": 123.0,
-                "response_event_id": "$response",
-                "source_event_ids": [],
-                "source_event_prompts": {
-                    "$event": "prompt",
-                    "$extra": "ignored",
-                },
-            },
-        },
-    )
-
-    turn_record = tracker.get_turn_record("$event")
-    assert turn_record is not None
-    assert turn_record.source_event_ids == ("$event",)
-    assert turn_record.response_event_id == "$response"
-    assert turn_record.source_event_prompts == {"$event": "prompt"}
+def test_current_codec_rejects_incomplete_ledger_records() -> None:
+    """Current-version ledger rows require the full canonical identity and outcome fields."""
+    assert TurnRecordCodec.from_ledger_record("$event", {}) is None
 
 
 def test_large_coalesced_turn_round_trips(temp_dir: Path) -> None:
@@ -806,8 +670,7 @@ def test_concurrent_access_keeps_json_valid(temp_dir: Path) -> None:
 
     assert len(tracker._responses) == 100
     tracker.flush()
-    with tracker._responses_file.open() as file:
-        assert len(json.load(file)) == 100
+    assert len(_read_persisted_records(tracker)) == 100
 
 
 def test_cross_process_lock_defers_persist_without_blocking_writers(temp_dir: Path) -> None:
@@ -823,8 +686,7 @@ def test_cross_process_lock_defers_persist_without_blocking_writers(temp_dir: Pa
         _record_handled_turn(tracker_b, ["$second"], response_event_id="$response-b")
         assert _get_response_event_id(tracker_b, "$second") == "$response-b"
         # The queued disk merge cannot complete while the lock is held.
-        persisted = json.loads(tracker_a._responses_file.read_text(encoding="utf-8"))
-        assert "$second" not in persisted
+        assert "$second" not in _read_persisted_records(tracker_a)
 
     tracker_b.flush()
     tracker_c = _reload_ledger("test_cross_instance_lock", temp_dir)
@@ -874,7 +736,7 @@ def test_quarantines_malformed_ledger_file(temp_dir: Path) -> None:
     tracker.warm()
 
     assert tracker._responses == {}
-    assert json.loads(responses_file.read_text(encoding="utf-8")) == {}
+    assert _read_persisted_records(tracker) == {}
     quarantined_files = list(temp_dir.glob("bad_json_responded.json.corrupt-*"))
     assert len(quarantined_files) == 1
 
@@ -888,7 +750,7 @@ def test_quarantines_non_utf8_ledger_file(temp_dir: Path) -> None:
     tracker.warm()
 
     assert tracker._responses == {}
-    assert json.loads(responses_file.read_text(encoding="utf-8")) == {}
+    assert _read_persisted_records(tracker) == {}
     quarantined_files = list(temp_dir.glob("bad_utf8_responded.json.corrupt-*"))
     assert len(quarantined_files) == 1
 
@@ -902,7 +764,7 @@ def test_quarantines_structurally_invalid_ledger_file(temp_dir: Path) -> None:
     tracker.warm()
 
     assert tracker._responses == {}
-    assert json.loads(responses_file.read_text(encoding="utf-8")) == {}
+    assert _read_persisted_records(tracker) == {}
     quarantined_files = list(temp_dir.glob("bad_shape_responded.json.corrupt-*"))
     assert len(quarantined_files) == 1
     assert json.loads(quarantined_files[0].read_text(encoding="utf-8")) == ["oops"]
@@ -911,16 +773,20 @@ def test_quarantines_structurally_invalid_ledger_file(temp_dir: Path) -> None:
 def test_quarantines_ledger_file_with_invalid_event_entry(temp_dir: Path) -> None:
     """Per-event entries with invalid shapes should be quarantined before rewrite."""
     responses_file = temp_dir / "bad_entry_responded.json"
-    responses_file.write_text(json.dumps({"$event": []}), encoding="utf-8")
+    invalid_payload = {
+        "schema_version": TurnRecordCodec.schema_version(),
+        "records": {"$event": []},
+    }
+    responses_file.write_text(json.dumps(invalid_payload), encoding="utf-8")
 
     tracker = HandledTurnLedger("bad_entry", base_path=temp_dir)
     tracker.warm()
 
     assert tracker._responses == {}
-    assert json.loads(responses_file.read_text(encoding="utf-8")) == {}
+    assert _read_persisted_records(tracker) == {}
     quarantined_files = list(temp_dir.glob("bad_entry_responded.json.corrupt-*"))
     assert len(quarantined_files) == 1
-    assert json.loads(quarantined_files[0].read_text(encoding="utf-8")) == {"$event": []}
+    assert json.loads(quarantined_files[0].read_text(encoding="utf-8")) == invalid_payload
 
 
 def test_concurrent_reads_fail_soft_on_corrupt_file(temp_dir: Path) -> None:
@@ -1035,10 +901,9 @@ def test_record_returns_before_disk_persist_completes(temp_dir: Path, monkeypatc
     # would deadlock; returning at all proves the disk merge is write-behind.
     _record_handled_turn(tracker, ["$event"], response_event_id="$response")
     assert tracker.has_responded("$event")
-    persisted = json.loads(tracker._responses_file.read_text(encoding="utf-8"))
-    assert "$event" not in persisted
+    assert "$event" not in _read_persisted_records(tracker)
 
     gate.set()
     tracker.flush()
-    persisted = json.loads(tracker._responses_file.read_text(encoding="utf-8"))
+    persisted = _read_persisted_records(tracker)
     assert persisted["$event"]["response_event_id"] == "$response"

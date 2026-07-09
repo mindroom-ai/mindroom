@@ -16,7 +16,7 @@ CompactionAvailabilityReason = Literal["no_context_window", "non_positive_summar
 _ReplayPlanMode = Literal["configured", "limited", "disabled"]
 
 
-class HistoryScopeMetadata(TypedDict):
+class _HistoryScopeMetadata(TypedDict):
     """JSON-safe persisted history-scope identity."""
 
     kind: _ScopeKind
@@ -44,7 +44,7 @@ class HistoryScope:
         """Return the stable serialized storage key for this scope."""
         return f"{self.kind}:{self.scope_id}"
 
-    def to_metadata(self) -> HistoryScopeMetadata:
+    def to_metadata(self) -> _HistoryScopeMetadata:
         """Return JSON-safe history-scope metadata."""
         return {
             "kind": self.kind,

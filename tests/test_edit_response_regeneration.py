@@ -31,11 +31,12 @@ from mindroom.constants import (
     MATRIX_HISTORY_SCOPE_METADATA_KEY,
     MATRIX_RESPONSE_OWNER_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
+    MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY,
     ROUTER_AGENT_NAME,
     resolve_runtime_paths,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.history.interrupted_replay import _build_interrupted_replay_run, build_interrupted_replay_snapshot
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -173,7 +174,7 @@ def _record_handled_turn(
 ) -> None:
     """Record one handled turn through the turn-store API."""
     turn_store.record_turn(
-        HandledTurnState.create(
+        TurnRecord.create(
             source_event_ids,
             response_event_id=response_event_id,
             visible_echo_event_id=response_event_id,
@@ -203,6 +204,7 @@ def _run_response_context_metadata(
 ) -> dict[str, object]:
     """Return response context expected in persisted Matrix run metadata."""
     return {
+        MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
         MATRIX_RESPONSE_OWNER_METADATA_KEY: response_owner,
         MATRIX_HISTORY_SCOPE_METADATA_KEY: history_scope.to_metadata(),
         MATRIX_CONVERSATION_TARGET_METADATA_KEY: conversation_target.to_metadata(),
@@ -799,6 +801,7 @@ def test_remove_run_by_event_id_matches_coalesced_source_event_ids() -> None:
             TeamRunOutput(
                 session_id="session-1",
                 metadata={
+                    MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                     "matrix_event_id": "$primary:example.com",
                     "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
                 },
@@ -1659,7 +1662,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
         )
 
         mock_generate_response.assert_awaited_once()
-        assert turn_store.record_turn.call_count == 0
+        turn_store.record_turn.assert_not_called()
         assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
         mock_remove_run.assert_called_once()
 
@@ -1775,7 +1778,8 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         )
 
         mock_generate_response.assert_awaited_once()
-        assert turn_store.record_turn.call_count == 0
+        turn_store.record_turn.assert_called_once()
+        assert turn_store.record_turn.call_args.args[0].response_event_id == "$response:example.com"
         assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
         mock_remove_run.assert_called_once()
 
@@ -1865,6 +1869,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             RunOutput(
                 session_id=session_id,
                 metadata={
+                    MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                     "matrix_event_id": "$primary:example.com",
                     "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
                     "matrix_source_event_prompts": {
@@ -1976,6 +1981,7 @@ def test_load_turn_prefers_newest_matching_run(tmp_path: Path) -> None:
                 run_id="run-old",
                 session_id=session_id,
                 metadata={
+                    MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                     "matrix_event_id": "$primary:example.com",
                     "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
                     "matrix_source_event_prompts": {
@@ -1989,6 +1995,7 @@ def test_load_turn_prefers_newest_matching_run(tmp_path: Path) -> None:
                 run_id="run-new",
                 session_id=session_id,
                 metadata={
+                    MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                     "matrix_event_id": "$primary:example.com",
                     "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
                     "matrix_source_event_prompts": {
@@ -2015,15 +2022,15 @@ def test_load_turn_prefers_newest_matching_run(tmp_path: Path) -> None:
         )
 
     assert loaded_turn is not None
-    assert loaded_turn.record.response_event_id == "$response-new:example.com"
-    assert loaded_turn.record.source_event_prompts == {
+    assert loaded_turn.response_event_id == "$response-new:example.com"
+    assert loaded_turn.source_event_prompts == {
         "$first:example.com": "first new",
         "$primary:example.com": "primary new",
     }
 
 
-def test_load_turn_preserves_persisted_anchor_for_interactive_selection(tmp_path: Path) -> None:
-    """Selection-triggered runs should keep the original question anchor when reloaded."""
+def test_load_turn_keeps_ledger_anchor_for_interactive_selection(tmp_path: Path) -> None:
+    """Selection-triggered run metadata must not override a present ledger identity or outcome."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -2054,6 +2061,7 @@ def test_load_turn_preserves_persisted_anchor_for_interactive_selection(tmp_path
                 run_id="run-selection",
                 session_id=session_id,
                 metadata={
+                    MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                     "matrix_event_id": "$question:example.com",
                     "matrix_source_event_ids": ["$selection:example.com"],
                     "matrix_response_event_id": "$response-persisted:example.com",
@@ -2076,10 +2084,9 @@ def test_load_turn_preserves_persisted_anchor_for_interactive_selection(tmp_path
         )
 
     assert loaded_turn is not None
-    assert loaded_turn.record.anchor_event_id == "$question:example.com"
-    assert loaded_turn.record.source_event_ids == ("$selection:example.com",)
-    assert loaded_turn.record.response_event_id == "$response-persisted:example.com"
-    assert loaded_turn.requires_backfill is True
+    assert loaded_turn.anchor_event_id == "$selection:example.com"
+    assert loaded_turn.source_event_ids == ("$selection:example.com",)
+    assert loaded_turn.response_event_id == "$response-ledger:example.com"
 
 
 @pytest.mark.asyncio
@@ -2127,6 +2134,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
                     completed_tools=[],
                     interrupted_tools=[],
                     run_metadata={
+                        MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                         "matrix_event_id": "$original:example.com",
                         "matrix_source_event_ids": ["$original:example.com"],
                         "matrix_source_event_prompts": {
@@ -2260,6 +2268,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
                     completed_tools=[],
                     interrupted_tools=[],
                     run_metadata={
+                        MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                         "matrix_event_id": "$anchor:example.com",
                         "matrix_source_event_ids": ["$first:example.com", "$anchor:example.com"],
                         "matrix_source_event_prompts": {
@@ -2416,6 +2425,7 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
                     completed_tools=[],
                     interrupted_tools=[],
                     run_metadata={
+                        MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                         "matrix_event_id": "$original:example.com",
                         "matrix_source_event_ids": ["$original:example.com"],
                         "matrix_source_event_prompts": {
@@ -2580,6 +2590,7 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
                 run_id="run-selection",
                 session_id=session_id,
                 metadata={
+                    MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                     "matrix_event_id": "$question:example.com",
                     "matrix_source_event_ids": ["$selection:example.com"],
                     "matrix_response_event_id": "$response:example.com",
@@ -2635,10 +2646,10 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
 
 
 @pytest.mark.asyncio
-async def test_edit_regenerator_backfill_preserves_interactive_selection_anchor_when_suppressed(
+async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
     tmp_path: Path,
 ) -> None:
-    """Suppressed interactive-selection regeneration should still backfill a converged question anchor."""
+    """Suppression should not let recovery metadata replace the authoritative ledger anchor."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -2715,6 +2726,7 @@ async def test_edit_regenerator_backfill_preserves_interactive_selection_anchor_
                 run_id="run-selection",
                 session_id=session_id,
                 metadata={
+                    MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                     "matrix_event_id": "$question:example.com",
                     "matrix_source_event_ids": ["$selection:example.com"],
                     "matrix_response_event_id": "$response:example.com",
@@ -2765,9 +2777,8 @@ async def test_edit_regenerator_backfill_preserves_interactive_selection_anchor_
 
     generate_response.assert_awaited_once()
     assert loaded_turn is not None
-    assert loaded_turn.record.anchor_event_id == "$question:example.com"
-    assert loaded_turn.record.response_event_id == "$response:example.com"
-    assert loaded_turn.requires_backfill is False
+    assert loaded_turn.anchor_event_id == "$selection:example.com"
+    assert loaded_turn.response_event_id == "$response:example.com"
 
 
 def test_load_turn_prefers_newest_match_across_thread_and_room_sessions(tmp_path: Path) -> None:
@@ -2798,6 +2809,7 @@ def test_load_turn_prefers_newest_match_across_thread_and_room_sessions(tmp_path
                     session_id=threaded_session_id,
                     created_at=1,
                     metadata={
+                        MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                         "matrix_event_id": "$primary:example.com",
                         "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
                         "matrix_source_event_prompts": {
@@ -2819,6 +2831,7 @@ def test_load_turn_prefers_newest_match_across_thread_and_room_sessions(tmp_path
                     session_id=room_session_id,
                     created_at=2,
                     metadata={
+                        MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                         "matrix_event_id": "$primary:example.com",
                         "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
                         "matrix_source_event_prompts": {
@@ -2846,8 +2859,8 @@ def test_load_turn_prefers_newest_match_across_thread_and_room_sessions(tmp_path
         )
 
     assert loaded_turn is not None
-    assert loaded_turn.record.response_event_id == "$response-room:example.com"
-    assert loaded_turn.record.source_event_prompts == {
+    assert loaded_turn.response_event_id == "$response-room:example.com"
+    assert loaded_turn.source_event_prompts == {
         "$first:example.com": "first room",
         "$primary:example.com": "primary room",
     }
@@ -3041,6 +3054,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
                     run_id=kwargs["run_id"],
                     session_id=session_id,
                     metadata={
+                        MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                         "matrix_event_id": "$primary:example.com",
                         **(request.matrix_run_metadata or {}),
                     },
@@ -3232,6 +3246,7 @@ async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context
                     run_id="run-threaded",
                     session_id=threaded_session_id,
                     metadata={
+                        MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                         "matrix_event_id": "$primary:example.com",
                         "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
                         "matrix_source_event_prompts": {
@@ -3390,6 +3405,7 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
             RunOutput(
                 session_id=session_id,
                 metadata={
+                    MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                     "matrix_event_id": "$original:example.com",
                     "matrix_source_event_ids": ["$original:example.com"],
                     "matrix_source_event_prompts": {
@@ -3437,10 +3453,10 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
 
 
 @pytest.mark.asyncio
-async def test_handle_message_edit_prefers_persisted_response_event_id_after_restart(
+async def test_handle_message_edit_keeps_ledger_response_event_id_after_restart(
     tmp_path: Path,
 ) -> None:
-    """A fresh bot should prefer the newest persisted response linkage over a stale ledger row."""
+    """A fresh bot should keep ledger response linkage when run metadata disagrees."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -3495,6 +3511,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
                             session_id=session_id,
                             content="ok",
                             metadata={
+                                MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                                 "matrix_event_id": "$original:example.com",
                                 "matrix_source_event_ids": ["$original:example.com"],
                                 "matrix_source_event_prompts": {
@@ -3638,9 +3655,9 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
 
     mock_generate_response.assert_awaited_once()
     request = mock_generate_response.call_args.args[0]
-    assert request.existing_event_id == "$response-new:example.com"
+    assert request.existing_event_id == "$response-old:example.com"
     assert request.response_envelope.target.session_id == "!test:example.com"
-    assert _response_event_id(restarted_bot, "$original:example.com") == "$response-new:example.com"
+    assert _response_event_id(restarted_bot, "$original:example.com") == "$response-old:example.com"
 
 
 @pytest.mark.asyncio

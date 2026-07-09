@@ -12,7 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
@@ -127,7 +127,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     # Verify bot responded
     assert bot.client.room_send.call_count == 2  # thinking + final
     bot._turn_store.record_turn(
-        HandledTurnState.from_source_event_id("$original123", response_event_id="$response123"),
+        TurnRecord.create(["$original123"], response_event_id="$response123"),
     )
 
     # Reset mock

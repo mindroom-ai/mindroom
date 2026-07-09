@@ -60,7 +60,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import MessageEnvelope, build_hook_matrix_admin, hook_ingress_policy
 from mindroom.inbound_turn_normalizer import (
     InboundTurnNormalizer,
@@ -342,7 +342,7 @@ class TurnController:
             return None
         return _PrecheckedEvent(event=event, requester_user_id=requester_user_id)
 
-    def _mark_source_events_responded(self, handled_turn: HandledTurnState) -> None:
+    def _mark_source_events_responded(self, handled_turn: TurnRecord) -> None:
         """Mark one or more source events as handled by the same terminal outcome."""
         self.deps.turn_store.record_turn(handled_turn)
 
@@ -705,7 +705,7 @@ class TurnController:
             self.deps.ingress.event_source_kind(prepared_event, content) if isinstance(content, dict) else None
         )
         if self.deps.ingress.is_display_only_router_voice_echo(prepared_event):
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(prepared_event.event_id))
+            self._mark_source_events_responded(TurnRecord.create([prepared_event.event_id]))
             return _IngressAdmissionOutcome.CONSUMED
         trusted_user_relay = original_sender is not None and prepared_source_kind in {
             TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -814,7 +814,7 @@ class TurnController:
                     ),
                 ),
             )
-        self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
+        self._mark_source_events_responded(TurnRecord.create([event.event_id]))
         return True
 
     async def _dispatch_command_control_input(
@@ -842,7 +842,7 @@ class TurnController:
             [pending_event],
         )
         handoff = build_dispatch_handoff(batch)
-        handled_turn = HandledTurnState.create(
+        handled_turn = TurnRecord.create(
             handoff.source_event_ids,
             source_event_prompts=dict(handoff.source_event_prompts),
             source_event_metadata=dict(handoff.source_event_metadata) if len(handoff.source_event_ids) > 1 else None,
@@ -1015,7 +1015,7 @@ class TurnController:
         requester_user_id: str,
         *,
         event_label: str,
-        handled_turn: HandledTurnState,
+        handled_turn: TurnRecord,
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
         use_command_context: bool = False,
@@ -1296,8 +1296,8 @@ class TurnController:
             )
             return
         selection_handled_turn = self.deps.turn_store.attach_response_context(
-            HandledTurnState.from_source_event_id(
-                selection.question_event_id,
+            TurnRecord.create(
+                [selection.question_event_id],
                 requester_id=user_id,
                 correlation_id=selection.question_event_id,
             ),
@@ -1344,13 +1344,13 @@ class TurnController:
         )
         if response_event_id is not None:
             self._mark_source_events_responded(
-                selection_handled_turn.with_response_event_id(response_event_id),
+                replace(selection_handled_turn, response_event_id=response_event_id),
             )
             if source_event_id != selection.question_event_id:
                 self._mark_source_events_responded(
                     self.deps.turn_store.attach_response_context(
-                        HandledTurnState.from_source_event_id(
-                            source_event_id,
+                        TurnRecord.create(
+                            [source_event_id],
                             response_event_id=response_event_id,
                             requester_id=user_id,
                             correlation_id=selection.question_event_id,
@@ -1399,7 +1399,7 @@ class TurnController:
         requester_user_id: str,
         extra_content: dict[str, Any] | None = None,
         media_events: list[MediaDispatchEvent] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
     ) -> None:
         """Run one explicit router relay from the turn controller."""
         assert self.deps.agent_name == ROUTER_AGENT_NAME
@@ -1494,8 +1494,9 @@ class TurnController:
                 extra_content=routed_extra_content or None,
             ),
         )
-        tracked_handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
-        tracked_handled_turn = tracked_handled_turn.with_request_context(
+        tracked_handled_turn = handled_turn or TurnRecord.create([event.event_id])
+        tracked_handled_turn = replace(
+            tracked_handled_turn,
             requester_id=requester_user_id,
             correlation_id=event.event_id,
         )
@@ -1507,14 +1508,14 @@ class TurnController:
         with bound_log_context(**resolved_target.log_context):
             if event_id:
                 self.deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
-                self._mark_source_events_responded(tracked_handled_turn.with_response_event_id(event_id))
+                self._mark_source_events_responded(replace(tracked_handled_turn, response_event_id=event_id))
             else:
                 self.deps.logger.error("Failed to route to entity", entity=suggested_entity)
 
     def _router_handled_turn_outcome(
         self,
-        handled_turn: HandledTurnState,
-    ) -> HandledTurnState | None:
+        handled_turn: TurnRecord,
+    ) -> TurnRecord | None:
         """Return the terminal handled-turn outcome for one ignored router turn."""
         visible_router_echo_event_id = (
             handled_turn.visible_echo_event_id
@@ -1526,7 +1527,7 @@ class TurnController:
             return None
         if all(self.deps.turn_store.is_handled(source_event_id) for source_event_id in handled_turn.source_event_ids):
             return None
-        return handled_turn.with_response_event_id(visible_router_echo_event_id)
+        return replace(handled_turn, response_event_id=visible_router_echo_event_id)
 
     async def _finalize_dispatch_failure(
         self,
@@ -1553,7 +1554,7 @@ class TurnController:
         action: ResponseAction,
         payload_inputs: DispatchPayloadInputs,
         *,
-        handled_turn: HandledTurnState,
+        handled_turn: TurnRecord,
         matrix_run_metadata: dict[str, Any] | None,
     ) -> Callable[[], None]:
         """Build the callback that queues a one-shot re-dispatch after stall recovery."""
@@ -1586,7 +1587,7 @@ class TurnController:
         *,
         processing_log: str,
         dispatch_started_at: float,
-        handled_turn: HandledTurnState,
+        handled_turn: TurnRecord,
         matrix_run_metadata: dict[str, Any] | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
@@ -1617,7 +1618,7 @@ class TurnController:
                         response_text=action.rejection_message,
                     ),
                 )
-                self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+                self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
                 if dispatch_timing is not None and response_event_id is not None:
                     dispatch_timing.mark_first_visible_reply("final")
                     dispatch_timing.mark("response_complete")
@@ -1721,10 +1722,10 @@ class TurnController:
                     error=failure,
                 )
                 if response_event_id is not None:
-                    self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+                    self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
                 return
             if response_event_id is not None:
-                self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+                self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
@@ -1745,7 +1746,7 @@ class TurnController:
             dispatch_timing.mark("gate_exit")
         async with self.deps.resolver.turn_thread_cache_scope():
             dispatch_start = time.monotonic()
-            handled_turn = HandledTurnState.create(
+            handled_turn = TurnRecord.create(
                 handoff.source_event_ids,
                 source_event_prompts=dict(handoff.source_event_prompts),
                 source_event_metadata=dict(handoff.source_event_metadata)
@@ -1780,7 +1781,7 @@ class TurnController:
         self,
         handoff: DispatchHandoff,
         *,
-        handled_turn: HandledTurnState,
+        handled_turn: TurnRecord,
     ) -> None:
         """Dispatch one coalesced handoff and own opaque metadata cleanup."""
         await self._dispatch_text_message(
@@ -1935,7 +1936,7 @@ class TurnController:
         requester_user_id: str | None = None,
         *,
         media_events: list[MediaDispatchEvent] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
@@ -2004,7 +2005,7 @@ class TurnController:
                 sender=prechecked_event.event.sender,
             )
             self._mark_source_events_responded(
-                HandledTurnState.from_source_event_id(prechecked_event.event.event_id),
+                TurnRecord.create([prechecked_event.event.event_id]),
             )
             return
         reservation_owner = self._reserve_prompt_ingress_order(

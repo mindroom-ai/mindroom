@@ -13,7 +13,7 @@ from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
 from mindroom.scheduling import (
     SchedulingRuntime,
@@ -87,7 +87,7 @@ class CommandHandlerContext:
     conversation_cache: ConversationCacheProtocol
     event_cache: ConversationEventCache
     stable_target: MessageTarget
-    record_handled_turn: Callable[[HandledTurnState], None]
+    record_handled_turn: Callable[[TurnRecord], None]
     send_response: _CommandResponseSender
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
@@ -325,8 +325,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     skip_mentions=True,
                 )
                 response_event_id = _normalized_response_event_id(raw_response_event_id)
-                handled_turn = HandledTurnState.from_source_event_id(
-                    event.event_id,
+                handled_turn = TurnRecord.create(
+                    [event.event_id],
                     response_event_id=response_event_id,
                 )
 
@@ -410,8 +410,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             skip_mentions=True,
         )
         context.record_handled_turn(
-            HandledTurnState.from_source_event_id(
-                event.event_id,
+            TurnRecord.create(
+                [event.event_id],
                 response_event_id=_normalized_response_event_id(raw_response_event_id),
             ),
         )

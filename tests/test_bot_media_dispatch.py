@@ -1272,15 +1272,16 @@ class TestAgentBot(AgentBotTestBase):
         assert str(media.files[0].filepath) == str(local_media_path)
         assert list(media.videos) == []
         tracker.record_handled_turn.assert_called_once_with(
-            _agent_response_handled_turn(
-                agent_name=mock_agent_user.agent_name,
-                room_id=room.room_id,
-                event_id="$file_event",
-                response_event_id="$response",
-                requester_id="@user:localhost",
-                correlation_id="$file_event",
-                source_event_prompts={"$file_event": "[Attached file]"},
-            ).with_response_context(
+            replace(
+                _agent_response_handled_turn(
+                    agent_name=mock_agent_user.agent_name,
+                    room_id=room.room_id,
+                    event_id="$file_event",
+                    response_event_id="$response",
+                    requester_id="@user:localhost",
+                    correlation_id="$file_event",
+                    source_event_prompts={"$file_event": "[Attached file]"},
+                ),
                 response_owner=mock_agent_user.agent_name,
                 history_scope=HistoryScope(kind="agent", scope_id=mock_agent_user.agent_name),
                 conversation_target=MessageTarget.resolve(

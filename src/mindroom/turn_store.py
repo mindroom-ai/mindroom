@@ -1,4 +1,4 @@
-"""Unified durable turn access for runtime flows."""
+"""Unified durable turn ownership for runtime flows."""
 
 from __future__ import annotations
 
@@ -10,10 +10,9 @@ from agno.db.base import SessionType
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
-from mindroom import constants
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
-from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState, SourceEventMetadata
+from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
@@ -28,35 +27,8 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class _LoadedTurnRecord:
-    """Merged durable turn state used by regeneration and dispatch flows."""
-
-    record: HandledTurnRecord
-    requires_backfill: bool
-
-
-@dataclass(frozen=True)
-class _PersistedTurnMetadata:
-    """Run metadata needed to rebuild a turn after a partial ledger write."""
-
-    anchor_event_id: str
-    source_event_ids: tuple[str, ...]
-    response_event_id: str | None = None
-    source_event_prompts: dict[str, str] | None = None
-    source_event_metadata: dict[str, SourceEventMetadata] | None = None
-    response_owner: str | None = None
-    history_scope: HistoryScope | None = None
-    conversation_target: MessageTarget | None = None
-
-    @property
-    def is_coalesced(self) -> bool:
-        """Return whether this persisted turn represents a coalesced batch."""
-        return len(self.source_event_ids) > 1
-
-
-@dataclass(frozen=True)
-class _LoadPersistedTurnMetadataRequest:
-    """Inputs needed to recover persisted turn metadata for an edited message."""
+class _LoadPersistedTurnRequest:
+    """Inputs needed to recover one turn from Agno run metadata."""
 
     room: nio.MatrixRoom
     thread_id: str | None
@@ -77,7 +49,14 @@ class TurnStoreDeps:
 
 @dataclass
 class TurnStore:
-    """Own the runtime-facing durable turn record for one entity."""
+    """Own replication, precedence, backfill, and repair for one entity's turns.
+
+    The handled-turn ledger is authoritative whenever a row exists.
+    Agno run metadata recovers a missing ledger row and backfills only optional
+    facts that are absent from an existing row.
+    Any recovered or enriched record is repaired back into the ledger before it
+    is returned to the caller.
+    """
 
     deps: TurnStoreDeps
     _ledger: HandledTurnLedger = field(init=False, repr=False)
@@ -93,18 +72,24 @@ class TurnStore:
         """Load the durable ledger from disk; call from a worker thread, not the event loop."""
         self._ledger.warm()
 
-    def record_turn(self, handled_turn: HandledTurnState) -> None:
-        """Persist one terminal handled-turn outcome."""
-        visible_echo_event_id = handled_turn.visible_echo_event_id or self.visible_echo_for_sources(
-            handled_turn.source_event_ids,
+    def record_turn(self, turn_record: TurnRecord) -> None:
+        """Persist one terminal turn, preserving any previously recorded optional facts."""
+        if not turn_record.source_event_ids:
+            return
+        existing_record = self._existing_record_for_sources(turn_record.source_event_ids)
+        merged_record = (
+            _backfill_missing_turn_facts(turn_record, existing_record) if existing_record is not None else turn_record
+        )
+        visible_echo_event_id = merged_record.visible_echo_event_id or self.visible_echo_for_sources(
+            merged_record.source_event_ids,
         )
         self._ledger.record_handled_turn(
-            handled_turn.with_visible_echo_event_id(visible_echo_event_id),
+            replace(
+                merged_record,
+                completed=True,
+                visible_echo_event_id=visible_echo_event_id,
+            ),
         )
-
-    def record_turn_record(self, turn_record: HandledTurnRecord) -> None:
-        """Persist one exact handled-turn record without losing its anchor event."""
-        self._ledger.record_handled_turn_record(turn_record)
 
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
@@ -115,15 +100,18 @@ class TurnStore:
         return self._ledger.get_visible_echo_event_id(source_event_id)
 
     def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
-        """Track a visible echo before the turn reaches a terminal outcome."""
-        self._ledger.record_visible_echo(source_event_id, echo_event_id)
+        """Track a visible echo without changing an existing completion outcome."""
+        turn_record = self._ledger.get_turn_record(source_event_id)
+        if turn_record is None:
+            turn_record = TurnRecord.create([source_event_id], completed=False)
+        self._ledger.record_handled_turn(replace(turn_record, visible_echo_event_id=echo_event_id))
 
     def visible_echo_for_sources(self, source_event_ids: tuple[str, ...]) -> str | None:
         """Return the first visible echo already tracked for one or more source events."""
         return self._ledger.visible_echo_event_id_for_sources(source_event_ids)
 
-    def get_turn_record(self, source_event_id: str) -> HandledTurnRecord | None:
-        """Return the ledger-backed turn record for one source event when available."""
+    def get_turn_record(self, source_event_id: str) -> TurnRecord | None:
+        """Return the ledger-backed canonical record for one source event."""
         return self._ledger.get_turn_record(source_event_id)
 
     def response_history_scope(
@@ -146,13 +134,14 @@ class TurnStore:
 
     def attach_response_context(
         self,
-        handled_turn: HandledTurnState,
+        turn_record: TurnRecord,
         *,
         history_scope: HistoryScope | None,
         conversation_target: MessageTarget,
-    ) -> HandledTurnState:
+    ) -> TurnRecord:
         """Attach the persisted regeneration context for one response."""
-        return handled_turn.with_response_context(
+        return replace(
+            turn_record,
             response_owner=self.deps.agent_name,
             history_scope=history_scope,
             conversation_target=conversation_target,
@@ -160,50 +149,25 @@ class TurnStore:
 
     def build_run_metadata(
         self,
-        handled_turn: HandledTurnState,
+        turn_record: TurnRecord,
         *,
         additional_source_event_ids: tuple[str, ...] = (),
     ) -> dict[str, Any] | None:
-        """Return persisted run metadata for one handled turn.
+        """Project one record into versioned recoverable Agno run metadata.
 
         ``additional_source_event_ids`` lets one anchored run stay discoverable by
         extra triggering events, such as a numeric interactive reply whose response
         still anchors to the original question event.
         """
-        metadata = self._build_run_metadata_for_handled_turn(handled_turn) or {}
+        projected_record = turn_record
         if additional_source_event_ids:
-            source_event_ids = list(
-                _normalized_matrix_source_event_ids(metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)),
-            )
-            for event_id in _normalized_matrix_source_event_ids(list(additional_source_event_ids)):
-                if event_id not in source_event_ids:
-                    source_event_ids.append(event_id)
-            if source_event_ids:
-                metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = source_event_ids
-        return metadata or None
-
-    @staticmethod
-    def _build_run_metadata_for_handled_turn(
-        handled_turn: HandledTurnState,
-    ) -> dict[str, Any] | None:
-        """Build persisted run metadata for one handled turn."""
-        metadata: dict[str, Any] = {}
-        if handled_turn.is_coalesced:
-            metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = list(handled_turn.source_event_ids)
-        if handled_turn.source_event_prompts:
-            metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(handled_turn.source_event_prompts)
-        if handled_turn.source_event_metadata:
-            metadata[constants.MATRIX_SOURCE_EVENT_METADATA_KEY] = {
-                event_id: source_metadata.to_record()
-                for event_id, source_metadata in handled_turn.source_event_metadata.items()
-            }
-        if handled_turn.response_owner is not None:
-            metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] = handled_turn.response_owner
-        if handled_turn.history_scope is not None:
-            metadata[constants.MATRIX_HISTORY_SCOPE_METADATA_KEY] = handled_turn.history_scope.to_metadata()
-        if handled_turn.conversation_target is not None:
-            metadata[constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY] = handled_turn.conversation_target.to_metadata()
-        return metadata or None
+            base_source_event_ids = turn_record.source_event_ids if turn_record.is_coalesced else ()
+            normalized_source_event_ids = TurnRecord.create(
+                (*base_source_event_ids, *additional_source_event_ids),
+            ).source_event_ids
+            projected_record = replace(turn_record, source_event_ids=normalized_source_event_ids)
+        metadata = TurnRecordCodec.to_run_metadata(projected_record)
+        return dict(metadata) if metadata else None
 
     def load_turn(
         self,
@@ -212,133 +176,79 @@ class TurnStore:
         thread_id: str | None,
         original_event_id: str,
         requester_user_id: str,
-    ) -> _LoadedTurnRecord | None:
-        """Load one merged durable turn record for an edited or replayed source event."""
-        turn_record = self._ledger.get_turn_record(original_event_id)
-        ledger_turn_record = turn_record
-        persisted_turn_metadata = self._load_persisted_turn_metadata(
-            _LoadPersistedTurnMetadataRequest(
+    ) -> TurnRecord | None:
+        """Load, deterministically merge, and repair one durable turn record."""
+        ledger_record = self._ledger.get_turn_record(original_event_id)
+        recovery_record = self._load_persisted_turn_record(
+            _LoadPersistedTurnRequest(
                 room=room,
                 thread_id=thread_id,
                 original_event_id=original_event_id,
                 requester_user_id=requester_user_id,
             ),
         )
-        if turn_record is None and persisted_turn_metadata is None:
+        if ledger_record is None and recovery_record is None:
             return None
-        if turn_record is None:
-            assert persisted_turn_metadata is not None
-            turn_record = HandledTurnRecord(
-                anchor_event_id=persisted_turn_metadata.anchor_event_id,
-                source_event_ids=persisted_turn_metadata.source_event_ids,
-                response_event_id=persisted_turn_metadata.response_event_id,
-                source_event_prompts=persisted_turn_metadata.source_event_prompts,
-                source_event_metadata=persisted_turn_metadata.source_event_metadata,
-                response_owner=persisted_turn_metadata.response_owner,
-                history_scope=persisted_turn_metadata.history_scope,
-                conversation_target=persisted_turn_metadata.conversation_target,
-            )
-        if persisted_turn_metadata is None:
-            return _LoadedTurnRecord(
-                record=turn_record,
-                requires_backfill=False,
-            )
-        merged_prompt_map = turn_record.source_event_prompts
-        if merged_prompt_map is None and persisted_turn_metadata.is_coalesced:
-            merged_prompt_map = persisted_turn_metadata.source_event_prompts
-        merged_source_event_metadata = turn_record.source_event_metadata
-        if merged_source_event_metadata is None and persisted_turn_metadata.is_coalesced:
-            merged_source_event_metadata = persisted_turn_metadata.source_event_metadata
-        merged_turn_record = replace(
-            turn_record,
-            anchor_event_id=persisted_turn_metadata.anchor_event_id,
-            response_event_id=persisted_turn_metadata.response_event_id or turn_record.response_event_id,
-            source_event_prompts=merged_prompt_map,
-            source_event_metadata=merged_source_event_metadata,
-            response_owner=turn_record.response_owner or persisted_turn_metadata.response_owner,
-            history_scope=turn_record.history_scope or persisted_turn_metadata.history_scope,
-            conversation_target=turn_record.conversation_target or persisted_turn_metadata.conversation_target,
-        )
-        return _LoadedTurnRecord(
-            record=merged_turn_record,
-            requires_backfill=ledger_turn_record is None or merged_turn_record != ledger_turn_record,
-        )
+        if ledger_record is None:
+            assert recovery_record is not None
+            merged_record = recovery_record
+        elif recovery_record is None:
+            merged_record = ledger_record
+        else:
+            merged_record = _backfill_missing_turn_facts(ledger_record, recovery_record)
+        if merged_record != ledger_record:
+            self._ledger.record_handled_turn(merged_record)
+        return merged_record
 
     def remove_stale_runs_for_edit(
         self,
         *,
-        loaded_turn: _LoadedTurnRecord,
+        turn_record: TurnRecord,
         requester_user_id: str,
     ) -> None:
         """Remove stale persisted runs before regenerating one edited turn."""
         self._remove_stale_runs_for_turn_record(
-            turn_record=loaded_turn.record,
+            turn_record=turn_record,
             requester_user_id=requester_user_id,
         )
 
-    def _persisted_turn_metadata_for_run(self, metadata: dict[str, Any]) -> _PersistedTurnMetadata | None:
-        """Parse persisted run metadata needed for edit regeneration."""
-        anchor_event_id = metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY)
-        if not isinstance(anchor_event_id, str) or not anchor_event_id:
-            return None
-        raw_source_event_ids = metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-        raw_prompt_map = metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)
-        raw_source_event_metadata = metadata.get(constants.MATRIX_SOURCE_EVENT_METADATA_KEY)
-        raw_response_event_id = metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
-        raw_response_owner = metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)
-        response_event_id = raw_response_event_id if isinstance(raw_response_event_id, str) else None
-        handled_turn = HandledTurnState.from_persisted_metadata(
-            _normalized_matrix_source_event_ids_or_anchor(raw_source_event_ids, anchor_event_id=anchor_event_id),
-            response_event_id=response_event_id,
-            source_event_prompts=raw_prompt_map if isinstance(raw_prompt_map, dict) else None,
-            source_event_metadata=raw_source_event_metadata if isinstance(raw_source_event_metadata, dict) else None,
-            response_owner=raw_response_owner if isinstance(raw_response_owner, str) else None,
-            history_scope_metadata=metadata.get(constants.MATRIX_HISTORY_SCOPE_METADATA_KEY),
-            conversation_target_metadata=metadata.get(constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY),
-        )
-        return _PersistedTurnMetadata(
-            anchor_event_id=anchor_event_id,
-            source_event_ids=handled_turn.source_event_ids,
-            response_event_id=handled_turn.response_event_id,
-            source_event_prompts=handled_turn.source_event_prompts,
-            source_event_metadata=handled_turn.source_event_metadata,
-            response_owner=handled_turn.response_owner,
-            history_scope=handled_turn.history_scope,
-            conversation_target=handled_turn.conversation_target,
-        )
+    @staticmethod
+    def _turn_record_for_run_metadata(metadata: dict[str, Any]) -> TurnRecord | None:
+        """Parse current-version turn facts needed for crash recovery."""
+        return TurnRecordCodec.from_run_metadata(metadata)
 
-    def _latest_matching_persisted_turn_metadata(
+    def _latest_matching_persisted_turn_record(
         self,
         runs: list[RunOutput | TeamRunOutput] | None,
         *,
         original_event_id: str,
-    ) -> tuple[tuple[int | float, int], _PersistedTurnMetadata] | None:
-        """Return the newest persisted turn metadata in one session matching the edit target."""
-        newest_match: tuple[tuple[int | float, int], _PersistedTurnMetadata] | None = None
+    ) -> tuple[tuple[int | float, int], TurnRecord] | None:
+        """Return the newest persisted turn record in one session matching the edit target."""
+        newest_match: tuple[tuple[int | float, int], TurnRecord] | None = None
         for run_index, run in enumerate(runs or []):
             if not isinstance(run, (RunOutput, TeamRunOutput)):
                 continue
             if not isinstance(run.metadata, dict):
                 continue
-            turn_metadata = self._persisted_turn_metadata_for_run(run.metadata)
-            if turn_metadata is None:
+            turn_record = self._turn_record_for_run_metadata(run.metadata)
+            if turn_record is None:
                 continue
             if (
-                original_event_id != turn_metadata.anchor_event_id
-                and original_event_id not in turn_metadata.source_event_ids
+                original_event_id != turn_record.anchor_event_id
+                and original_event_id not in turn_record.source_event_ids
             ):
                 continue
             run_created_at = run.created_at if isinstance(run.created_at, int | float) else 0
             sort_key = (run_created_at, run_index)
             if newest_match is None or sort_key > newest_match[0]:
-                newest_match = (sort_key, turn_metadata)
+                newest_match = (sort_key, turn_record)
         return newest_match
 
-    def _load_persisted_turn_metadata(
+    def _load_persisted_turn_record(
         self,
-        request: _LoadPersistedTurnMetadataRequest,
-    ) -> _PersistedTurnMetadata | None:
-        """Load persisted run metadata for one edited turn when available."""
+        request: _LoadPersistedTurnRequest,
+    ) -> TurnRecord | None:
+        """Load the newest matching recovery record across thread and room sessions."""
         history_scope = self.deps.state_writer.history_scope()
         session_type = self.deps.state_writer.session_type_for_scope(history_scope)
         session_contexts = [
@@ -346,7 +256,7 @@ class TurnStore:
             (None, create_session_id(request.room.room_id, None)),
         ]
         checked_session_ids: set[str] = set()
-        newest_match: _PersistedTurnMetadata | None = None
+        newest_match: TurnRecord | None = None
         newest_sort_key: tuple[int | float, int] | None = None
         for candidate_thread_id, session_id in session_contexts:
             if session_id in checked_session_ids:
@@ -373,15 +283,15 @@ class TurnStore:
                 )
                 if session is None:
                     continue
-                session_match = self._latest_matching_persisted_turn_metadata(
+                session_match = self._latest_matching_persisted_turn_record(
                     session.runs,
                     original_event_id=request.original_event_id,
                 )
                 if session_match is not None:
-                    session_sort_key, turn_metadata = session_match
+                    session_sort_key, turn_record = session_match
                     if newest_sort_key is None or session_sort_key > newest_sort_key:
                         newest_sort_key = session_sort_key
-                        newest_match = turn_metadata
+                        newest_match = turn_record
             finally:
                 storage.close()
         return newest_match
@@ -389,7 +299,7 @@ class TurnStore:
     def _remove_stale_runs_for_turn_record(
         self,
         *,
-        turn_record: HandledTurnRecord,
+        turn_record: TurnRecord,
         requester_user_id: str,
     ) -> bool:
         """Remove persisted runs using the exact recorded target and history scope."""
@@ -429,24 +339,38 @@ class TurnStore:
             )
         return removed_any
 
-
-def _normalized_matrix_source_event_ids(
-    raw_source_event_ids: object,
-) -> tuple[str, ...]:
-    """Return normalized Matrix source-event IDs from an explicit metadata list."""
-    if isinstance(raw_source_event_ids, list):
-        raw_string_event_ids = [event_id for event_id in raw_source_event_ids if isinstance(event_id, str)]
-        return HandledTurnState.create(raw_string_event_ids).source_event_ids
-    return ()
+    def _existing_record_for_sources(self, source_event_ids: tuple[str, ...]) -> TurnRecord | None:
+        """Return the first existing ledger record for one canonical source identity."""
+        for source_event_id in source_event_ids:
+            if turn_record := self._ledger.get_turn_record(source_event_id):
+                return turn_record
+        return None
 
 
-def _normalized_matrix_source_event_ids_or_anchor(
-    raw_source_event_ids: object,
-    *,
-    anchor_event_id: str,
-) -> tuple[str, ...]:
-    """Return explicit Matrix source-event IDs, or the required anchor ID when none exist."""
-    source_event_ids = _normalized_matrix_source_event_ids(raw_source_event_ids)
-    if source_event_ids:
-        return source_event_ids
-    return HandledTurnState.from_source_event_id(anchor_event_id).source_event_ids
+def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) -> TurnRecord:
+    """Fill absent optional facts without overriding authoritative ledger values.
+
+    Source identity, anchor, completion, and timestamp always come from
+    ``authority``. Every optional fact uses ``recovery`` only when the
+    authoritative value is absent.
+    """
+    return replace(
+        authority,
+        response_event_id=authority.response_event_id or recovery.response_event_id,
+        visible_echo_event_id=authority.visible_echo_event_id or recovery.visible_echo_event_id,
+        source_event_prompts=(
+            authority.source_event_prompts
+            if authority.source_event_prompts is not None
+            else recovery.source_event_prompts
+        ),
+        source_event_metadata=(
+            authority.source_event_metadata
+            if authority.source_event_metadata is not None
+            else recovery.source_event_metadata
+        ),
+        response_owner=authority.response_owner or recovery.response_owner,
+        requester_id=authority.requester_id or recovery.requester_id,
+        correlation_id=authority.correlation_id or recovery.correlation_id,
+        history_scope=authority.history_scope or recovery.history_scope,
+        conversation_target=authority.conversation_target or recovery.conversation_target,
+    )

@@ -16,14 +16,14 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.edit_regenerator import EditRegenerator, EditRegeneratorDeps
-from mindroom.handled_turns import HandledTurnRecord, SourceEventMetadata
+from mindroom.handled_turns import SourceEventMetadata, TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks.ingress import HookIngressPolicy
 from mindroom.matrix.event_info import EventInfo
 from mindroom.message_target import MessageTarget
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_policy import IngressHookRunner
-from mindroom.turn_store import TurnStore, _LoadedTurnRecord
+from mindroom.turn_store import TurnStore
 from tests.conftest import make_visible_message, request_envelope
 from tests.identity_helpers import entity_ids
 
@@ -87,9 +87,9 @@ def _turn_record(
     source_event_metadata: dict[str, SourceEventMetadata] | None = None,
     response_owner: str | None = AGENT_NAME,
     thread_id: str | None = THREAD_ID,
-) -> HandledTurnRecord:
+) -> TurnRecord:
     anchor = anchor_event_id or source_event_ids[-1]
-    return HandledTurnRecord(
+    return TurnRecord(
         anchor_event_id=anchor,
         source_event_ids=source_event_ids,
         response_event_id=response_event_id,
@@ -129,7 +129,7 @@ def _edit_event(
     return event, EventInfo.from_event(source)
 
 
-def _harness(tmp_path: Path, *, turn_record: HandledTurnRecord | None, requires_backfill: bool = False) -> _Harness:
+def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
@@ -153,9 +153,7 @@ def _harness(tmp_path: Path, *, turn_record: HandledTurnRecord | None, requires_
     )
 
     turn_store = MagicMock(spec=TurnStore)
-    turn_store.load_turn.return_value = (
-        None if turn_record is None else _LoadedTurnRecord(record=turn_record, requires_backfill=requires_backfill)
-    )
+    turn_store.load_turn.return_value = turn_record
     turn_store.build_run_metadata.return_value = dict(RUN_METADATA)
 
     ingress_hook_runner = MagicMock(spec=IngressHookRunner)
@@ -196,7 +194,7 @@ async def _handle_edit(harness: _Harness, event: nio.RoomMessageText, event_info
 
 def _assert_no_regeneration(harness: _Harness) -> None:
     harness.generate_response.assert_not_awaited()
-    harness.turn_store.record_turn_record.assert_not_called()
+    harness.turn_store.record_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -228,8 +226,8 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     metadata_kwargs = harness.turn_store.build_run_metadata.call_args.kwargs
     assert metadata_kwargs["additional_source_event_ids"] == ()
 
-    harness.turn_store.record_turn_record.assert_called_once()
-    recorded = harness.turn_store.record_turn_record.call_args.args[0]
+    harness.turn_store.record_turn.assert_called_once()
+    recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
     assert recorded.source_event_ids == (ORIGINAL_EVENT_ID,)
     assert recorded.anchor_event_id == ORIGINAL_EVENT_ID
@@ -253,7 +251,7 @@ async def test_lifecycle_lock_callback_removes_stale_runs(tmp_path: Path) -> Non
     harness.turn_store.remove_stale_runs_for_edit.assert_called_once()
     removal_kwargs = harness.turn_store.remove_stale_runs_for_edit.call_args.kwargs
     assert removal_kwargs["requester_user_id"] == USER_ID
-    assert removal_kwargs["loaded_turn"].record == record
+    assert removal_kwargs["turn_record"] == record
 
 
 @pytest.mark.asyncio
@@ -282,7 +280,7 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
     }
     assert metadata_call.kwargs["additional_source_event_ids"] == ()
 
-    recorded = harness.turn_store.record_turn_record.call_args.args[0]
+    recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
     assert recorded.source_event_prompts == {
         first_event_id: "edited first message",
@@ -323,7 +321,7 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
 
     handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
     assert handled_turn.source_event_metadata == record.source_event_metadata
-    recorded = harness.turn_store.record_turn_record.call_args.args[0]
+    recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_metadata == record.source_event_metadata
 
 
@@ -403,8 +401,8 @@ async def test_hook_suppression_records_turn_without_regeneration(tmp_path: Path
     assert hook_kwargs["policy"] == HookIngressPolicy()
 
     harness.generate_response.assert_not_awaited()
-    harness.turn_store.record_turn_record.assert_called_once()
-    recorded = harness.turn_store.record_turn_record.call_args.args[0]
+    harness.turn_store.record_turn.assert_called_once()
+    recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.response_event_id == RESPONSE_EVENT_ID
     assert recorded.source_event_ids == (ORIGINAL_EVENT_ID,)
 
@@ -419,30 +417,21 @@ async def test_generate_response_failure_propagates_without_recording(tmp_path: 
     with pytest.raises(RuntimeError, match="model unavailable"):
         await _handle_edit(harness, event, event_info)
 
-    harness.turn_store.record_turn_record.assert_not_called()
+    harness.turn_store.record_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requires_backfill", [True, False])
-async def test_suppressed_regeneration_backfills_only_when_required(
-    tmp_path: Path,
-    requires_backfill: bool,
-) -> None:
-    """A None regeneration result records the merged turn only when backfill is pending."""
+async def test_suppressed_regeneration_needs_no_caller_owned_backfill(tmp_path: Path) -> None:
+    """TurnStore repairs during load, so suppression needs no regenerator backfill branch."""
     record = _turn_record()
-    harness = _harness(tmp_path, turn_record=record, requires_backfill=requires_backfill)
+    harness = _harness(tmp_path, turn_record=record)
     harness.generate_response.return_value = None
     event, event_info = _edit_event()
 
     await _handle_edit(harness, event, event_info)
 
     harness.generate_response.assert_awaited_once()
-    if requires_backfill:
-        harness.turn_store.record_turn_record.assert_called_once()
-        recorded = harness.turn_store.record_turn_record.call_args.args[0]
-        assert recorded.response_event_id == RESPONSE_EVENT_ID
-    else:
-        harness.turn_store.record_turn_record.assert_not_called()
+    harness.turn_store.record_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -532,7 +521,7 @@ async def test_edit_without_resolved_body_is_skipped(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_record_without_persisted_response_context_is_skipped(tmp_path: Path) -> None:
     """A turn record missing persisted response context cannot be regenerated."""
-    record = HandledTurnRecord(
+    record = TurnRecord(
         anchor_event_id=ORIGINAL_EVENT_ID,
         source_event_ids=(ORIGINAL_EVENT_ID,),
         response_event_id=RESPONSE_EVENT_ID,

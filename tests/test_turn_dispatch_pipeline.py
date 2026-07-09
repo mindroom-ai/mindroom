@@ -41,7 +41,7 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     MessageEnvelope,
 )
@@ -169,7 +169,7 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         send_text.assert_awaited_once()
@@ -178,8 +178,8 @@ class TestAgentBot(AgentBotTestBase):
             "private agents are only supported in explicit Matrix ad hoc teams with requester identity",
         )
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(
-                "$event",
+            TurnRecord.create(
+                ["$event"],
                 response_event_id="$reply",
             ),
         )
@@ -240,11 +240,11 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(event.event_id),
+            TurnRecord.create([event.event_id]),
         )
 
     @pytest.mark.asyncio
@@ -825,7 +825,7 @@ class TestAgentBot(AgentBotTestBase):
             await bot._turn_controller._dispatch_text_message(
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
-                handled_turn=HandledTurnState.create(
+                handled_turn=TurnRecord.create(
                     ["$voice", "$text"],
                     source_event_prompts={"$voice": "voice prompt", "$text": "text prompt"},
                 ),
@@ -833,7 +833,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert tracker.record_handled_turn.call_args_list == [
             call(
-                HandledTurnState.create(
+                TurnRecord.create(
                     ["$voice", "$text"],
                     response_event_id="$voice_echo",
                     source_event_prompts={"$voice": "voice prompt", "$text": "text prompt"},
@@ -895,7 +895,7 @@ class TestAgentBot(AgentBotTestBase):
             correlation_id="corr-router-coalesced",
             envelope=_hook_envelope(body="hello", source_event_id="$text", target=dispatch_target),
         )
-        coalesced_turn = HandledTurnState.create(
+        coalesced_turn = TurnRecord.create(
             ["$voice", "$text"],
             source_event_prompts={"$voice": "voice prompt", "$text": "hello"},
         )
@@ -910,7 +910,7 @@ class TestAgentBot(AgentBotTestBase):
             requester_user_id: str,
             extra_content: dict[str, Any] | None = None,
             media_events: list[object] | None = None,
-            handled_turn: HandledTurnState | None = None,
+            handled_turn: TurnRecord | None = None,
         ) -> None:
             assert message == "hello"
             assert requester_user_id == "@user:localhost"
@@ -918,7 +918,7 @@ class TestAgentBot(AgentBotTestBase):
             assert media_events is None
             assert handled_turn is not None
             assert handled_turn.source_event_prompts == {"$voice": "voice prompt", "$text": "hello"}
-            bot._turn_controller._mark_source_events_responded(handled_turn.with_response_event_id("$route"))
+            bot._turn_controller._mark_source_events_responded(replace(handled_turn, response_event_id="$route"))
 
         with (
             patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
@@ -954,11 +954,12 @@ class TestAgentBot(AgentBotTestBase):
 
         assert tracker.record_handled_turn.call_args_list == [
             call(
-                HandledTurnState.create(
-                    ["$voice", "$text"],
-                    response_event_id="$route",
-                    source_event_prompts={"$voice": "voice prompt", "$text": "hello"},
-                ).with_response_context(
+                replace(
+                    TurnRecord.create(
+                        ["$voice", "$text"],
+                        response_event_id="$route",
+                        source_event_prompts={"$voice": "voice prompt", "$text": "hello"},
+                    ),
                     response_owner="router",
                     requester_id="@user:localhost",
                     correlation_id="corr-router-coalesced",
@@ -1738,7 +1739,7 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         team_request = mock_generate_team_response.await_args.args[0]
@@ -1746,8 +1747,8 @@ class TestAgentBot(AgentBotTestBase):
         assert team_request.existing_event_is_placeholder is False
         mock_send_response.assert_not_awaited()
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(
-                "$event",
+            TurnRecord.create(
+                ["$event"],
                 response_event_id="$team-response",
             ),
         )
@@ -1826,7 +1827,7 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         assert action.form_team is not None
@@ -1913,7 +1914,7 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         mock_select_team_mode.assert_not_called()
@@ -1979,15 +1980,15 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         mock_send_response.assert_not_awaited()
         assert mock_generate_response.await_args.kwargs["existing_event_id"] is None
         assert mock_generate_response.await_args.kwargs["existing_event_is_placeholder"] is False
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(
-                "$event",
+            TurnRecord.create(
+                ["$event"],
                 response_event_id="$response",
             ),
         )
@@ -2226,14 +2227,14 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         mock_edit.assert_not_awaited()
         bot._delivery_gateway.send_text.assert_awaited_once()
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(
-                "$event",
+            TurnRecord.create(
+                ["$event"],
                 response_event_id="$error",
             ),
         )
@@ -2301,7 +2302,7 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         tracker.record_handled_turn.assert_not_called()
@@ -2373,12 +2374,12 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(
-                "$event",
+            TurnRecord.create(
+                ["$event"],
                 response_event_id="$error",
             ),
         )
@@ -2445,7 +2446,7 @@ class TestAgentBot(AgentBotTestBase):
             DispatchPayloadInputs((), (), ()),
             processing_log="processing",
             dispatch_started_at=0.0,
-            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+            handled_turn=TurnRecord.create([event.event_id]),
         )
 
         delivery_gateway.send_text.assert_awaited_once()
@@ -2515,12 +2516,12 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(
-                "$event",
+            TurnRecord.create(
+                ["$event"],
                 response_event_id="$thinking",
             ),
         )
@@ -2775,7 +2776,7 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         tracker.record_handled_turn.assert_not_called()

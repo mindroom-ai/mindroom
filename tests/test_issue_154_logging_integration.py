@@ -26,7 +26,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, tracking_dir
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import PreparedHistoryState
 from mindroom.hooks import HookRegistry
 from mindroom.llm_request_logging import install_llm_request_logging
@@ -368,8 +368,8 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
         DispatchPayloadInputs((), (), ()),
         processing_log="Processing",
         dispatch_started_at=time.monotonic(),
-        handled_turn=HandledTurnState.from_source_event_id(
-            event.event_id,
+        handled_turn=TurnRecord.create(
+            [event.event_id],
             requester_id="@user:localhost",
             correlation_id="$event:localhost",
         ),

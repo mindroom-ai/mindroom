@@ -30,7 +30,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delivery_gateway import SendTextRequest
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
@@ -490,8 +490,8 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
     )
 
     context.record_handled_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(
-            "$event",
+        TurnRecord.create(
+            ["$event"],
             response_event_id="$reply",
         ),
     )
@@ -712,8 +712,8 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         "$preview",
     )
     context.record_handled_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(
-            "$event",
+        TurnRecord.create(
+            ["$event"],
             response_event_id="$preview",
         ),
     )
@@ -785,8 +785,8 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
         )
 
     context.record_handled_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(
-            "$event",
+        TurnRecord.create(
+            ["$event"],
             response_event_id="$preview",
         ),
     )

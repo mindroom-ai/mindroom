@@ -24,7 +24,7 @@ from mindroom.dispatch_source import (
     source_kind_from_content,
 )
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.media import is_audio_message_event
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 
@@ -266,11 +266,11 @@ class IngressValidator:
             room.room_id,
             self.deps.runtime_paths,
         ):
-            self.deps.turn_store.record_turn(HandledTurnState.from_source_event_id(event.event_id))
+            self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 
         if not self.deps.turn_policy.can_reply_to_sender(requester_user_id):
-            self.deps.turn_store.record_turn(HandledTurnState.from_source_event_id(event.event_id))
+            self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 
         return requester_user_id

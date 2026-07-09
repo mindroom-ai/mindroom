@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
@@ -26,7 +26,7 @@ from mindroom.dispatch_handoff import (
     payload_metadata_from_source,
 )
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
@@ -71,7 +71,7 @@ class _ReplayGuard(Protocol):
 class _PreparedTextDispatch:
     event: TextDispatchEvent
     payload_metadata: DispatchPayloadMetadata | None
-    handled_turn: HandledTurnState
+    handled_turn: TurnRecord
     command: Command | None
     dispatch: PreparedDispatch
     replay_guard: _ReplayGuard
@@ -85,7 +85,7 @@ async def dispatch_text_message(
     requester_user_id: str,
     *,
     media_events: list[MediaDispatchEvent] | None = None,
-    handled_turn: HandledTurnState | None = None,
+    handled_turn: TurnRecord | None = None,
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ingress_metadata: DispatchIngressMetadata | None = None,
     payload_metadata: DispatchPayloadMetadata | None = None,
@@ -160,7 +160,7 @@ async def _prepare_text_dispatch(
     requester_user_id: str,
     *,
     media_events: list[MediaDispatchEvent] | None,
-    handled_turn: HandledTurnState | None,
+    handled_turn: TurnRecord | None,
     ingress_metadata: DispatchIngressMetadata | None,
     payload_metadata: DispatchPayloadMetadata | None,
     trust_hydrated_internal_metadata: bool | None,
@@ -193,11 +193,11 @@ async def _prepare_text_dispatch(
     dispatch_started_at = time.monotonic()
 
     if handled_turn is None:
-        handled_turn = HandledTurnState.from_source_event_id(event.event_id)
+        handled_turn = TurnRecord.create([event.event_id])
     elif raw_event is not event and event.event_id in handled_turn.source_event_ids:
         refreshed_prompts = dict(handled_turn.source_event_prompts or {})
         refreshed_prompts[event.event_id] = event.body
-        handled_turn = handled_turn.with_source_event_prompts(refreshed_prompts)
+        handled_turn = replace(handled_turn, source_event_prompts=refreshed_prompts)
 
     command = _parsed_command_for_event(
         controller,
@@ -227,7 +227,8 @@ async def _prepare_text_dispatch(
     return _PreparedTextDispatch(
         event=event,
         payload_metadata=payload_metadata,
-        handled_turn=handled_turn.with_request_context(
+        handled_turn=replace(
+            handled_turn,
             requester_id=prepared.dispatch.requester_user_id,
             correlation_id=prepared.dispatch.correlation_id,
         ),
@@ -469,7 +470,7 @@ def _tracked_route_turn(
     *,
     route_event: DispatchEvent,
     single_direct_media_route: bool,
-) -> HandledTurnState | None:
+) -> TurnRecord | None:
     if single_direct_media_route:
         return None
     if not prepared.handled_turn.is_coalesced and (
