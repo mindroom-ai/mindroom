@@ -387,15 +387,23 @@ async def test_create_room_seeds_room_admin_power_levels(
 
 
 def test_room_admin_user_ids_filters_non_concrete_entries(tmp_path: Path) -> None:
-    """Configured room admins should keep concrete IDs and skip wildcard/placeholder entries."""
+    """Configured room admins should keep concrete IDs and skip wildcard, placeholder, or malformed entries."""
     config = _config_with_runtime_paths(
         tmp_path,
         matrix_room_access={
-            "room_admins": ["@admin:example.com", "@*:example.com", "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"],
+            "room_admins": [
+                "@admin:example.com",
+                "@admin:example.com:8448",
+                "@*:example.com",
+                "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__",
+                "@:example.com",
+                "@nodomain:",
+                "@tabbed\t:example.com",
+            ],
         },
     )
 
-    assert matrix_rooms._room_admin_user_ids(config) == ["@admin:example.com"]
+    assert matrix_rooms._room_admin_user_ids(config) == ["@admin:example.com", "@admin:example.com:8448"]
 
 
 @pytest.mark.asyncio

@@ -16,7 +16,7 @@ import { useConfigStore } from "@/store/configStore";
 import { isConcreteMatrixUserId } from "@/lib/matrixIds";
 
 export function RoomAdmins() {
-  const { config, isLoading, saveConfig, updateMatrixRoomAccess } =
+  const { config, isLoading, isDirty, saveConfig, updateMatrixRoomAccess } =
     useConfigStore();
   const { toast } = useToast();
   const [newAdminId, setNewAdminId] = useState("");
@@ -136,7 +136,7 @@ export function RoomAdmins() {
             <Button
               type="button"
               onClick={handleSave}
-              disabled={isLoading || !config}
+              disabled={isLoading || !config || !isDirty}
             >
               Save
             </Button>

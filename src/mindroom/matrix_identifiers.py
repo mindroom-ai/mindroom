@@ -99,9 +99,12 @@ def room_alias_identifier_candidates(room_alias: str, runtime_paths: RuntimePath
 
 def _is_concrete_matrix_user_id(user_id: str) -> bool:
     """Return whether this string is a concrete Matrix user ID (no wildcards or placeholders)."""
-    return (
-        user_id.startswith("@") and ":" in user_id and "*" not in user_id and "?" not in user_id and " " not in user_id
-    )
+    if not user_id.startswith("@") or "*" in user_id or "?" in user_id:
+        return False
+    if any(character.isspace() for character in user_id):
+        return False
+    localpart, separator, domain = user_id[1:].partition(":")
+    return bool(separator) and bool(localpart) and bool(domain)
 
 
 def split_concrete_matrix_user_ids(user_ids: Iterable[str]) -> tuple[list[str], list[str]]:

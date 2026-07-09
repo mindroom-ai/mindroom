@@ -23,10 +23,14 @@ vi.mock("@/components/ui/toaster", () => ({
 describe("isConcreteMatrixUserId", () => {
   it("accepts full Matrix user IDs and rejects wildcards or placeholders", () => {
     expect(isConcreteMatrixUserId("@alice:example.com")).toBe(true);
+    expect(isConcreteMatrixUserId("@alice:example.com:8448")).toBe(true);
     expect(isConcreteMatrixUserId("alice:example.com")).toBe(false);
     expect(isConcreteMatrixUserId("@alice")).toBe(false);
     expect(isConcreteMatrixUserId("@*:example.com")).toBe(false);
     expect(isConcreteMatrixUserId("__OWNER_PLACEHOLDER__")).toBe(false);
+    expect(isConcreteMatrixUserId("@:example.com")).toBe(false);
+    expect(isConcreteMatrixUserId("@alice:")).toBe(false);
+    expect(isConcreteMatrixUserId("@ali\tce:example.com")).toBe(false);
   });
 });
 
@@ -57,12 +61,12 @@ describe("RoomAdmins", () => {
     },
   });
 
-  const setMockStore = (config: Partial<Config>) => {
+  const setMockStore = (config: Partial<Config>, isDirty = true) => {
     mockStoreState = {
       config: config as Config,
       diagnostics: [],
       syncStatus: "synced",
-      isDirty: false,
+      isDirty,
       isLoading: false,
       saveConfig: mockSaveConfig,
       updateMatrixRoomAccess: mockUpdateMatrixRoomAccess,
@@ -102,6 +106,14 @@ describe("RoomAdmins", () => {
         room_admins: ["@alice:example.com", "@bob:example.com"],
       });
     });
+  });
+
+  it("disables Save when there are no pending changes", () => {
+    setMockStore(createConfig(), false);
+
+    render(<RoomAdmins />);
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 
   it("disables Add and Save while the config has not loaded", () => {
