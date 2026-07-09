@@ -95,6 +95,24 @@ def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Pat
     assert read_scope_seen_event_ids(session, scope) == {"question-1", "answer-1"}
 
 
+@pytest.mark.parametrize("excluded_status", [RunStatus.cancelled, RunStatus.error, RunStatus.paused])
+def test_scope_seen_event_ids_skip_runs_agno_history_drops(tmp_path: Path, excluded_status: RunStatus) -> None:
+    """Events on cancelled/error/paused runs stay unseen so the next turn re-reads them."""
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    completed = _completed_run("run-1")
+    completed.metadata = {"matrix_seen_event_ids": ["answered-question"]}
+    dropped = _completed_run("run-2")
+    dropped.status = excluded_status
+    dropped.metadata = {
+        "matrix_seen_event_ids": ["orphaned-question"],
+        "matrix_response_event_id": "orphaned-placeholder",
+    }
+    session = _session("session-1", runs=[completed, dropped])
+
+    assert read_scope_seen_event_ids(session, scope) == {"answered-question"}
+
+
 def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     agent_scope = HistoryScope(kind="agent", scope_id="test_agent")

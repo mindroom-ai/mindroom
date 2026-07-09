@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
@@ -55,6 +56,10 @@ _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
 _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
 _COMPACTED_RUN_ID_RETENTION_LIMIT = 1_024
+# Agno's history builder drops these run statuses, so their source events are
+# not represented in model-visible history and must stay eligible for
+# unseen-thread-context re-inclusion on the next turn.
+_MODEL_HISTORY_EXCLUDED_RUN_STATUSES = frozenset({RunStatus.paused, RunStatus.cancelled, RunStatus.error})
 
 
 def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> AgentSession | TeamSession:
@@ -224,10 +229,12 @@ def has_pending_force_compaction_scope(
 
 
 def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:
-    """Return the consumed Matrix event ids for one session scope."""
+    """Return the Matrix event ids represented in this scope's model-visible history."""
     seen_event_ids = _read_preserved_scope_seen_event_ids(session, scope)
     for run in session.runs or []:
         if not isinstance(run, (RunOutput, TeamRunOutput)):
+            continue
+        if run.status in _MODEL_HISTORY_EXCLUDED_RUN_STATUSES:
             continue
         if _scope_for_run(run) != scope:
             continue
