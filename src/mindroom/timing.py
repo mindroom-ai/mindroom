@@ -84,6 +84,7 @@ _DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
     ("diag_lock_wait_ms", "lock_wait_start", "lock_acquired"),
     ("diag_runtime_prepare_ms", "response_runtime_start", "response_runtime_ready"),
     ("diag_llm_prepare_ms", "ai_prepare_start", "history_ready"),
+    ("diag_prompt_branch_join_ms", "prompt_branches_start", "prompt_branches_ready"),
     ("diag_memory_prepare_ms", "memory_prepare_start", "memory_prepare_ready"),
     ("diag_agent_build_ms", "agent_build_start", "agent_build_ready"),
     ("diag_history_classify_ms", "history_classify_start", "history_classify_ready"),

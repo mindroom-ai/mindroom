@@ -456,9 +456,11 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
             "response_runtime_ready": 15.0,
             "ai_prepare_start": 15.5,
             "memory_prepare_start": 15.6,
+            "agent_build_start": 15.6,
+            "prompt_branches_start": 15.6,
             "memory_prepare_ready": 15.8,
-            "agent_build_start": 15.8,
             "agent_build_ready": 16.0,
+            "prompt_branches_ready": 16.0,
             "history_classify_start": 16.0,
             "history_classify_ready": 16.2,
             "required_compaction_start": 16.2,
@@ -499,8 +501,9 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert summary["diag_lock_wait_ms"] == 2000.0
     assert summary["diag_runtime_prepare_ms"] == 1000.0
     assert summary["diag_llm_prepare_ms"] == 1500.0
+    assert summary["diag_prompt_branch_join_ms"] == 400.0
     assert summary["diag_memory_prepare_ms"] == 200.0
-    assert summary["diag_agent_build_ms"] == 200.0
+    assert summary["diag_agent_build_ms"] == 400.0
     assert summary["diag_history_classify_ms"] == 200.0
     assert summary["diag_required_compaction_ms"] == 400.0
     assert summary["diag_replay_plan_ms"] == 200.0

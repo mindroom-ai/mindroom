@@ -67,6 +67,7 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs, MediaKind
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
+from mindroom.pre_model_preparation import prepare_mem0_prompt_branches
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingAttemptResolution,
@@ -83,7 +84,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timing_scope
+from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_system.events import StreamingToolTracker, complete_pending_tool_block, format_tool_combined
 
 if TYPE_CHECKING:
@@ -1093,23 +1094,6 @@ async def _prepare_agent_and_prompt(
     agent_name = ctx.entity_label
     _assert_agent_target(agent_name, config)
     storage_path = runtime_paths.storage_root
-    _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
-    prompt_parts = await build_memory_prompt_parts(
-        prompt,
-        agent_name,
-        storage_path,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-    )
-    current_turn_prompt = _compose_current_turn_prompt(
-        raw_prompt=prompt,
-        model_prompt=model_prompt,
-        prompt_parts=prompt_parts,
-    )
-    _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
-
-    _mark_pipeline_timing(pipeline_timing, "agent_build_start")
 
     def _resolve_model_and_build_agent() -> tuple[ResolvedRuntimeModel, Agent]:
         """Resolve the runtime model and build the agent off the event loop (#1260).
@@ -1140,14 +1124,63 @@ async def _prepare_agent_and_prompt(
         )
         return runtime_model, agent
 
-    runtime_model, agent = await asyncio.to_thread(_resolve_model_and_build_agent)
+    parallel_branches = config.resolve_entity(agent_name).memory_backend == "mem0"
+    if pipeline_timing is not None:
+        pipeline_timing.note(prompt_branches_parallel=parallel_branches)
+    if parallel_branches:
+        _mark_pipeline_timing(pipeline_timing, "prompt_branches_start")
+        with timed_block(
+            "system_prompt_assembly.memory_agent_join",
+            parallel=True,
+        ):
+            try:
+                prompt_parts, runtime_model, agent = await prepare_mem0_prompt_branches(
+                    prepare_memory=lambda: build_memory_prompt_parts(
+                        prompt,
+                        agent_name,
+                        storage_path,
+                        config,
+                        runtime_paths,
+                        execution_identity=execution_identity,
+                    ),
+                    build_agent=_resolve_model_and_build_agent,
+                    agent_name=agent_name,
+                    shared_scope_storage=scope_context.storage if scope_context is not None else None,
+                    pipeline_timing=pipeline_timing,
+                )
+            finally:
+                _mark_pipeline_timing(pipeline_timing, "prompt_branches_ready")
+        current_turn_prompt = _compose_current_turn_prompt(
+            raw_prompt=prompt,
+            model_prompt=model_prompt,
+            prompt_parts=prompt_parts,
+        )
+    else:
+        _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
+        prompt_parts = await build_memory_prompt_parts(
+            prompt,
+            agent_name,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        )
+        current_turn_prompt = _compose_current_turn_prompt(
+            raw_prompt=prompt,
+            model_prompt=model_prompt,
+            prompt_parts=prompt_parts,
+        )
+        _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
+        _mark_pipeline_timing(pipeline_timing, "agent_build_start")
+        runtime_model, agent = await asyncio.to_thread(_resolve_model_and_build_agent)
+        _mark_pipeline_timing(pipeline_timing, "agent_build_ready")
+
     _append_additional_context(agent, prompt_parts.session_preamble)
     if ctx.system_enrichment_items:
         _append_additional_context(
             agent,
             _render_system_enrichment_context(ctx.system_enrichment_items),
         )
-    _mark_pipeline_timing(pipeline_timing, "agent_build_ready")
 
     prepared_execution = await prepare_agent_execution_context(
         ctx,
@@ -1157,6 +1190,7 @@ async def _prepare_agent_and_prompt(
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
+        resolved_runtime_model=runtime_model if parallel_branches else None,
         compaction_lifecycle=compaction_lifecycle,
         current_sender_id=None if include_openai_compat_guidance else ctx.requester_id,
         current_timestamp_ms=current_timestamp_ms,
