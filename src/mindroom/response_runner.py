@@ -619,6 +619,30 @@ class ResponseRunner:
             # the replay snapshot is the lesser harm.
             self.deps.logger.exception("Failed to persist interrupted replay state")
 
+    async def _persist_pending_recorder_as_error(
+        self,
+        *,
+        recorder: TurnRecorder,
+        session_scope: HistoryScope,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+        run_id: str | None,
+        response_event_id: str | None,
+    ) -> None:
+        """Persist a replay carrier when generation fails before its turn driver settles."""
+        if recorder.outcome != "pending":
+            return
+        recorder.mark_interrupted(original_status=RunStatus.error)
+        await self._persist_interrupted_recorder_off_loop(
+            recorder=recorder,
+            session_scope=session_scope,
+            session_id=session_id,
+            execution_identity=execution_identity,
+            run_id=run_id,
+            is_team=False,
+            response_event_id=response_event_id,
+        )
+
     async def _emit_session_started_with_cancel_guard(
         self,
         *,
@@ -2329,6 +2353,14 @@ class ResponseRunner:
             )
         except Exception as error:
             self.deps.logger.exception("Error in non-streaming response", error=str(error))
+            await self._persist_pending_recorder_as_error(
+                recorder=turn_recorder,
+                session_scope=session_scope,
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                response_event_id=request.existing_event_id,
+            )
             raise
 
         response_extra_content = _merge_response_extra_content(
@@ -2516,6 +2548,14 @@ class ResponseRunner:
             raise
         except Exception as error:
             self.deps.logger.exception("Error in streaming response", error=str(error))
+            await self._persist_pending_recorder_as_error(
+                recorder=turn_recorder,
+                session_scope=session_scope,
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                response_event_id=request.existing_event_id,
+            )
             return build_outcome(
                 await self.deps.delivery_gateway.finalize_streamed_response(
                     FinalizeStreamedResponseRequest(

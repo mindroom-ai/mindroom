@@ -16,6 +16,7 @@ from agno.session.summary import SessionSummary
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
+    MATRIX_EVENT_ID_METADATA_KEY,
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_REPLAY_STATE_INTERRUPTED,
     MINDROOM_REPLAY_STATE_METADATA_KEY,
@@ -106,13 +107,22 @@ def test_pending_restart_recovery_run_ids_only_keeps_latest_flagged_replay() -> 
     """Generic failures clear protection; repeated restart cancels replace it."""
     first = _completed_run("first")
     first.metadata = {
+        MATRIX_EVENT_ID_METADATA_KEY: "source-event",
         MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
         MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY: True,
     }
     second = _completed_run("second")
     second.metadata = dict(first.metadata)
     provider_error = _completed_run("provider-error")
-    provider_error.metadata = {MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED}
+    provider_error.metadata = {
+        MATRIX_EVENT_ID_METADATA_KEY: "source-event",
+        MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
+    }
+    newer_provider_error = _completed_run("newer-provider-error")
+    newer_provider_error.metadata = {
+        MATRIX_EVENT_ID_METADATA_KEY: "newer-event",
+        MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
+    }
 
     assert pending_restart_recovery_run_ids([first, second]) == {"second"}
     assert pending_restart_recovery_run_ids([first, provider_error]) == set()

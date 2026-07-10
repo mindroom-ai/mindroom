@@ -16,6 +16,8 @@ from agno.run.base import RunStatus
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
+from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
+from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 
 from mindroom import ai_runtime
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
@@ -70,6 +72,10 @@ def _completed_team_run(content: str) -> TeamRunOutput:
     return output
 
 
+def _empty_plain_run(run_id: str) -> RunOutput:
+    return RunOutput(content="", run_id=run_id, session_id="session-1", status=RunStatus.completed)
+
+
 @pytest.mark.asyncio
 async def test_team_response_retries_once_after_empty_completed_run() -> None:
     """One empty completed team run is discarded and retried before answering."""
@@ -118,6 +124,32 @@ async def test_team_response_returns_fallback_notice_when_retry_is_also_empty() 
     # The fallback notice stays out of the recorded turn.
     assert recorder.outcome == "completed"
     assert recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
+async def test_team_response_replays_final_empty_nonbound_run() -> None:
+    """An exhausted empty retry keeps a carrier when the output is outside team history."""
+    orchestrator, _config = _make_orchestrator()
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(side_effect=[_empty_plain_run("run-1"), _empty_plain_run("run-2")])
+    recorder = TurnRecorder(user_message="Say something.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Say something.",
+            turn_recorder=recorder,
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(session_id="session-1"),
+        )
+
+    assert response == ai_runtime.EMPTY_RESPONSE_NOTICE
+    assert mock_team.arun.await_count == 2
+    assert recorder.outcome == "interrupted"
+    assert recorder.interruption_status is RunStatus.error
 
 
 @pytest.mark.asyncio
@@ -268,6 +300,40 @@ async def test_team_response_stream_yields_fallback_notice_when_retry_is_also_em
 
 
 @pytest.mark.asyncio
+async def test_team_response_stream_replays_final_empty_nonbound_run() -> None:
+    """Streaming exhausted empty retries keep a carrier outside bound team history."""
+    orchestrator, config = _make_orchestrator()
+
+    async def empty_stream(run_id: str) -> AsyncIterator[object]:
+        yield _empty_plain_run(run_id)
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(side_effect=[empty_stream("run-1"), empty_stream("run-2")])
+    recorder = TurnRecorder(user_message="Say something.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Say something.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-1"),
+            )
+        ]
+
+    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+    assert ai_runtime.EMPTY_RESPONSE_NOTICE in rendered
+    assert mock_team.arun.call_count == 2
+    assert recorder.outcome == "interrupted"
+    assert recorder.interruption_status is RunStatus.error
+
+
+@pytest.mark.asyncio
 async def test_team_response_stream_does_not_preserve_seen_ids_for_double_empty_run() -> None:
     """Discarded streaming attempts cannot consume Matrix events."""
     orchestrator, config = _make_orchestrator()
@@ -309,6 +375,7 @@ async def test_team_response_stream_does_not_preserve_seen_ids_for_paused_run() 
     paused_run.status = RunStatus.paused
 
     async def paused_stream() -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
         yield paused_run
 
     mock_team = _make_test_team()
@@ -317,7 +384,7 @@ async def test_team_response_stream_does_not_preserve_seen_ids_for_paused_run() 
 
     patches = _team_patches(mock_team)
     with patches[0], patches[1], patches[2], patch("mindroom.teams._persist_bound_seen_event_ids") as persist_seen:
-        _ = [
+        chunks = [
             chunk
             async for chunk in team_response_stream(
                 agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
@@ -331,8 +398,11 @@ async def test_team_response_stream_does_not_preserve_seen_ids_for_paused_run() 
         ]
 
     persist_seen.assert_not_called()
+    rendered_chunks = [chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks]
+    assert [chunk for chunk in rendered_chunks if chunk.strip()][-1].count("Member answer") == 1
     assert recorder.outcome == "interrupted"
     assert recorder.interruption_status is RunStatus.paused
+    assert recorder.assistant_text.count("Member answer") == 1
 
 
 @pytest.mark.asyncio
@@ -378,11 +448,29 @@ async def test_team_response_stream_records_paused_terminal_event() -> None:
     """A native team paused event leaves a replay carrier instead of a completed turn."""
     orchestrator, config = _make_orchestrator()
 
+    completed_tool = ToolExecution(
+        tool_call_id="completed-call",
+        tool_name="get_time",
+        tool_args={},
+        result="noon",
+        tool_call_error=False,
+    )
+    pending_tool = ToolExecution(
+        tool_call_id="pending-call",
+        tool_name="request_approval",
+        tool_args={},
+    )
+
     async def paused_stream() -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        yield TeamToolCallStartedEvent(tool=completed_tool)
+        yield TeamToolCallCompletedEvent(tool=completed_tool)
+        yield TeamToolCallStartedEvent(tool=pending_tool)
         yield TeamRunPausedEvent(
-            content="Approval required",
+            content="Member answer",
             run_id="team-run-paused",
             session_id="session-1",
+            tools=[completed_tool, pending_tool],
         )
 
     mock_team = _make_test_team()
@@ -403,10 +491,13 @@ async def test_team_response_stream_records_paused_terminal_event() -> None:
             )
         ]
 
-    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "Approval required" in rendered
+    rendered_chunks = [chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks]
+    assert [chunk for chunk in rendered_chunks if chunk.strip()][-1].count("Member answer") == 1
     assert recorder.outcome == "interrupted"
     assert recorder.interruption_status is RunStatus.paused
+    assert recorder.assistant_text.count("Member answer") == 1
+    assert len(recorder.completed_tools) == 1
+    assert len(recorder.interrupted_tools) == 1
 
 
 @pytest.mark.asyncio

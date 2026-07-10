@@ -288,7 +288,7 @@ async def auto_resume_interrupted_threads(
 
 
 async def _has_newer_human_thread_activity(
-    client: nio.AsyncClient,
+    _client: nio.AsyncClient,
     interrupted_thread: InterruptedThread,
     *,
     conversation_cache: ConversationCacheProtocol | None,
@@ -299,19 +299,6 @@ async def _has_newer_human_thread_activity(
     if conversation_cache is None or interrupted_thread.thread_id is None:
         return False
     try:
-        original_event = await client.room_get_event(
-            interrupted_thread.room_id,
-            interrupted_thread.target_event_id,
-        )
-        if not isinstance(original_event, nio.RoomGetEventResponse):
-            return True
-        original_timestamp_ms = original_event.event.server_timestamp
-        if (
-            not isinstance(original_timestamp_ms, int)
-            or isinstance(original_timestamp_ms, bool)
-            or original_timestamp_ms <= 0
-        ):
-            return True
         history = await conversation_cache.get_thread_history(
             interrupted_thread.room_id,
             interrupted_thread.thread_id,
@@ -333,15 +320,26 @@ async def _has_newer_human_thread_activity(
             thread_id=interrupted_thread.thread_id,
         )
         return True
+    target_index = next(
+        (index for index, message in enumerate(history) if message.event_id == interrupted_thread.target_event_id),
+        None,
+    )
+    if target_index is None:
+        logger.warning(
+            "Skipping auto-resume because interrupted target is absent from thread history",
+            room_id=interrupted_thread.room_id,
+            thread_id=interrupted_thread.thread_id,
+            target_event_id=interrupted_thread.target_event_id,
+        )
+        return True
     return any(
-        message.timestamp >= original_timestamp_ms
-        and _effective_requester_for_message(
+        _effective_requester_for_message(
             message,
             config=config,
             runtime_paths=runtime_paths,
         )
         not in internal_sender_ids
-        for message in history
+        for message in history[target_index + 1 :]
     )
 
 

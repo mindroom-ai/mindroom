@@ -257,6 +257,7 @@ class CompletedAttempt:
     replayable_text: str = ""
     has_visible_content: bool = False
     is_empty: bool = False
+    model_history_visible: bool = True
     session_id: str | None = None
     run_id: str | None = None
     attempt_run_id: str | None = None
@@ -735,6 +736,15 @@ def _settle_blocking_attempt(
     )
     if settle.keep_going:
         return settle.continuation
+    if not resolution.model_history_visible:
+        _record_completed_attempt_without_history_carrier(
+            ctx,
+            adapter.persist_standalone_replay,
+            sinks,
+            run,
+            resolution,
+        )
+        return settle.response_text
     _publish_run_metadata(sinks, resolution.metadata_content)
     run.turn_state.record_completed(
         sinks.turn_recorder,
@@ -743,6 +753,24 @@ def _settle_blocking_attempt(
         completed_tools=list(settle.recorded_tools),
     )
     return settle.response_text
+
+
+def _record_completed_attempt_without_history_carrier(
+    ctx: ResponseTurnContext,
+    persist: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None,
+    sinks: TurnSinks,
+    run: TurnRunState,
+    resolution: CompletedAttempt,
+) -> None:
+    """Record a provider completion that Agno cannot replay in model history."""
+    errored = ErroredAttempt(
+        "",
+        session_id=resolution.session_id,
+        run_id=resolution.run_id or resolution.attempt_run_id,
+        metadata_content=resolution.metadata_content,
+    )
+    _publish_run_metadata(sinks, resolution.metadata_content)
+    _record_errored_turn(ctx, persist, sinks, run, errored)
 
 
 def _publish_run_metadata(sinks: TurnSinks, metadata_content: dict[str, Any] | None) -> None:
@@ -926,6 +954,15 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     if settle.response_text:
                         yield adapter.make_text_chunk(settle.response_text)
                     if not keep_going:
+                        if not resolution.model_history_visible:
+                            _record_completed_attempt_without_history_carrier(
+                                ctx,
+                                adapter.persist_standalone_replay,
+                                sinks,
+                                run,
+                                resolution,
+                            )
+                            return
                         _publish_run_metadata(sinks, resolution.metadata_content)
                         run.turn_state.record_completed(
                             sinks.turn_recorder,

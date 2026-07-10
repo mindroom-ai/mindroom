@@ -540,6 +540,44 @@ async def test_process_and_respond_persists_errored_turn_when_delivery_raises(tm
     assert persisted_recorder.interruption_status is RunStatus.error
 
 
+@pytest.mark.parametrize("use_streaming", [False, True])
+@pytest.mark.asyncio
+async def test_process_and_respond_persists_pre_driver_generation_failure(
+    tmp_path: Path,
+    use_streaming: bool,
+) -> None:
+    """Generation failures before driver settlement still leave one replay carrier."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+        history_storage=storage,
+        message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+    )
+    request = _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root")
+
+    if use_streaming:
+        coordinator.generate_streaming_ai_response = AsyncMock(side_effect=RuntimeError("setup boom"))
+        await coordinator.process_and_respond_streaming(request)
+    else:
+        coordinator.generate_non_streaming_ai_response = AsyncMock(side_effect=RuntimeError("setup boom"))
+        with pytest.raises(RuntimeError, match="setup boom"):
+            await coordinator.process_and_respond(request)
+
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.metadata is not None
+    assert persisted_run.metadata[MINDROOM_REPLAY_STATE_METADATA_KEY] == MINDROOM_REPLAY_STATE_INTERRUPTED
+    assert persisted_run.metadata["mindroom_original_status"] == "error"
+
+
 @pytest.mark.asyncio
 async def test_process_and_respond_emits_session_started_after_first_persisted_thread_response(
     tmp_path: Path,

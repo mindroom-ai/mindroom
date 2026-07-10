@@ -842,7 +842,15 @@ async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path:
     )
     conversation_cache = AsyncMock()
     conversation_cache.get_thread_history.return_value = ThreadHistoryResult(
-        messages=[],
+        messages=[
+            ResolvedVisibleMessage.synthetic(
+                sender=BOT_USER_ID,
+                body="Interrupted response",
+                event_id="$target",
+                timestamp=100,
+                thread_id="$threaded",
+            ),
+        ],
         is_full_history=True,
     )
     conversation_cache.notify_outbound_message = Mock()
@@ -955,12 +963,12 @@ async def test_auto_resume_skips_human_activity_after_original_event(
         "$threaded",
         caller_label="auto_resume_after_restart",
     )
-    client.room_get_event.assert_awaited_once_with(ROOM_ID, "$target")
+    client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_auto_resume_skips_when_original_event_lookup_fails(tmp_path: Path) -> None:
-    """Recovery fails closed when it cannot place already-fetched human activity in time."""
+async def test_auto_resume_skips_when_interrupted_target_is_absent_from_history(tmp_path: Path) -> None:
+    """Recovery fails closed when authoritative history omits the interrupted target."""
     config = _make_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
@@ -984,7 +992,6 @@ async def test_auto_resume_skips_when_original_event_lookup_fails(tmp_path: Path
         ],
         is_full_history=True,
     )
-    client.room_get_event.side_effect = RuntimeError("event lookup failed")
     interrupted = [
         InterruptedThread(
             room_id=ROOM_ID,
@@ -1011,8 +1018,8 @@ async def test_auto_resume_skips_when_original_event_lookup_fails(tmp_path: Path
 
     assert resumed_count == 0
     mock_send.assert_not_awaited()
-    conversation_cache.get_thread_history.assert_not_awaited()
-    client.room_get_event.assert_awaited_once_with(ROOM_ID, "$target")
+    conversation_cache.get_thread_history.assert_awaited_once()
+    client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1068,7 +1075,7 @@ async def test_auto_resume_skips_nonauthoritative_thread_history(
 
     assert resumed_count == 0
     mock_send.assert_not_awaited()
-    client.room_get_event.assert_awaited_once_with(ROOM_ID, "$target")
+    client.room_get_event.assert_not_awaited()
     conversation_cache.get_thread_history.assert_awaited_once_with(
         ROOM_ID,
         "$threaded",
@@ -1077,16 +1084,25 @@ async def test_auto_resume_skips_nonauthoritative_thread_history(
 
 
 @pytest.mark.asyncio
-async def test_auto_resume_skips_event_error_result(tmp_path: Path) -> None:
-    """A typed original-event lookup failure cannot authorize restart recovery."""
+async def test_auto_resume_does_not_query_target_event_separately(tmp_path: Path) -> None:
+    """Authoritative ordered history alone decides whether recovery is safe."""
     config = _make_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
     conversation_cache = AsyncMock()
     conversation_cache.get_thread_history.return_value = ThreadHistoryResult(
-        messages=[],
+        messages=[
+            ResolvedVisibleMessage.synthetic(
+                sender=BOT_USER_ID,
+                body="Interrupted response",
+                event_id="$target",
+                timestamp=100,
+                thread_id="$threaded",
+            ),
+        ],
         is_full_history=True,
     )
+    conversation_cache.notify_outbound_message = Mock()
     client.room_get_event.return_value = nio.RoomGetEventError("missing", status_code="M_NOT_FOUND")
     interrupted = [
         InterruptedThread(
@@ -1099,7 +1115,10 @@ async def test_auto_resume_skips_event_error_result(tmp_path: Path) -> None:
         ),
     ]
 
-    with patch("mindroom.matrix.stale_stream_cleanup.send_message_result", new=AsyncMock()) as mock_send:
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message_result",
+        new=AsyncMock(return_value=delivered_matrix_event("$resume")),
+    ) as mock_send:
         resumed_count = await auto_resume_interrupted_threads(
             client,
             interrupted,
@@ -1108,26 +1127,38 @@ async def test_auto_resume_skips_event_error_result(tmp_path: Path) -> None:
             conversation_cache=conversation_cache,
         )
 
-    assert resumed_count == 0
-    mock_send.assert_not_awaited()
-    conversation_cache.get_thread_history.assert_not_awaited()
-    client.room_get_event.assert_awaited_once_with(ROOM_ID, "$target")
+    assert resumed_count == 1
+    mock_send.assert_awaited_once()
+    conversation_cache.get_thread_history.assert_awaited_once()
+    client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_auto_resume_skips_nonpositive_original_event_timestamp(tmp_path: Path) -> None:
-    """A nonpositive authoritative event timestamp cannot authorize recovery."""
+async def test_auto_resume_uses_order_when_original_prompt_shares_target_timestamp(tmp_path: Path) -> None:
+    """The original human prompt before a same-millisecond target does not suppress recovery."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
-    client.room_get_event.return_value = _room_get_event_response(
-        _make_message_event(
-            event_id="$target",
-            body="Interrupted response",
-            timestamp_ms=0,
-            relates_to=_thread_reply_relation("$threaded", "$threaded"),
-        ),
-    )
     conversation_cache = AsyncMock()
+    conversation_cache.get_thread_history.return_value = ThreadHistoryResult(
+        messages=[
+            ResolvedVisibleMessage.synthetic(
+                sender=USER_ID,
+                body="Original prompt",
+                event_id="$prompt",
+                timestamp=100,
+                thread_id="$threaded",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender=BOT_USER_ID,
+                body="Interrupted response",
+                event_id="$target",
+                timestamp=100,
+                thread_id="$threaded",
+            ),
+        ],
+        is_full_history=True,
+    )
+    conversation_cache.notify_outbound_message = Mock()
     interrupted = [
         InterruptedThread(
             room_id=ROOM_ID,
@@ -1139,7 +1170,10 @@ async def test_auto_resume_skips_nonpositive_original_event_timestamp(tmp_path: 
         ),
     ]
 
-    with patch("mindroom.matrix.stale_stream_cleanup.send_message_result", new=AsyncMock()) as mock_send:
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message_result",
+        new=AsyncMock(return_value=delivered_matrix_event("$resume")),
+    ) as mock_send:
         resumed_count = await auto_resume_interrupted_threads(
             client,
             interrupted,
@@ -1148,38 +1182,31 @@ async def test_auto_resume_skips_nonpositive_original_event_timestamp(tmp_path: 
             conversation_cache=conversation_cache,
         )
 
-    assert resumed_count == 0
-    mock_send.assert_not_awaited()
-    conversation_cache.get_thread_history.assert_not_awaited()
+    assert resumed_count == 1
+    mock_send.assert_awaited_once()
+    conversation_cache.get_thread_history.assert_awaited_once()
+    client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_auto_resume_fetches_history_after_original_timestamp(tmp_path: Path) -> None:
-    """Human activity arriving during target lookup must appear in the later history read."""
+async def test_auto_resume_checks_latest_authoritative_history(tmp_path: Path) -> None:
+    """A fresh authoritative history read sees human activity that arrived before recovery."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     conversation_cache = AsyncMock()
     call_order: list[str] = []
-    human_replied = False
 
-    async def fetch_original_after_human_reply(*_args: object) -> nio.RoomGetEventResponse:
-        nonlocal human_replied
-        call_order.append("target")
-        human_replied = True
-        return _room_get_event_response(
-            _make_message_event(
-                event_id="$target",
-                body="Interrupted response",
-                timestamp_ms=100,
-                relates_to=_thread_reply_relation("$threaded", "$threaded"),
-            ),
-        )
-
-    async def fetch_history_after_target(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+    async def fetch_latest_history(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
         call_order.append("history")
-        assert human_replied is True
         return ThreadHistoryResult(
             messages=[
+                ResolvedVisibleMessage.synthetic(
+                    sender=BOT_USER_ID,
+                    body="Interrupted response",
+                    event_id="$target",
+                    timestamp=100,
+                    thread_id="$threaded",
+                ),
                 ResolvedVisibleMessage.synthetic(
                     sender=USER_ID,
                     body="Please continue",
@@ -1191,8 +1218,7 @@ async def test_auto_resume_fetches_history_after_original_timestamp(tmp_path: Pa
             is_full_history=True,
         )
 
-    client.room_get_event.side_effect = fetch_original_after_human_reply
-    conversation_cache.get_thread_history.side_effect = fetch_history_after_target
+    conversation_cache.get_thread_history.side_effect = fetch_latest_history
     interrupted = [
         InterruptedThread(
             room_id=ROOM_ID,
@@ -1218,8 +1244,9 @@ async def test_auto_resume_fetches_history_after_original_timestamp(tmp_path: Pa
 
     assert resumed_count == 0
     mock_send.assert_not_awaited()
-    assert call_order == ["target", "history"]
+    assert call_order == ["history"]
     conversation_cache.get_thread_history.assert_awaited_once()
+    client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio

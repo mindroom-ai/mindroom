@@ -30,7 +30,12 @@ from mindroom.teams import (
 )
 from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
-from tests.test_team_media_fallback import _build_test_config, _make_test_agent, _make_test_team
+from tests.test_team_media_fallback import (
+    _bound_team_run_output,
+    _build_test_config,
+    _make_test_agent,
+    _make_test_team,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -50,7 +55,7 @@ def _load_tool_execution(tool_name: str = "sleep") -> ToolExecution:
 
 
 def _dynamic_tool_team_output() -> TeamRunOutput:
-    return TeamRunOutput(
+    return _bound_team_run_output(
         content="",
         member_responses=[RunOutput(agent_name="GeneralAgent", content="", tools=[_load_tool_execution()])],
     )
@@ -83,7 +88,7 @@ async def test_team_response_continues_after_member_dynamic_tool_load() -> None:
     mock_team.arun = AsyncMock(
         side_effect=[
             _dynamic_tool_team_output(),
-            TeamRunOutput(content="Used the loaded tool."),
+            _bound_team_run_output(content="Used the loaded tool."),
         ],
     )
     recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
@@ -155,7 +160,7 @@ async def test_team_response_stream_continues_after_terminal_dynamic_tool_output
         yield _dynamic_tool_team_output()
 
     async def second_stream() -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Used the loaded tool.")
+        yield _bound_team_run_output(content="Used the loaded tool.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
@@ -328,7 +333,7 @@ def test_release_attempt_members_resets_snapshot_state() -> None:
             materialized_agent_names={"general"},
             failed_agent_names=[],
         ),
-        last_response=TeamRunOutput(content="stale"),
+        last_response=_bound_team_run_output(content="stale"),
         render_partial=lambda: "stale partial",
     )
     stale_tracker = holder.tool_tracker
@@ -390,7 +395,7 @@ async def test_team_response_logs_continuation_prompt_in_request_log_context() -
     mock_team.arun = AsyncMock(
         side_effect=[
             _dynamic_tool_team_output(),
-            TeamRunOutput(content="Used the loaded tool."),
+            _bound_team_run_output(content="Used the loaded tool."),
         ],
     )
     logged_prompts: list[object] = []
@@ -430,7 +435,7 @@ async def test_team_response_stream_logs_continuation_prompt_in_request_log_cont
         yield _dynamic_tool_team_output()
 
     async def second_stream() -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Used the loaded tool.")
+        yield _bound_team_run_output(content="Used the loaded tool.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])

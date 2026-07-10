@@ -39,6 +39,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.constants import (
+    MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MINDROOM_COMPACTION_METADATA_KEY,
@@ -299,7 +300,11 @@ def scope_has_recovered_interrupted_event(
             and metadata.get(MINDROOM_REPLAY_STATE_METADATA_KEY) == MINDROOM_REPLAY_STATE_INTERRUPTED
         )
         if is_interrupted_replay:
-            if event_id in _run_seen_event_ids(run):
+            source_event_id = _run_source_event_id(run)
+            is_same_source = source_event_id == event_id or (
+                source_event_id is None and event_id in _run_seen_event_ids(run)
+            )
+            if is_same_source:
                 interrupted_source_seen = True
                 recovered_after_interruption = False
             elif interrupted_source_seen:
@@ -325,6 +330,15 @@ def _run_seen_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
     if isinstance(response_event_id, str) and response_event_id:
         seen_event_ids.add(response_event_id)
     return seen_event_ids
+
+
+def _run_source_event_id(run: RunOutput | TeamRunOutput) -> str | None:
+    """Return the Matrix event that directly triggered one provider run."""
+    metadata = run.metadata
+    if not isinstance(metadata, dict):
+        return None
+    source_event_id = metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
+    return source_event_id if isinstance(source_event_id, str) and source_event_id else None
 
 
 def update_scope_seen_event_ids(

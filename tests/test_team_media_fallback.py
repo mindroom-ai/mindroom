@@ -88,6 +88,12 @@ if TYPE_CHECKING:
 _TEST_MODEL = "openai:gpt-5.4"
 
 
+def _bound_team_run_output(**kwargs: object) -> TeamRunOutput:
+    """Build a provider-shaped output bound to the default ad hoc team scope."""
+    kwargs.setdefault("team_id", "team_general")
+    return TeamRunOutput(**kwargs)
+
+
 def _make_test_agent(name: str) -> AgnoAgent:
     agent_id = name.removesuffix("Agent").replace(" ", "_").lower() or name.lower()
     return AgnoAgent(name=name, id=agent_id, model=_TEST_MODEL)
@@ -96,7 +102,7 @@ def _make_test_agent(name: str) -> AgnoAgent:
 def _make_test_team(
     *,
     name: str = "Test Team",
-    team_id: str = "test-team",
+    team_id: str = "team_general",
 ) -> AgnoTeam:
     return AgnoTeam(name=name, id=team_id, model=_TEST_MODEL, members=[], tools=[])
 
@@ -275,7 +281,7 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     mock_team.arun = AsyncMock(
         side_effect=[
             Exception(media_validation_error),
-            TeamRunOutput(content="Recovered team response"),
+            _bound_team_run_output(content="Recovered team response"),
         ],
     )
     audio_input = MagicMock(name="audio_input")
@@ -323,7 +329,7 @@ async def test_team_response_retries_errored_plain_run_output_with_fresh_run_id(
     mock_team.arun = AsyncMock(
         side_effect=[
             RunOutput(content="Error code: 500 - audio input is not supported", status="error"),
-            TeamRunOutput(content="Recovered team response", status=RunStatus.completed),
+            _bound_team_run_output(content="Recovered team response", status=RunStatus.completed),
         ],
     )
 
@@ -370,7 +376,7 @@ async def test_team_generic_invalid_request_retry_teaches_route_after_success() 
     mock_team.arun = AsyncMock(
         side_effect=[
             Exception("Error code: 400 - completely new provider wording"),
-            TeamRunOutput(content="Recovered team response"),
+            _bound_team_run_output(content="Recovered team response"),
         ],
     )
 
@@ -487,7 +493,7 @@ async def test_team_response_retry_scrubs_queued_notice_before_second_attempt() 
         team_id = prepared_scope_context.session.team_id
         assert team_id is not None
         if attempts == 1:
-            errored_output = TeamRunOutput(
+            errored_output = _bound_team_run_output(
                 run_id="run-1",
                 team_id=team_id,
                 team_name="General Team",
@@ -499,7 +505,7 @@ async def test_team_response_retry_scrubs_queued_notice_before_second_attempt() 
             _cleanup_and_store(mock_team, errored_output, prepared_scope_context.session)
             return errored_output
         assert not any(_has_queued_notice(run.messages) for run in prepared_scope_context.session.runs or [])
-        return TeamRunOutput(
+        return _bound_team_run_output(
             run_id="run-2",
             team_id=team_id,
             team_name="General Team",
@@ -629,7 +635,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
     mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
+    mock_team.arun = AsyncMock(return_value=_bound_team_run_output(content="Recovered team response"))
     fake_agent = _make_test_agent("GeneralAgent")
 
     with (
@@ -726,7 +732,7 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
     orchestrator.agent_bots = {"general": MagicMock()}
 
     mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
+    mock_team.arun = AsyncMock(return_value=_bound_team_run_output(content="Recovered team response"))
     fake_agent = _make_test_agent("GeneralAgent")
 
     with (
@@ -772,7 +778,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
     orchestrator.agent_bots = {"general": MagicMock()}
 
     mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
+    mock_team.arun = AsyncMock(return_value=_bound_team_run_output(content="Recovered team response"))
     fake_agent = _make_test_agent("GeneralAgent")
     with open_bound_scope_session_context(
         agents=[fake_agent],
@@ -852,7 +858,7 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
         persisted_team.db = scope_context.storage
         _cleanup_and_store(
             persisted_team,
-            TeamRunOutput(
+            _bound_team_run_output(
                 run_id="run-1",
                 team_id=scope_context.session.team_id,
                 team_name="General Team",
@@ -873,7 +879,7 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
         assert prepared_scope_context.session is not None
         _cleanup_and_store(
             mock_team,
-            TeamRunOutput(
+            _bound_team_run_output(
                 run_id="run-2",
                 team_id=team_id,
                 team_name="General Team",
@@ -884,7 +890,7 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
             ),
             prepared_scope_context.session,
         )
-        return TeamRunOutput(
+        return _bound_team_run_output(
             run_id="run-2",
             team_id=team_id,
             team_name="General Team",
@@ -961,7 +967,7 @@ async def test_prepare_materialized_team_execution_scrubs_queued_notices_when_ca
         persisted_team.db = scope_context.storage
         _cleanup_and_store(
             persisted_team,
-            TeamRunOutput(
+            _bound_team_run_output(
                 run_id="run-1",
                 team_id=scope_context.session.team_id,
                 team_name="General Team",
@@ -1290,7 +1296,7 @@ async def test_team_response_scrubs_queued_notices_after_run_exception() -> None
         assert prepared_scope_context.session is not None
         _cleanup_and_store(
             mock_team,
-            TeamRunOutput(
+            _bound_team_run_output(
                 run_id="run-error",
                 team_id=team_id,
                 team_name="General Team",
@@ -1386,7 +1392,7 @@ async def test_team_response_stream_scrubs_queued_notices_after_stream_exception
         assert prepared_scope_context.session is not None
         _cleanup_and_store(
             mock_team,
-            TeamRunOutput(
+            _bound_team_run_output(
                 run_id="run-stream-error",
                 team_id=team_id,
                 team_name="General Team",
@@ -1465,7 +1471,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
     orchestrator.agent_bots = {"general": MagicMock()}
 
     mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Recovered team response"))
+    mock_team.arun = AsyncMock(return_value=_bound_team_run_output(content="Recovered team response"))
     fake_agent = _make_test_agent("GeneralAgent")
     with open_bound_scope_session_context(
         agents=[fake_agent],
@@ -1533,7 +1539,7 @@ async def test_team_response_passes_run_id_to_team_arun() -> None:
 
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
-        return_value=TeamRunOutput(content="Recovered team response", status=RunStatus.completed),
+        return_value=_bound_team_run_output(content="Recovered team response", status=RunStatus.completed),
     )
 
     fake_agent = _make_test_agent("GeneralAgent")
@@ -1568,7 +1574,7 @@ async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None
 
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
-        return_value=TeamRunOutput(
+        return_value=_bound_team_run_output(
             content="Run run-123 was cancelled",
             status=RunStatus.cancelled,
         ),
@@ -1606,7 +1612,7 @@ async def test_team_response_records_interrupted_snapshot_for_cancelled_runs() -
     fake_agent = _make_test_agent("GeneralAgent")
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
-        return_value=TeamRunOutput(
+        return_value=_bound_team_run_output(
             run_id="run-123",
             session_id="session-team",
             content="Run run-123 was cancelled",
@@ -1674,7 +1680,7 @@ async def test_team_response_records_incomplete_cancelled_tools_as_interrupted()
     fake_agent = _make_test_agent("GeneralAgent")
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
-        return_value=TeamRunOutput(
+        return_value=_bound_team_run_output(
             run_id="run-123",
             session_id="session-team",
             content="Run run-123 was cancelled",
@@ -1740,7 +1746,7 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
 
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
-        return_value=TeamRunOutput(
+        return_value=_bound_team_run_output(
             content="validation failed in team",
             messages=[Message(role="assistant", content="Consensus partial")],
             member_responses=[
@@ -1814,7 +1820,7 @@ async def test_team_response_with_turn_recorder_defers_interrupted_persistence_t
 
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
-        return_value=TeamRunOutput(
+        return_value=_bound_team_run_output(
             content="Run cancelled",
             messages=[Message(role="assistant", content="Half done")],
             tools=[
@@ -1882,7 +1888,7 @@ async def test_team_response_with_turn_recorder_preserves_unseen_event_ids_on_ca
 
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
-        return_value=TeamRunOutput(
+        return_value=_bound_team_run_output(
             content="Run cancelled",
             messages=[Message(role="assistant", content="Half done")],
             status=RunStatus.cancelled,
@@ -1937,8 +1943,8 @@ async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> N
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
         side_effect=[
-            TeamRunOutput(content="Error code: 500 - audio input is not supported", status=RunStatus.error),
-            TeamRunOutput(content="Recovered team response", status=RunStatus.completed),
+            _bound_team_run_output(content="Error code: 500 - audio input is not supported", status=RunStatus.error),
+            _bound_team_run_output(content="Recovered team response", status=RunStatus.completed),
         ],
     )
 
@@ -1991,7 +1997,7 @@ async def test_team_response_tracks_retry_run_id_after_hard_cancellation() -> No
     callback_run_ids: list[str] = []
     mock_team.arun = AsyncMock(
         side_effect=[
-            TeamRunOutput(content="Error code: 500 - audio input is not supported", status=RunStatus.error),
+            _bound_team_run_output(content="Error code: 500 - audio input is not supported", status=RunStatus.error),
             asyncio.CancelledError(),
         ],
     )
@@ -2769,7 +2775,7 @@ async def test_team_response_stream_emits_team_run_output_fallback() -> None:
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         assert _kwargs["run_id"] == "run-789"
-        yield TeamRunOutput(content="Fallback consensus", status=RunStatus.completed)
+        yield _bound_team_run_output(content="Fallback consensus", status=RunStatus.completed)
 
     team_agent_ids = [
         fixture_entity_matrix_id(
@@ -2959,7 +2965,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_output_f
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         assert _kwargs["run_id"] == "run-789"
-        yield TeamRunOutput(content="Run run-789 was cancelled", status=RunStatus.cancelled)
+        yield _bound_team_run_output(content="Run run-789 was cancelled", status=RunStatus.cancelled)
 
     team_agent_ids = [
         fixture_entity_matrix_id(
@@ -3011,7 +3017,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
     )
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-        yield TeamRunOutput(
+        yield _bound_team_run_output(
             content="validation failed in team",
             messages=[Message(role="assistant", content="Consensus partial")],
             member_responses=[
@@ -3169,7 +3175,10 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
         call_run_ids.append(_kwargs["run_id"])
         outcomes_at_attempt_start.append(recorder.outcome)
         if len(call_run_ids) == 1:
-            yield TeamRunOutput(content="Error code: 500 - audio input is not supported", status=RunStatus.error)
+            yield _bound_team_run_output(
+                content="Error code: 500 - audio input is not supported",
+                status=RunStatus.error,
+            )
             return
         yield TeamRunOutput(
             content="Recovered consensus",
@@ -3362,7 +3371,7 @@ async def test_team_response_stream_retry_scrubs_queued_notice_before_second_att
         assert team_id is not None
         assert team_id == "super_team"
         if attempts == 1:
-            errored_output = TeamRunOutput(
+            errored_output = _bound_team_run_output(
                 run_id="run-1",
                 team_id=team_id,
                 team_name="General Team",
@@ -3375,7 +3384,7 @@ async def test_team_response_stream_retry_scrubs_queued_notice_before_second_att
             yield errored_output
             return
         assert not any(_has_queued_notice(run.messages) for run in prepared_scope_context.session.runs or [])
-        yield TeamRunOutput(
+        yield _bound_team_run_output(
             run_id="run-2",
             team_id=team_id,
             team_name="General Team",
@@ -3498,7 +3507,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
     mock_team = _make_test_team(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Streamed team response")
+        yield _bound_team_run_output(content="Streamed team response")
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -3550,7 +3559,7 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
     mock_team = _make_test_team(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Streamed team response")
+        yield _bound_team_run_output(content="Streamed team response")
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -3618,7 +3627,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
     mock_team = _make_test_team(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Streamed team response")
+        yield _bound_team_run_output(content="Streamed team response")
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -3674,7 +3683,7 @@ async def test_team_response_stream_preserves_assistant_context_in_team_prompt()
     mock_team = _make_test_team(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Streamed team response")
+        yield _bound_team_run_output(content="Streamed team response")
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -4141,7 +4150,7 @@ async def test_private_ad_hoc_team_second_turn_replays_first_scoped_run() -> Non
         first_team.db = scope_context.storage
         _cleanup_and_store(
             first_team,
-            TeamRunOutput(
+            _bound_team_run_output(
                 run_id="run-1",
                 team_id=first_team.id,
                 team_name=first_team.name,
@@ -4211,7 +4220,7 @@ async def test_team_response_materializes_private_agent_with_execution_identity(
     private_agent = _make_test_agent("GeneralAgent")
     shared_agent = _make_test_agent("CalculatorAgent")
     mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Team response"))
+    mock_team.arun = AsyncMock(return_value=_bound_team_run_output(content="Team response"))
 
     with (
         patch("mindroom.teams.create_agent", side_effect=[private_agent, shared_agent]) as mock_create_agent,
@@ -4355,7 +4364,7 @@ async def test_team_response_stream_materializes_private_agent_with_execution_id
     mock_team = _make_test_team()
 
     async def fake_stream_raw(**_kwargs: object) -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Streamed team response")
+        yield _bound_team_run_output(content="Streamed team response")
 
     with (
         patch("mindroom.teams.create_agent", side_effect=[private_agent, shared_agent]) as mock_create_agent,
@@ -4442,7 +4451,7 @@ async def test_team_response_ignores_router_in_direct_team_member_list() -> None
     general_bot.agent.instructions = []
     orchestrator.agent_bots = {"general": general_bot}
     mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="General response"))
+    mock_team.arun = AsyncMock(return_value=_bound_team_run_output(content="General response"))
 
     fake_agent = _make_test_agent("GeneralAgent")
 
@@ -4520,7 +4529,7 @@ async def test_team_response_forwards_session_and_user_id_to_team_run() -> None:
     general_bot.agent.instructions = []
     orchestrator.agent_bots = {"general": general_bot}
     mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="General response"))
+    mock_team.arun = AsyncMock(return_value=_bound_team_run_output(content="General response"))
 
     fake_agent = _make_test_agent("GeneralAgent")
 
@@ -4574,7 +4583,7 @@ async def test_team_response_materializes_members_with_request_execution_identit
     )
     fake_agent = _make_test_agent("GeneralAgent")
     mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="General response"))
+    mock_team.arun = AsyncMock(return_value=_bound_team_run_output(content="General response"))
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent) as mock_create_agent,

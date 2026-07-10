@@ -1209,12 +1209,15 @@ def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[st
 def _is_bound_team_history_visible_run(
     response: TeamRunOutput | RunOutput,
     scope_context: ScopeSessionContext | None,
+    *,
+    team_id: str | None,
 ) -> bool:
     """Return whether this response belongs to the bound top-level team history."""
+    expected_team_id = scope_context.scope.scope_id if scope_context is not None else team_id
     return (
         isinstance(response, TeamRunOutput)
-        and scope_context is not None
-        and response.team_id == scope_context.scope.scope_id
+        and expected_team_id is not None
+        and response.team_id == expected_team_id
         and is_model_history_visible_run(response)
     )
 
@@ -2275,10 +2278,15 @@ async def team_response(  # noqa: C901, PLR0915
             team_response_text = str(response)
             has_visible_output = bool(team_response_text)
 
+        model_history_visible = isinstance(response, (TeamRunOutput, RunOutput)) and _is_bound_team_history_visible_run(
+            response,
+            run.scope_context,
+            team_id=team.id,
+        )
         if (
             ctx.reply_to_event_id
             and isinstance(response, (TeamRunOutput, RunOutput))
-            and _is_bound_team_history_visible_run(response, run.scope_context)
+            and model_history_visible
             and not is_empty_run
         ):
             _persist_bound_seen_event_ids(
@@ -2303,11 +2311,7 @@ async def team_response(  # noqa: C901, PLR0915
             if isinstance(response, (TeamRunOutput, RunOutput))
             else _format_team_header(team_members.display_names) + team_response_text
         )
-        if (
-            isinstance(response, (TeamRunOutput, RunOutput))
-            and not is_empty_run
-            and not _is_bound_team_history_visible_run(response, run.scope_context)
-        ):
+        if isinstance(response, (TeamRunOutput, RunOutput)) and not is_empty_run and not model_history_visible:
             completed_tools, interrupted_tools = _extract_cancelled_team_tool_trace(response)
             return ErroredAttempt(
                 response_text,
@@ -2326,6 +2330,7 @@ async def team_response(  # noqa: C901, PLR0915
             replayable_text=response_text if has_visible_output else "",
             has_visible_content=has_visible_output,
             is_empty=is_empty_run,
+            model_history_visible=model_history_visible,
             session_id=response_session_id,
             run_id=response_run_id,
             attempt_run_id=attempt_run_id,
@@ -2928,11 +2933,12 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     event_is_empty = (
                         event.status == RunStatus.completed and not event_tool_executions and not event_has_visible
                     )
-                    if (
-                        ctx.reply_to_event_id
-                        and _is_bound_team_history_visible_run(event, run.scope_context)
-                        and not event_is_empty
-                    ):
+                    model_history_visible = _is_bound_team_history_visible_run(
+                        event,
+                        run.scope_context,
+                        team_id=team.id,
+                    )
+                    if ctx.reply_to_event_id and model_history_visible and not event_is_empty:
                         _persist_bound_seen_event_ids(
                             scope_context=run.scope_context,
                             session_id=ctx.session_id,
@@ -2942,12 +2948,13 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         event,
                         team_display_names=team_members.display_names,
                     )
-                    if not event_is_empty and not _is_bound_team_history_visible_run(event, run.scope_context):
+                    if not event_is_empty and not model_history_visible:
                         completed_tool_trace, interrupted_tool_trace = _extract_cancelled_team_tool_trace(event)
+                        interrupted_partial = _current_canonical_partial_text() if emitted_output else response_text
                         yield AttemptResolved(
                             ErroredAttempt(
-                                response_text,
-                                partial_text=response_text if event_has_visible else "",
+                                "" if emitted_output else response_text,
+                                partial_text=interrupted_partial if event_has_visible else "",
                                 completed_tools=tuple(completed_tool_trace),
                                 interrupted_tools=tuple(interrupted_tool_trace),
                                 session_id=event.session_id,
@@ -2969,6 +2976,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             replayable_text=response_text if event_has_visible else "",
                             has_visible_content=event_has_visible,
                             is_empty=event_is_empty,
+                            model_history_visible=model_history_visible,
                             session_id=event.session_id,
                             run_id=event.run_id,
                             attempt_run_id=attempt_run_id,
