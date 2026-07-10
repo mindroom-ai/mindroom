@@ -609,6 +609,14 @@ class KubernetesResourceManager:
             body["spec"] = {"replicas": replicas}
         self._apps.patch_namespaced_deployment(deployment_name, self.config.namespace, body)
 
+    def patch_deployment_annotations(self, deployment_name: str, *, annotations: dict[str, str]) -> None:
+        """Merge selected Deployment annotations without a preceding read."""
+        self._apps.patch_namespaced_deployment(
+            deployment_name,
+            self.config.namespace,
+            {"metadata": {"annotations": annotations}},
+        )
+
     def delete_deployment(self, deployment_name: str) -> None:
         """Delete one worker Deployment, ignoring 404s."""
         self._delete_object(self._apps.delete_namespaced_deployment, deployment_name)
