@@ -88,6 +88,7 @@ class PreparedRuntimeConfigPublish:
     validated_payload: dict[str, Any]
     source_fingerprint: str
     source_files: frozenset[Path] | None
+    source_load_result: ConfigLoadResult
 
 
 @dataclass(frozen=True)
@@ -221,7 +222,7 @@ def _load_config_result(
 def _source_fingerprint_for_published_runtime_config(
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
-) -> tuple[str, frozenset[Path] | None]:
+) -> tuple[str, frozenset[Path] | None, ConfigLoadResult]:
     """Return the disk fingerprint and source set when the file still matches the runtime config.
 
     The source set is ``None`` when the published config cannot be tied to the
@@ -236,8 +237,10 @@ def _source_fingerprint_for_published_runtime_config(
     canonical_fingerprint = _source_fingerprint(canonical_source)
     result, disk_payload, _disk_config, disk_fingerprint, disk_source_files = _load_config_result(runtime_paths)
     if result.success and disk_payload == validated_payload and disk_fingerprint is not None:
-        return disk_fingerprint, disk_source_files
-    return canonical_fingerprint, None
+        return disk_fingerprint, disk_source_files, result
+    if not result.success:
+        return disk_fingerprint or canonical_fingerprint, disk_source_files, result
+    return canonical_fingerprint, None, result
 
 
 def _raise_for_config_load_result(result: ConfigLoadResult | None) -> None:
@@ -812,7 +815,7 @@ def prepare_runtime_config_publish(
     initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
     validated_payload = runtime_config.authored_model_dump()
-    source_fingerprint, source_files = _source_fingerprint_for_published_runtime_config(
+    source_fingerprint, source_files, source_load_result = _source_fingerprint_for_published_runtime_config(
         runtime_paths,
         validated_payload,
     )
@@ -823,6 +826,7 @@ def prepare_runtime_config_publish(
         validated_payload=validated_payload,
         source_fingerprint=source_fingerprint,
         source_files=source_files,
+        source_load_result=source_load_result,
     )
 
 
@@ -843,8 +847,13 @@ def publish_prepared_runtime_config_into_app(
             )
             return False
         same_config = current.config_data == prepared.validated_payload
+        source_load_failed = not prepared.source_load_result.success and current.config_load_result is not None
         if current.generation != prepared.observed_generation:
-            if not same_config or (current.config_load_result is not None and not current.config_load_result.success):
+            if (
+                source_load_failed
+                or not same_config
+                or (current.config_load_result is not None and not current.config_load_result.success)
+            ):
                 logger.info(
                     "Discarding stale API config publish after config changed",
                     publish_config_path=str(prepared.runtime_paths.config_path),
@@ -857,6 +866,18 @@ def publish_prepared_runtime_config_into_app(
             )
             return True
         same_source = prepared.source_fingerprint == current.source_fingerprint
+        if source_load_failed:
+            published_source_files = prepared.source_files or current.source_files
+            if prepared.source_files is not None and current.source_files is not None:
+                published_source_files = prepared.source_files | current.source_files
+            current_state.snapshot = _published_snapshot(
+                current,
+                increment_generation=not same_source,
+                config_load_result=prepared.source_load_result,
+                source_fingerprint=prepared.source_fingerprint,
+                source_files=published_source_files,
+            )
+            return False
         current_state.snapshot = _published_snapshot(
             current,
             increment_generation=not same_source,
