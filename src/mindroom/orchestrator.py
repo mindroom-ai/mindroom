@@ -77,7 +77,6 @@ from mindroom.tool_system.catalog import (
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
-    load_plugins,
     prepare_plugin_reload,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
@@ -732,11 +731,6 @@ class _MultiAgentOrchestrator:
         self.agent_bots[entity_name] = bot
         return bot
 
-    def _build_hook_registry(self, config: RuntimeConfig) -> HookRegistry:
-        """Load plugins and rebuild the immutable hook-registry snapshot."""
-        plugins = load_plugins(config, self.runtime_paths)
-        return HookRegistry.from_plugins(plugins)
-
     def _activate_hook_registry(self, hook_registry: HookRegistry) -> None:
         """Commit one hook-registry snapshot to the live runtime."""
         set_scheduling_hook_registry(hook_registry)
@@ -918,13 +912,19 @@ class _MultiAgentOrchestrator:
         logger.info("Initializing multi-agent system...")
 
         config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
-        hook_registry = await asyncio.to_thread(self._build_hook_registry, config)
+        prepared_plugin_reload = await asyncio.to_thread(
+            prepare_plugin_reload,
+            config,
+            self.runtime_paths,
+            skip_broken_plugins=True,
+        )
+        config = self._rebuild_config_with_tool_state(config, prepared_plugin_reload.resolved_tool_state)
         entity_names = configured_entity_names(config)
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
         self.config = config
-        self._activate_hook_registry(hook_registry)
+        self._activate_hook_registry(apply_prepared_plugin_reload(prepared_plugin_reload).hook_registry)
         await self._sync_mcp_manager(config)
         await self._sync_event_cache_service(config)
         self._configure_approval_store_transport()
@@ -1146,7 +1146,15 @@ class _MultiAgentOrchestrator:
 
     async def _load_initial_config(self, new_config: RuntimeConfig) -> bool:
         """Handle config loading before the runtime has an active config."""
-        hook_registry = self._build_hook_registry(new_config)
+        prepared_plugin_reload = prepare_plugin_reload(
+            new_config,
+            self.runtime_paths,
+            skip_broken_plugins=True,
+        )
+        new_config = self._rebuild_config_with_tool_state(
+            new_config,
+            prepared_plugin_reload.resolved_tool_state,
+        )
         entity_names = configured_entity_names(new_config)
         self._preflight_account_provisioning(
             new_config,
@@ -1156,7 +1164,7 @@ class _MultiAgentOrchestrator:
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
         await self._prepare_entity_accounts(new_config, entity_names)
         self.config = new_config
-        self._activate_hook_registry(hook_registry)
+        self._activate_hook_registry(apply_prepared_plugin_reload(prepared_plugin_reload).hook_registry)
         await self._sync_mcp_manager(new_config)
         await self._sync_runtime_support_services(new_config, start_watcher=self.running)
         clear_worker_validation_snapshot_cache()

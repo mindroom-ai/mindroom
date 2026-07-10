@@ -210,7 +210,6 @@ class TestDynamicConfigUpdate:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch.object(
                 orchestrator,
                 "_restart_changed_entities",

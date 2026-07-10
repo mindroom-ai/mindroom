@@ -1408,6 +1408,39 @@ def test_load_plugins_preserves_non_plugin_dynamic_tools(tmp_path: Path) -> None
         set_plugin_skill_roots(original_plugin_roots)
 
 
+def test_prepare_plugin_reload_resolves_configured_mcp_once_when_live_registry_contains_it(tmp_path: Path) -> None:
+    """The staged carried state must not merge an already-live MCP entry twice."""
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    config = runtime_config_from_data(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "demo-command",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    dynamic_factory = MagicMock()
+    original_registry = TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+
+    try:
+        TOOL_REGISTRY["mcp_demo"] = dynamic_factory
+        TOOL_METADATA["mcp_demo"] = replace(TOOL_METADATA["shell"], name="mcp_demo", factory=dynamic_factory)
+
+        prepared = plugins_module.prepare_plugin_reload(config, runtime_paths)
+
+        assert "mcp_demo" in prepared.resolved_tool_state.validation_snapshot
+        assert prepared.tool_registry_snapshot.registry["mcp_demo"] is dynamic_factory
+    finally:
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+
 def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tmp_path: Path) -> None:
     """Reloading an enabled plugin should drop tool names it no longer registers."""
     plugin_root = tmp_path / "plugins" / "demo"

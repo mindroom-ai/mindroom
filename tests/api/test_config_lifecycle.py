@@ -493,34 +493,31 @@ class TestExternalWriterPublishing:
         assert seeded.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
         assert seeded.runtime_config is prepared.runtime_config
 
-    def test_stale_same_config_publish_only_refreshes_runtime_value(self, loaded_app: FastAPI) -> None:
-        """A benign stale runtime refresh preserves newer source and load metadata."""
+    def test_stale_same_config_publish_cannot_replace_newer_tool_state(self, loaded_app: FastAPI) -> None:
+        """Equal authored data cannot make a stale derived tool snapshot safe to publish."""
         before = _snapshot(loaded_app)
         assert before.runtime_config is not None
-        refreshed_runtime = before.runtime_config.model_copy()
+        stale_runtime = before.runtime_config.model_copy(
+            update={"unavailable_plugin_tool_names": frozenset({"stale_plugin_tool"})},
+        )
         prepared = config_lifecycle.prepare_runtime_config_publish(
-            refreshed_runtime,
+            stale_runtime,
             before.runtime_paths,
             loaded_app,
         )
         state = config_lifecycle.require_api_state(loaded_app)
-        newer_source_files = frozenset({before.runtime_paths.config_path})
+        newer_runtime = before.runtime_config.model_copy(
+            update={"unavailable_plugin_tool_names": frozenset({"newer_plugin_tool"})},
+        )
         with state.config_lock:
             state.snapshot = config_lifecycle._published_snapshot(
                 state.snapshot,
-                config_load_result=config_lifecycle.ConfigLoadResult(success=True),
-                source_fingerprint="newer-source",
-                source_files=newer_source_files,
+                runtime_config=newer_runtime,
             )
         newer = _snapshot(loaded_app)
 
-        assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, loaded_app) is True
-        after = _snapshot(loaded_app)
-        assert after.generation == newer.generation
-        assert after.runtime_config is refreshed_runtime
-        assert after.config_load_result == newer.config_load_result
-        assert after.source_fingerprint == newer.source_fingerprint
-        assert after.source_files == newer_source_files
+        assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, loaded_app) is False
+        assert _snapshot(loaded_app) is newer
 
 
 class TestConcurrencySmoke:

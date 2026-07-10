@@ -1227,7 +1227,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.load_config", return_value=mock_config) as mock_load_config,
-            patch("mindroom.orchestrator.load_plugins"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
             patch.object(
                 _MultiAgentOrchestrator,
@@ -1281,7 +1280,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.load_config", return_value=config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch(
@@ -1292,7 +1290,8 @@ class TestMultiAgentOrchestrator:
         ):
             await orchestrator.initialize()
 
-        assert orchestrator.config is config
+        assert orchestrator.config is not None
+        assert orchestrator.config.agents == config.agents
         assert mock_create_managed_bot.call_count == 2
         assert orchestrator._runtime_support.event_cache.is_initialized is False
 
@@ -1353,17 +1352,12 @@ class TestMultiAgentOrchestrator:
         tmp_path: Path,
     ) -> None:
         """Startup must not swap the live hook runtime before user-account prep succeeds."""
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        config = MagicMock()
-        config.agents = {}
-        config.teams = {}
+        config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         initial_hook_registry = orchestrator.hook_registry
-        new_hook_registry = HookRegistry.empty()
 
         with (
             patch("mindroom.orchestrator.load_config", return_value=config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
-            patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
             patch.object(
                 orchestrator,
@@ -2329,7 +2323,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=config),
-            patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_updates._identify_entities_to_restart",
                 return_value=set(),
@@ -2708,7 +2701,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
             patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
@@ -3025,7 +3017,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         ):
@@ -3092,7 +3083,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         ):
@@ -3176,7 +3166,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_updates._identify_entities_to_restart",
                 return_value=set(),
@@ -3272,7 +3261,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_updates._identify_entities_to_restart",
                 return_value=set(),

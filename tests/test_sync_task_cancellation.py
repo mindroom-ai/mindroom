@@ -1058,19 +1058,15 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         mock_create_bot.return_value = mock_bot
 
         # Create config with one agent
-        config = MagicMock(spec=Config)
-        config.agents = {"test_agent": MagicMock()}
-        config.teams = {}
-        config.mcp_servers = {}
-        config.plugins = []
-        config.cache = MagicMock()
-        config.cache.resolve_db_path.return_value = tmp_path / "event_cache.db"
-        config.mindroom_user = None
-        config.get_all_configured_rooms.return_value = []
+        runtime_paths = orchestrator_runtime_paths(tmp_path)
+        config = RuntimeConfig.from_authored(
+            Config(agents={"test_agent": {"display_name": "Test Agent"}}),
+            runtime_paths,
+        )
         mock_load_config.return_value = config
 
         # Create orchestrator
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
         orchestrator._prepare_entity_accounts = AsyncMock(
             return_value={
                 "router": AgentMatrixUser(

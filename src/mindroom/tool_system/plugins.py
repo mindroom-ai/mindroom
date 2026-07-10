@@ -18,6 +18,7 @@ from mindroom.tool_system.registry_state import (
     clear_plugin_tool_registrations,
     locked_tool_registry_state,
     registered_plugin_tool_names,
+    resolved_tool_state,
     restore_plugin_tool_registrations,
     restore_tool_registry_snapshot,
     scoped_plugin_registration_owner,
@@ -103,18 +104,22 @@ def _raise_if_host_control_exception(exc: BaseException) -> None:
         raise exc
 
 
+def _active_plugin_tool_modules(plugins: list[_Plugin]) -> list[tuple[str, str]]:
+    """Return the registry owners for active plugin tool modules."""
+    return [
+        (plugin.name, plugin_imports._module_name(plugin.name, plugin.root, plugin.tools_module_path))
+        for plugin in plugins
+        if plugin.tools_module_path is not None
+    ]
+
+
 def _sync_loaded_plugin_tools(
     plugins: list[_Plugin],
     previous_plugin_tool_names: set[str],
 ) -> None:
     """Remove plugin tool registrations for plugins no longer present in config."""
-    active_tool_modules = [
-        (plugin.name, plugin_imports._module_name(plugin.name, plugin.root, plugin.tools_module_path))
-        for plugin in plugins
-        if plugin.tools_module_path is not None
-    ]
     synchronize_plugin_tools(
-        active_tool_modules,
+        _active_plugin_tool_modules(plugins),
         previous_plugin_tool_names=previous_plugin_tool_names,
     )
 
@@ -250,11 +255,15 @@ def prepare_plugin_reload(
             candidate_tool_registry_snapshot = capture_tool_registry_snapshot()
             from mindroom.tool_system.catalog import resolved_tool_runtime_state_from_registry  # noqa: PLC0415
 
-            resolved_tool_state = resolved_tool_runtime_state_from_registry(
+            candidate_plugin_registry, candidate_plugin_metadata = resolved_tool_state(
+                _active_plugin_tool_modules(plugins),
+                candidate_tool_registry_snapshot.plugin_tool_metadata_by_module,
+            )
+            resolved_runtime_tool_state = resolved_tool_runtime_state_from_registry(
                 runtime_paths,
                 config,
-                candidate_tool_registry_snapshot.registry,
-                candidate_tool_registry_snapshot.metadata,
+                candidate_plugin_registry,
+                candidate_plugin_metadata,
                 unavailable_tool_names=config.unavailable_plugin_tool_names,
                 tolerate_plugin_load_errors=True,
             )
@@ -265,7 +274,7 @@ def prepare_plugin_reload(
                 hook_registry=HookRegistry.from_plugins(plugins),
                 active_plugin_names=tuple(plugin.name for plugin in plugins),
                 tool_registry_snapshot=candidate_tool_registry_snapshot,
-                resolved_tool_state=resolved_tool_state,
+                resolved_tool_state=resolved_runtime_tool_state,
                 plugin_skill_roots=tuple(get_plugin_skill_roots()),
                 plugin_cache=candidate_plugin_cache,
                 module_import_cache=candidate_module_import_cache,
