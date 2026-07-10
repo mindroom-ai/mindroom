@@ -543,7 +543,10 @@ async def stop_entities(
         if entity_name in agent_bots
     ]
     if stop_tasks:
-        await asyncio.gather(*stop_tasks)
+        stop_results = await asyncio.gather(*stop_tasks, return_exceptions=True)
+        for result in stop_results:
+            if isinstance(result, BaseException):
+                raise result
 
     for entity_name in entities_to_stop:
         agent_bots.pop(entity_name, None)

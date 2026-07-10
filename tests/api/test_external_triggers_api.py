@@ -159,6 +159,8 @@ def _create_record(runtime_paths: constants.RuntimePaths, config: Config, public
 
 def _bind_runtime(ready_snapshots: list[TriggerDeliverySnapshot]) -> object:
     client = object()
+    api_snapshot = config_lifecycle.require_api_state(api_main.app).snapshot
+    assert api_snapshot.runtime_config is not None
 
     async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
         ready_snapshots.append(snapshot)
@@ -169,6 +171,8 @@ def _bind_runtime(ready_snapshots: list[TriggerDeliverySnapshot]) -> object:
         client=client,
         conversation_cache=object(),
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+        expected_config=api_snapshot.runtime_config,
+        expected_runtime_paths=api_snapshot.runtime_paths,
     )
     return client
 

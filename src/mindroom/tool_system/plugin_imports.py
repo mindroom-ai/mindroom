@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sys
@@ -9,7 +10,10 @@ from dataclasses import dataclass
 from importlib import util
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
@@ -67,6 +71,82 @@ class _ModuleCacheEntry:
 
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
 _MODULE_IMPORT_CACHE: dict[Path, _ModuleCacheEntry] = {}
+
+
+def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
+    """Return task globals or one-level container-held tasks from one module value."""
+    if isinstance(value, asyncio.Task):
+        return (value,)
+    if isinstance(value, dict):
+        values = value.values()
+    elif isinstance(value, tuple | list | set):
+        values = value
+    else:
+        return ()
+    return tuple(item for item in values if isinstance(item, asyncio.Task))
+
+
+def _cancel_tasks_in_modules(
+    modules: Iterable[ModuleType],
+    *,
+    excluded_task_ids: frozenset[int] = frozenset(),
+) -> int:
+    """Cancel non-done module-global tasks except identities owned before this operation."""
+    cancelled_task_ids: set[int] = set()
+    for module in modules:
+        for value in vars(module).values():
+            for task in _iter_module_tasks(value):
+                task_id = id(task)
+                if task.done() or task_id in excluded_task_ids or task_id in cancelled_task_ids:
+                    continue
+                task.cancel()
+                cancelled_task_ids.add(task_id)
+    return len(cancelled_task_ids)
+
+
+def cancel_tasks_in_modules(modules: Iterable[ModuleType]) -> int:
+    """Cancel non-done module-global asyncio tasks found in the given modules."""
+    return _cancel_tasks_in_modules(modules)
+
+
+def snapshot_module_subtree(package_root: str) -> dict[str, ModuleType]:
+    """Snapshot currently imported modules under one synthetic plugin package."""
+    return {
+        module_name: module
+        for module_name, module in sys.modules.copy().items()
+        if module is not None and (module_name == package_root or module_name.startswith(f"{package_root}."))
+    }
+
+
+def restore_module_subtree(package_root: str, previous_modules: dict[str, ModuleType]) -> None:
+    """Restore one synthetic plugin package to a previously captured module mapping."""
+    for module_name in tuple(sys.modules):
+        if module_name == package_root or module_name.startswith(f"{package_root}."):
+            sys.modules.pop(module_name, None)
+    sys.modules.update(previous_modules)
+
+
+def snapshot_module_subtree_task_ids(package_root: str) -> frozenset[int]:
+    """Snapshot task identities reachable from one synthetic plugin package."""
+    return frozenset(
+        id(task)
+        for module in snapshot_module_subtree(package_root).values()
+        for value in vars(module).values()
+        for task in _iter_module_tasks(value)
+    )
+
+
+def cancel_new_module_subtree_tasks(
+    package_root: str,
+    previous_task_ids: frozenset[int],
+    *,
+    additional_modules: Iterable[ModuleType] = (),
+) -> int:
+    """Cancel tasks created under one plugin package since the task snapshot."""
+    return _cancel_tasks_in_modules(
+        (*snapshot_module_subtree(package_root).values(), *additional_modules),
+        excluded_task_ids=previous_task_ids,
+    )
 
 
 def _warn_once(message: str, *, path: Path) -> None:

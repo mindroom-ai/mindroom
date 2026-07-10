@@ -871,6 +871,53 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_entities_waits_for_all_parallel_stops_before_raising() -> None:
+    """One failing stop must not let rollback race sibling stop coroutines still running."""
+    sibling_started = asyncio.Event()
+    failing_started = asyncio.Event()
+    release_sibling = asyncio.Event()
+    sibling_finished = asyncio.Event()
+    stop_error = RuntimeError("stop failed")
+
+    async def fail_stop(**_kwargs: object) -> None:
+        failing_started.set()
+        await sibling_started.wait()
+        raise stop_error
+
+    async def finish_stop(**_kwargs: object) -> None:
+        sibling_started.set()
+        await release_sibling.wait()
+        sibling_finished.set()
+
+    failing_bot = AsyncMock()
+    failing_bot.prepare_for_sync_shutdown = AsyncMock()
+    failing_bot.stop = AsyncMock(side_effect=fail_stop)
+    sibling_bot = AsyncMock()
+    sibling_bot.prepare_for_sync_shutdown = AsyncMock()
+    sibling_bot.stop = AsyncMock(side_effect=finish_stop)
+
+    stop_task = asyncio.create_task(
+        stop_entities(
+            {"failing", "sibling"},
+            {"failing": failing_bot, "sibling": sibling_bot},
+            {},
+            restart_entities={"failing", "sibling"},
+        ),
+    )
+    await failing_started.wait()
+    await sibling_started.wait()
+    done, _ = await asyncio.wait({stop_task}, timeout=0.05)
+    completed_before_sibling = bool(done)
+    release_sibling.set()
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await stop_task
+
+    assert completed_before_sibling is False
+    assert sibling_finished.is_set()
+
+
+@pytest.mark.asyncio
 async def test_stop_entities_uses_generic_shutdown_for_removed_entities() -> None:
     """Removed entities must not enqueue sync-restart resume work."""
     restart_bot = AsyncMock()

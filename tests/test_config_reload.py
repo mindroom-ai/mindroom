@@ -330,12 +330,17 @@ async def test_plugin_watcher_debounces_changes_and_ignores_unconfigured_roots(
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
     reload_seen = asyncio.Event()
 
-    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+    async def record_reload(
+        *,
+        source: str,
+        changed_paths: tuple[Path, ...] = (),
+        expected_revision: int,
+    ) -> bool:
         reload_calls.append((source, changed_paths))
         reload_seen.set()
-        return PluginReloadResult(HookRegistry.empty(), (), 0)
+        return expected_revision == orchestrator.plugin_watch.revision
 
-    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    orchestrator.reload_plugins_from_watcher = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.05)
@@ -401,12 +406,18 @@ async def test_plugin_watcher_tracks_configured_absolute_root_outside_config_dir
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
     reload_seen = asyncio.Event()
 
-    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+    async def record_reload(
+        *,
+        source: str,
+        changed_paths: tuple[Path, ...] = (),
+        expected_revision: int,
+    ) -> PluginReloadResult:
+        del expected_revision
         reload_calls.append((source, changed_paths))
         reload_seen.set()
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
-    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    orchestrator.reload_plugins_from_watcher = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.05)
@@ -449,12 +460,18 @@ async def test_plugin_watcher_catches_first_save_after_startup(
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
     reload_seen = asyncio.Event()
 
-    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+    async def record_reload(
+        *,
+        source: str,
+        changed_paths: tuple[Path, ...] = (),
+        expected_revision: int,
+    ) -> PluginReloadResult:
+        del expected_revision
         reload_calls.append((source, changed_paths))
         reload_seen.set()
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
-    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    orchestrator.reload_plugins_from_watcher = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.01)
@@ -503,12 +520,18 @@ async def test_plugin_watcher_catches_first_save_after_config_switch(
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
     reload_seen = asyncio.Event()
 
-    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+    async def record_reload(
+        *,
+        source: str,
+        changed_paths: tuple[Path, ...] = (),
+        expected_revision: int,
+    ) -> PluginReloadResult:
+        del expected_revision
         reload_calls.append((source, changed_paths))
         reload_seen.set()
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
-    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    orchestrator.reload_plugins_from_watcher = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.08)
@@ -562,11 +585,17 @@ async def test_plugin_watcher_does_not_reload_on_config_switch_without_plugin_ed
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
 
-    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+    async def record_reload(
+        *,
+        source: str,
+        changed_paths: tuple[Path, ...] = (),
+        expected_revision: int,
+    ) -> PluginReloadResult:
+        del expected_revision
         reload_calls.append((source, changed_paths))
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
-    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    orchestrator.reload_plugins_from_watcher = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.08)
@@ -607,7 +636,12 @@ async def test_plugin_watcher_ignores_cache_artifacts_created_during_reload(
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
     reload_seen = asyncio.Event()
 
-    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+    async def record_reload(
+        *,
+        source: str,
+        changed_paths: tuple[Path, ...] = (),
+        expected_revision: int,
+    ) -> bool:
         reload_calls.append((source, changed_paths))
         if len(reload_calls) == 1:
             pycache_dir = plugin_root / "__pycache__"
@@ -623,9 +657,9 @@ async def test_plugin_watcher_ignores_cache_artifacts_created_during_reload(
             pytest_cache_dir.mkdir(parents=True, exist_ok=True)
             (pytest_cache_dir / "nodeids").write_text("[]", encoding="utf-8")
             reload_seen.set()
-        return PluginReloadResult(HookRegistry.empty(), (), 0)
+        return expected_revision == orchestrator.plugin_watch.revision
 
-    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    orchestrator.reload_plugins_from_watcher = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.05)
@@ -694,6 +728,45 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
     assert reload_call_count == 1
 
 
+@pytest.mark.asyncio
+async def test_watcher_reload_drops_stale_revision_after_waiting_for_update_lock(tmp_path: Path) -> None:
+    """A newer publication while the watcher waits for the lock must consume its pending reload."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "demo", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    hooks_path = plugin_root / "hooks.py"
+    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+    config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+    orchestrator.plugin_watch.sync_roots(config)
+    expected_revision = orchestrator.plugin_watch.revision
+
+    with patch("mindroom.orchestrator.reload_plugins") as reload_plugins_mock:
+        await orchestrator._config_update_lock.acquire()
+        reload_task = asyncio.create_task(
+            orchestrator.reload_plugins_from_watcher(
+                source="watcher",
+                changed_paths=(hooks_path,),
+                expected_revision=expected_revision,
+            ),
+        )
+        try:
+            await asyncio.sleep(0)
+            assert not reload_task.done()
+            orchestrator.plugin_watch.refresh(config)
+        finally:
+            orchestrator._config_update_lock.release()
+
+        assert await reload_task is False
+
+    reload_plugins_mock.assert_not_called()
+
+
 def test_plugin_tree_snapshot_ignores_git_metadata(tmp_path: Path) -> None:
     """Plugin tree snapshots should ignore Git metadata files inside watched repos."""
     plugin_root = tmp_path / "plugins" / "demo"
@@ -743,7 +816,13 @@ async def test_plugin_watcher_does_not_retry_failed_reload_without_new_change(
     second_reload_seen = asyncio.Event()
     error_message = "broken plugin"
 
-    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+    async def record_reload(
+        *,
+        source: str,
+        changed_paths: tuple[Path, ...] = (),
+        expected_revision: int,
+    ) -> PluginReloadResult:
+        del expected_revision
         reload_calls.append((source, changed_paths))
         if len(reload_calls) == 1:
             first_reload_seen.set()
@@ -751,7 +830,7 @@ async def test_plugin_watcher_does_not_retry_failed_reload_without_new_change(
             second_reload_seen.set()
         raise RuntimeError(error_message)
 
-    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    orchestrator.reload_plugins_from_watcher = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.05)
@@ -1562,11 +1641,17 @@ async def test_plugin_watcher_drops_pending_changes_when_reload_commits_during_s
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
 
-    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+    async def record_reload(
+        *,
+        source: str,
+        changed_paths: tuple[Path, ...] = (),
+        expected_revision: int,
+    ) -> PluginReloadResult:
+        del expected_revision
         reload_calls.append((source, changed_paths))
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
-    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    orchestrator.reload_plugins_from_watcher = AsyncMock(side_effect=record_reload)
 
     from mindroom.orchestration.plugin_watch import _collect_plugin_root_changes as real_collect  # noqa: PLC0415
 

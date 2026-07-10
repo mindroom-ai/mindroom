@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 import tokenize
 from dataclasses import dataclass
@@ -26,7 +25,6 @@ from mindroom.tool_system.registry_state import (
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
     from pathlib import Path
     from types import ModuleType
 
@@ -274,22 +272,9 @@ def apply_prepared_plugin_reload(
     )
 
 
-def _cancel_tasks_in_modules(modules: Iterable[ModuleType]) -> int:
-    """Cancel non-done module-global asyncio tasks found in the given modules."""
-    cancelled_task_ids: set[int] = set()
-    for module in modules:
-        for value in vars(module).values():
-            for task in _iter_module_tasks(value):
-                if task.done() or id(task) in cancelled_task_ids:
-                    continue
-                task.cancel()
-                cancelled_task_ids.add(id(task))
-    return len(cancelled_task_ids)
-
-
 def cancel_discarded_plugin_reload_tasks(prepared_reload: PreparedPluginReload) -> int:
     """Cancel module-global tasks spawned by one staged plugin snapshot that will not commit."""
-    return _cancel_tasks_in_modules(prepared_reload.tool_registry_snapshot.plugin_modules.values())
+    return plugin_imports.cancel_tasks_in_modules(prepared_reload.tool_registry_snapshot.plugin_modules.values())
 
 
 def reload_plugins(
@@ -323,20 +308,7 @@ def _cancel_plugin_module_tasks(package_roots: set[str]) -> int:
         if module is not None
         and any(module_name == root or module_name.startswith(f"{root}.") for root in package_roots)
     )
-    return _cancel_tasks_in_modules(matching_modules)
-
-
-def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
-    """Return task globals or one-level container-held tasks from one module value."""
-    if isinstance(value, asyncio.Task):
-        return (value,)
-    if isinstance(value, dict):
-        values = value.values()
-    elif isinstance(value, tuple | list | set):
-        values = value
-    else:
-        return ()
-    return tuple(item for item in values if isinstance(item, asyncio.Task))
+    return plugin_imports.cancel_tasks_in_modules(matching_modules)
 
 
 def _clear_plugin_reload_caches() -> None:
@@ -360,31 +332,46 @@ def _materialize_plugin(
     entry_config: PluginEntryConfig,
     plugin_order: int,
 ) -> _Plugin:
-    tools_module = load_plugin_module(plugin.name, plugin.root, plugin.tools_module_path, kind="tools")
-    hooks_module_path = plugin.hooks_module_path or plugin.tools_module_path
-    hooks_module = (
-        load_plugin_module(plugin.name, plugin.root, hooks_module_path, kind="hooks") if hooks_module_path else None
-    )
-    if hooks_module is None and plugin.hooks_module_path is None:
-        hooks_module = tools_module
-    discovered_hooks = tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else ()
-    if discovered_hooks:
-        logger.info(
-            "Discovered plugin hooks",
-            plugin_name=plugin.name,
-            hook_names=[_hook_display_name(hook) for hook in discovered_hooks],
+    package_root = plugin_imports._plugin_package_name(plugin.name, plugin.root)
+    previous_task_ids = plugin_imports.snapshot_module_subtree_task_ids(package_root)
+    loaded_modules: list[ModuleType] = []
+    try:
+        tools_module = load_plugin_module(plugin.name, plugin.root, plugin.tools_module_path, kind="tools")
+        if tools_module is not None:
+            loaded_modules.append(tools_module)
+        hooks_module_path = plugin.hooks_module_path or plugin.tools_module_path
+        hooks_module = (
+            load_plugin_module(plugin.name, plugin.root, hooks_module_path, kind="hooks") if hooks_module_path else None
         )
-    return _Plugin(
-        name=plugin.name,
-        root=plugin.root,
-        manifest_path=plugin.manifest_path,
-        entry_config=entry_config,
-        plugin_order=plugin_order,
-        tools_module_path=plugin.tools_module_path,
-        hooks_module_path=plugin.hooks_module_path,
-        skill_dirs=plugin.skill_dirs,
-        discovered_hooks=discovered_hooks,
-    )
+        if hooks_module is not None:
+            loaded_modules.append(hooks_module)
+        if hooks_module is None and plugin.hooks_module_path is None:
+            hooks_module = tools_module
+        discovered_hooks = tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else ()
+        if discovered_hooks:
+            logger.info(
+                "Discovered plugin hooks",
+                plugin_name=plugin.name,
+                hook_names=[_hook_display_name(hook) for hook in discovered_hooks],
+            )
+        return _Plugin(
+            name=plugin.name,
+            root=plugin.root,
+            manifest_path=plugin.manifest_path,
+            entry_config=entry_config,
+            plugin_order=plugin_order,
+            tools_module_path=plugin.tools_module_path,
+            hooks_module_path=plugin.hooks_module_path,
+            skill_dirs=plugin.skill_dirs,
+            discovered_hooks=discovered_hooks,
+        )
+    except BaseException:
+        plugin_imports.cancel_new_module_subtree_tasks(
+            package_root,
+            previous_task_ids,
+            additional_modules=loaded_modules,
+        )
+        raise
 
 
 def _prepare_plugin_tool_module_reload(
@@ -438,6 +425,8 @@ def load_plugin_module(
         raise _PluginValidationError(msg) from exc
 
     module_name = plugin_imports._module_name(plugin_name, plugin_root, module_path)
+    package_root = module_name.split(".", 1)[0]
+    previous_task_ids = plugin_imports.snapshot_module_subtree_task_ids(package_root)
     cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_path)
     if cached is not None and cached.mtime == mtime and cached.module_name == module_name:
         return cached.module
@@ -463,6 +452,11 @@ def load_plugin_module(
         else:
             _exec_plugin_source(module_path, module)
     except BaseException as exc:
+        plugin_imports.cancel_new_module_subtree_tasks(
+            package_root,
+            previous_task_ids,
+            additional_modules=(module,),
+        )
         if kind == "tools":
             _restore_failed_plugin_tool_module_reload(
                 module_path,

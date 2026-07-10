@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
 import os
 import sys
@@ -2625,8 +2626,9 @@ def test_load_oauth_providers_isolates_system_exit_from_plugin_callback(tmp_path
             clear_oauth_provider_cache()
 
 
-def test_load_oauth_providers_propagates_keyboard_interrupt_from_plugin_callback(tmp_path: Path) -> None:
-    """Operator interrupts during plugin OAuth callbacks should still terminate startup."""
+@pytest.mark.asyncio
+async def test_load_oauth_providers_propagates_keyboard_interrupt_from_plugin_callback(tmp_path: Path) -> None:
+    """Operator interrupts propagate after OAuth import tasks and cache state are rolled back."""
     plugin_root = tmp_path / "plugins" / "bad-oauth"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -2634,6 +2636,10 @@ def test_load_oauth_providers_propagates_keyboard_interrupt_from_plugin_callback
         encoding="utf-8",
     )
     (plugin_root / "oauth_provider.py").write_text(
+        "import asyncio\n"
+        "import builtins\n"
+        "_TASK = asyncio.create_task(asyncio.Event().wait())\n"
+        "builtins._MINDROOM_INTERRUPTED_OAUTH_TASK = _TASK\n"
         "def register_oauth_providers(settings, runtime_paths):\n"
         "    del settings, runtime_paths\n"
         "    raise KeyboardInterrupt('stop')\n",
@@ -2644,13 +2650,205 @@ def test_load_oauth_providers_propagates_keyboard_interrupt_from_plugin_callback
     config = _bind_runtime_paths(Config(plugins=["./plugins/bad-oauth"]), config_path)
     runtime_paths = runtime_paths_for(config)
 
-    with _preserved_plugin_loader_state():
-        try:
+    try:
+        with _preserved_plugin_loader_state():
             clear_oauth_provider_cache()
             with pytest.raises(KeyboardInterrupt):
                 load_oauth_providers(config, runtime_paths)
-        finally:
+            task = builtins._MINDROOM_INTERRUPTED_OAUTH_TASK
+            await asyncio.sleep(0)
+            assert task.cancelled()
+            assert (plugin_root / "oauth_provider.py").resolve() not in plugin_module._MODULE_IMPORT_CACHE
+    finally:
+        clear_oauth_provider_cache()
+        task = getattr(builtins, "_MINDROOM_INTERRUPTED_OAUTH_TASK", None)
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            delattr(builtins, "_MINDROOM_INTERRUPTED_OAUTH_TASK")
+
+
+@pytest.mark.asyncio
+async def test_tolerant_plugin_load_cancels_task_from_failed_module(tmp_path: Path) -> None:
+    """A skipped plugin must not leave tasks spawned before its module raised."""
+    plugin_root = tmp_path / "plugins" / "broken-task"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "broken-task", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text(
+        "import asyncio\n"
+        "import builtins\n"
+        "import sys\n"
+        "_TASK = asyncio.create_task(asyncio.Event().wait())\n"
+        "builtins._MINDROOM_FAILED_PLUGIN_TASK = _TASK\n"
+        "sys.modules.pop(__name__, None)\n"
+        "raise RuntimeError('broken after task creation')\n",
+        encoding="utf-8",
+    )
+    config = Config(plugins=["./plugins/broken-task"])
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+
+    try:
+        with _preserved_plugin_loader_state():
+            assert load_plugins(config, runtime_paths, skip_broken_plugins=True) == []
+        task = builtins._MINDROOM_FAILED_PLUGIN_TASK
+        await asyncio.sleep(0)
+        assert task.cancelled()
+    finally:
+        task = getattr(builtins, "_MINDROOM_FAILED_PLUGIN_TASK", None)
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            delattr(builtins, "_MINDROOM_FAILED_PLUGIN_TASK")
+
+
+@pytest.mark.asyncio
+async def test_skipped_plugin_cancels_task_from_successful_tools_module(tmp_path: Path) -> None:
+    """A later hooks failure must cancel tasks from the same plugin's successful tools module."""
+    plugin_root = tmp_path / "plugins" / "partly-broken-task"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "partly-broken-task",
+                "tools_module": "tools.py",
+                "hooks_module": "hooks.py",
+                "skills": [],
+            },
+        ),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "import asyncio\n"
+        "import builtins\n"
+        "_TASK = asyncio.create_task(asyncio.Event().wait())\n"
+        "builtins._MINDROOM_PARTIAL_PLUGIN_TASK = _TASK\n",
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text("raise RuntimeError('broken hooks')\n", encoding="utf-8")
+    config = Config(plugins=["./plugins/partly-broken-task"])
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+
+    try:
+        with _preserved_plugin_loader_state():
+            assert load_plugins(config, runtime_paths, skip_broken_plugins=True) == []
+        task = builtins._MINDROOM_PARTIAL_PLUGIN_TASK
+        await asyncio.sleep(0)
+        assert task.cancelled()
+    finally:
+        task = getattr(builtins, "_MINDROOM_PARTIAL_PLUGIN_TASK", None)
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            delattr(builtins, "_MINDROOM_PARTIAL_PLUGIN_TASK")
+
+
+@pytest.mark.asyncio
+async def test_skipped_oauth_callback_reexecutes_module_on_retry(tmp_path: Path) -> None:
+    """A skipped OAuth callback must discard its import so corrected settings get a fresh task."""
+    plugin_root = tmp_path / "plugins" / "oauth-task-retry"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "oauth-task-retry", "oauth_module": "oauth_provider.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "oauth_provider.py").write_text(
+        "import asyncio\n"
+        "import builtins\n"
+        "IMPORT_TASK = asyncio.create_task(asyncio.Event().wait())\n"
+        "_TASKS = getattr(builtins, '_MINDROOM_OAUTH_RETRY_TASKS', [])\n"
+        "_TASKS.append(IMPORT_TASK)\n"
+        "builtins._MINDROOM_OAUTH_RETRY_TASKS = _TASKS\n"
+        "def register_oauth_providers(settings, runtime_paths):\n"
+        "    del runtime_paths\n"
+        "    if settings.get('fail'):\n"
+        "        raise RuntimeError('bad settings')\n"
+        "    return []\n",
+        encoding="utf-8",
+    )
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    failing_config = Config(plugins=[{"path": "./plugins/oauth-task-retry", "settings": {"fail": True}}])
+    corrected_config = Config(plugins=[{"path": "./plugins/oauth-task-retry", "settings": {"fail": False}}])
+
+    try:
+        with _preserved_plugin_loader_state():
             clear_oauth_provider_cache()
+            load_oauth_providers(failing_config, runtime_paths, skip_broken_plugins=True)
+            await asyncio.sleep(0)
+            first_task = builtins._MINDROOM_OAUTH_RETRY_TASKS[0]
+            assert first_task.cancelled()
+
+            clear_oauth_provider_cache()
+            load_oauth_providers(corrected_config, runtime_paths, skip_broken_plugins=True)
+            tasks = builtins._MINDROOM_OAUTH_RETRY_TASKS
+            assert len(tasks) == 2
+            assert not tasks[1].done()
+    finally:
+        clear_oauth_provider_cache()
+        tasks = getattr(builtins, "_MINDROOM_OAUTH_RETRY_TASKS", [])
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if hasattr(builtins, "_MINDROOM_OAUTH_RETRY_TASKS"):
+            delattr(builtins, "_MINDROOM_OAUTH_RETRY_TASKS")
+
+
+@pytest.mark.asyncio
+async def test_skipped_oauth_callback_preserves_reexported_live_task(tmp_path: Path) -> None:
+    """OAuth cleanup must not cancel a preexisting task reexported from a live tools helper."""
+    plugin_root = tmp_path / "plugins" / "oauth-live-task"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "oauth-live-task",
+                "tools_module": "tools.py",
+                "oauth_module": "oauth_provider.py",
+                "skills": [],
+            },
+        ),
+        encoding="utf-8",
+    )
+    (plugin_root / "helper.py").write_text(
+        "import asyncio\n"
+        "import builtins\n"
+        "LIVE_TASK = asyncio.create_task(asyncio.Event().wait())\n"
+        "builtins._MINDROOM_OAUTH_LIVE_TASK = LIVE_TASK\n",
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text("from .helper import LIVE_TASK\n", encoding="utf-8")
+    (plugin_root / "oauth_provider.py").write_text(
+        "from .helper import LIVE_TASK\n"
+        "def register_oauth_providers(settings, runtime_paths):\n"
+        "    del settings, runtime_paths\n"
+        "    raise RuntimeError('broken oauth callback')\n",
+        encoding="utf-8",
+    )
+    config = Config(plugins=["./plugins/oauth-live-task"])
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+
+    try:
+        with _preserved_plugin_loader_state():
+            assert len(load_plugins(config, runtime_paths, skip_broken_plugins=True)) == 1
+            live_task = builtins._MINDROOM_OAUTH_LIVE_TASK
+            clear_oauth_provider_cache()
+            load_oauth_providers(config, runtime_paths, skip_broken_plugins=True)
+            await asyncio.sleep(0)
+            assert not live_task.done()
+    finally:
+        clear_oauth_provider_cache()
+        live_task = getattr(builtins, "_MINDROOM_OAUTH_LIVE_TASK", None)
+        if live_task is not None:
+            if not live_task.done():
+                live_task.cancel()
+            await asyncio.gather(live_task, return_exceptions=True)
+            delattr(builtins, "_MINDROOM_OAUTH_LIVE_TASK")
 
 
 @pytest.mark.asyncio
