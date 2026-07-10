@@ -1357,7 +1357,7 @@ voice:
   visible_router_echo: true        # Optional: show the normalized voice text from the router
   stt:
     provider: openai               # Default: openai
-    model: whisper-1               # Default: whisper-1
+    model: gpt-4o-transcribe       # Default: gpt-4o-transcribe
     api_key: null
     host: null
   intelligence:
@@ -1366,9 +1366,12 @@ voice:
 # Voice calls via Element Call / MatrixRTC (optional)
 calls:
   enabled: false                   # Default: false
+  backend: realtime                # realtime (default) or cascaded
   agents: []                       # Shared agents allowed to join calls in their configured rooms (at most one per room)
   model: gpt-realtime-2.1          # OpenAI realtime speech-to-speech model
   voice: null                      # Optional realtime voice preset
+  stt: null                        # Cascaded SpeechServiceConfig; required with backend: cascaded
+  tts: null                        # Cascaded SpeechServiceConfig; required with backend: cascaded
   livekit_service_url: null        # Optional override for .well-known discovery
 
 # Internal MindRoom user account (optional, omit for hosted/public profiles)
@@ -12674,7 +12677,7 @@ voice:
   visible_router_echo: true
   stt:
     provider: openai
-    model: whisper-1
+    model: gpt-4o-transcribe
     # Optional: custom endpoint (without /v1 suffix)
     # host: http://localhost:8080
   intelligence:
@@ -12698,7 +12701,7 @@ voice:
   enabled: true
   stt:
     provider: openai
-    model: whisper-1
+    model: gpt-4o-transcribe
 ```
 
 Requires `OPENAI_API_KEY` environment variable.
@@ -12709,12 +12712,12 @@ Requires `OPENAI_API_KEY` environment variable.
 voice:
   enabled: true
   stt:
-    provider: openai
+    provider: openai_compatible
     model: whisper-1
     host: http://localhost:8080
 ```
 
-Note: Do not include `/v1` in the host URL - MindRoom appends `/v1/audio/transcriptions` automatically.
+The host may be either the service root or its `/v1` base URL.
 
 Use with [faster-whisper-server](https://github.com/fedirz/faster-whisper-server) or similar OpenAI-compatible STT servers.
 
@@ -12726,13 +12729,14 @@ For self-hosted solutions that require authentication:
 voice:
   enabled: true
   stt:
-    provider: openai
+    provider: openai_compatible
     model: whisper-1
     host: http://localhost:8080
     api_key: your-custom-api-key
 ```
 
-If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment variable.
+If a custom endpoint has no `api_key`, MindRoom sends a non-secret placeholder rather than requiring a cloud key.
+Cloud OpenAI transcription falls back to the `OPENAI_API_KEY` environment variable.
 
 ## Command Recognition
 
@@ -12892,7 +12896,8 @@ Attachment IDs in this fallback path use the same context-scoping rules describe
 # Voice Calls
 
 MindRoom agents can join Element Call voice calls in their rooms and talk with you in real time.
-The agent speaks through an OpenAI realtime speech-to-speech model (`gpt-realtime-2.1` by default), so there is no separate transcription and TTS pipeline and you can interrupt it naturally mid-sentence.
+The default `realtime` backend preserves the OpenAI realtime speech-to-speech path.
+The `cascaded` backend combines independently configured speech-to-text and text-to-speech services with the agent's normal MindRoom response path.
 
 ## How it works
 
@@ -12905,30 +12910,107 @@ When a call starts in a room, the configured agent:
 2. Exchanges a Matrix OpenID token for a LiveKit JWT at the MatrixRTC authorization service (`lk-jwt-service`).
 3. Connects to the LiveKit SFU and publishes its own call membership state event, so it appears in the call roster.
 4. In encrypted rooms, distributes its media frame key over encrypted to-device messages and installs the other participants' keys, following the same per-sender key rotation policy as Element Call.
-5. Runs an OpenAI realtime session on the call audio until the managed session ends.
+5. Runs either the OpenAI realtime session or the cascaded speech pipeline until the managed session ends.
 
-The voice agent is the same agent you chat with: it carries the agent's regular rendered system prompt (with a spoken-style addendum) and its effective text-chat tool surface, including tools added by knowledge and skills.
+The voice agent is the same agent you chat with.
+Realtime carries the agent's rendered prompt and effective tools into OpenAI Realtime.
+Cascaded sends each finalized transcript through the normal MindRoom agent response path, preserving the resolved model, rendered system prompt, instructions, knowledge, skills, hooks, tools, requester identity, history storage, and tool execution behavior.
 MindRoom keeps a managed call active only while its devices belong to one Matrix user, and uses that user's ID as the real requester for the room-scoped tool runtime.
 Multiple devices belonging to that same user are supported.
-Tools requiring confirmation, user input, external execution, or `tool_approval` are hidden from the voice tool schema because a voice call has no approval UI.
+Tools requiring confirmation, user input, external execution, or `tool_approval` are hidden in both backends because a voice call has no approval UI.
 
-The agent leaves the call (and clears its membership state event) when the caller leaves, a second distinct Matrix user joins, the realtime session terminates, or the bot shuts down.
+The agent leaves the call and clears its membership state event when the caller leaves, a second distinct Matrix user joins, the voice session terminates, or the bot shuts down.
 
 ## Configuration
 
 ```yaml
 calls:
   enabled: true
+  backend: realtime           # default; preserves OpenAI speech-to-speech
   agents: [assistant]        # shared agents that may join calls in their configured rooms
   model: gpt-realtime-2.1    # OpenAI realtime model
   voice: marin               # optional voice preset
   # livekit_service_url: https://rtc.example.org   # same-server .well-known override
 ```
 
-Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`) and an `OPENAI_API_KEY` in your credentials.
+Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`).
+The realtime backend requires an `OPENAI_API_KEY` in your credentials and otherwise behaves as before.
 MindRoom enforces at most one calls-enabled agent per room.
 Calls only join rooms configured for that agent and only while the sole caller passes the normal room and per-agent reply permissions.
 Requester-private agents are not currently supported for calls.
+
+## Cascaded cloud example
+
+This example uses OpenAI speech services while the agent keeps its normally configured model provider.
+The agent can therefore use Anthropic, Gemini, OpenAI, or any other MindRoom model provider without changing the call configuration.
+
+```yaml
+calls:
+  enabled: true
+  backend: cascaded
+  agents: [assistant]
+  stt:
+    provider: openai
+    model: gpt-4o-transcribe
+    api_key: your-stt-key
+    extra_kwargs:
+      language: en
+  tts:
+    provider: openai
+    model: tts-1
+    api_key: your-tts-key
+    extra_kwargs:
+      voice: ash
+```
+
+Each speech component has its own `provider`, `model`, `host`, `api_key`, and `extra_kwargs`.
+For OpenAI, omit a component's `api_key` to use the configured `OPENAI_API_KEY`.
+The current OpenAI model catalog documents [`gpt-4o-transcribe`](https://developers.openai.com/api/docs/models/gpt-4o-transcribe) for transcription and [`tts-1`](https://developers.openai.com/api/docs/models/tts-1) for text-to-speech.
+
+## Completely local example
+
+This configuration sends STT, LLM, and TTS requests only to separately managed localhost services and needs no real cloud API key.
+The STT service must expose an OpenAI-compatible `/v1/audio/transcriptions` endpoint.
+The TTS service must expose an OpenAI-compatible `/v1/audio/speech` endpoint, such as a narrow local Kokoro server using a configured model alias.
+
+```yaml
+models:
+  default:
+    provider: openai
+    id: local-chat-model
+    extra_kwargs:
+      api_key: sk-no-key-required
+      base_url: http://127.0.0.1:9292/v1
+
+memory: none
+
+agents:
+  assistant:
+    display_name: Assistant
+    role: Help the caller.
+    rooms: [lobby]
+
+calls:
+  enabled: true
+  backend: cascaded
+  agents: [assistant]
+  stt:
+    provider: openai_compatible
+    model: whisper-large-v3
+    host: http://127.0.0.1:9000
+    extra_kwargs:
+      language: en
+  tts:
+    provider: openai_compatible
+    model: tts-1
+    host: http://127.0.0.1:9001
+    extra_kwargs:
+      voice: ash
+```
+
+`host` accepts either the service root or its `/v1` base URL.
+MindRoom supplies a non-secret placeholder key when an OpenAI-compatible speech endpoint has no configured key.
+LiveKit's local Silero VAD controls turn boundaries and barge-in, and preemptive agent generation stays disabled so an interrupted or speculative turn cannot execute tools twice.
 
 ## Server requirements
 
@@ -12975,6 +13057,7 @@ When the call ends, file memory stores a relative transcript reference, Mem0 sto
 
 - Audio only: the agent neither publishes nor consumes video and screen shares.
 - Managed agent calls support one distinct human Matrix user at a time, although that user may join from multiple devices.
+- Cascaded speech services currently use OpenAI-compatible transcription and speech endpoints.
 - Legacy 1:1 `m.call.*` calls (non-MatrixRTC) are not supported.
 
 # Image Messages
