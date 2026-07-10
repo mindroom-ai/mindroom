@@ -2790,6 +2790,99 @@ async def test_plugin_reload_keeps_each_runtime_package_generation_isolated(
         assert toolkit_name(config_v2) == "generation_version_2"
 
 
+def test_plugin_staging_serializes_runtime_validation_packages(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Staged snapshot restoration must not evict concurrent validation packages."""
+    plugin_root = tmp_path / "plugins" / "validation-race"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "validation-race", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "helper.py").write_text("TOOLKIT_NAME = 'validation_race'\n", encoding="utf-8")
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "class ValidationRaceToolkit(Toolkit):\n"
+        "    def __init__(self):\n"
+        "        from .helper import TOOLKIT_NAME\n"
+        "        super().__init__(name=TOOLKIT_NAME, tools=[])\n"
+        "@register_tool_with_metadata(\n"
+        "    name='validation_race_tool',\n"
+        "    display_name='Validation Race Tool',\n"
+        "    description='Test validation package ownership.',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def validation_race_tool():\n"
+        "    return ValidationRaceToolkit\n",
+        encoding="utf-8",
+    )
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    empty_config = RuntimeConfig.from_authored(Config(defaults={"tools": []}), runtime_paths)
+    authored_plugin_config = Config(defaults={"tools": []}, plugins=["./plugins/validation-race"])
+    staging_started = threading.Event()
+    continue_staging = threading.Event()
+    validation_started = threading.Event()
+    validation_finished = threading.Event()
+    results: dict[str, object] = {}
+    errors: list[BaseException] = []
+    original_load_plugins = plugins_module.load_plugins
+
+    def pause_staging(*args: object, **kwargs: object) -> list[plugin_module._Plugin]:
+        staging_started.set()
+        if not continue_staging.wait(timeout=5):
+            msg = "timed out waiting to resume plugin staging"
+            raise RuntimeError(msg)
+        return original_load_plugins(*args, **kwargs)
+
+    def stage_plugins() -> None:
+        try:
+            results["prepared"] = plugins_module.prepare_plugin_reload(empty_config, runtime_paths)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def validate_config() -> None:
+        validation_started.set()
+        try:
+            results["config"] = RuntimeConfig.from_authored(authored_plugin_config, runtime_paths)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            validation_finished.set()
+
+    monkeypatch.setattr(plugins_module, "load_plugins", pause_staging)
+    with _preserved_plugin_loader_state():
+        staging_thread = threading.Thread(target=stage_plugins)
+        validation_thread = threading.Thread(target=validate_config)
+        staging_thread.start()
+        try:
+            assert staging_started.wait(timeout=5)
+            validation_thread.start()
+            assert validation_started.wait(timeout=5)
+            assert not validation_finished.wait(timeout=0.2)
+        finally:
+            continue_staging.set()
+            staging_thread.join(timeout=5)
+            validation_thread.join(timeout=5)
+
+        assert not staging_thread.is_alive()
+        assert not validation_thread.is_alive()
+        assert not errors
+        runtime_config = results["config"]
+        assert isinstance(runtime_config, RuntimeConfig)
+        toolkit = get_tool_by_name(
+            "validation_race_tool",
+            runtime_paths,
+            runtime_config=runtime_config,
+            disable_sandbox_proxy=True,
+            worker_target=None,
+        )
+        assert toolkit.name == "validation_race"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("raise_after_schedule", [False, True])
 async def test_plugin_import_rejects_background_tasks(

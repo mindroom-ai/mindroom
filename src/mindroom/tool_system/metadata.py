@@ -35,6 +35,7 @@ from mindroom.tool_system.registry_state import (
     TOOL_METADATA,
     TOOL_REGISTRY,
     ToolMetadataValidationError,
+    locked_tool_registry_state,
     resolved_tool_state,
     scoped_plugin_registration_owner,
     scoped_plugin_registration_store,
@@ -912,6 +913,21 @@ def _evict_resolved_tool_state(cache_key: tuple[int, bool]) -> None:
         _RESOLVED_TOOL_STATE_CACHE.pop(cache_key, None)
 
 
+def _cached_resolved_tool_state(
+    runtime_paths: RuntimePaths,
+    config: Config,
+    cache_key: tuple[int, bool],
+) -> _ResolvedToolState | None:
+    """Return tool state already owned by one config while the cache lock is held."""
+    bound = _BOUND_RUNTIME_TOOL_STATE_CACHE.get(id(config))
+    if bound is not None and bound[0] == runtime_paths:
+        return bound[1]
+    cached = _RESOLVED_TOOL_STATE_CACHE.get(cache_key)
+    if cached is not None and cached[0] == runtime_paths:
+        return cached[1]
+    return None
+
+
 def _resolved_tool_state_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
@@ -923,17 +939,18 @@ def _resolved_tool_state_for_runtime(
     The state is computed once per config object and reused by every consumer
     (authored-entry validation, the tools API, self-config tools, worker
     snapshots): resolving it executes plugin modules and walks the filesystem,
-    so recomputing per consumer stalls the event loop (#1260). The lock also
-    serializes plugin validation, which temporarily rewires ``sys.modules``.
+    so recomputing per consumer stalls the event loop (#1260). The registry lock
+    keeps validation's temporary ``sys.modules`` changes isolated from staged reloads.
     """
     cache_key = (id(config), tolerate_plugin_load_errors)
     with _RESOLVED_TOOL_STATE_LOCK:
-        bound = _BOUND_RUNTIME_TOOL_STATE_CACHE.get(id(config))
-        if bound is not None and bound[0] == runtime_paths:
-            return bound[1]
-        cached = _RESOLVED_TOOL_STATE_CACHE.get(cache_key)
-        if cached is not None and cached[0] == runtime_paths:
-            return cached[1]
+        cached_state = _cached_resolved_tool_state(runtime_paths, config, cache_key)
+        if cached_state is not None:
+            return cached_state
+    with locked_tool_registry_state(), _RESOLVED_TOOL_STATE_LOCK:
+        cached_state = _cached_resolved_tool_state(runtime_paths, config, cache_key)
+        if cached_state is not None:
+            return cached_state
         resolved_state = _compute_resolved_tool_state_for_runtime(
             runtime_paths,
             config,
