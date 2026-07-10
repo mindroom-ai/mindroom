@@ -168,9 +168,16 @@ async def test_request_sfu_grant_posts_openid_exchange(monkeypatch: pytest.Monke
 
     def patched_client(**kwargs: object) -> httpx.AsyncClient:
         kwargs.pop("verify", None)
+        kwargs.pop("transport", None)
         return original_client(transport=transport, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr("mindroom.matrix_rtc.focus.httpx.AsyncClient", patched_client)
+
+    def guarded_transport(**kwargs: object) -> httpx.MockTransport:
+        seen["transport_kwargs"] = kwargs
+        return transport
+
+    monkeypatch.setattr("mindroom.matrix_rtc.focus.ServerFetchAsyncHTTPTransport", guarded_transport)
     grant = await request_sfu_grant(
         "https://rtc.example.org/",
         room_id="!room:example.org",
@@ -184,6 +191,7 @@ async def test_request_sfu_grant_posts_openid_exchange(monkeypatch: pytest.Monke
     )
     assert grant.url == "wss://sfu.example.org"
     assert grant.jwt == "token123"
+    assert seen["transport_kwargs"]["allow_private_networks"] is False
     assert seen["url"] == "https://rtc.example.org/sfu/get"
     assert b'"room": "!room:example.org"' in seen["body"] or b'"room":"!room:example.org"' in seen["body"]
 
@@ -194,6 +202,7 @@ def _patched_httpx_client(monkeypatch: pytest.MonkeyPatch, handler) -> None:  # 
 
     def patched_client(**kwargs: object) -> httpx.AsyncClient:
         kwargs.pop("verify", None)
+        kwargs.pop("transport", None)
         return original_client(transport=transport, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr("mindroom.matrix_rtc.focus.httpx.AsyncClient", patched_client)

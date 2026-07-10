@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import httpx
 
 from mindroom.logging_config import get_logger
+from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport
 
 logger = get_logger(__name__)
 
@@ -37,10 +38,19 @@ class SfuGrant:
     jwt: str
 
 
-async def discover_livekit_service_url(server_name: str, *, ssl_verify: bool = True) -> str | None:
+async def discover_livekit_service_url(
+    server_name: str,
+    *,
+    ssl_verify: bool = True,
+    allow_private_networks: bool = False,
+) -> str | None:
     """Read the LiveKit service URL from a Matrix server name's client well-known."""
     well_known_url = f"https://{server_name}/.well-known/matrix/client"
-    async with httpx.AsyncClient(verify=ssl_verify, timeout=10.0, follow_redirects=True) as client:
+    transport = ServerFetchAsyncHTTPTransport(
+        allow_private_networks=allow_private_networks,
+        verify=ssl_verify,
+    )
+    async with httpx.AsyncClient(transport=transport, timeout=10.0, follow_redirects=True) as client:
         try:
             response = await client.get(well_known_url)
             response.raise_for_status()
@@ -69,6 +79,7 @@ async def request_sfu_grant(
     device_id: str,
     openid_token: OpenIDToken,
     ssl_verify: bool = True,
+    allow_private_networks: bool = False,
 ) -> SfuGrant:
     """Exchange a Matrix OpenID token for LiveKit SFU credentials.
 
@@ -87,7 +98,11 @@ async def request_sfu_grant(
         },
         "device_id": device_id,
     }
-    async with httpx.AsyncClient(verify=ssl_verify, timeout=30.0) as client:
+    transport = ServerFetchAsyncHTTPTransport(
+        allow_private_networks=allow_private_networks,
+        verify=ssl_verify,
+    )
+    async with httpx.AsyncClient(transport=transport, timeout=30.0) as client:
         response = await client.post(endpoint, json=request_body)
         response.raise_for_status()
         payload = response.json()

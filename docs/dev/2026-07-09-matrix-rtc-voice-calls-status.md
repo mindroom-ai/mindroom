@@ -50,6 +50,7 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
    Fixed in `call_tools._wrap_agno_function` (now processes the entrypoint before reading `function.parameters`), pinned by a unit test.
    Calls use the configured agent's room-scoped context; tools requiring `tool_approval` remain unavailable without a Matrix requester.
 4. **Enabling calls without the `matrix_calls` extra crashed the whole agent at startup** — `find_spec("livekit.rtc")` raises `ModuleNotFoundError` (instead of returning `None`) when the parent `livekit` package is missing, so `matrix_calls_dependencies_available()` blew up `AgentBot.start()` instead of logging the dependencies-missing warning. Found during the first real deployment; fixed in `voice_agent.py` (commit `33b92df46`), pinned by a unit test.
+5. **PR review found lifecycle, federation-recovery, and credential-transport gaps** — the follow-up publishes membership before the first E2EE key, tears down partial SFU connects, supports sticky inherited federation focuses behind server-fetch guards, and sends manual-harness Matrix access tokens only in authorization headers.
 
 ## Deployed agent backend (mindroom-chat on the `mindroom` LXC)
 

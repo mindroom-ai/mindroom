@@ -76,7 +76,7 @@ async def _register(http: httpx.AsyncClient, username: str, password: str, reg_t
 async def _openid(http: httpx.AsyncClient, user_id: str, access_token: str) -> OpenIDToken:
     resp = await http.post(
         f"/_matrix/client/v3/user/{user_id}/openid/request_token",
-        params={"access_token": access_token},
+        headers={"Authorization": f"Bearer {access_token}"},
         json={},
     )
     resp.raise_for_status()

@@ -151,16 +151,16 @@ class CallSession:
         self._sync_bridge_participants()
         grant = await self.deps.fetch_grant()
         try:
-            await self.deps.bridge.connect(grant)
-        except Exception as error:
-            # livekit raises SDK-native exception types; convert them so the
-            # manager's join guard handles them as an ordinary failed join.
-            msg = f"LiveKit SFU connect failed: {error}"
-            raise CallJoinError(msg) from error
-        try:
+            try:
+                await self.deps.bridge.connect(grant)
+            except Exception as error:
+                # livekit raises SDK-native exception types; convert them so the
+                # manager's join guard handles them as an ordinary failed join.
+                msg = f"LiveKit SFU connect failed: {error}"
+                raise CallJoinError(msg) from error
+            await self._publish_membership(initial=True)
             if self.e2ee_enabled:
                 await self._distribute_keys()
-            await self._publish_membership(initial=True)
             self._spawn(self._membership_refresh_loop())
             try:
                 await self.deps.bridge.start_agent(self.deps.agent_options)

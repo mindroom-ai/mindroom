@@ -689,6 +689,74 @@ async def test_session_distributes_and_applies_first_key_on_start() -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_publishes_membership_before_peer_receives_first_key() -> None:
+    """A peer can admit the sender's first E2EE key from authoritative membership."""
+    sender_client = _client()
+    receiver_client = _client()
+    receiver_client.user_id = "@alice:example.org"
+    receiver_client.device_id = "ALICEDEV"
+    receiver_bridge = FakeBridge()
+    receiver_session = _session(receiver_client, receiver_bridge, FakeKeyTransport(), [1_000])
+    sender_member = _member(BOT_USER, BOT_DEVICE)
+    receiver_member = _member(receiver_client.user_id, receiver_client.device_id)
+    sender_published = False
+
+    async def record_sender_membership(
+        _room_id: str,
+        _event_type: str,
+        content: dict,
+        *,
+        state_key: str,
+    ) -> MagicMock:
+        nonlocal sender_published
+        assert state_key == membership_state_key(BOT_USER, BOT_DEVICE)
+        if content:
+            sender_published = True
+        return MagicMock()
+
+    sender_client.room_put_state.side_effect = record_sender_membership
+
+    class PeerTransport(FakeKeyTransport):
+        async def send_key(
+            self,
+            *,
+            room_id: str,
+            key_base64: str,
+            key_index: int,
+            targets: list[CallMember],
+        ) -> list[CallMember]:
+            assert sender_published
+            receiver_session._members = [sender_member]
+            admitted = receiver_session.on_key_received(
+                ReceivedFrameKey(
+                    user_id=BOT_USER,
+                    claimed_device_id=BOT_DEVICE,
+                    key_base64=key_base64,
+                    key_index=key_index,
+                ),
+            )
+            assert admitted
+            return await super().send_key(
+                room_id=room_id,
+                key_base64=key_base64,
+                key_index=key_index,
+                targets=targets,
+            )
+
+    sender_session = _session(sender_client, FakeBridge(), PeerTransport(), [1_000])
+
+    await sender_session.start([receiver_member])
+
+    assert len(receiver_bridge.frame_keys) == 1
+    participant_identity, received_key, key_index = receiver_bridge.frame_keys[0]
+    assert participant_identity == f"{BOT_USER}:{BOT_DEVICE}"
+    assert len(received_key) == 16
+    assert key_index == 0
+    await sender_session.stop()
+    await receiver_session.stop()
+
+
+@pytest.mark.asyncio
 async def test_session_installs_inbound_keys_on_bridge() -> None:
     """Session derives the media identity from its trusted call roster."""
     client = _client()
@@ -937,23 +1005,15 @@ async def test_manager_replays_a_key_received_while_starting(
 
 
 @pytest.mark.asyncio
-async def test_manager_uses_oldest_membership_focus_after_remote_discovery(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_manager_uses_oldest_membership_federated_https_focus(
     tmp_path: Path,
 ) -> None:
-    """A federated call follows its oldest member only after server-name discovery agrees."""
+    """A federated call follows the sticky HTTPS focus advertised by its oldest member."""
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
         models={},
         calls=CallsConfig(enabled=True, agents=["helper"]),
     )
-    discovered_for: list[str] = []
-
-    async def trusted_discovery(server_name: str, **_kwargs: object) -> str:
-        discovered_for.append(server_name)
-        return "https://rtc.remote.example"
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.discover_livekit_service_url", trusted_discovery)
     manager = _manager(_client(), FakeBridge(), tmp_path, config)
     members = [
         _member(
@@ -965,34 +1025,71 @@ async def test_manager_uses_oldest_membership_focus_after_remote_discovery(
         _member("@newer:example.org", "NEW", created_ts=2),
     ]
 
-    assert await manager._resolve_service_url(members) == "https://rtc.remote.example"
-    assert discovered_for == ["remote.example"]
+    service = await manager._resolve_service(members)
+
+    assert service is not None
+    assert service.url == "https://rtc.remote.example"
+    assert not service.allow_private_networks
 
 
 @pytest.mark.asyncio
-async def test_manager_rejects_oldest_membership_focus_that_discovery_does_not_trust(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_manager_rejects_same_server_focus_that_config_does_not_trust(
     tmp_path: Path,
 ) -> None:
-    """A participant-advertised focus cannot redirect the bot's OpenID token."""
+    """A same-server participant cannot override the operator's configured focus."""
+    config = Config(
+        agents={"helper": AgentConfig(display_name="Helper")},
+        models={},
+        calls=CallsConfig(enabled=True, agents=["helper"], livekit_service_url=SERVICE_URL),
+    )
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
+    member = _member(
+        "@alice:example.org",
+        "ALICEDEV",
+        livekit_service_url="https://attacker.example",
+    )
+
+    assert await manager._resolve_service([member]) is None
+
+
+@pytest.mark.asyncio
+async def test_manager_recovers_inherited_focus_after_founder_leaves(tmp_path: Path) -> None:
+    """A restarted bot follows the focus a remaining follower inherited from a departed founder."""
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
         models={},
         calls=CallsConfig(enabled=True, agents=["helper"]),
     )
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
+    follower = _member(
+        "@follower:follower.example",
+        "FOLLOWER",
+        livekit_service_url="https://rtc.founder.example",
+    )
 
-    async def trusted_discovery(_server_name: str, **_kwargs: object) -> str:
-        return "https://trusted.remote.example"
+    service = await manager._resolve_service([follower])
 
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.discover_livekit_service_url", trusted_discovery)
+    assert service is not None
+    assert service.url == "https://rtc.founder.example"
+    assert not service.allow_private_networks
+
+
+@pytest.mark.asyncio
+async def test_manager_rejects_insecure_federated_focus(tmp_path: Path) -> None:
+    """Federated membership cannot redirect an OpenID token over plaintext HTTP."""
+    config = Config(
+        agents={"helper": AgentConfig(display_name="Helper")},
+        models={},
+        calls=CallsConfig(enabled=True, agents=["helper"]),
+    )
     manager = _manager(_client(), FakeBridge(), tmp_path, config)
     member = _member(
         "@alice:remote.example",
         "ALICEDEV",
-        livekit_service_url="https://attacker.example",
+        livekit_service_url="http://rtc.remote.example",
     )
 
-    assert await manager._resolve_service_url([member]) is None
+    assert await manager._resolve_service([member]) is None
 
 
 @pytest.mark.asyncio
@@ -1094,6 +1191,7 @@ async def test_bridge_connect_failure_is_a_clean_join_failure(tmp_path: Path) ->
     bridge = FakeBridge()
 
     async def exploding_connect(_grant: SfuGrant) -> None:
+        bridge.connected_grant = GRANT
         msg = "sdk boom"
         raise RuntimeError(msg)
 
@@ -1102,6 +1200,7 @@ async def test_bridge_connect_failure_is_a_clean_join_failure(tmp_path: Path) ->
     client.room_get_state.return_value = _state_response(_remote_member_event())
     await manager.on_room_event(_room(), _member_unknown_event())
     assert bridge.agent_options is None
+    assert bridge.closed
 
 
 def _plain_session(

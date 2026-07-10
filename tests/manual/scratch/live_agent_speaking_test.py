@@ -199,13 +199,13 @@ async def caller_start_call(
         )
         put = await h.put(
             f"/_matrix/client/v3/rooms/{room_id}/state/{CALL_MEMBER_EVENT_TYPE}/{membership_state_key(user_id, device_id)}",
-            params={"access_token": token},
+            headers={"Authorization": f"Bearer {token}"},
             json=content,
         )
         put.raise_for_status()
         openid_response = await h.post(
             f"/_matrix/client/v3/user/{user_id}/openid/request_token",
-            params={"access_token": token},
+            headers={"Authorization": f"Bearer {token}"},
             json={},
         )
         openid_response.raise_for_status()
@@ -262,7 +262,7 @@ async def main() -> int:  # noqa: PLR0915
     async with httpx.AsyncClient(base_url=HOMESERVER, timeout=30.0) as h:
         create_response = await h.post(
             "/_matrix/client/v3/createRoom",
-            params={"access_token": caller_tok},
+            headers={"Authorization": f"Bearer {caller_tok}"},
             json={
                 "name": f"speaktest-{SUFFIX}",
                 "invite": [bot_id],
@@ -274,7 +274,7 @@ async def main() -> int:  # noqa: PLR0915
         room_id = create_response.json()["room_id"]
         join_response = await h.post(
             f"/_matrix/client/v3/rooms/{room_id}/join",
-            params={"access_token": bot_tok},
+            headers={"Authorization": f"Bearer {bot_tok}"},
             json={},
         )
         join_response.raise_for_status()

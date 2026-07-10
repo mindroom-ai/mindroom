@@ -2143,7 +2143,10 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.matrix_rtc.focus"
-depends_on = ["mindroom.logging_config"]
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.server_fetch_url",
+]
 
 [[modules]]
 path = "mindroom.matrix_rtc.frame_keys"

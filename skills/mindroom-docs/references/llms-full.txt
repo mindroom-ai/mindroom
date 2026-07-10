@@ -12923,7 +12923,8 @@ Your Matrix deployment needs the standard Element Call backend:
 
 Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/livekit/docs/self-hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables all of it with `matrix_rtc_enabled: true`.
 
-MindRoom follows MatrixRTC's oldest-membership focus selection, but exchanges its OpenID token only when that member's advertised URL matches trusted discovery on the member's Matrix server-name domain or the same-server configured override.
+MindRoom follows MatrixRTC's sticky oldest-membership focus selection, including a focus inherited from a departed founder.
+Same-server focus URLs must match trusted local discovery or the configured override, while federated focuses require HTTPS and use server-side fetch guards that reject private, local, and metadata endpoints before sending the short-lived Matrix OpenID identity token.
 
 The room's power levels must allow members to send `org.matrix.msc3401.call.member` state events (Element Call-capable clients set this up when they create rooms).
 
