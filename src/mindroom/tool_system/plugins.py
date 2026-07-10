@@ -76,7 +76,7 @@ class PluginReloadResult:
 
 
 @dataclass(frozen=True, slots=True)
-class _PreparedPluginReload:
+class PreparedPluginReload:
     """Prepared plugin runtime state that is safe to apply later."""
 
     hook_registry: HookRegistry
@@ -230,7 +230,7 @@ def prepare_plugin_reload(
     runtime_paths: RuntimePaths,
     *,
     skip_broken_plugins: bool = False,
-) -> _PreparedPluginReload:
+) -> PreparedPluginReload:
     """Build one fresh plugin snapshot without mutating the live runtime."""
     with locked_tool_registry_state():
         package_roots = {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
@@ -240,7 +240,7 @@ def prepare_plugin_reload(
             _clear_plugin_reload_caches()
             _evict_synthetic_plugin_subtrees(package_roots)
             plugins = load_plugins(config, runtime_paths, skip_broken_plugins=skip_broken_plugins)
-            return _PreparedPluginReload(
+            return PreparedPluginReload(
                 hook_registry=HookRegistry.from_plugins(plugins),
                 active_plugin_names=tuple(plugin.name for plugin in plugins),
                 tool_registry_snapshot=capture_tool_registry_snapshot(),
@@ -252,7 +252,7 @@ def prepare_plugin_reload(
 
 
 def apply_prepared_plugin_reload(
-    prepared_reload: _PreparedPluginReload,
+    prepared_reload: PreparedPluginReload,
     *,
     cancelled_task_count: int = 0,
     cancel_existing_tasks: bool = False,

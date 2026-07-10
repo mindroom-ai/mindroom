@@ -1053,3 +1053,158 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         await orchestrator.config_reload.update_config()
 
     assert call_order[:2] == ["stop", "sync"]
+
+
+@pytest.mark.asyncio
+async def test_update_config_keeps_last_good_state_when_mcp_sync_fails(tmp_path: Path) -> None:
+    """A failed MCP sync must keep the current config live and restart pre-stopped entities."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config(tmp_path)
+    updated_config = _config(tmp_path, command="uvx")
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
+        "code": MagicMock(spec=AgentBot),
+        "plain": MagicMock(spec=AgentBot),
+        "dev_team": MagicMock(spec=AgentBot),
+    }
+    persist_entity_accounts(current_config, orchestrator.runtime_paths)
+    persist_entity_accounts(updated_config, orchestrator.runtime_paths)
+    synced_configs: list[Config] = []
+
+    async def fake_sync_mcp_manager(config: Config) -> set[str]:
+        synced_configs.append(config)
+        if config is updated_config:
+            msg = "mcp sync failed"
+            raise RuntimeError(msg)
+        return set()
+
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(side_effect=fake_sync_mcp_manager)),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+        patch.object(
+            orchestrator,
+            "_create_and_start_entities",
+            new=AsyncMock(return_value=EntityStartResults()),
+        ) as restore,
+        patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()) as api_sync,
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+        pytest.raises(RuntimeError, match="mcp sync failed"),
+    ):
+        await orchestrator.config_reload.update_config()
+
+    assert orchestrator.config is current_config
+    assert synced_configs == [updated_config, current_config]
+    api_sync.assert_not_awaited()
+    restore.assert_awaited_once()
+    restored_entities, restored_config = restore.await_args.args
+    assert restored_entities == {"code", "dev_team"}
+    assert restored_config is current_config
+
+
+@pytest.mark.asyncio
+async def test_update_config_keeps_last_good_state_when_api_snapshot_publish_fails(tmp_path: Path) -> None:
+    """A failed API config publication must keep the current config and MCP state live."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config(tmp_path)
+    updated_config = _config(tmp_path, command="uvx")
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
+        "code": MagicMock(spec=AgentBot),
+        "plain": MagicMock(spec=AgentBot),
+        "dev_team": MagicMock(spec=AgentBot),
+    }
+    persist_entity_accounts(current_config, orchestrator.runtime_paths)
+    persist_entity_accounts(updated_config, orchestrator.runtime_paths)
+    synced_configs: list[Config] = []
+
+    async def record_sync_mcp_manager(config: Config) -> set[str]:
+        synced_configs.append(config)
+        return set()
+
+    publish_error = RuntimeError("Failed to publish external trigger API config snapshot")
+
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(side_effect=record_sync_mcp_manager)),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+        patch.object(
+            orchestrator,
+            "_create_and_start_entities",
+            new=AsyncMock(return_value=EntityStartResults()),
+        ) as restore,
+        patch.object(
+            orchestrator._external_trigger_runtime,
+            "sync_api_config_snapshot",
+            new=AsyncMock(side_effect=publish_error),
+        ),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+        pytest.raises(RuntimeError, match="Failed to publish"),
+    ):
+        await orchestrator.config_reload.update_config()
+
+    assert orchestrator.config is current_config
+    assert synced_configs == [updated_config, current_config]
+    restore.assert_awaited_once()
+    restored_entities, restored_config = restore.await_args.args
+    assert restored_entities == {"code", "dev_team"}
+    assert restored_config is current_config
+
+
+@pytest.mark.asyncio
+async def test_update_config_publishes_config_only_after_runtime_syncs(tmp_path: Path) -> None:
+    """The new config must not become live until MCP, cache, and API syncs succeed."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config_with_code_agent(tmp_path)
+    updated_config = _config_with_code_agent(tmp_path, role="Review code")
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
+        "code": MagicMock(spec=AgentBot),
+    }
+    persist_entity_accounts(current_config, orchestrator.runtime_paths)
+    persist_entity_accounts(updated_config, orchestrator.runtime_paths)
+    observed_live_configs: list[Config | None] = []
+
+    async def observe_mcp_sync(config: Config) -> set[str]:
+        del config
+        observed_live_configs.append(orchestrator.config)
+        return set()
+
+    async def observe_cache_sync(config: Config) -> None:
+        del config
+        observed_live_configs.append(orchestrator.config)
+
+    async def observe_api_sync(config: Config) -> None:
+        del config
+        observed_live_configs.append(orchestrator.config)
+
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(side_effect=observe_mcp_sync)),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock(side_effect=observe_cache_sync)),
+        patch.object(
+            orchestrator,
+            "_restart_changed_entities",
+            new=AsyncMock(return_value=(set(), [], [])),
+        ),
+        patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
+        patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+        patch.object(
+            orchestrator._external_trigger_runtime,
+            "sync_api_config_snapshot",
+            new=AsyncMock(side_effect=observe_api_sync),
+        ),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+    ):
+        updated = await orchestrator.config_reload.update_config()
+
+    assert updated is True
+    assert observed_live_configs == [current_config, current_config, current_config]
+    assert orchestrator.config is updated_config

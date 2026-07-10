@@ -119,6 +119,7 @@ if TYPE_CHECKING:
     from types import FrameType
 
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.tool_system.plugins import PreparedPluginReload
 
     from .constants import RuntimePaths
     from .orchestration.config_updates import ConfigUpdatePlan
@@ -127,6 +128,15 @@ logger = get_logger(__name__)
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
+
+
+@dataclass(frozen=True)
+class _PreparedPluginConfigUpdate:
+    """Staged plugin runtime and watcher baselines built before config publication."""
+
+    prepared_reload: PreparedPluginReload
+    watch_roots: tuple[Path, ...]
+    watch_root_snapshots: dict[Path, dict[Path, int]]
 
 
 @dataclass(frozen=True)
@@ -216,8 +226,7 @@ class _MultiAgentOrchestrator:
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
-    _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _plugin_reload_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     plugin_watch: PluginWatchState = field(init=False)
@@ -253,6 +262,7 @@ class _MultiAgentOrchestrator:
             in_flight_response_count=self.in_flight_response_count,
             load_initial_config=self._load_initial_config,
             apply_update_plan=self._apply_config_update_plan,
+            config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
             runtime_paths=self.runtime_paths,
@@ -750,7 +760,7 @@ class _MultiAgentOrchestrator:
         if not self.running:
             msg = "Plugin reload unavailable until startup finishes."
             raise RuntimeError(msg)
-        async with self._plugin_reload_lock:
+        async with self._config_update_lock:
             config = self._require_config()
             logger.info(
                 "Reloading plugins",
@@ -780,38 +790,27 @@ class _MultiAgentOrchestrator:
             )
             return result
 
-    async def _apply_plugin_changes_for_config_update(
-        self,
-        *,
-        current_config: Config,
-        new_config: Config,
-        changed_server_ids: set[str],
-    ) -> set[str]:
-        """Stage and commit plugin changes without interleaving live reloads."""
-        async with self._plugin_reload_lock:
-            prepared_plugin_roots, prepared_plugin_root_snapshots = self.plugin_watch.capture(new_config)
-            prepared_plugin_reload = prepare_plugin_reload(
+    def _prepare_plugin_update_for_config_update(self, new_config: Config) -> _PreparedPluginConfigUpdate:
+        """Stage the plugin runtime for one config update without mutating live state."""
+        watch_roots, watch_root_snapshots = self.plugin_watch.capture(new_config)
+        return _PreparedPluginConfigUpdate(
+            prepared_reload=prepare_plugin_reload(
                 new_config,
                 self.runtime_paths,
                 skip_broken_plugins=True,
-            )
-            pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
-                current_config,
-                new_config,
-                changed_server_ids,
-            )
-            self.config = new_config
-            new_hook_registry = apply_prepared_plugin_reload(
-                prepared_plugin_reload,
-                cancel_existing_tasks=True,
-            ).hook_registry
-            self.plugin_watch.replace_snapshots(
-                prepared_plugin_roots,
-                prepared_plugin_root_snapshots,
-            )
-            self._activate_hook_registry(new_hook_registry)
-            clear_worker_validation_snapshot_cache()
-            return pre_stopped_mcp_entities
+            ),
+            watch_roots=watch_roots,
+            watch_root_snapshots=watch_root_snapshots,
+        )
+
+    def _commit_plugin_update_for_config_update(self, prepared: _PreparedPluginConfigUpdate) -> None:
+        """Swap the live plugin runtime to one staged config-update snapshot."""
+        new_hook_registry = apply_prepared_plugin_reload(
+            prepared.prepared_reload,
+            cancel_existing_tasks=True,
+        ).hook_registry
+        self.plugin_watch.replace_snapshots(prepared.watch_roots, prepared.watch_root_snapshots)
+        self._activate_hook_registry(new_hook_registry)
 
     async def _start_entities_once(
         self,
@@ -1211,6 +1210,43 @@ class _MultiAgentOrchestrator:
         )
         return affected_entities
 
+    async def _rollback_failed_config_publication(
+        self,
+        current_config: Config,
+        pre_stopped_mcp_entities: set[str],
+    ) -> None:
+        """Restore last-good runtime services and entities after a failed publication."""
+        logger.warning("Configuration update failed before publication; keeping last-good config")
+        try:
+            await self._sync_mcp_manager(current_config)
+            await self._sync_event_cache_service(current_config)
+        except Exception:
+            logger.exception("Resyncing runtime services to the last-good config failed during rollback")
+        await self._restore_pre_stopped_mcp_entities(pre_stopped_mcp_entities, current_config)
+
+    async def _restore_pre_stopped_mcp_entities(
+        self,
+        entity_names: set[str],
+        config: Config,
+    ) -> None:
+        """Recreate entities that were stopped for an MCP sync that never published."""
+        restartable_entities = entity_names & set(configured_entity_names(config))
+        if not restartable_entities:
+            return
+        start_results = await self._create_and_start_entities(
+            restartable_entities,
+            config,
+            start_sync_tasks=True,
+        )
+        self._external_trigger_runtime.bind_if_ready(config, self.agent_bots)
+        for entity_name in start_results.retryable_entities:
+            await self._schedule_bot_start_retry(entity_name)
+        if start_results.permanently_failed_entities:
+            logger.warning(
+                "Config update rollback left some bots disabled",
+                entities=start_results.permanently_failed_entities,
+            )
+
     async def _restart_changed_entities(
         self,
         plan: ConfigUpdatePlan,
@@ -1247,7 +1283,7 @@ class _MultiAgentOrchestrator:
 
     async def _handle_mcp_catalog_change(self, server_id: str) -> None:
         """Restart entities that reference one changed MCP catalog."""
-        async with self._mcp_catalog_change_lock:
+        async with self._config_update_lock:
             if not self.running or self.config is None:
                 return
             clear_worker_validation_snapshot_cache()
@@ -1351,30 +1387,36 @@ class _MultiAgentOrchestrator:
         replay_startup_maintenance = await self._startup_maintenance.cancel()
 
         try:
-            if plugin_changes:
-                pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
-                    current_config=current_config,
-                    new_config=new_config,
-                    changed_server_ids=plan.changed_mcp_servers,
+            # Stage plugins first: a broken plugin edit must fail the update before
+            # any entity is stopped or any runtime service is resynced.
+            prepared_plugin_update = (
+                self._prepare_plugin_update_for_config_update(new_config) if plugin_changes else None
+            )
+            pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
+                current_config,
+                new_config,
+                plan.changed_mcp_servers,
+            )
+            try:
+                changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
+                await self._sync_event_cache_service(new_config)
+                logger.info(
+                    "updating_config_authorization",
+                    authorized_user_ids=new_config.authorization.global_users,
                 )
+                await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
+            except Exception:
+                await self._rollback_failed_config_publication(current_config, pre_stopped_mcp_entities)
+                raise
+            # Publish the new config only after every fallible sync above succeeded, so a
+            # failed update keeps the last-good config, runtime services, and entities.
+            self.config = new_config
+            if prepared_plugin_update is not None:
+                self._commit_plugin_update_for_config_update(prepared_plugin_update)
             else:
-                pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
-                    current_config,
-                    new_config,
-                    plan.changed_mcp_servers,
-                )
-                # Only apply the new config after validation and account checks succeed.
-                self.config = new_config
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
-                clear_worker_validation_snapshot_cache()
-            changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
-            await self._sync_event_cache_service(new_config)
-            logger.info(
-                "updating_config_authorization",
-                authorized_user_ids=new_config.authorization.global_users,
-            )
-            await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
+            clear_worker_validation_snapshot_cache()
             if changed_runtime_mcp_servers:
                 plan = replace(
                     plan,
