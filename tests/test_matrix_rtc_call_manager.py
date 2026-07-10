@@ -434,6 +434,27 @@ def test_fully_local_speech_services_never_resolve_cloud_credentials(
     assert manager._config.memory.backend == "none"
 
 
+def test_openai_speech_with_custom_host_uses_provider_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An OpenAI proxy endpoint still uses the configured OpenAI credential."""
+    lookup = MagicMock(return_value="openai-provider-key")
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_provider", lookup)
+    manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config())
+
+    service = manager._resolve_speech_service(
+        SpeechServiceConfig(provider="openai", model="gpt-4o-transcribe", host="https://proxy.example.test"),
+        component="stt",
+        room_id=ROOM_ID,
+    )
+
+    assert service is not None
+    assert service.api_key == "openai-provider-key"
+    assert service.base_url == "https://proxy.example.test/v1"
+    lookup.assert_called_once_with("openai", manager._runtime_paths)
+
+
 def test_default_bridge_factory_tracks_configured_backend(tmp_path: Path) -> None:
     """Backend config selects cascaded media without changing CallSession."""
     config = _cascaded_config(local=True)
@@ -2235,10 +2256,10 @@ def test_speech_config_rejects_unsafe_endpoint(host: str) -> None:
 
 def test_speech_config_rejects_connection_fields_in_extra_kwargs() -> None:
     """Typed connection fields cannot be ambiguously overridden by provider options."""
-    with pytest.raises(ValueError, match="must not redefine: api_key, base_url"):
+    with pytest.raises(ValueError, match="must not redefine: api_key, base_url, client"):
         SpeechServiceConfig(
             model="gpt-4o-transcribe",
-            extra_kwargs={"api_key": "wrong", "base_url": "https://wrong.example"},
+            extra_kwargs={"api_key": "wrong", "base_url": "https://wrong.example", "client": "wrong"},
         )
 
 

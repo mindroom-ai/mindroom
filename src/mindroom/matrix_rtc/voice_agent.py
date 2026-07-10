@@ -316,7 +316,7 @@ class RealtimeVoiceBridge:
         self._room: Any = None
         self._connect_task: asyncio.Task[None] | None = None
         self._session: Any = None
-        self._owned_speech_models: tuple[Any, ...] = ()
+        self._owned_speech_resource_closers: tuple[Callable[[], Awaitable[None]], ...] = ()
         self._session_event_tasks: set[asyncio.Future[None]] = set()
         self._audio_input: _AuthorizedParticipantAudioInput | None = None
         self._participant_identities: frozenset[str] = frozenset()
@@ -422,13 +422,16 @@ class RealtimeVoiceBridge:
         self._audio_input = audio_input
         session.input.audio = cast("AudioInput", audio_input)
         self._register_session_listeners(session, options)
+        text_output: object = False
+        if isinstance(options, CascadedVoiceAgentOptions):
+            text_output = room_io_module.TextOutputOptions(sync_transcription=True)
         await session.start(
             agent,
             room=self._room,
             room_options=room_io_module.RoomOptions(
                 audio_input=False,
                 text_input=False,
-                text_output=False,
+                text_output=text_output,
                 close_on_disconnect=False,
             ),
         )
@@ -559,8 +562,8 @@ class RealtimeVoiceBridge:
         """Tear down the agent session and leave the SFU."""
         session = self._session
         self._session = None
-        owned_speech_models = self._owned_speech_models
-        self._owned_speech_models = ()
+        speech_resource_closers = self._owned_speech_resource_closers
+        self._owned_speech_resource_closers = ()
         audio_input = self._audio_input
         self._audio_input = None
         connect_task = self._connect_task
@@ -578,7 +581,7 @@ class RealtimeVoiceBridge:
                     await asyncio.gather(*self._session_event_tasks, return_exceptions=True)
             finally:
                 try:
-                    await _close_speech_models(owned_speech_models)
+                    await _close_speech_resources(speech_resource_closers)
                 finally:
                     try:
                         if audio_input is not None:
@@ -611,6 +614,7 @@ class CascadedVoiceBridge(RealtimeVoiceBridge):
         from livekit import rtc  # noqa: PLC0415
         from livekit.agents import Agent, AgentSession, TurnHandlingOptions, inference, room_io  # noqa: PLC0415
         from livekit.plugins import openai  # noqa: PLC0415
+        from openai import AsyncOpenAI  # noqa: PLC0415
 
         if self._room is None:
             msg = "connect() must succeed before start_agent()"
@@ -619,13 +623,21 @@ class CascadedVoiceBridge(RealtimeVoiceBridge):
             msg = "CascadedVoiceBridge requires cascaded agent options"
             raise TypeError(msg)
 
-        stt = openai.STT(**_speech_component_kwargs(options.stt))
+        stt_client = AsyncOpenAI(
+            api_key=options.stt.api_key,
+            base_url=options.stt.base_url,
+            max_retries=0,
+        )
+        stt_kwargs = _speech_component_kwargs(options.stt)
+        del stt_kwargs["api_key"]
+        stt_kwargs.pop("base_url", None)
         try:
+            stt = openai.STT(client=stt_client, **stt_kwargs)
             tts = openai.TTS(**_speech_component_kwargs(options.tts))
         except BaseException:
-            await stt.aclose()
+            await stt_client.close()
             raise
-        self._owned_speech_models = (stt, tts)
+        self._owned_speech_resource_closers = (stt_client.close, tts.aclose)
         mindroom_llm = _build_mindroom_llm(options.respond, options.on_tools_executed)
         session = AgentSession(
             stt=stt,
@@ -634,6 +646,7 @@ class CascadedVoiceBridge(RealtimeVoiceBridge):
             tts=tts,
             turn_handling=TurnHandlingOptions(
                 turn_detection="vad",
+                endpointing={"min_delay": 1.0},
                 interruption={"enabled": True, "mode": "vad"},
                 preemptive_generation={"enabled": False},
             ),
@@ -663,10 +676,10 @@ def _build_mindroom_llm(
 
     class _MindRoomLLMStream(llm.LLMStream):
         async def _run(self) -> None:
-            transcript = _consecutive_user_transcript(self._chat_ctx)
+            transcript = _latest_user_transcript(self._chat_ctx)
             if not transcript:
-                msg = "Cascaded voice turn has no finalized user transcript"
-                raise ValueError(msg)
+                logger.warning("cascaded_voice_turn_skipped_no_transcript")
+                return
             result = await respond(transcript)
             if on_tools_executed is not None and result.tool_names:
                 on_tools_executed(list(result.tool_names))
@@ -714,26 +727,25 @@ def _build_mindroom_llm(
     return _MindRoomLLM()
 
 
-def _consecutive_user_transcript(chat_ctx: ChatContext) -> str:
-    """Join VAD-split user fragments that have no intervening assistant turn."""
+def _latest_user_transcript(chat_ctx: ChatContext) -> str:
+    """Return only the finalized user turn that triggered this generation."""
     from livekit.agents.llm import ChatMessage  # noqa: PLC0415
 
-    transcript_parts: list[str] = []
     for item in reversed(chat_ctx.items):
         if not isinstance(item, ChatMessage):
             continue
+        if item.role == "user":
+            return item.text_content or ""
         if item.role == "assistant":
-            break
-        if item.role == "user" and item.text_content:
-            transcript_parts.append(item.text_content)
-    return "\n".join(reversed(transcript_parts))
+            return ""
+    return ""
 
 
-async def _close_speech_models(models: tuple[Any, ...]) -> None:
+async def _close_speech_resources(closers: tuple[Callable[[], Awaitable[None]], ...]) -> None:
     """Close caller-owned LiveKit speech providers without blocking room teardown."""
-    if not models:
+    if not closers:
         return
-    results = await asyncio.gather(*(model.aclose() for model in models), return_exceptions=True)
+    results = await asyncio.gather(*(close() for close in closers), return_exceptions=True)
     for result in results:
         if isinstance(result, BaseException):
             logger.warning("call_speech_model_close_failed", error=str(result))

@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from mindroom.model_defaults import OPENAI_TRANSCRIPTION
 
-_RESERVED_SPEECH_OPTION_NAMES = frozenset({"api_key", "base_url", "model"})
+_RESERVED_SPEECH_OPTION_NAMES = frozenset({"api_key", "base_url", "client", "model"})
 
 
 def normalize_speech_base_url(host: str | None) -> str | None:

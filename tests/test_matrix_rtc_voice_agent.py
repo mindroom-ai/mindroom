@@ -14,8 +14,9 @@ import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from livekit import rtc
-from livekit.agents import APIConnectionError, APIStatusError, CloseReason, llm
+from livekit.agents import APIConnectionError, APIStatusError, CloseReason, llm, room_io
 from livekit.agents.voice import io as agents_io
+from openai import AsyncOpenAI
 from structlog.testing import capture_logs
 
 from mindroom.matrix_rtc.call_tools import CallAgentResponse
@@ -223,6 +224,14 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
         async def aclose(self) -> None:
             self.closed = True
 
+    class FakeOpenAIClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
     class FakeSession:
         def __init__(self, **kwargs: object) -> None:
             built["session_kwargs"] = kwargs
@@ -254,6 +263,7 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     fake_session = FakeSession()
     stt = FakeSpeechModel()
     tts = FakeSpeechModel()
+    stt_client = FakeOpenAIClient()
     monkeypatch.setattr(
         "livekit.agents.AgentSession",
         lambda **kwargs: (built.update(session_kwargs=kwargs), fake_session)[1],
@@ -267,6 +277,10 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     monkeypatch.setattr(
         "livekit.plugins.openai.TTS",
         lambda **kwargs: (setattr(tts, "kwargs", kwargs), tts)[1],
+    )
+    monkeypatch.setattr(
+        "openai.AsyncOpenAI",
+        lambda **kwargs: (setattr(stt_client, "kwargs", kwargs), stt_client)[1],
     )
     fake_audio_input = MagicMock()
     fake_audio_input.aclose = AsyncMock()
@@ -305,33 +319,43 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     assert stt.kwargs == {
         "language": "en",
         "model": "whisper-large-v3",
+        "client": stt_client,
+    }
+    assert stt_client.kwargs == {
         "api_key": "local-stt",
         "base_url": "http://127.0.0.1:9000/v1",
+        "max_retries": 0,
     }
     assert session_kwargs["tts"] is tts
     assert tts.kwargs == {"voice": "ash", "model": "tts-1", "api_key": "tts-key"}
     assert session_kwargs["vad"] == ("vad", {"model": "silero"})
     assert session_kwargs["turn_handling"] == {
         "turn_detection": "vad",
+        "endpointing": {"min_delay": 1.0},
         "interruption": {"enabled": True, "mode": "vad"},
         "preemptive_generation": {"enabled": False},
     }
     assert fake_session.input.audio is fake_audio_input
     assert fake_session.greetings == ["Hello."]
+    room_options = cast("room_io.RoomOptions", built["room_options"])
+    assert isinstance(room_options.text_output, room_io.TextOutputOptions)
+    assert room_options.text_output.sync_transcription is True
 
     user_message = llm.ChatContext.empty().add_message(role="user", content="hello")
     callback = cast("Callable[[object], None]", fake_session.handlers["conversation_item_added"])
     callback(SimpleNamespace(item=user_message))
     assert turns == [("user", "hello")]
 
+    # An interrupted response can leave consecutive user items in LiveKit's
+    # context; replaying the first one could repeat side effects or tools.
     chat_context = llm.ChatContext.empty()
-    chat_context.add_message(role="user", content="status part one")
-    chat_context.add_message(role="user", content="status part two")
+    chat_context.add_message(role="user", content="first side-effecting request")
+    chat_context.add_message(role="user", content="new request")
     stream = session_kwargs["llm"].chat(chat_ctx=chat_context)  # type: ignore[union-attr]
     assert stream._conn_options.max_retry == 0
     chunks = [chunk async for chunk in stream]
-    assert responder_inputs == ["status part one\nstatus part two"]
-    assert [chunk.delta.content for chunk in chunks] == ["heard status part one\nstatus part two"]
+    assert responder_inputs == ["new request"]
+    assert [chunk.delta.content for chunk in chunks] == ["heard new request"]
     assert chunks[0].delta.extra == {"mindroom_call_turn_id": "turn-1"}
     assert tool_uses == [["weather"]]
 
@@ -358,7 +382,8 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     assert finalized[-1] == (None, "", True)
 
     await bridge.aclose()
-    assert stt.closed
+    assert stt_client.closed
+    assert not stt.closed
     assert tts.closed
     assert built["session_closed"] is True
     fake_audio_input.aclose.assert_awaited_once()
@@ -368,14 +393,18 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
 async def test_cascaded_start_closes_stt_when_tts_construction_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """Partial speech-provider construction cannot leak the first client."""
 
-    class FakeSTT:
+    class FakeOpenAIClient:
         closed = False
 
-        async def aclose(self) -> None:
+        def __init__(self, **_kwargs: object) -> None:
+            return
+
+        async def close(self) -> None:
             self.closed = True
 
-    stt = FakeSTT()
-    monkeypatch.setattr("livekit.plugins.openai.STT", lambda **_kwargs: stt)
+    stt_client = FakeOpenAIClient()
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda **_kwargs: stt_client)
+    monkeypatch.setattr("livekit.plugins.openai.STT", lambda **_kwargs: object())
 
     def fail_tts(**_kwargs: object) -> None:
         msg = "tts construction failed"
@@ -393,7 +422,19 @@ async def test_cascaded_start_closes_stt_when_tts_construction_fails(monkeypatch
     with pytest.raises(RuntimeError, match="tts construction failed"):
         await bridge.start_agent(options)
 
-    assert stt.closed
+    assert stt_client.closed
+
+
+@pytest.mark.asyncio
+async def test_cascaded_close_closes_real_openai_stt_client() -> None:
+    """The explicitly owned OpenAI client closes despite LiveKit STT's no-op close."""
+    client = AsyncOpenAI(api_key="sk-test", base_url="http://127.0.0.1:9000/v1")
+    bridge = CascadedVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._owned_speech_resource_closers = (client.close,)
+
+    await bridge.aclose()
+
+    assert client.is_closed()
 
 
 @pytest.mark.asyncio
@@ -415,6 +456,20 @@ async def test_cascaded_agent_failure_propagates_to_session_lifecycle() -> None:
         _ = [chunk async for chunk in stream]
 
     assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_cascaded_empty_transcript_is_ignored() -> None:
+    """Noise-only turns cannot terminate the active call session."""
+    respond = AsyncMock()
+    context = llm.ChatContext.empty()
+    context.add_message(role="user", content="already answered")
+    context.add_message(role="assistant", content="previous answer")
+
+    chunks = [chunk async for chunk in _build_mindroom_llm(respond, None).chat(chat_ctx=context)]
+
+    assert chunks == []
+    respond.assert_not_awaited()
 
 
 def test_voice_agent_import_keeps_livekit_and_openai_lazy() -> None:

@@ -734,10 +734,11 @@ class CallManager:
     ) -> SpeechServiceOptions | None:
         """Resolve one independently credentialed cloud or local speech service."""
         base_url = normalize_speech_base_url(service.host)
-        if base_url is not None:
-            api_key = service.api_key or LOCAL_OPENAI_API_KEY_DEFAULT
-        else:
-            api_key = service.api_key or get_api_key_for_provider(service.provider, self._runtime_paths)
+        api_key = service.api_key
+        if api_key is None and service.provider == "openai_compatible":
+            api_key = LOCAL_OPENAI_API_KEY_DEFAULT
+        if api_key is None:
+            api_key = get_api_key_for_provider(service.provider, self._runtime_paths)
         if not api_key:
             logger.warning(
                 "call_join_skipped_no_speech_key",

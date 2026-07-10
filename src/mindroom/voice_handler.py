@@ -477,11 +477,11 @@ async def _transcribe_audio(
             f"{stt_base_url}/audio/transcriptions" if stt_base_url else "https://api.openai.com/v1/audio/transcriptions"
         )
 
-        api_key = config.voice.stt.api_key or (
-            LOCAL_OPENAI_API_KEY_DEFAULT
-            if stt_base_url is not None
-            else get_secret_from_env("OPENAI_API_KEY", runtime_paths)
-        )
+        api_key = config.voice.stt.api_key
+        if api_key is None and config.voice.stt.provider == "openai_compatible":
+            api_key = LOCAL_OPENAI_API_KEY_DEFAULT
+        if api_key is None:
+            api_key = get_secret_from_env("OPENAI_API_KEY", runtime_paths)
         if not api_key:
             logger.error("No OpenAI-compatible STT API key configured for voice transcription")
             return None

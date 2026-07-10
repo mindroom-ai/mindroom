@@ -456,7 +456,7 @@ def _function_available_during_call(
     """Keep only functions whose execution can complete without text UI."""
     unavailable = _function_requires_text_chat(function, config)
     if unavailable:
-        logger.info("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
+        logger.debug("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
     return not unavailable
 
 
