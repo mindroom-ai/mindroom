@@ -374,6 +374,8 @@ def _format_contributions_recursive(  # noqa: C901
     response: TeamRunOutput | RunOutput,
     indent: int,
     include_consensus: bool,
+    *,
+    exclude_errored_content: bool = False,
 ) -> list[str]:
     """Internal recursive function for formatting contributions.
 
@@ -381,6 +383,7 @@ def _format_contributions_recursive(  # noqa: C901
         response: The response to extract from
         indent: Current indentation level
         include_consensus: Whether to include team consensus
+        exclude_errored_content: Whether to use only current assistant messages for errored runs
 
     Returns:
         List of formatted contribution strings
@@ -399,11 +402,16 @@ def _format_contributions_recursive(  # noqa: C901
                         member_resp,
                         indent=indent + 1,
                         include_consensus=False,  # No consensus for nested teams
+                        exclude_errored_content=exclude_errored_content,
                     )
                     parts.extend(nested_parts)
                 elif isinstance(member_resp, RunOutput):
                     agent_name = member_resp.agent_name or "Team Member"
-                    content = _get_response_content(member_resp)
+                    content = (
+                        _get_error_safe_response_content(member_resp)
+                        if exclude_errored_content
+                        else _get_response_content(member_resp)
+                    )
                     if content.strip():
                         parts.append(_format_member_contribution(agent_name, content, indent))
 
@@ -415,7 +423,9 @@ def _format_contributions_recursive(  # noqa: C901
 
     elif isinstance(response, RunOutput):
         agent_name = response.agent_name or "Agent"
-        content = _get_response_content(response)
+        content = (
+            _get_error_safe_response_content(response) if exclude_errored_content else _get_response_content(response)
+        )
         if content.strip():
             parts.append(_format_member_contribution(agent_name, content, indent))
 
@@ -433,17 +443,29 @@ def _get_response_content(response: TeamRunOutput | RunOutput) -> str:
     if response.content:
         return str(response.content)
 
-    if response.messages:
-        messages_list: list[Any] = response.messages
-        content_parts = [
-            str(msg.content)
-            for msg in messages_list
-            if isinstance(msg, Message) and msg.role == "assistant" and msg.content and not msg.from_history
-        ]
+    return _get_current_assistant_message_content(response)
 
-        return "\n\n".join(content_parts) if content_parts else ""
 
-    return ""
+def _get_current_assistant_message_content(response: TeamRunOutput | RunOutput) -> str:
+    """Return only assistant text produced by the current run."""
+    content_parts = [
+        str(message.content)
+        for message in response.messages or []
+        if (
+            isinstance(message, Message)
+            and message.role == "assistant"
+            and message.content
+            and not message.from_history
+        )
+    ]
+    return "\n\n".join(content_parts)
+
+
+def _get_error_safe_response_content(response: TeamRunOutput | RunOutput) -> str:
+    """Drop provider error prose while retaining current model-produced text."""
+    if response.status == RunStatus.error:
+        return _get_current_assistant_message_content(response)
+    return _get_response_content(response)
 
 
 class TeamIntent(str, Enum):
@@ -1201,26 +1223,19 @@ def _extract_interrupted_team_partial_text(response: TeamRunOutput | RunOutput) 
 def _extract_errored_team_partial_text(response: TeamRunOutput | RunOutput) -> str:
     """Extract model-produced partial text without persisting provider error prose."""
     if isinstance(response, TeamRunOutput):
-        response_without_error = replace(response, content=None)
-        parts = _format_contributions_recursive(response_without_error, indent=0, include_consensus=False)
-        consensus = _get_response_content(response_without_error).strip()
+        parts = _format_contributions_recursive(
+            response,
+            indent=0,
+            include_consensus=False,
+            exclude_errored_content=True,
+        )
+        consensus = _get_current_assistant_message_content(response).strip()
         if consensus:
             parts.extend(_format_team_consensus(consensus))
         elif parts:
             parts.append(_format_no_consensus_note())
         return "\n\n".join(parts).strip()
-    assistant_parts = [
-        str(message.content).strip()
-        for message in response.messages or []
-        if (
-            isinstance(message, Message)
-            and message.role == "assistant"
-            and not message.from_history
-            and isinstance(message.content, str)
-            and message.content.strip()
-        )
-    ]
-    return assistant_parts[-1] if assistant_parts else ""
+    return _get_current_assistant_message_content(response).strip()
 
 
 def _extract_completed_team_tool_trace(response: TeamRunOutput | RunOutput) -> list[ToolTraceEntry]:

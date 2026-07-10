@@ -14,6 +14,28 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
 
 
+def merge_tool_trace_snapshots(
+    canonical: Sequence[ToolTraceEntry],
+    supplemental: Sequence[ToolTraceEntry],
+) -> list[ToolTraceEntry]:
+    """Merge cumulative tool snapshots without dropping or duplicating overlap."""
+    canonical_list = list(canonical)
+    supplemental_list = list(supplemental)
+    if not canonical_list:
+        return supplemental_list
+    if not supplemental_list:
+        return canonical_list
+    if canonical_list[: len(supplemental_list)] == supplemental_list:
+        return canonical_list
+    if supplemental_list[: len(canonical_list)] == canonical_list:
+        return supplemental_list
+    max_overlap = min(len(canonical_list), len(supplemental_list))
+    for overlap in range(max_overlap, 0, -1):
+        if canonical_list[-overlap:] == supplemental_list[:overlap]:
+            return [*canonical_list, *supplemental_list[overlap:]]
+    return [*canonical_list, *supplemental_list]
+
+
 @dataclass
 class AITurnState:
     """Apply one AI response attempt's visible state to the top-level turn."""
@@ -93,6 +115,30 @@ class AITurnState:
             original_status=original_status,
         )
 
+    def record_interrupted_canonical(
+        self,
+        recorder: TurnRecorder | None,
+        *,
+        run_metadata: Mapping[str, Any] | None,
+        assistant_text: str,
+        completed_tools: Sequence[ToolTraceEntry],
+        interrupted_tools: Sequence[ToolTraceEntry],
+        original_status: RunStatus = RunStatus.cancelled,
+    ) -> None:
+        """Record already-merged top-level interruption state without re-prefixing."""
+        self.assistant_text = assistant_text
+        self.completed_tools = list(completed_tools)
+        self.interrupted_tools = list(interrupted_tools)
+        if recorder is None:
+            return
+        recorder.record_interrupted(
+            run_metadata=run_metadata,
+            assistant_text=self.assistant_text,
+            completed_tools=self.completed_tools,
+            interrupted_tools=self.interrupted_tools,
+            original_status=original_status,
+        )
+
     def record_interrupted_from_recorder(
         self,
         recorder: TurnRecorder,
@@ -101,13 +147,11 @@ class AITurnState:
         original_status: RunStatus | None = None,
     ) -> None:
         """Mark the recorder interrupted using its already-canonical live state."""
-        self.assistant_text = recorder.assistant_text
-        self.completed_tools = list(recorder.completed_tools)
-        self.interrupted_tools = list(recorder.interrupted_tools)
-        recorder.record_interrupted(
+        self.record_interrupted_canonical(
+            recorder,
             run_metadata=run_metadata,
-            assistant_text=self.assistant_text,
-            completed_tools=self.completed_tools,
-            interrupted_tools=self.interrupted_tools,
+            assistant_text=recorder.assistant_text,
+            completed_tools=recorder.completed_tools,
+            interrupted_tools=recorder.interrupted_tools,
             original_status=recorder.interruption_status if original_status is None else original_status,
         )

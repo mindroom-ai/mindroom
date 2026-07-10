@@ -1343,6 +1343,7 @@ class TestUserIdPassthrough:
         mock_run_output = RunOutput(
             agent_id="general",
             content="validation failed in agno",
+            messages=[Message(role="assistant", content="Previous turn answer", from_history=True)],
             tools=[
                 ToolExecution(
                     tool_name="write_file",
@@ -1377,6 +1378,7 @@ class TestUserIdPassthrough:
         mock_friendly_error.assert_called_once()
         snapshot = recorder.interrupted_snapshot()
         assert snapshot.original_status is RunStatus.error
+        assert snapshot.partial_text == ""
         assert snapshot.seen_event_ids == ("e1",)
         assert [tool.tool_name for tool in snapshot.completed_tools] == ["write_file"]
 

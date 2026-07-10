@@ -832,7 +832,19 @@ async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path:
     """Auto-resume should write successful threaded sends through the conversation cache."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
+    client.room_get_event.return_value = _room_get_event_response(
+        _make_message_event(
+            event_id="$target",
+            body="Interrupted response",
+            timestamp_ms=100,
+            relates_to=_thread_reply_relation("$threaded", "$threaded"),
+        ),
+    )
     conversation_cache = AsyncMock()
+    conversation_cache.get_thread_history.return_value = ThreadHistoryResult(
+        messages=[],
+        is_full_history=True,
+    )
     conversation_cache.notify_outbound_message = Mock()
     interrupted = [
         InterruptedThread(
@@ -909,7 +921,7 @@ async def test_auto_resume_skips_human_activity_after_original_event(
             partial_text="Interrupted response",
             agent_name="test_agent",
             original_sender_id=USER_ID,
-            timestamp_ms=300,
+            timestamp_ms=0,
         ),
     ]
 
@@ -1089,6 +1101,45 @@ async def test_auto_resume_skips_event_error_result(tmp_path: Path) -> None:
     mock_send.assert_not_awaited()
     conversation_cache.get_thread_history.assert_not_awaited()
     client.room_get_event.assert_awaited_once_with(ROOM_ID, "$target")
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_skips_nonpositive_original_event_timestamp(tmp_path: Path) -> None:
+    """A nonpositive authoritative event timestamp cannot authorize recovery."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_get_event.return_value = _room_get_event_response(
+        _make_message_event(
+            event_id="$target",
+            body="Interrupted response",
+            timestamp_ms=0,
+            relates_to=_thread_reply_relation("$threaded", "$threaded"),
+        ),
+    )
+    conversation_cache = AsyncMock()
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$threaded",
+            target_event_id="$target",
+            partial_text="Interrupted response",
+            agent_name="test_agent",
+            timestamp_ms=0,
+        ),
+    ]
+
+    with patch("mindroom.matrix.stale_stream_cleanup.send_message_result", new=AsyncMock()) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            conversation_cache=conversation_cache,
+        )
+
+    assert resumed_count == 0
+    mock_send.assert_not_awaited()
+    conversation_cache.get_thread_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio

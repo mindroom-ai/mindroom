@@ -296,7 +296,7 @@ async def _has_newer_human_thread_activity(
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Return whether a human sent a newer message before restart recovery ran."""
-    if conversation_cache is None or interrupted_thread.thread_id is None or interrupted_thread.timestamp_ms <= 0:
+    if conversation_cache is None or interrupted_thread.thread_id is None:
         return False
     try:
         original_event = await client.room_get_event(
@@ -306,7 +306,11 @@ async def _has_newer_human_thread_activity(
         if not isinstance(original_event, nio.RoomGetEventResponse):
             return True
         original_timestamp_ms = original_event.event.server_timestamp
-        if not isinstance(original_timestamp_ms, int) or isinstance(original_timestamp_ms, bool):
+        if (
+            not isinstance(original_timestamp_ms, int)
+            or isinstance(original_timestamp_ms, bool)
+            or original_timestamp_ms <= 0
+        ):
             return True
         history = await conversation_cache.get_thread_history(
             interrupted_thread.room_id,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mindroom.ai_turn_state import AITurnState
+from mindroom.ai_turn_state import AITurnState, merge_tool_trace_snapshots
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.tool_system.events import ToolTraceEntry
 
@@ -49,3 +49,12 @@ def test_ai_turn_state_marks_existing_recorder_state_without_reprefixing() -> No
     assert recorder.run_metadata == {"run": "2"}
     assert [tool.tool_name for tool in recorder.completed_tools] == ["load_tool", "run_shell_command"]
     assert [tool.tool_name for tool in recorder.interrupted_tools] == ["save_file"]
+
+
+def test_merge_tool_trace_snapshots_preserves_canonical_overlap() -> None:
+    """Cumulative and attempt-local snapshots merge without duplicate tools."""
+    load_tool = _tool("load_tool")
+    shell_tool = _tool("run_shell_command")
+
+    assert merge_tool_trace_snapshots([load_tool, shell_tool], [shell_tool]) == [load_tool, shell_tool]
+    assert merge_tool_trace_snapshots([load_tool], [load_tool, shell_tool]) == [load_tool, shell_tool]

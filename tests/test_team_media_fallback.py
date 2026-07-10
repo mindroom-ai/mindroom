@@ -1748,6 +1748,12 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
                     content="Half done",
                     status=RunStatus.completed,
                 ),
+                RunOutput(
+                    agent_name="BrokenAgent",
+                    content="429 rate limit",
+                    messages=[Message(role="assistant", content="Useful partial")],
+                    status=RunStatus.error,
+                ),
             ],
             tools=[
                 ToolExecution(
@@ -1788,6 +1794,8 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
     assert snapshot.original_status is RunStatus.error
     assert snapshot.seen_event_ids == ("e1",)
     assert "Half done" in snapshot.partial_text
+    assert "Useful partial" in snapshot.partial_text
+    assert "429 rate limit" not in snapshot.partial_text
     assert "Consensus partial" in snapshot.partial_text
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["write_file"]
 
@@ -3011,6 +3019,12 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
                     content="Half done",
                     status=RunStatus.completed,
                 ),
+                RunOutput(
+                    agent_name="BrokenAgent",
+                    content="429 rate limit",
+                    messages=[Message(role="assistant", content="Useful partial")],
+                    status=RunStatus.error,
+                ),
             ],
             tools=[
                 ToolExecution(
@@ -3060,6 +3074,8 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
     assert snapshot.original_status is RunStatus.error
     assert snapshot.seen_event_ids == ("e1",)
     assert "Half done" in snapshot.partial_text
+    assert "Useful partial" in snapshot.partial_text
+    assert "429 rate limit" not in snapshot.partial_text
     assert "Consensus partial" in snapshot.partial_text
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["write_file"]
 

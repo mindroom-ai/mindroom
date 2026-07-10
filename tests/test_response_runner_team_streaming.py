@@ -1175,6 +1175,34 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
     assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
 
 
+def test_record_stream_delivery_error_merges_live_and_delivery_completed_tools(tmp_path: Path) -> None:
+    """Delivery traces supplement canonical tools from earlier continuation attempts."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    recorder = TurnRecorder(user_message="Hello")
+    recorder.set_completed_tools(
+        [ToolTraceEntry(type="tool_call_completed", tool_name="load_tool")],
+    )
+
+    coordinator._record_stream_delivery_error(
+        recorder=recorder,
+        accumulated_text="Partial answer",
+        tool_trace=[ToolTraceEntry(type="tool_call_completed", tool_name="run_shell_command")],
+        original_status=RunStatus.error,
+    )
+
+    snapshot = recorder.interrupted_snapshot()
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["load_tool", "run_shell_command"]
+
+
 def test_record_stream_delivery_error_records_zero_output_interruption(
     tmp_path: Path,
 ) -> None:

@@ -127,7 +127,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.ai_turn_state"
 depends_on = []
-visibility = ["mindroom.response_turn"]
+visibility = [
+    "mindroom.response_runner",
+    "mindroom.response_turn",
+]
 
 [[modules]]
 path = "mindroom.dynamic_tool_continuation"
@@ -1200,6 +1203,7 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_run_metadata",
+    "mindroom.ai_turn_state",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",

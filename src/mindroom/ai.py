@@ -682,7 +682,7 @@ def _extract_interrupted_partial_text(
     messages: list[Message] | None = None,
 ) -> str:
     """Extract assistant partial text while dropping bare cancellation boilerplate."""
-    preferred_assistant_parts = [
+    assistant_parts = [
         str(message.content).strip()
         for message in messages or []
         if (
@@ -692,13 +692,7 @@ def _extract_interrupted_partial_text(
             and not message.from_history
         )
     ]
-    assistant_parts = [
-        str(message.content).strip()
-        for message in messages or []
-        if isinstance(message, Message) and message.role == "assistant" and isinstance(message.content, str)
-    ]
-    candidate_assistant_parts = preferred_assistant_parts or assistant_parts
-    for part in reversed(candidate_assistant_parts):
+    for part in reversed(assistant_parts):
         if part and not _is_run_cancelled_boilerplate(part):
             return part
     if not isinstance(content, str):

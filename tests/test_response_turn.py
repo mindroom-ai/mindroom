@@ -399,6 +399,32 @@ def test_blocking_errored_attempt_preserves_seeded_recorder_metadata() -> None:
     assert recorder.interrupted_calls[-1]["original_status"] == RunStatus.error
 
 
+def test_blocking_errored_attempt_preserves_live_completed_tools_when_resolution_omits_them() -> None:
+    """Terminal error snapshots must not erase tools already observed by the turn."""
+    log = _AdapterLog()
+    live_tool = _trace("write_file")
+    recorder = _FakeTurnRecorder(
+        assistant_text="Partial answer",
+        completed_tools=[live_tool],
+    )
+
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> ErroredAttempt:
+        return ErroredAttempt("friendly error")
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert result == "friendly error"
+    assert recorder.interrupted_calls[-1]["assistant_text"] == "Partial answer"
+    assert recorder.interrupted_calls[-1]["completed_tools"] == [live_tool]
+
+
 def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:
     """A cancelled attempt without recorder persists one standalone replay and raises."""
     log = _AdapterLog()
