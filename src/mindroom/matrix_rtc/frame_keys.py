@@ -72,6 +72,7 @@ class FrameKeyManager:
     _key_created_ms: int = field(default=0, init=False)
     _key_activation_ms: int = field(default=0, init=False)
     _shared_with: list[_SharedWith] = field(default_factory=list, init=False)
+    _exposed_to: list[_SharedWith] = field(default_factory=list, init=False)
     _newest_inbound_ts: dict[tuple[str, str, int], int] = field(default_factory=dict, init=False)
 
     def update_memberships(self, members: list[CallMember], now_ms: int) -> _KeyDistribution | None:
@@ -105,8 +106,9 @@ class FrameKeyManager:
             )
 
         # A member that rejoined with a new membership event needs the key again.
-        still_valid_shares = [s for s in self._shared_with if s in remote]
-        any_left = len(still_valid_shares) < len(self._shared_with)
+        still_exposed = [share for share in self._exposed_to if share in remote]
+        any_left = len(still_exposed) < len(self._exposed_to)
+        still_valid_shares = [share for share in self._shared_with if share in remote]
         joined = [identity for identity in remote if identity not in still_valid_shares]
 
         if any_left:
@@ -134,6 +136,7 @@ class FrameKeyManager:
         self._key_created_ms = now_ms
         self._key_activation_ms = now_ms + _USE_KEY_DELAY_MS
         self._shared_with = []
+        self._exposed_to = []
         del remote  # rotation always re-shares with every current member
         return _KeyDistribution(
             key=self._key,
@@ -152,10 +155,18 @@ class FrameKeyManager:
         delivered: tuple[CallMember, ...] | None = None,
     ) -> None:
         """Record successful sends so unavailable targets are retried later."""
+        self.mark_exposed(distribution)
         for member in distribution.targets if delivered is None else delivered:
             share = _SharedWith(user_id=member.user_id, device_id=member.device_id, membership_ts=member.created_ts)
             if share not in self._shared_with:
                 self._shared_with.append(share)
+
+    def mark_exposed(self, distribution: _KeyDistribution) -> None:
+        """Record every device that may have received this key before transport returns."""
+        for member in distribution.targets:
+            share = _SharedWith(user_id=member.user_id, device_id=member.device_id, membership_ts=member.created_ts)
+            if share not in self._exposed_to:
+                self._exposed_to.append(share)
 
     def receive(
         self,

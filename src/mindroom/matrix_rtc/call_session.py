@@ -259,6 +259,7 @@ class CallSession:
                 return
             delivered: list[CallMember] = []
             if distribution.targets:
+                self._key_manager.mark_exposed(distribution)
                 delivered = await self.deps.key_transport.send_key(
                     room_id=self.room_id,
                     key_base64=distribution.key_base64,

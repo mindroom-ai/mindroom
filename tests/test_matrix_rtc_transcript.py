@@ -230,3 +230,11 @@ def test_transcript_path_routes_by_memory_backend(tmp_path: Path) -> None:
         started_at=started,
     )
     assert archive_path.is_relative_to(tmp_path / "calls" / AGENT)
+    second_archive_path = _call_transcript_path(
+        agent_name=AGENT,
+        config=_config(),
+        storage_path=tmp_path,
+        room_id=ROOM_ID,
+        started_at=started,
+    )
+    assert second_archive_path != archive_path

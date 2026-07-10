@@ -1852,6 +1852,45 @@ async def test_key_distribution_retry_survives_transport_failure(monkeypatch: py
 
 
 @pytest.mark.asyncio
+async def test_partial_key_send_failure_still_rotates_after_exposed_member_leaves() -> None:
+    """A transport error cannot hide an earlier recipient from leave rotation."""
+
+    class PartialFailureTransport(FakeKeyTransport):
+        async def send_key(
+            self,
+            *,
+            room_id: str,
+            key_base64: str,
+            key_index: int,
+            targets: list[CallMember],
+        ) -> list[CallMember]:
+            await super().send_key(
+                room_id=room_id,
+                key_base64=key_base64,
+                key_index=key_index,
+                targets=targets,
+            )
+            if len(self.sent) == 1:
+                message = "failed after first recipient"
+                raise aiohttp.ClientError(message)
+            return targets
+
+    transport = PartialFailureTransport()
+    session = _session(_client(), FakeBridge(), transport, [1_000])
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    session._members = [alice, bob]
+
+    with pytest.raises(aiohttp.ClientError):
+        await session._distribute_keys()
+    await session.on_members_changed([bob])
+
+    assert [send["key_index"] for send in transport.sent] == [0, 1]
+    assert transport.sent[1]["targets"] == [bob]
+    await session.stop()
+
+
+@pytest.mark.asyncio
 async def test_key_distribution_serializes_roster_change_after_inflight_send() -> None:
     """A leaver during key delivery is followed by a rotation for the latest roster."""
 

@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from mindroom.logging_config import get_logger
 from mindroom.memory import add_agent_memory
@@ -43,7 +44,7 @@ def _call_transcript_path(
         base = storage_path / _TRANSCRIPT_DIRNAME / agent_name
     safe_room = re.sub(r"[^A-Za-z0-9_.-]", "_", room_id)
     stamp = started_at.strftime("%Y-%m-%d_%H-%M-%S")
-    return base / f"{stamp}_{safe_room}.md"
+    return base / f"{stamp}_{uuid4().hex}_{safe_room}.md"
 
 
 @dataclass
