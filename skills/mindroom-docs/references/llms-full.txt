@@ -2384,6 +2384,29 @@ Live testing against the Codex subscription endpoint reported `cached_tokens` on
 Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
 Treat Codex prompt caching as best-effort rather than guaranteed.
 
+## OpenRouter Provider Routing
+
+OpenRouter routes each request to one of several upstream providers serving the model, and upstream quality varies (we have seen a third-party host leak raw tool-call markup into a visible reply).
+Control routing by passing OpenRouter [provider preferences](https://openrouter.ai/docs/features/provider-routing) through `extra_kwargs.extra_body`:
+
+```yaml
+models:
+  deepseek:
+    provider: openrouter
+    id: deepseek/deepseek-v4-pro
+    context_window: 1048576
+    extra_kwargs:
+      extra_body:
+        provider:
+          sort: price                     # cheapest available endpoint
+          # order: [fireworks, together]  # or pin specific upstreams, in order
+          # allow_fallbacks: false        # fail instead of using unlisted upstreams
+```
+
+Provider slugs are in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
+Account-level OpenRouter settings (ignored providers, data-policy filters) still apply and cannot be overridden per request, so pinning an upstream your account excludes fails with `No endpoints found`.
+Verify a new pin with a direct API test request and check the `provider` field in the response.
+
 ## Azure OpenAI
 
 Use `provider: azure` when your model is deployed through Azure OpenAI.
@@ -2459,6 +2482,7 @@ The `extra_kwargs` field passes additional parameters directly to the underlying
 - `base_url` - Custom API endpoint (useful for OpenAI-compatible servers)
 - `temperature` - Sampling temperature
 - `max_tokens` - Maximum tokens in response
+- `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., OpenRouter provider routing above)
 
 ## Environment Variables
 
