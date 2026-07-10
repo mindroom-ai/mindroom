@@ -1264,7 +1264,15 @@ class _MultiAgentOrchestrator:
             await self._sync_event_cache_service(current_config)
         except Exception:
             logger.exception("Resyncing the event-cache service to the last-good config failed during rollback")
-        await self._restore_pre_stopped_mcp_entities(pre_stopped, current_config)
+        try:
+            await self._restore_pre_stopped_mcp_entities(pre_stopped, current_config)
+        except Exception:
+            logger.exception("Restoring MCP-dependent entities failed during config rollback")
+        if pre_stopped.affected:
+            try:
+                self._external_trigger_runtime.bind_if_ready(current_config, self.agent_bots)
+            except Exception:
+                logger.exception("Rebinding the external-trigger runtime failed during config rollback")
 
     async def _restore_pre_stopped_mcp_entities(
         self,
@@ -1286,9 +1294,6 @@ class _MultiAgentOrchestrator:
             )
         if start_results.started_bots:
             await self._setup_rooms_and_memberships(start_results.started_bots)
-        if pre_stopped.affected:
-            # Stopping unbound the trigger runtime even when nothing is restartable.
-            self._external_trigger_runtime.bind_if_ready(config, self.agent_bots)
         for entity_name in start_results.retryable_entities:
             await self._schedule_bot_start_retry(entity_name)
         if start_results.permanently_failed_entities:

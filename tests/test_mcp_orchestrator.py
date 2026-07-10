@@ -1343,7 +1343,29 @@ async def test_rollback_rebinds_triggers_when_stop_entities_raises(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_restore_runs_room_setup_before_trigger_rebind(tmp_path: Path) -> None:
+async def test_rollback_rebinds_triggers_when_entity_restore_fails(tmp_path: Path) -> None:
+    """A restore failure must stay contained and not leave triggers unbound."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    config = _config(tmp_path)
+    pre_stopped = _PreStoppedMcpEntities(affected=frozenset({"code"}))
+
+    with (
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+        patch.object(
+            orchestrator,
+            "_restore_pre_stopped_mcp_entities",
+            new=AsyncMock(side_effect=RuntimeError("restore failed")),
+        ),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as bind,
+    ):
+        await orchestrator._rollback_failed_config_publication(config, pre_stopped)
+
+    bind.assert_called_once_with(config, orchestrator.agent_bots)
+
+
+@pytest.mark.asyncio
+async def test_rollback_runs_room_setup_before_trigger_rebind(tmp_path: Path) -> None:
     """Restored bots need room and membership reconciliation before triggers rebind."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     config = _config(tmp_path)
@@ -1361,15 +1383,17 @@ async def test_restore_runs_room_setup_before_trigger_rebind(tmp_path: Path) -> 
             new=AsyncMock(return_value=EntityStartResults(started_bots=[restored_bot])),
         ),
         patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock(side_effect=record_rooms)),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch.object(
             orchestrator._external_trigger_runtime,
             "bind_if_ready",
             side_effect=lambda *_args: call_order.append("bind"),
         ),
     ):
-        await orchestrator._restore_pre_stopped_mcp_entities(
-            _PreStoppedMcpEntities(affected=frozenset({"code"}), running_before_stop=frozenset({"code"})),
+        await orchestrator._rollback_failed_config_publication(
             config,
+            _PreStoppedMcpEntities(affected=frozenset({"code"}), running_before_stop=frozenset({"code"})),
         )
 
     assert call_order == ["rooms", "bind"]
