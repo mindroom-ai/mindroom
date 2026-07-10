@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
 from mindroom import constants
+from mindroom.config.errors import ConfigSourceChangedError
 from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
     Config,
@@ -222,6 +223,7 @@ def _load_config_result(
 def _source_fingerprint_for_published_runtime_config(
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
+    expected_source_files: frozenset[Path],
 ) -> tuple[str, frozenset[Path] | None, ConfigLoadResult]:
     """Return the disk fingerprint and source set when the file still matches the runtime config.
 
@@ -240,6 +242,10 @@ def _source_fingerprint_for_published_runtime_config(
         return disk_fingerprint, disk_source_files, result
     if not result.success:
         return disk_fingerprint or canonical_fingerprint, disk_source_files, result
+    if expected_source_files:
+        raise ConfigSourceChangedError(
+            disk_source_files or frozenset({runtime_paths.config_path.resolve()}),
+        )
     return canonical_fingerprint, None, result
 
 
@@ -818,6 +824,7 @@ def prepare_runtime_config_publish(
     source_fingerprint, source_files, source_load_result = _source_fingerprint_for_published_runtime_config(
         runtime_paths,
         validated_payload,
+        runtime_config.source_files,
     )
     return PreparedRuntimeConfigPublish(
         runtime_config=runtime_config,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -245,6 +246,7 @@ def test_mcp_server_id_from_tool_name_ignores_non_mcp_prefixed_plugin_tools() ->
 
 def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -> None:
     """Reject MCP tool name collisions during config validation, before runtime sync."""
+    existing_modules = set(sys.modules)
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -290,6 +292,7 @@ def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -
             },
             _runtime_paths(tmp_path),
         )
+    assert not any("__validation__" in module_name for module_name in set(sys.modules) - existing_modules)
 
 
 def test_config_validation_allows_non_mcp_prefixed_plugin_tools_on_isolating_scope(tmp_path: Path) -> None:

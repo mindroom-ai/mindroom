@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+from mindroom.config.errors import ConfigSourceChangedError
 from mindroom.config.main import load_config
 from mindroom.config.yaml_includes import partial_source_files
 from mindroom.logging_config import get_logger
@@ -223,6 +224,11 @@ class ConfigReloadLifecycle:
         logger.info("Configuration file changed, checking for updates...")
         try:
             updated = await self.update_config()
+        except ConfigSourceChangedError as exc:
+            logger.info("Configuration changed during publication; queueing a fresh reload")
+            self.failed_reload_source_files = exc.source_files
+            self._requested_at = asyncio.get_running_loop().time()
+            return
         except Exception as exc:
             logger.exception("Configuration update failed; will retry if a new change is queued")
             # Keep watching every file the broken load read so fixing a newly

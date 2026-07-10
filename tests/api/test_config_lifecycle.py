@@ -17,7 +17,8 @@ from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
-from mindroom.config.main import Config
+from mindroom.config.errors import ConfigSourceChangedError
+from mindroom.config.main import Config, load_config
 
 VALID_CONFIG: dict[str, Any] = {
     "models": {"default": {"provider": "ollama", "id": "test-model"}},
@@ -473,6 +474,37 @@ class TestExternalWriterPublishing:
         assert after.config_load_result is not None
         assert after.config_load_result.success is False
         assert after.runtime_config is before.runtime_config
+
+    def test_runtime_publish_retries_when_new_include_changes_during_preparation(
+        self,
+        loaded_app: FastAPI,
+    ) -> None:
+        """A valid include edit after staging must reject the stale runtime snapshot."""
+        before = _snapshot(loaded_app)
+        include_path = before.runtime_paths.config_dir / "agents.yaml"
+        included_agents = copy.deepcopy(VALID_CONFIG["agents"])
+        include_path.write_text(yaml.dump(included_agents), encoding="utf-8")
+        root_config = {name: value for name, value in VALID_CONFIG.items() if name != "agents"}
+        before.runtime_paths.config_path.write_text(
+            f"{yaml.dump(root_config)}agents: !include {include_path.name}\n",
+            encoding="utf-8",
+        )
+        staged_config = load_config(before.runtime_paths)
+
+        included_agents["test_agent"]["role"] = "Changed after staging"
+        include_path.write_text(yaml.dump(included_agents), encoding="utf-8")
+
+        with pytest.raises(ConfigSourceChangedError) as exc_info:
+            config_lifecycle.prepare_runtime_config_publish(
+                staged_config,
+                before.runtime_paths,
+                loaded_app,
+            )
+
+        assert exc_info.value.source_files == frozenset(
+            {before.runtime_paths.config_path.resolve(), include_path.resolve()},
+        )
+        assert _snapshot(loaded_app) is before
 
     def test_initial_runtime_publish_can_seed_app_without_disk_snapshot(self, loaded_app: FastAPI) -> None:
         """A supplied runtime config can initialize an app that never loaded authored source."""

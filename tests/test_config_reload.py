@@ -19,6 +19,7 @@ import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig
+from mindroom.config.errors import ConfigSourceChangedError
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
@@ -28,6 +29,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
 from mindroom.orchestration.config_updates import (
     ConfigUpdatePlan,
     _get_changed_agents,
@@ -120,6 +122,33 @@ def test_startup_phase_logging_helpers_emit_structured_timing(monkeypatch: pytes
         status="failed",
         elapsed_ms=123.4,
     )
+
+
+@pytest.mark.asyncio
+async def test_config_reload_retries_source_change_publication_conflict(tmp_path: Path) -> None:
+    """A valid source change during publication should immediately queue one fresh read."""
+    source_files = frozenset({tmp_path / "config.yaml", tmp_path / "agents.yaml"})
+    lifecycle = ConfigReloadLifecycle(
+        runtime_paths=test_runtime_paths(tmp_path),
+        is_running=lambda: True,
+        current_config=lambda: None,
+        agent_bots=dict,
+        in_flight_response_count=lambda: 0,
+        load_initial_config=AsyncMock(),
+        apply_update_plan=AsyncMock(),
+    )
+    update_config = AsyncMock(side_effect=[ConfigSourceChangedError(source_files), True])
+    lifecycle.update_config = update_config
+
+    await lifecycle._apply_queued_config_reload()
+
+    assert lifecycle.failed_reload_source_files == source_files
+    assert lifecycle._requested_at is not None
+
+    await lifecycle._apply_queued_config_reload()
+
+    assert update_config.await_count == 2
+    assert lifecycle.failed_reload_source_files is None
 
 
 @pytest.mark.asyncio

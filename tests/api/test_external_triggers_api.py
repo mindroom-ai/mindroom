@@ -19,7 +19,7 @@ from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.api import external_triggers as external_triggers_api
 from mindroom.api import main as api_main
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.external_triggers.auth import sign_trigger_request
 from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerTarget, TriggerDeliverySnapshot
 
@@ -285,7 +285,8 @@ def test_trigger_invalidated_by_current_config_returns_404_before_replay_claim(
 ) -> None:
     """Stored triggers that no longer target configured rooms are hidden as not found."""
     runtime_paths = trigger_api.runtime_paths
-    config = _write_runtime_config(runtime_paths.config_path, research_rooms=[])
+    _write_runtime_config(runtime_paths.config_path, research_rooms=[])
+    config = load_config(runtime_paths)
     prepared = config_lifecycle.prepare_runtime_config_publish(config, runtime_paths, api_main.app)
     assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, api_main.app)
 
@@ -458,7 +459,8 @@ def test_policy_caps_apply_at_request_time(
     assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
     _create_record(runtime_paths, initial_config, _public_key_b64(private_key))
 
-    lowered_config = _write_runtime_config(config_path, max_body_bytes=1024)
+    _write_runtime_config(config_path, max_body_bytes=1024)
+    lowered_config = load_config(runtime_paths)
     prepared = config_lifecycle.prepare_runtime_config_publish(lowered_config, runtime_paths, api_main.app)
     assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, api_main.app)
     ready_snapshots: list[TriggerDeliverySnapshot] = []
@@ -482,7 +484,8 @@ def test_owner_permission_removed_blocks_delivery_before_replay_claim(
 ) -> None:
     """Current authorization is checked before replay state is touched."""
     runtime_paths = trigger_api.runtime_paths
-    config = _write_runtime_config(runtime_paths.config_path, owner_authorized=False)
+    _write_runtime_config(runtime_paths.config_path, owner_authorized=False)
+    config = load_config(runtime_paths)
     prepared = config_lifecycle.prepare_runtime_config_publish(config, runtime_paths, api_main.app)
     assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, api_main.app)
     _bind_runtime(trigger_api.ready_snapshots)

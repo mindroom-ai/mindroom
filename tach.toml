@@ -407,6 +407,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.config_lifecycle"
 depends_on = [
+    "mindroom.config.errors",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
@@ -1139,6 +1140,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.orchestration.config_lifecycle"
 depends_on = [
+    "mindroom.config.errors",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
     "mindroom.logging_config",

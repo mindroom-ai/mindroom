@@ -842,7 +842,7 @@ def _execute_validation_plugin_module(
         if _module_origin_within_root(loaded_module, plugin_root)
     }
     tasks_before_import = plugin_module._running_tasks()
-    execution_error: Exception | None = None
+    execution_error: BaseException | None = None
     created_task_count = 0
     discovered_hooks: tuple[HookCallback, ...] = ()
     owned_plugin_modules: tuple[tuple[str, ModuleType], ...] = ()
@@ -855,7 +855,7 @@ def _execute_validation_plugin_module(
             from mindroom.hooks import iter_module_hooks  # noqa: PLC0415
 
             discovered_hooks = tuple(iter_module_hooks(module))
-    except Exception as exc:
+    except BaseException as exc:
         execution_error = exc
     finally:
         created_task_count = plugin_module._cancel_tasks_created_since(tasks_before_import)
@@ -869,6 +869,8 @@ def _execute_validation_plugin_module(
         )
 
     if execution_error is not None:
+        if not isinstance(execution_error, Exception):
+            raise execution_error
         msg = f"Plugin validation module execution failed for {module_path}: {execution_error}"
         raise ToolMetadataValidationError(msg) from execution_error
     if created_task_count:
@@ -944,6 +946,58 @@ def _resolved_tool_state_for_runtime(
         return resolved_state
 
 
+def _resolve_validation_plugin_modules(
+    plugin_base: plugin_module._PluginBase,
+    candidate_registrations: dict[str, dict[str, ToolMetadata]],
+    candidate_active_plugins: list[tuple[str, str]],
+    candidate_owned_modules: dict[str, ModuleType],
+) -> tuple[HookCallback, ...]:
+    """Resolve one plugin's validation modules and clean partial imports on failure."""
+    candidate_hooks: tuple[HookCallback, ...] = ()
+    validation_plugin_name = (
+        f"{plugin_base.name}{_VALIDATION_PLUGIN_MODULE_SUFFIX}{next(_VALIDATION_PLUGIN_GENERATIONS)}"
+    )
+    try:
+        if plugin_base.tools_module_path is None:
+            if plugin_base.hooks_module_path is not None:
+                _, candidate_hooks, hook_modules = _execute_validation_plugin_module(
+                    plugin_base.name,
+                    plugin_base.root,
+                    plugin_base.hooks_module_path,
+                    candidate_registrations,
+                    validation_plugin_name=validation_plugin_name,
+                )
+                candidate_owned_modules.update(hook_modules)
+        else:
+            tool_module_name, tool_module_hooks, tool_modules = _execute_validation_plugin_module(
+                plugin_base.name,
+                plugin_base.root,
+                plugin_base.tools_module_path,
+                candidate_registrations,
+                validation_plugin_name=validation_plugin_name,
+            )
+            candidate_owned_modules.update(tool_modules)
+            candidate_active_plugins.append((plugin_base.name, tool_module_name))
+            if (
+                plugin_base.hooks_module_path is not None
+                and plugin_base.hooks_module_path != plugin_base.tools_module_path
+            ):
+                _, candidate_hooks, hook_modules = _execute_validation_plugin_module(
+                    plugin_base.name,
+                    plugin_base.root,
+                    plugin_base.hooks_module_path,
+                    candidate_registrations,
+                    validation_plugin_name=validation_plugin_name,
+                )
+                candidate_owned_modules.update(hook_modules)
+            else:
+                candidate_hooks = tool_module_hooks
+    except BaseException:
+        _remove_owned_plugin_modules(tuple(sorted(candidate_owned_modules.items())))
+        raise
+    return candidate_hooks
+
+
 def _compute_resolved_tool_state_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
@@ -984,53 +1038,20 @@ def _compute_resolved_tool_state_for_runtime(
     for plugin_base, plugin_entry, plugin_order in plugin_bases:
         candidate_registrations: dict[str, dict[str, ToolMetadata]] = {}
         candidate_active_plugins: list[tuple[str, str]] = []
-        candidate_hooks: tuple[HookCallback, ...] = ()
         candidate_owned_modules: dict[str, ModuleType] = {}
-        validation_plugin_name = (
-            f"{plugin_base.name}{_VALIDATION_PLUGIN_MODULE_SUFFIX}{next(_VALIDATION_PLUGIN_GENERATIONS)}"
-        )
         try:
-            if plugin_base.tools_module_path is None:
-                if plugin_base.hooks_module_path is not None:
-                    _, candidate_hooks, hook_modules = _execute_validation_plugin_module(
-                        plugin_base.name,
-                        plugin_base.root,
-                        plugin_base.hooks_module_path,
-                        candidate_registrations,
-                        validation_plugin_name=validation_plugin_name,
-                    )
-                    candidate_owned_modules.update(hook_modules)
-            else:
-                tool_module_name, tool_module_hooks, tool_modules = _execute_validation_plugin_module(
-                    plugin_base.name,
-                    plugin_base.root,
-                    plugin_base.tools_module_path,
-                    candidate_registrations,
-                    validation_plugin_name=validation_plugin_name,
-                )
-                candidate_owned_modules.update(tool_modules)
-                candidate_active_plugins.append(
-                    (
-                        plugin_base.name,
-                        tool_module_name,
-                    ),
-                )
-                if (
-                    plugin_base.hooks_module_path is not None
-                    and plugin_base.hooks_module_path != plugin_base.tools_module_path
-                ):
-                    _, candidate_hooks, hook_modules = _execute_validation_plugin_module(
-                        plugin_base.name,
-                        plugin_base.root,
-                        plugin_base.hooks_module_path,
-                        candidate_registrations,
-                        validation_plugin_name=validation_plugin_name,
-                    )
-                    candidate_owned_modules.update(hook_modules)
-                else:
-                    candidate_hooks = tool_module_hooks
-        except Exception as exc:
+            candidate_hooks = _resolve_validation_plugin_modules(
+                plugin_base,
+                candidate_registrations,
+                candidate_active_plugins,
+                candidate_owned_modules,
+            )
+        except BaseException as exc:
+            if not isinstance(exc, Exception):
+                _remove_owned_plugin_modules(tuple(sorted(owned_plugin_modules.items())))
+                raise
             if not tolerate_plugin_load_errors:
+                _remove_owned_plugin_modules(tuple(sorted(owned_plugin_modules.items())))
                 raise
             plugin_module._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
             unavailable_tool_metadata.update(
@@ -1050,25 +1071,31 @@ def _compute_resolved_tool_state_for_runtime(
             ),
         )
 
-    desired_registry, desired_metadata = resolved_tool_state(active_plugins, validation_registrations)
-    mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
-    _merge_mcp_tool_state(
-        desired_registry,
-        desired_metadata,
-        mcp_registry,
-        mcp_metadata,
-    )
-    unavailable_tool_metadata = _unavailable_tool_metadata_without_resolved_tools(
-        unavailable_tool_metadata,
-        desired_registry,
-        desired_metadata,
-    )
+    try:
+        desired_registry, desired_metadata = resolved_tool_state(active_plugins, validation_registrations)
+        mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
+        _merge_mcp_tool_state(
+            desired_registry,
+            desired_metadata,
+            mcp_registry,
+            mcp_metadata,
+        )
+        unavailable_tool_metadata = _unavailable_tool_metadata_without_resolved_tools(
+            unavailable_tool_metadata,
+            desired_registry,
+            desired_metadata,
+        )
+        hook_registry = HookRegistry.from_plugins(hook_plugins)
+        module_owner = _OwnedPluginModules(tuple(sorted(owned_plugin_modules.items())))
+    except BaseException:
+        _remove_owned_plugin_modules(tuple(sorted(owned_plugin_modules.items())))
+        raise
     return _ResolvedToolState(
         desired_registry,
         desired_metadata,
         unavailable_tool_metadata,
-        HookRegistry.from_plugins(hook_plugins),
-        _OwnedPluginModules(tuple(sorted(owned_plugin_modules.items()))),
+        hook_registry,
+        module_owner,
     )
 
 

@@ -1011,6 +1011,34 @@ def test_runtime_validation_does_not_leak_plugin_tools_after_failure(tmp_path: P
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
 
 
+def test_runtime_validation_cleans_healthy_package_when_later_plugin_fails(tmp_path: Path) -> None:
+    """A rejected multi-plugin snapshot must remove packages imported before the failure."""
+    good_root = tmp_path / "plugins" / "good"
+    bad_root = tmp_path / "plugins" / "bad"
+    good_root.mkdir(parents=True)
+    bad_root.mkdir(parents=True)
+    (good_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "good", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (bad_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "bad", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (good_root / "hooks.py").write_text("VALUE = 'loaded'\n", encoding="utf-8")
+    (bad_root / "hooks.py").write_text("raise RuntimeError('rejected candidate')\n", encoding="utf-8")
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    existing_modules = set(sys.modules)
+
+    with pytest.raises(ConfigRuntimeValidationError, match="rejected candidate"):
+        RuntimeConfig.from_authored(
+            Config(plugins=["./plugins/good", "./plugins/bad"]),
+            runtime_paths,
+        )
+
+    assert not any("__validation__" in module_name for module_name in set(sys.modules) - existing_modules)
+
+
 def test_runtime_validation_does_not_mutate_live_tool_registry_on_success(tmp_path: Path) -> None:
     """Successful runtime validation should not publish plugin tools into the live registry."""
     plugin_root = tmp_path / "plugins" / "demo"
