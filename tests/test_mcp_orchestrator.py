@@ -1308,6 +1308,41 @@ async def test_rollback_rebinds_triggers_even_when_nothing_is_restartable(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_rollback_rebinds_triggers_when_stop_entities_raises(tmp_path: Path) -> None:
+    """A failing pre-sync stop must still roll back with the planned affected set."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config(tmp_path)
+    updated_config = _config(tmp_path, command="uvx")
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot, running=True),
+        "code": MagicMock(spec=AgentBot, running=True),
+        "dev_team": MagicMock(spec=AgentBot, running=True),
+    }
+    persist_entity_accounts(current_config, orchestrator.runtime_paths)
+    persist_entity_accounts(updated_config, orchestrator.runtime_paths)
+
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=RuntimeError("stop failed"))),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())) as mcp_sync,
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+        patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock()) as restore,
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as bind,
+        pytest.raises(RuntimeError, match="stop failed"),
+    ):
+        await orchestrator.config_reload.update_config()
+
+    assert orchestrator.config is current_config
+    # The bots never actually stopped, so nothing may be recreated over them.
+    restore.assert_not_awaited()
+    # The unbind already happened before the failure, so triggers must rebind.
+    bind.assert_called_once_with(current_config, orchestrator.agent_bots)
+    # The MCP manager never synced the new config; rollback resyncs last-good once.
+    mcp_sync.assert_awaited_once_with(current_config)
+
+
+@pytest.mark.asyncio
 async def test_restore_runs_room_setup_before_trigger_rebind(tmp_path: Path) -> None:
     """Restored bots need room and membership reconciliation before triggers rebind."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))

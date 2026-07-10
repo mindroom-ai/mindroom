@@ -1203,13 +1203,13 @@ class _MultiAgentOrchestrator:
             if bot is not None:
                 await bot.cleanup()
 
-    async def _stop_entities_before_mcp_sync(
+    def _plan_pre_stopped_mcp_entities(
         self,
         current_config: Config,
         new_config: Config,
         changed_server_ids: set[str],
     ) -> _PreStoppedMcpEntities:
-        """Stop MCP-dependent entities before removing or reconfiguring their servers."""
+        """Return the MCP-dependent entities one update must stop before syncing."""
         if not changed_server_ids:
             return _PreStoppedMcpEntities()
 
@@ -1229,16 +1229,25 @@ class _MultiAgentOrchestrator:
             for entity_name in affected_entities
             if (bot := self.agent_bots.get(entity_name)) is not None and bot.running
         )
-        self._external_trigger_runtime.unbind_for_entity_changes(affected_entities)
-        for entity_name in affected_entities:
+        return _PreStoppedMcpEntities(affected=affected_entities, running_before_stop=running_before_stop)
+
+    async def _stop_entities_before_mcp_sync(
+        self,
+        pre_stopped: _PreStoppedMcpEntities,
+        new_config: Config,
+    ) -> None:
+        """Stop MCP-dependent entities before removing or reconfiguring their servers."""
+        if not pre_stopped.affected:
+            return
+        self._external_trigger_runtime.unbind_for_entity_changes(pre_stopped.affected)
+        for entity_name in pre_stopped.affected:
             await self._cancel_bot_start_task(entity_name)
         await stop_entities(
-            set(affected_entities),
+            set(pre_stopped.affected),
             self.agent_bots,
             self._sync_tasks,
-            restart_entities=set(affected_entities & set(configured_entity_names(new_config))),
+            restart_entities=set(pre_stopped.affected & set(configured_entity_names(new_config))),
         )
-        return _PreStoppedMcpEntities(affected=affected_entities, running_before_stop=running_before_stop)
 
     async def _rollback_failed_config_publication(
         self,
@@ -1433,13 +1442,15 @@ class _MultiAgentOrchestrator:
             prepared_plugin_update = (
                 self._prepare_plugin_update_for_config_update(new_config) if plugin_changes else None
             )
-            pre_stopped_mcp_entities = _PreStoppedMcpEntities()
+            # Plan the pre-sync stop before doing it, so a failure inside the stop
+            # itself still rolls back with the affected set (rebinding triggers).
+            pre_stopped_mcp_entities = self._plan_pre_stopped_mcp_entities(
+                current_config,
+                new_config,
+                plan.changed_mcp_servers,
+            )
             try:
-                pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
-                    current_config,
-                    new_config,
-                    plan.changed_mcp_servers,
-                )
+                await self._stop_entities_before_mcp_sync(pre_stopped_mcp_entities, new_config)
                 changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
                 await self._sync_event_cache_service(new_config)
                 logger.info(

@@ -26,6 +26,7 @@ from mindroom.tool_system.registry_state import (
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
     from types import ModuleType
 
@@ -273,10 +274,10 @@ def apply_prepared_plugin_reload(
     )
 
 
-def cancel_discarded_plugin_reload_tasks(prepared_reload: PreparedPluginReload) -> int:
-    """Cancel module-global tasks spawned by one staged plugin snapshot that will not commit."""
+def _cancel_tasks_in_modules(modules: Iterable[ModuleType]) -> int:
+    """Cancel non-done module-global asyncio tasks found in the given modules."""
     cancelled_task_ids: set[int] = set()
-    for module in prepared_reload.tool_registry_snapshot.plugin_modules.values():
+    for module in modules:
         for value in vars(module).values():
             for task in _iter_module_tasks(value):
                 if task.done() or id(task) in cancelled_task_ids:
@@ -284,6 +285,11 @@ def cancel_discarded_plugin_reload_tasks(prepared_reload: PreparedPluginReload) 
                 task.cancel()
                 cancelled_task_ids.add(id(task))
     return len(cancelled_task_ids)
+
+
+def cancel_discarded_plugin_reload_tasks(prepared_reload: PreparedPluginReload) -> int:
+    """Cancel module-global tasks spawned by one staged plugin snapshot that will not commit."""
+    return _cancel_tasks_in_modules(prepared_reload.tool_registry_snapshot.plugin_modules.values())
 
 
 def reload_plugins(
@@ -311,19 +317,13 @@ def _cancel_plugin_module_tasks(package_roots: set[str]) -> int:
     if not package_roots:
         return 0
 
-    cancelled_task_ids: set[int] = set()
-    for module_name, module in tuple(sys.modules.items()):
-        if module is None or not any(
-            module_name == root or module_name.startswith(f"{root}.") for root in package_roots
-        ):
-            continue
-        for value in vars(module).values():
-            for task in _iter_module_tasks(value):
-                if task.done() or id(task) in cancelled_task_ids:
-                    continue
-                task.cancel()
-                cancelled_task_ids.add(id(task))
-    return len(cancelled_task_ids)
+    matching_modules = (
+        module
+        for module_name, module in tuple(sys.modules.items())
+        if module is not None
+        and any(module_name == root or module_name.startswith(f"{root}.") for root in package_roots)
+    )
+    return _cancel_tasks_in_modules(matching_modules)
 
 
 def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
