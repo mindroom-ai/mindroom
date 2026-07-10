@@ -18,7 +18,7 @@ from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from tests.conftest import (
@@ -303,7 +303,7 @@ class TestResponseTrackingRegression:
             message_event,
             [],
             requester_user_id="@user:localhost",
-            handled_turn=HandledTurnState.create(
+            handled_turn=TurnRecord.create(
                 source_event_ids,
                 source_event_prompts=source_event_prompts,
             ),
@@ -333,7 +333,7 @@ class TestResponseTrackingRegression:
             message_event,
             [],
             requester_user_id="@user:localhost",
-            handled_turn=HandledTurnState.create(
+            handled_turn=TurnRecord.create(
                 source_event_ids,
                 source_event_prompts=source_event_prompts,
             ),

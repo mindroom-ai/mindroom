@@ -109,11 +109,7 @@ def _render_cleaned_interrupted_replay(body: str) -> str:
             partial_text=clean_partial_reply_text(body),
             completed_tools=(),
             interrupted_tools=(),
-            seen_event_ids=(),
-            source_event_id=None,
-            source_event_ids=(),
-            source_event_prompts=(),
-            response_event_id=None,
+            run_metadata={},
         ),
     )
 

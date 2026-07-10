@@ -32,6 +32,7 @@ from mindroom.constants import (
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+    MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
@@ -115,11 +116,13 @@ def build_matrix_run_metadata(
     else:
         metadata.setdefault("model_params", {})
     source_event_ids = _normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
+    discovery_event_ids = _normalized_string_list(metadata.get(MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY))
     if reply_to_event_id:
         seen_event_ids = _normalized_string_list(
             [
                 reply_to_event_id,
                 *source_event_ids,
+                *discovery_event_ids,
                 *_normalized_string_list(metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)),
                 *unseen_event_ids,
             ],

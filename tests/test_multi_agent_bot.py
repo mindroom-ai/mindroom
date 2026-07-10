@@ -20,7 +20,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
 )
 from mindroom.conversation_resolver import MessageContext
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -992,7 +992,7 @@ class TestAgentBot(AgentBotTestBase):
 
         if marks_responded:
             tracker.record_handled_turn.assert_called_once_with(
-                HandledTurnState.from_source_event_id(event.event_id),
+                TurnRecord.create([event.event_id]),
             )
         else:
             tracker.record_handled_turn.assert_not_called()
@@ -1059,7 +1059,7 @@ class TestAgentBot(AgentBotTestBase):
 
         if marks_responded:
             tracker.record_handled_turn.assert_called_once_with(
-                HandledTurnState.from_source_event_id(event.event_id),
+                TurnRecord.create([event.event_id]),
             )
         else:
             tracker.record_handled_turn.assert_not_called()
@@ -1341,7 +1341,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = AsyncMock()
 
         # Mark an event as already responded
-        _turn_store(bot).record_turn(HandledTurnState.from_source_event_id("event123"))
+        _turn_store(bot).record_turn(TurnRecord.create(["event123"]))
 
         # Create mock room and event
         mock_room = MagicMock()

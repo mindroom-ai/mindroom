@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,7 +26,7 @@ from mindroom.constants import (
     VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.identity import MatrixID
@@ -574,7 +575,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     mock_interactive.assert_not_awaited()
     mock_schedule.assert_not_awaited()
     turn_store.record_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(event.event_id),
+        TurnRecord.create([event.event_id]),
     )
 
 
@@ -766,7 +767,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     mock_download_audio.assert_not_called()
     send_response.assert_not_called()
     turn_store.record_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id("$agent_audio_event"),
+        TurnRecord.create(["$agent_audio_event"]),
     )
 
 
@@ -824,11 +825,12 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     assert call_kwargs["attachment_ids"] == [expected_attachment_id]
     assert list(call_kwargs["media"].audio)
     turn_store.record_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(
-            "$voice_event",
-            response_event_id="$response",
-            source_event_prompts={"$voice_event": f"{VOICE_PREFIX}[Attached voice message]"},
-        ).with_response_context(
+        replace(
+            TurnRecord.create(
+                ["$voice_event"],
+                response_event_id="$response",
+                source_event_prompts={"$voice_event": f"{VOICE_PREFIX}[Attached voice message]"},
+            ),
             response_owner="home",
             requester_id="@alice:example.com",
             correlation_id="$voice_event",
@@ -1262,10 +1264,11 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         VOICE_TRANSCRIPT_KEY: True,
     }
     turn_store.record_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(
-            "$voice_event",
-            response_event_id="$response",
-        ).with_response_context(
+        replace(
+            TurnRecord.create(
+                ["$voice_event"],
+                response_event_id="$response",
+            ),
             response_owner=ROUTER_AGENT_NAME,
             requester_id="@alice:example.com",
             correlation_id="$voice_event",

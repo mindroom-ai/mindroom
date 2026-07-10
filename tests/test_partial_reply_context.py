@@ -96,11 +96,7 @@ def _render_normalized_interrupted_replay(body: str) -> str:
             partial_text=_clean_partial_reply_body(body),
             completed_tools=(),
             interrupted_tools=(),
-            seen_event_ids=(),
-            source_event_id=None,
-            source_event_ids=(),
-            source_event_prompts=(),
-            response_event_id=None,
+            run_metadata={},
         ),
     )
 

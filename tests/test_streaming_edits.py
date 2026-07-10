@@ -12,7 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
@@ -165,7 +165,7 @@ class TestStreamingEdits:
         assert bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
         bot._turn_store.record_turn(
-            HandledTurnState.from_source_event_id("$initial123", response_event_id="$response123"),
+            TurnRecord.create(["$initial123"], response_event_id="$response123"),
         )
 
         # Reset mocks
@@ -255,7 +255,7 @@ class TestStreamingEdits:
         mock_room.room_id = "!test:localhost"
 
         # Mark that we already responded to some original message
-        bot._turn_store.record_turn(HandledTurnState.from_source_event_id("$original123"))
+        bot._turn_store.record_turn(TurnRecord.create(["$original123"]))
 
         # New message (NOT an edit) mentioning the agent
         new_event = MagicMock()

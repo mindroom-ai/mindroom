@@ -37,6 +37,12 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_SOURCE_CACHE,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+    is_thread_history_degraded,
+)
 from mindroom.matrix.thread_projection import (
     SupportsVisibleThreadMessage,
     latest_visible_thread_event_id_by_thread,
@@ -51,11 +57,11 @@ from mindroom.streaming import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable
+    from collections.abc import AsyncIterator, Iterable, Sequence
 
     from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ThreadReadResult
 
 logger = get_logger(__name__)
 
@@ -218,18 +224,36 @@ async def auto_resume_interrupted_threads(
     if not interrupted or (max_resumes is not None and max_resumes <= 0):
         return 0
 
-    selected_threads = _select_threads_to_resume(interrupted, max_resumes=max_resumes)
-    if not selected_threads:
-        return 0
-
+    candidate_threads = _ordered_auto_resume_candidates(interrupted, max_resumes=max_resumes)
     resumed_count = 0
-    for index, interrupted_thread in enumerate(selected_threads):
+    delay_due = False
+    for interrupted_thread in candidate_threads:
+        if max_resumes is not None and resumed_count >= max_resumes:
+            break
+        if not await _interrupted_target_remains_latest_human_work(
+            interrupted_thread,
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_cache=conversation_cache,
+        ):
+            continue
         try:
             content = _build_auto_resume_content(
                 interrupted_thread,
                 config=config,
                 runtime_paths=runtime_paths,
             )
+            if delay_due:
+                await asyncio.sleep(delay)
+                delay_due = False
+                if not await _interrupted_target_remains_latest_human_work(
+                    interrupted_thread,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    conversation_cache=conversation_cache,
+                ):
+                    continue
+            delay_due = True
             delivered = await send_message_result(client, interrupted_thread.room_id, content)
             if delivered is not None:
                 if conversation_cache is not None:
@@ -261,10 +285,102 @@ async def auto_resume_interrupted_threads(
                 target_event_id=interrupted_thread.target_event_id,
                 error=str(exc),
             )
-        if index < len(selected_threads) - 1:
-            await asyncio.sleep(delay)
 
     return resumed_count
+
+
+async def _interrupted_target_remains_latest_human_work(
+    interrupted_thread: InterruptedThread,
+    *,
+    config: RuntimeConfig,
+    runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None,
+) -> bool:
+    """Return whether authoritative history has no newer effective human activity."""
+    if conversation_cache is None or interrupted_thread.thread_id is None:
+        return False
+
+    try:
+        history = await conversation_cache.get_strict_thread_history(
+            interrupted_thread.room_id,
+            interrupted_thread.thread_id,
+            caller_label="startup_auto_resume_freshness",
+        )
+        later_messages = _authoritative_history_after_target(
+            history,
+            target_event_id=interrupted_thread.target_event_id,
+        )
+        remains_latest = _later_thread_activity_is_internal(
+            later_messages,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Skipping auto-resume because authoritative freshness check failed",
+            target_event_id=interrupted_thread.target_event_id,
+            error=str(exc),
+        )
+        return False
+
+    if not remains_latest:
+        logger.info(
+            "Skipping stale auto-resume after newer human activity",
+            target_event_id=interrupted_thread.target_event_id,
+        )
+    return remains_latest
+
+
+def _authoritative_history_after_target(
+    history: ThreadReadResult,
+    *,
+    target_event_id: str,
+) -> Sequence[ResolvedVisibleMessage]:
+    """Return history entries after an exact target or raise when history is unusable."""
+    history_source = history.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
+    if not history.is_full_history or is_thread_history_degraded(history):
+        msg = "Thread history is incomplete or degraded"
+        raise ValueError(msg)
+    if history_source not in {THREAD_HISTORY_SOURCE_CACHE, THREAD_HISTORY_SOURCE_HOMESERVER}:
+        msg = f"Non-authoritative thread history source: {history_source!r}"
+        raise ValueError(msg)
+
+    target_index = next(
+        (index for index, message in enumerate(history) if message.event_id == target_event_id),
+        None,
+    )
+    if target_index is None:
+        msg = f"Interrupted target absent from thread history: {target_event_id}"
+        raise ValueError(msg)
+    return history[target_index + 1 :]
+
+
+def _later_thread_activity_is_internal(
+    messages: Sequence[ResolvedVisibleMessage],
+    *,
+    config: RuntimeConfig,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether every later event is from an effective internal requester."""
+    if not messages:
+        return True
+
+    internal_sender_ids = current_internal_sender_ids(config, runtime_paths)
+    for message in messages:
+        if not message.sender:
+            msg = "Thread history contains a message without a trustworthy sender"
+            raise ValueError(msg)
+        effective_requester = _effective_requester_for_message(
+            message,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        if not effective_requester:
+            msg = "Thread history sender classification returned no requester"
+            raise ValueError(msg)
+        if effective_requester not in internal_sender_ids:
+            return False
+    return True
 
 
 async def _cleanup_room_stale_streaming_messages(
@@ -1414,12 +1530,12 @@ def _truncate_partial_text(text: str, *, limit: int = _INTERRUPTED_PARTIAL_TEXT_
     return f"{stripped_text[: limit - 1]}…"
 
 
-def _select_threads_to_resume(
+def _ordered_auto_resume_candidates(
     interrupted: list[InterruptedThread],
     *,
     max_resumes: int | None,
 ) -> list[InterruptedThread]:
-    """Return the newest unique threaded interruptions, optionally capped."""
+    """Return newest unique capped candidates first, then older delivery fallbacks."""
     latest_by_key: dict[tuple[str, str, str], InterruptedThread] = {}
 
     for interrupted_thread in interrupted:
@@ -1441,7 +1557,7 @@ def _select_threads_to_resume(
     )
     if max_resumes is None or max_resumes >= len(unique_threads):
         return unique_threads
-    return unique_threads[-max_resumes:]
+    return [*unique_threads[-max_resumes:], *reversed(unique_threads[:-max_resumes])]
 
 
 def _has_restart_interrupted_note(body: str) -> bool:

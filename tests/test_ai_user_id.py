@@ -49,6 +49,7 @@ from mindroom.constants import (
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+    MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.execution_preparation import _PreparedExecutionContext
@@ -1129,6 +1130,14 @@ class TestUserIdPassthrough:
         persisted_run = cast("RunOutput", persisted_session.runs[0])
         assert persisted_run.status is RunStatus.completed
         assert persisted_run.metadata == {
+            AI_RUN_METADATA_KEY: {
+                "version": 1,
+                "compaction": {
+                    "decision": "none",
+                    "outcome": "none",
+                    "reason": "unclassified",
+                },
+            },
             "reply_to_event_id": "e1",
             "correlation_id": "e1",
             "tools_schema": [],
@@ -1305,7 +1314,7 @@ class TestUserIdPassthrough:
         assert snapshot.user_message == "test"
         assert snapshot.partial_text == "Half done"
         assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
-        assert snapshot.seen_event_ids == ("e1",)
+        assert snapshot.run_metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] == ["e1"]
 
     @pytest.mark.asyncio
     async def test_ai_response_returns_friendly_error_for_error_status(self, tmp_path: Path) -> None:
@@ -2976,13 +2985,14 @@ class TestUserIdPassthrough:
         assert "cached_input_tokens" not in payload["context"]
         assert payload["context"]["window_tokens"] == 200_000
 
-    def test_build_matrix_run_metadata_merges_coalesced_source_event_ids(self) -> None:
-        """Run metadata should mark every source event in a coalesced batch as seen."""
+    def test_build_matrix_run_metadata_merges_source_and_discovery_event_ids(self) -> None:
+        """Run metadata should mark canonical sources and discovery aliases as seen."""
         metadata = build_matrix_run_metadata(
             "$primary",
             ["$unseen"],
             extra_metadata={
                 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],
+                MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$selection"],
                 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$first": "first", "$primary": "primary"},
             },
         )
@@ -2992,8 +3002,9 @@ class TestUserIdPassthrough:
             "tools_schema": [],
             "model_params": {},
             MATRIX_EVENT_ID_METADATA_KEY: "$primary",
-            MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$primary", "$first", "$unseen"],
+            MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$primary", "$first", "$selection", "$unseen"],
             MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],
+            MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$selection"],
             MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$first": "first", "$primary": "primary"},
         }
 

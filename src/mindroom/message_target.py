@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from mindroom.scheduling import ScheduledWorkflow
 
 
-class MessageTargetMetadata(TypedDict):
+class _MessageTargetMetadata(TypedDict):
     """JSON-safe persisted conversation-target identity."""
 
     room_id: str
@@ -62,7 +62,7 @@ class MessageTarget:
 
     _build_session_id = staticmethod(create_session_id)
 
-    def to_metadata(self) -> MessageTargetMetadata:
+    def to_metadata(self) -> _MessageTargetMetadata:
         """Return JSON-safe conversation-target metadata."""
         return {
             "room_id": self.room_id,

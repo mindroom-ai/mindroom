@@ -540,7 +540,7 @@ async def test_streaming_midstream_failure_persists_partial_and_finalizes_error(
     persist.assert_called_once()
     snapshot = persist.call_args.kwargs["snapshot"]
     assert snapshot.partial_text == "partial body"
-    assert snapshot.response_event_id == "$stream"
+    assert snapshot.run_metadata["matrix_response_event_id"] == "$stream"
     assert persist.call_args.kwargs["is_team"] is False
 
 

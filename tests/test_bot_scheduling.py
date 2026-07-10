@@ -19,7 +19,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KI
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import DispatchIngressMetadata
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
@@ -1229,7 +1229,7 @@ class TestCommandHandling:
                 event,
                 "@mindroom_router:localhost",
                 event_label="message",
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                handled_turn=TurnRecord.create([event.event_id]),
                 ingress_metadata=DispatchIngressMetadata(source_kind=SCHEDULED_SOURCE_KIND),
             )
 

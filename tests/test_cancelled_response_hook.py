@@ -24,7 +24,7 @@ from mindroom.delivery_gateway import (
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import HandledTurnRecord
+from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -46,7 +46,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
-from mindroom.turn_store import _LoadedTurnRecord
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -414,7 +413,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
     """Edited team prompts that become blank must still emit one canonical cancelled hook."""
     bot = _team_bot(tmp_path)
     turn_store = bot._edit_regenerator.deps.turn_store
-    turn_record = HandledTurnRecord(
+    turn_record = TurnRecord(
         anchor_event_id="$original",
         source_event_ids=("$original",),
         response_event_id="$response",
@@ -463,13 +462,10 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         patch.object(
             turn_store,
             "load_turn",
-            return_value=_LoadedTurnRecord(
-                record=turn_record,
-                requires_backfill=False,
-            ),
+            return_value=turn_record,
         ),
         patch.object(turn_store, "build_run_metadata", return_value={}),
-        patch.object(turn_store, "record_turn_record"),
+        patch.object(turn_store, "record_turn"),
         patch.object(turn_store, "remove_stale_runs_for_edit"),
         patch.object(bot._ingress_hook_runner, "emit_message_received_hooks", new=AsyncMock(return_value=False)),
     ):

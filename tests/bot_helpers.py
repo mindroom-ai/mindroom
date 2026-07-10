@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -35,7 +35,7 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
@@ -72,7 +72,7 @@ from tests.conftest import replace_turn_policy_deps as shared_replace_turn_polic
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 
     from agno.knowledge.document import Document
 
@@ -231,6 +231,21 @@ def _turn_store(bot: AgentBot | TeamBot) -> TurnStore:
 
 def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> MagicMock:
     """Swap the private handled-turn ledger behind one turn store for test assertions."""
+
+    def update_handled_turn(
+        lookup_event_ids: Sequence[str],
+        update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
+    ) -> TurnRecord:
+        existing_records = {
+            source_event_id: turn_record
+            for source_event_id in lookup_event_ids
+            if isinstance((turn_record := tracker.get_turn_record(source_event_id)), TurnRecord)
+        }
+        turn_record = update(existing_records)
+        tracker.record_handled_turn(turn_record)
+        return turn_record
+
+    tracker.update_handled_turn.side_effect = update_handled_turn
     _turn_store(bot)._ledger = tracker
     return tracker
 
@@ -312,15 +327,16 @@ def _agent_response_handled_turn(
     requester_id: str | None = None,
     correlation_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
-) -> HandledTurnState:
+) -> TurnRecord:
     """Return the handled-turn state persisted for one direct agent response."""
-    return HandledTurnState.from_source_event_id(
-        event_id,
-        response_event_id=response_event_id,
-        requester_id=requester_id,
-        correlation_id=correlation_id,
-        source_event_prompts=source_event_prompts,
-    ).with_response_context(
+    return replace(
+        TurnRecord.create(
+            [event_id],
+            response_event_id=response_event_id,
+            requester_id=requester_id,
+            correlation_id=correlation_id,
+            source_event_prompts=source_event_prompts,
+        ),
         response_owner=agent_name,
         history_scope=HistoryScope(kind="agent", scope_id=agent_name),
         conversation_target=MessageTarget.resolve(

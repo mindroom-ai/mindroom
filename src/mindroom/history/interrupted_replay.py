@@ -14,13 +14,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.agent_storage import get_agent_session, get_team_session
-from mindroom.constants import (
-    MATRIX_EVENT_ID_METADATA_KEY,
-    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
-    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
-    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
-    MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
-)
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.history.storage import new_scope_session
 from mindroom.tool_system.events import (
     ToolTraceEntry,
@@ -39,15 +33,6 @@ if TYPE_CHECKING:
 _INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
 _ORIGINAL_STATUS_KEY = "mindroom_original_status"
 _INTERRUPTED_REPLAY_STATE = "interrupted"
-_TRACE_METADATA_KEYS = (
-    "room_id",
-    "thread_id",
-    "reply_to_event_id",
-    "requester_id",
-    "correlation_id",
-    "tools_schema",
-    "model_params",
-)
 
 
 @dataclass(frozen=True)
@@ -58,22 +43,7 @@ class InterruptedReplaySnapshot:
     partial_text: str
     completed_tools: tuple[ToolTraceEntry, ...]
     interrupted_tools: tuple[ToolTraceEntry, ...]
-    seen_event_ids: tuple[str, ...]
-    source_event_id: str | None
-    source_event_ids: tuple[str, ...]
-    source_event_prompts: tuple[tuple[str, str], ...]
-    response_event_id: str | None
-    trace_metadata: dict[str, Any] = field(default_factory=dict)
-
-
-def _normalized_string_tuple(values: object) -> tuple[str, ...]:
-    if not isinstance(values, list):
-        return ()
-    normalized: list[str] = []
-    for value in values:
-        if isinstance(value, str) and value and value not in normalized:
-            normalized.append(value)
-    return tuple(normalized)
+    run_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def tool_execution_call_id(tool: ToolExecution | None) -> str | None:
@@ -82,16 +52,6 @@ def tool_execution_call_id(tool: ToolExecution | None) -> str | None:
         return None
     call_id = tool.tool_call_id.strip()
     return call_id or None
-
-
-def _normalized_prompt_items(values: object) -> tuple[tuple[str, str], ...]:
-    if not isinstance(values, dict):
-        return ()
-    normalized: list[tuple[str, str]] = []
-    for key, value in values.items():
-        if isinstance(key, str) and key and isinstance(value, str):
-            normalized.append((key, value))
-    return tuple(normalized)
 
 
 def split_interrupted_tool_trace(
@@ -151,22 +111,13 @@ def _render_interrupted_replay_content(snapshot: InterruptedReplaySnapshot) -> s
 
 
 def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[str, Any]:
-    metadata: dict[str, Any] = dict(snapshot.trace_metadata)
+    metadata = dict(snapshot.run_metadata)
     metadata.update(
         {
-            MATRIX_SEEN_EVENT_IDS_METADATA_KEY: list(snapshot.seen_event_ids),
             _ORIGINAL_STATUS_KEY: "cancelled",
             _INTERRUPTED_REPLAY_STATE_KEY: _INTERRUPTED_REPLAY_STATE,
         },
     )
-    if snapshot.source_event_id is not None:
-        metadata[MATRIX_EVENT_ID_METADATA_KEY] = snapshot.source_event_id
-    if snapshot.source_event_ids:
-        metadata[MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = list(snapshot.source_event_ids)
-    if snapshot.source_event_prompts:
-        metadata[MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(snapshot.source_event_prompts)
-    if snapshot.response_event_id is not None:
-        metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = snapshot.response_event_id
     return metadata
 
 
@@ -216,26 +167,18 @@ def build_interrupted_replay_snapshot(
     response_event_id: str | None = None,
 ) -> InterruptedReplaySnapshot:
     """Build one canonical interrupted replay snapshot from trusted runtime state."""
-    metadata = run_metadata if isinstance(run_metadata, Mapping) else {}
-    seen_event_ids = _normalized_string_tuple(metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY))
-    source_event_id = metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
-    source_event_ids = _normalized_string_tuple(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
-    source_event_prompts = _normalized_prompt_items(metadata.get(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY))
+    metadata = dict(run_metadata) if isinstance(run_metadata, Mapping) else {}
     raw_response_event_id = response_event_id or metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
-    trace_metadata = {key: metadata[key] for key in _TRACE_METADATA_KEYS if key in metadata}
+    if isinstance(raw_response_event_id, str) and raw_response_event_id:
+        metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = raw_response_event_id
+    else:
+        metadata.pop(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, None)
     return InterruptedReplaySnapshot(
         user_message=(user_message or "").strip(),
         partial_text=(partial_text or "").strip(),
         completed_tools=tuple(completed_tools),
         interrupted_tools=tuple(interrupted_tools),
-        seen_event_ids=seen_event_ids,
-        source_event_id=source_event_id if isinstance(source_event_id, str) and source_event_id else None,
-        source_event_ids=source_event_ids,
-        source_event_prompts=source_event_prompts,
-        response_event_id=(
-            raw_response_event_id if isinstance(raw_response_event_id, str) and raw_response_event_id else None
-        ),
-        trace_metadata=trace_metadata,
+        run_metadata=metadata,
     )
 
 

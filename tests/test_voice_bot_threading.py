@@ -48,7 +48,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.handled_turns import HandledTurnState
+    from mindroom.handled_turns import TurnRecord
 
 
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
@@ -295,7 +295,7 @@ def _normalized_voice_result(
     )
 
 
-def _handled_source_event_ids(handled_turn: HandledTurnState | None) -> list[str]:
+def _handled_source_event_ids(handled_turn: TurnRecord | None) -> list[str]:
     return list(handled_turn.source_event_ids) if handled_turn is not None else []
 
 
@@ -714,7 +714,7 @@ async def test_failed_or_disabled_visible_echo_does_not_affect_canonical_voice_d
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
@@ -978,7 +978,7 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         source_ids = _handled_source_event_ids(handled_turn)
@@ -1089,7 +1089,7 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
@@ -1180,7 +1180,7 @@ async def test_voice_first_text_second_waits_for_slow_thread_resolution(
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
@@ -1285,7 +1285,7 @@ async def test_root_voice_and_root_text_share_room_scope_while_stt_pending(
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
@@ -1372,7 +1372,7 @@ async def test_room_mode_voice_burst_dispatches_as_one_turn(mock_home_bot: Agent
         _dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append(_handled_source_event_ids(handled_turn))
@@ -1504,7 +1504,7 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
@@ -1550,7 +1550,7 @@ async def test_raw_voice_download_failure_dispatches_text_only_fallback(mock_hom
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
@@ -1587,7 +1587,7 @@ async def test_raw_voice_thread_resolution_exception_does_not_dispatch_guessed_f
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
@@ -1647,7 +1647,7 @@ async def test_raw_voice_root_target_failures_do_not_dispatch_guessed_fallbacks(
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
@@ -1686,7 +1686,7 @@ async def test_raw_voice_cache_append_exception_does_not_dispatch_guessed_fallba
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))

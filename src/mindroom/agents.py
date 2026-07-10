@@ -945,13 +945,19 @@ def remove_run_by_event_id(
             filtered_runs.append(run)
             continue
         raw_source_event_ids = run.metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
+        raw_discovery_event_ids = run.metadata.get(constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY)
         source_event_ids = (
             [candidate for candidate in raw_source_event_ids if isinstance(candidate, str)]
             if isinstance(raw_source_event_ids, list)
             else []
         )
+        discovery_event_ids = (
+            [candidate for candidate in raw_discovery_event_ids if isinstance(candidate, str)]
+            if isinstance(raw_discovery_event_ids, list)
+            else []
+        )
         matches_event_id = run.metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY) == event_id
-        if matches_event_id or event_id in source_event_ids:
+        if matches_event_id or event_id in source_event_ids or event_id in discovery_event_ids:
             continue
         filtered_runs.append(run)
     session.runs = filtered_runs

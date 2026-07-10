@@ -17,7 +17,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.message_target import MessageTarget
 from mindroom.room_thread_modes import (
     _get_room_thread_mode_override,
@@ -326,7 +326,7 @@ async def test_thread_mode_command_admin_sets_runtime_override_without_config_wr
     assert _get_room_thread_mode_override(context.runtime_paths, ROOM_ID) == "room"
     assert context.runtime_paths.config_path.read_text(encoding="utf-8") == config_before
     context.record_handled_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id("$event", response_event_id="$reply"),
+        TurnRecord.create(["$event"], response_event_id="$reply"),
     )
 
 
