@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, NoReturn, cast
+from typing import TYPE_CHECKING, NoReturn, cast, overload
 from uuid import uuid4
 
 import uvicorn
@@ -740,23 +740,49 @@ class _MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.hook_registry = hook_registry
 
+    @overload
     async def reload_plugins_now(
         self,
         *,
         source: str,
         changed_paths: tuple[Path, ...] = (),
-    ) -> PluginReloadResult:
+    ) -> PluginReloadResult: ...
+
+    @overload
+    async def reload_plugins_now(
+        self,
+        *,
+        source: str,
+        changed_paths: tuple[Path, ...] = (),
+        expected_revision: int,
+    ) -> PluginReloadResult | None: ...
+
+    async def reload_plugins_now(
+        self,
+        *,
+        source: str,
+        changed_paths: tuple[Path, ...] = (),
+        expected_revision: int | None = None,
+    ) -> PluginReloadResult | None:
         """Rebuild and atomically swap the live plugin registry snapshot."""
         if not self.running:
             msg = "Plugin reload unavailable until startup finishes."
             raise RuntimeError(msg)
         async with self._plugin_reload_lock:
+            if expected_revision is not None and self.plugin_watch.revision != expected_revision:
+                logger.info(
+                    "Skipping stale watcher plugin reload",
+                    expected_revision=expected_revision,
+                    current_revision=self.plugin_watch.revision,
+                )
+                return None
             config = self._require_config()
             logger.info(
                 "Reloading plugins",
                 source=source,
                 changed_paths=[str(path) for path in changed_paths],
             )
+            watch_roots, watch_root_snapshots = self.plugin_watch.capture(config)
             try:
                 result = reload_plugins(config, self.runtime_paths)
             except Exception:
@@ -766,12 +792,12 @@ class _MultiAgentOrchestrator:
                 )
                 self._activate_hook_registry(recovery_result.hook_registry)
                 clear_worker_validation_snapshot_cache()
-                self.plugin_watch.refresh(config)
+                self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
                 logger.warning(warning_message, source=source, **warning_kwargs)
                 raise
             self._activate_hook_registry(result.hook_registry)
             clear_worker_validation_snapshot_cache()
-            self.plugin_watch.refresh(config)
+            self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
             logger.info(
                 "Plugin reload complete",
                 source=source,

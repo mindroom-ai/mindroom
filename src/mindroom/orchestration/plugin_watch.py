@@ -78,8 +78,9 @@ class _PluginWatcherRuntime(Protocol):
         *,
         source: str,
         changed_paths: tuple[Path, ...] = (),
-    ) -> PluginReloadResult:
-        """Rebuild and atomically swap the live plugin registry snapshot."""
+        expected_revision: int,
+    ) -> PluginReloadResult | None:
+        """Reload only if no newer publication consumed the watcher's edits."""
 
 
 async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
@@ -110,6 +111,11 @@ async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
                 watch_state_revision = watch_state.revision
             pending_changes = _filter_pending_plugin_changes(pending_changes, configured_roots)
             changed_paths = await _collect_plugin_root_changes(configured_roots, watch_state.last_snapshot_by_root)
+            if watch_state_revision != watch_state.revision:
+                pending_changes.clear()
+                last_change_at = None
+                watch_state_revision = watch_state.revision
+                continue
 
             if changed_paths:
                 pending_changes.update(changed_paths)
@@ -127,6 +133,7 @@ async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
                 await orchestrator.reload_plugins_now(
                     source="watcher",
                     changed_paths=changed_paths,
+                    expected_revision=watch_state_revision,
                 )
         except Exception:
             logger.exception("Exception during plugin watcher callback - continuing to watch")
