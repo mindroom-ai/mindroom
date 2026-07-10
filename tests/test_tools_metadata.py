@@ -19,6 +19,7 @@ import mindroom.tool_system.metadata as metadata_module
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
 import mindroom.tools.custom_api as custom_api_module
+from mindroom.config import runtime as config_runtime_module
 from mindroom.config.main import Config, RuntimeConfig, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
@@ -993,6 +994,43 @@ def test_runtime_config_reuses_tool_state_resolved_during_validation(
     authored = Config.model_validate({"defaults": {"tools": []}})
     try:
         config = RuntimeConfig.from_authored(authored, runtime_paths)
+        metadata_module.resolved_tool_metadata_for_runtime(runtime_paths, config)
+
+        assert compute_calls == 1
+    finally:
+        metadata_module.clear_resolved_tool_state_cache()
+
+
+def test_runtime_config_binds_carried_tool_state_after_concurrent_cache_clear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Config construction must not re-read a cache that another lifecycle can clear."""
+    compute_calls = 0
+    dummy_state = metadata_module._ResolvedToolState({}, {}, {})
+
+    def counted_compute(*_args: object, **_kwargs: object) -> metadata_module._ResolvedToolState:
+        nonlocal compute_calls
+        compute_calls += 1
+        return dummy_state
+
+    real_resolve = config_runtime_module.resolved_tool_runtime_state_for_runtime
+
+    def resolve_then_clear(*args: object, **kwargs: object) -> metadata_module.ResolvedToolRuntimeState:
+        resolved_state = real_resolve(*args, **kwargs)
+        metadata_module.clear_resolved_tool_state_cache()
+        return resolved_state
+
+    monkeypatch.setattr(metadata_module, "_compute_resolved_tool_state_for_runtime", counted_compute)
+    monkeypatch.setattr(config_runtime_module, "resolved_tool_runtime_state_for_runtime", resolve_then_clear)
+    metadata_module.clear_resolved_tool_state_cache()
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    try:
+        config = RuntimeConfig.from_authored(Config(defaults={"tools": []}), runtime_paths)
         metadata_module.resolved_tool_metadata_for_runtime(runtime_paths, config)
 
         assert compute_calls == 1

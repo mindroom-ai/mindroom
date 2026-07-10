@@ -34,6 +34,7 @@ ALLOWED_PUBLIC_CATALOG_REEXPORTS = {
 EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "TOOL_METADATA",
     "ConfigField",
+    "ResolvedToolRuntimeState",
     "SetupType",
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
@@ -55,6 +56,7 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "get_tool_by_name",
     "normalize_authored_tool_overrides",
     "resolved_tool_metadata_for_runtime",
+    "resolved_tool_runtime_state_for_runtime",
     "resolved_tool_validation_snapshot_for_runtime",
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",

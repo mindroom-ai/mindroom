@@ -10,6 +10,7 @@ import sys
 import threading
 import weakref
 from dataclasses import asdict, dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -689,6 +690,16 @@ class _ResolvedToolState:
     unavailable_tool_metadata: dict[str, ToolMetadata]
 
 
+@dataclass(frozen=True)
+class ResolvedToolRuntimeState:
+    """Resolved validation and runtime tool state carried across config construction."""
+
+    runtime_paths: RuntimePaths
+    validation_snapshot: Mapping[str, ToolValidationInfo]
+    tolerate_plugin_load_errors: bool
+    _state: _ResolvedToolState = dataclass_field(repr=False)
+
+
 @functools.lru_cache(maxsize=8192)
 def _resolved_module_file(module_file: str) -> Path | None:
     """Return the resolved on-disk path for one module file, cached across calls."""
@@ -776,23 +787,15 @@ def clear_resolved_tool_state_cache() -> None:
 
 
 def bind_resolved_tool_state_cache(
-    runtime_paths: RuntimePaths,
-    source_config: Config,
+    resolved_state: ResolvedToolRuntimeState,
     target_config: Config,
-    *,
-    tolerate_plugin_load_errors: bool = False,
 ) -> None:
-    """Bind already-resolved tool state to a runtime config created from its authored source."""
-    source_key = (id(source_config), tolerate_plugin_load_errors)
-    target_key = (id(target_config), tolerate_plugin_load_errors)
+    """Bind carried tool state to the runtime config built from its validation snapshot."""
+    target_key = (id(target_config), resolved_state.tolerate_plugin_load_errors)
     with _RESOLVED_TOOL_STATE_LOCK:
-        cached = _RESOLVED_TOOL_STATE_CACHE.get(source_key)
-        if cached is None or cached[0] != runtime_paths:
-            msg = "Resolved tool state must be cached before it can be bound to a runtime config"
-            raise RuntimeError(msg)
         if target_key not in _RESOLVED_TOOL_STATE_CACHE:
             weakref.finalize(target_config, _evict_resolved_tool_state, target_key)
-        _RESOLVED_TOOL_STATE_CACHE[target_key] = cached
+        _RESOLVED_TOOL_STATE_CACHE[target_key] = (resolved_state.runtime_paths, resolved_state._state)
 
 
 def _evict_resolved_tool_state(cache_key: tuple[int, bool]) -> None:
@@ -1052,13 +1055,13 @@ def _unavailable_tool_metadata_from_failed_plugin(
     return metadata_by_name
 
 
-def resolved_tool_validation_snapshot_for_runtime(
+def resolved_tool_runtime_state_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
     *,
     tolerate_plugin_load_errors: bool = False,
-) -> dict[str, ToolValidationInfo]:
-    """Return validation-only tool state visible for one runtime config."""
+) -> ResolvedToolRuntimeState:
+    """Resolve the validation snapshot and runtime catalog in one carried value."""
     resolved_state = _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
@@ -1068,11 +1071,31 @@ def resolved_tool_validation_snapshot_for_runtime(
         **resolved_state.tool_metadata,
         **resolved_state.unavailable_tool_metadata,
     }
-    return _tool_validation_snapshot_from_state(
-        resolved_state.tool_registry,
-        validation_metadata,
-        unavailable_plugin_tool_names=frozenset(resolved_state.unavailable_tool_metadata),
+    return ResolvedToolRuntimeState(
+        runtime_paths=runtime_paths,
+        validation_snapshot=_tool_validation_snapshot_from_state(
+            resolved_state.tool_registry,
+            validation_metadata,
+            unavailable_plugin_tool_names=frozenset(resolved_state.unavailable_tool_metadata),
+        ),
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        _state=resolved_state,
     )
+
+
+def resolved_tool_validation_snapshot_for_runtime(
+    runtime_paths: RuntimePaths,
+    config: Config,
+    *,
+    tolerate_plugin_load_errors: bool = False,
+) -> dict[str, ToolValidationInfo]:
+    """Return validation-only tool state visible for one runtime config."""
+    resolved_state = resolved_tool_runtime_state_for_runtime(
+        runtime_paths,
+        config,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
+    return dict(resolved_state.validation_snapshot)
 
 
 def serialize_tool_validation_snapshot(

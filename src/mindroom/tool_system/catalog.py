@@ -15,6 +15,7 @@ from mindroom.tool_system.declarations import (
 )
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
+    ResolvedToolRuntimeState,
     ToolConfigOverrideError,
     ToolInitOverrideError,
     ToolMetadataValidationError,
@@ -28,6 +29,7 @@ from mindroom.tool_system.metadata import (
     get_tool_by_name,
     normalize_authored_tool_overrides,
     resolved_tool_metadata_for_runtime,
+    resolved_tool_runtime_state_for_runtime,
     resolved_tool_validation_snapshot_for_runtime,
     safe_tool_init_override_fields,
     sanitize_tool_init_overrides,
@@ -38,6 +40,7 @@ from mindroom.tool_system.metadata import (
 __all__ = [
     "TOOL_METADATA",
     "ConfigField",
+    "ResolvedToolRuntimeState",
     "SetupType",
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
@@ -59,6 +62,7 @@ __all__ = [
     "get_tool_by_name",
     "normalize_authored_tool_overrides",
     "resolved_tool_metadata_for_runtime",
+    "resolved_tool_runtime_state_for_runtime",
     "resolved_tool_validation_snapshot_for_runtime",
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",

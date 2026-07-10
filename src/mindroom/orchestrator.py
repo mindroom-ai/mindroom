@@ -72,7 +72,7 @@ from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.catalog import (
     bind_resolved_tool_state_cache,
     clear_resolved_tool_state_cache,
-    resolved_tool_validation_snapshot_for_runtime,
+    resolved_tool_runtime_state_for_runtime,
 )
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
@@ -764,7 +764,7 @@ class _MultiAgentOrchestrator:
             self.plugin_watch.refresh(config)
             try:
                 authored_config = Config.model_validate(config.authored_model_dump())
-                tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
+                resolved_tool_state = resolved_tool_runtime_state_for_runtime(
                     self.runtime_paths,
                     authored_config,
                     tolerate_plugin_load_errors=True,
@@ -774,14 +774,9 @@ class _MultiAgentOrchestrator:
                     self.runtime_paths,
                     tolerate_plugin_load_errors=True,
                     source_files=config.source_files,
-                    tool_validation_snapshot=tool_validation_snapshot,
+                    tool_validation_snapshot=resolved_tool_state.validation_snapshot,
                 )
-                bind_resolved_tool_state_cache(
-                    self.runtime_paths,
-                    authored_config,
-                    refreshed_config,
-                    tolerate_plugin_load_errors=True,
-                )
+                bind_resolved_tool_state_cache(resolved_tool_state, refreshed_config)
                 prepared_api_snapshot = await self._external_trigger_runtime.prepare_api_config_snapshot(
                     refreshed_config,
                 )

@@ -59,7 +59,7 @@ from mindroom.tool_system.catalog import (
     apply_authored_overrides,
     authored_tool_overrides_to_runtime,
     bind_resolved_tool_state_cache,
-    resolved_tool_validation_snapshot_for_runtime,
+    resolved_tool_runtime_state_for_runtime,
     validate_authored_tool_entry_overrides,
 )
 from mindroom.tool_system.plugin_imports import PluginValidationError
@@ -304,14 +304,15 @@ def build_runtime_config(
     except ValueError as exc:
         raise ConfigRuntimeValidationError(str(exc)) from exc
     resolved_snapshot = tool_validation_snapshot
-    resolved_tool_state_here = resolved_snapshot is None
+    resolved_tool_state = None
     try:
         if resolved_snapshot is None:
-            resolved_snapshot = resolved_tool_validation_snapshot_for_runtime(
+            resolved_tool_state = resolved_tool_runtime_state_for_runtime(
                 runtime_paths,
                 effective_authored,
                 tolerate_plugin_load_errors=tolerate_plugin_load_errors,
             )
+            resolved_snapshot = resolved_tool_state.validation_snapshot
         _validate_authored_tool_entries(effective_authored, resolved_snapshot)
     except (PluginValidationError, ToolConfigOverrideError, ToolMetadataValidationError) as exc:
         raise ConfigRuntimeValidationError(str(exc)) from exc
@@ -342,13 +343,8 @@ def build_runtime_config(
             "runtime_approved_egress_injected_approval_rule": overlay.injected_approval_rule,
         },
     )
-    if resolved_tool_state_here:
-        bind_resolved_tool_state_cache(
-            runtime_paths,
-            effective_authored,
-            runtime_config,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
+    if resolved_tool_state is not None:
+        bind_resolved_tool_state_cache(resolved_tool_state, runtime_config)
     try:
         _validate_shared_only_integration_assignments(runtime_config)
     except ValueError as exc:
