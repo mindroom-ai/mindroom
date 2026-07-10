@@ -22,7 +22,6 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
@@ -710,6 +709,7 @@ class ResponseRunner:
             queued_notice_reservation=request.queued_notice_reservation,
             pipeline_timing=request.pipeline_timing,
             locked_operation=locked_operation,
+            signal_queued_message=request.sync_restart_retry_source_event_id is None,
         )
 
     def _request_with_locked_target(
@@ -968,48 +968,30 @@ class ResponseRunner:
         if source_event_id is None:
             return True
 
-        storage = None
-        should_retry = False
-        reason = "history_not_pending"
         try:
             storage = self.deps.state_writer.create_storage(execution_identity, scope=history_scope)
-            session = storage.get_session(
-                request.response_envelope.target.session_id,
-                self.deps.state_writer.session_type_for_scope(history_scope),
-            )
-            if isinstance(session, AgentSession | TeamSession):
-                should_retry = interrupted_source_needs_retry(
+            try:
+                session = storage.get_session(
+                    request.response_envelope.target.session_id,
+                    self.deps.state_writer.session_type_for_scope(history_scope),
+                )
+                should_retry = isinstance(session, AgentSession | TeamSession) and interrupted_source_needs_retry(
                     session.runs or (),
                     scope=history_scope,
                     source_event_id=source_event_id,
                 )
-            else:
-                reason = "history_missing_or_degraded"
+            finally:
+                storage.close()
         except Exception as error:
-            reason = "history_lookup_failed"
             self.deps.logger.warning(
                 "sync_restart_retry_history_check_failed",
                 source_event_id=source_event_id,
-                session_id=request.response_envelope.target.session_id,
                 scope=history_scope.key,
                 exception_type=error.__class__.__name__,
             )
-        finally:
-            if storage is not None:
-                try:
-                    storage.close()
-                except Exception:
-                    should_retry = False
-                    reason = "history_storage_close_failed"
-
+            return False
         if not should_retry:
-            self.deps.logger.info(
-                "sync_restart_retry_skipped",
-                source_event_id=source_event_id,
-                session_id=request.response_envelope.target.session_id,
-                scope=history_scope.key,
-                reason=reason,
-            )
+            self.deps.logger.info("sync_restart_retry_skipped", source_event_id=source_event_id)
         return should_retry
 
     async def _finalize_pre_delivery_terminal(

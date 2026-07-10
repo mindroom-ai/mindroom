@@ -40,14 +40,21 @@ def _run_matches_scope(run: RunOutput | TeamRunOutput, scope: HistoryScope) -> b
     return isinstance(run, RunOutput) and run.agent_id == scope.scope_id
 
 
-def _run_matches_source(run: RunOutput | TeamRunOutput, source_event_id: str) -> bool:
+def _run_source_event_ids(run: RunOutput | TeamRunOutput) -> set[str] | None:
     metadata = run.metadata
     if not isinstance(metadata, dict):
-        return False
+        return None
+    source_event_id = metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
     source_event_ids = metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-    return metadata.get(MATRIX_EVENT_ID_METADATA_KEY) == source_event_id or (
-        isinstance(source_event_ids, list) and source_event_id in source_event_ids
-    )
+    if source_event_id is not None and (not isinstance(source_event_id, str) or not source_event_id):
+        return None
+    if source_event_ids is not None and (
+        not isinstance(source_event_ids, list)
+        or any(not isinstance(value, str) or not value for value in source_event_ids)
+    ):
+        return None
+    event_ids = [source_event_id, *(source_event_ids or ())]
+    return {event_id for event_id in event_ids if event_id} or None
 
 
 def interrupted_source_needs_retry(
@@ -63,8 +70,14 @@ def interrupted_source_needs_retry(
             run.parent_run_id is not None
             or run.status in _MODEL_INVISIBLE_RUN_STATUSES
             or not _run_matches_scope(run, scope)
-            or not _run_matches_source(run, source_event_id)
         ):
+            continue
+        run_source_event_ids = _run_source_event_ids(run)
+        if run_source_event_ids is None:
+            if interrupted_replay_found:
+                return False
+            continue
+        if source_event_id not in run_source_event_ids:
             continue
         if interrupted_replay_found:
             return False

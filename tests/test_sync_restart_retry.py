@@ -32,10 +32,10 @@ def _stored_run(
     scope: HistoryScope,
     run_id: str,
     *,
-    source_event_id: str = "$source",
+    source_event_id: str | None = "$source",
     interrupted: bool = False,
 ) -> RunOutput | TeamRunOutput:
-    metadata = {MATRIX_EVENT_ID_METADATA_KEY: source_event_id}
+    metadata = {} if source_event_id is None else {MATRIX_EVENT_ID_METADATA_KEY: source_event_id}
     if interrupted:
         metadata["mindroom_replay_state"] = "interrupted"
     run_kwargs = {
@@ -56,17 +56,16 @@ def test_retry_history_uses_latest_matching_visible_run() -> None:
 
     assert interrupted_source_needs_retry([interrupted], scope=scope, source_event_id="$source") is True
     assert interrupted_source_needs_retry([], scope=scope, source_event_id="$source") is False
-    for later in (
-        _stored_run(scope, "completed"),
-        _stored_run(scope, "failed-replay", interrupted=True),
-    ):
+    for later in (_stored_run(scope, "completed"), _stored_run(scope, "failed-replay", interrupted=True)):
         assert interrupted_source_needs_retry([interrupted, later], scope=scope, source_event_id="$source") is False
     unrelated_runs = [
-        _stored_run(scope, "interrupted", interrupted=True),
+        interrupted,
         _stored_run(scope, "other-source", source_event_id="$other"),
         _stored_run(HistoryScope(kind="team", scope_id="team"), "other-scope"),
     ]
     assert interrupted_source_needs_retry(unrelated_runs, scope=scope, source_event_id="$source") is True
+    ambiguous_runs = [interrupted, _stored_run(scope, "ambiguous", source_event_id=None)]
+    assert interrupted_source_needs_retry(ambiguous_runs, scope=scope, source_event_id="$source") is False
 
 
 @pytest.mark.asyncio
@@ -82,15 +81,9 @@ async def test_locked_retry_guard_precedes_payload_and_fails_closed(
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(reply_to_event_id="$source")
-    execution_identity = runner.deps.tool_runtime.build_execution_identity(
-        target=target,
-        user_id="@user:localhost",
-    )
+    execution_identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
     history_scope = (
-        runner.deps.state_writer.team_history_scope(
-            [bot.matrix_id],
-            requester_user_id=execution_identity.requester_id,
-        )
+        runner.deps.state_writer.team_history_scope([bot.matrix_id], requester_user_id=execution_identity.requester_id)
         if is_team
         else runner.deps.state_writer.history_scope()
     )
@@ -103,14 +96,9 @@ async def test_locked_retry_guard_precedes_payload_and_fails_closed(
         else AgentSession(session_id=target.session_id, agent_id=history_scope.scope_id, runs=runs)
     )
     storage = MagicMock()
+    storage.get_session.return_value = {"missing": None, "degraded": object()}.get(history_case, session)
     if history_case == "error":
         storage.get_session.side_effect = RuntimeError("history unavailable")
-    elif history_case == "missing":
-        storage.get_session.return_value = None
-    elif history_case == "degraded":
-        storage.get_session.return_value = object()
-    else:
-        storage.get_session.return_value = session
 
     events: list[str] = []
 
@@ -134,19 +122,27 @@ async def test_locked_retry_guard_precedes_payload_and_fails_closed(
         patch.object(runner.deps.request_preparer, "prepare", new=AsyncMock(side_effect=prepare_payload)),
     ):
         response = (
-            runner.generate_team_response_helper(
-                request,
-                team_agents=[bot.matrix_id],
-                team_mode="coordinate",
-            )
+            runner.generate_team_response_helper(request, team_agents=[bot.matrix_id], team_mode="coordinate")
             if is_team
             else runner.generate_response(request)
         )
+        lifecycle = runner._lifecycle_coordinator
+        lock = lifecycle._response_lifecycle_lock(target)
+        queued_signal = lifecycle._get_or_create_queued_signal(target)
+        await lock.acquire()
+        queued_signal.begin_response_turn()
+        task = asyncio.create_task(response)
+        try:
+            await asyncio.sleep(0)
+            assert queued_signal.pending_human_messages == 0
+        finally:
+            lock.release()
+            queued_signal.finish_response_turn()
         if history_case == "current":
             with pytest.raises(PostLockRequestPreparationError):
-                await response
+                await task
         else:
-            assert await response is None
+            assert await task is None
 
     assert events == (["lock", "history", "prepare"] if history_case == "current" else ["lock", "history"])
     bot.client.room_send.assert_not_awaited()

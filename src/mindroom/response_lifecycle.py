@@ -227,9 +227,10 @@ class ResponseLifecycleCoordinator:
         queued_signal: _QueuedMessageState,
         response_envelope: MessageEnvelope,
         queued_notice_reservation: QueuedHumanNoticeReservation | None,
+        signal_queued_message: bool,
     ) -> str | None:
         existing_turn = queued_signal.begin_response_turn()
-        if queued_notice_reservation is not None:
+        if not signal_queued_message or queued_notice_reservation is not None:
             return None
         if not (existing_turn or lifecycle_lock.locked()):
             return None
@@ -257,6 +258,7 @@ class ResponseLifecycleCoordinator:
         queued_notice_reservation: QueuedHumanNoticeReservation | None,
         pipeline_timing: DispatchPipelineTiming | None,
         locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
+        signal_queued_message: bool = True,
     ) -> _LockedResponseResult:
         """Run one locked response operation with shared queued-message bookkeeping."""
         self._assert_target_matches_envelope(target, response_envelope)
@@ -267,6 +269,7 @@ class ResponseLifecycleCoordinator:
             queued_signal=queued_signal,
             response_envelope=response_envelope,
             queued_notice_reservation=queued_notice_reservation,
+            signal_queued_message=signal_queued_message,
         )
         lock_acquired = False
         reservation_consumed = False
