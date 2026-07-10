@@ -251,16 +251,14 @@ def _authoritative_history(*messages: ResolvedVisibleMessage) -> ThreadHistoryRe
 
 
 def _auto_resume_conversation_cache(interrupted: list[InterruptedThread]) -> AsyncMock:
-    messages_by_thread: dict[tuple[str, str], list[ResolvedVisibleMessage]] = {}
-    for item in interrupted:
-        if item.thread_id is not None:
-            messages_by_thread.setdefault((item.room_id, item.thread_id), []).append(
-                _history_message(item.target_event_id, timestamp=item.timestamp_ms),
-            )
     conversation_cache = AsyncMock()
     conversation_cache.get_strict_thread_history = AsyncMock(
         side_effect=lambda room_id, thread_id, **_: _authoritative_history(
-            *messages_by_thread[(room_id, thread_id)],
+            *[
+                _history_message(item.target_event_id, timestamp=item.timestamp_ms)
+                for item in interrupted
+                if (item.room_id, item.thread_id) == (room_id, thread_id)
+            ],
         ),
     )
     conversation_cache.notify_outbound_message = Mock()
@@ -844,24 +842,26 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
 
 
 @pytest.mark.asyncio
-async def test_auto_resume_skipped_newest_does_not_consume_cap_or_delay(tmp_path: Path) -> None:
-    """Freshness skips should leave send capacity and should not add rate-limit sleeps."""
+async def test_auto_resume_rechecks_after_delay_and_bounds_history_reads(tmp_path: Path) -> None:
+    """Resume should recheck after delay and stop reading history when successful-send cap is full."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     interrupted = [
         InterruptedThread(ROOM_ID, f"$thread-{index}", f"$target-{index}", "partial", "test_agent", timestamp_ms=index)
-        for index in range(3)
+        for index in range(5)
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    histories = {
-        "$thread-0": _authoritative_history(_history_message("$target-0")),
-        "$thread-1": _authoritative_history(_history_message("$target-1")),
-        "$thread-2": _authoritative_history(
-            _history_message("$target-2"),
-            _history_message("$human-later", sender=USER_ID),
-        ),
-    }
-    conversation_cache.get_strict_thread_history.side_effect = lambda _, thread_id, **__: histories[thread_id]
+    history_calls: dict[str, int] = {}
+
+    def history_for_call(_: str, thread_id: str, **__: object) -> ThreadHistoryResult:
+        history_calls[thread_id] = history_calls.get(thread_id, 0) + 1
+        index = thread_id.removeprefix("$thread-")
+        messages = [_history_message(f"$target-{index}")]
+        if index == "4" or (index == "2" and history_calls[thread_id] == 2):
+            messages.append(_history_message("$human-later", sender=USER_ID))
+        return _authoritative_history(*messages)
+
+    conversation_cache.get_strict_thread_history.side_effect = history_for_call
 
     with (
         patch(
@@ -881,9 +881,10 @@ async def test_auto_resume_skipped_newest_does_not_consume_cap_or_delay(tmp_path
 
     assert resumed_count == 2
     assert [call.args[2]["m.relates_to"]["event_id"] for call in mock_send.await_args_list] == [
-        "$thread-0",
+        "$thread-3",
         "$thread-1",
     ]
+    assert history_calls == {"$thread-3": 1, "$thread-4": 1, "$thread-2": 2, "$thread-1": 1}
     mock_sleep.assert_awaited_once_with(2.0)
 
 
@@ -928,8 +929,8 @@ async def test_auto_resume_target_mention_ignores_unprepared_unrelated_entity(tm
     assert content["m.mentions"] == {"user_ids": [BOT_USER_ID]}
 
 
-def test_select_threads_to_resume_returns_all_unique_threads_when_unlimited() -> None:
-    """Selector should return every unique threaded interruption when uncapped."""
+def test_ordered_auto_resume_candidates_returns_all_unique_threads_when_unlimited() -> None:
+    """Candidate ordering should return every unique threaded interruption when uncapped."""
     interrupted = [
         InterruptedThread(
             room_id=ROOM_ID,
@@ -965,7 +966,7 @@ def test_select_threads_to_resume_returns_all_unique_threads_when_unlimited() ->
         ),
     ]
 
-    selected = stale_stream_cleanup_module._select_threads_to_resume(
+    selected = stale_stream_cleanup_module._ordered_auto_resume_candidates(
         interrupted,
         max_resumes=None,
     )

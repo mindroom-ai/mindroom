@@ -224,41 +224,36 @@ async def auto_resume_interrupted_threads(
     if not interrupted or (max_resumes is not None and max_resumes <= 0):
         return 0
 
-    unique_threads = _select_threads_to_resume(interrupted, max_resumes=None)
-    resumable_threads = [
-        interrupted_thread
-        for interrupted_thread in unique_threads
-        if await _interrupted_target_remains_latest_human_work(
+    candidate_threads = _ordered_auto_resume_candidates(interrupted, max_resumes=max_resumes)
+    resumed_count = 0
+    delay_due = False
+    for interrupted_thread in candidate_threads:
+        if max_resumes is not None and resumed_count >= max_resumes:
+            break
+        if not await _interrupted_target_remains_latest_human_work(
             interrupted_thread,
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
-        )
-    ]
-    if not resumable_threads:
-        return 0
-
-    selected_threads = resumable_threads
-    if max_resumes is not None and max_resumes < len(resumable_threads):
-        selected_threads = [
-            *resumable_threads[-max_resumes:],
-            *reversed(resumable_threads[:-max_resumes]),
-        ]
-
-    resumed_count = 0
-    send_attempts = 0
-    for interrupted_thread in selected_threads:
-        if max_resumes is not None and resumed_count >= max_resumes:
-            break
+        ):
+            continue
         try:
             content = _build_auto_resume_content(
                 interrupted_thread,
                 config=config,
                 runtime_paths=runtime_paths,
             )
-            if send_attempts:
+            if delay_due:
                 await asyncio.sleep(delay)
-            send_attempts += 1
+                delay_due = False
+                if not await _interrupted_target_remains_latest_human_work(
+                    interrupted_thread,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    conversation_cache=conversation_cache,
+                ):
+                    continue
+            delay_due = True
             delivered = await send_message_result(client, interrupted_thread.room_id, content)
             if delivered is not None:
                 if conversation_cache is not None:
@@ -343,11 +338,10 @@ def _authoritative_history_after_target(
 ) -> Sequence[ResolvedVisibleMessage]:
     """Return history entries after an exact target or raise when history is unusable."""
     history_source = history.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
-    if (
-        not history.is_full_history
-        or is_thread_history_degraded(history)
-        or history_source not in {THREAD_HISTORY_SOURCE_CACHE, THREAD_HISTORY_SOURCE_HOMESERVER}
-    ):
+    if not history.is_full_history or is_thread_history_degraded(history):
+        msg = "Thread history is incomplete or degraded"
+        raise ValueError(msg)
+    if history_source not in {THREAD_HISTORY_SOURCE_CACHE, THREAD_HISTORY_SOURCE_HOMESERVER}:
         msg = f"Non-authoritative thread history source: {history_source!r}"
         raise ValueError(msg)
 
@@ -1536,12 +1530,12 @@ def _truncate_partial_text(text: str, *, limit: int = _INTERRUPTED_PARTIAL_TEXT_
     return f"{stripped_text[: limit - 1]}…"
 
 
-def _select_threads_to_resume(
+def _ordered_auto_resume_candidates(
     interrupted: list[InterruptedThread],
     *,
     max_resumes: int | None,
 ) -> list[InterruptedThread]:
-    """Return the newest unique threaded interruptions, optionally capped."""
+    """Return newest unique capped candidates first, then older delivery fallbacks."""
     latest_by_key: dict[tuple[str, str, str], InterruptedThread] = {}
 
     for interrupted_thread in interrupted:
@@ -1563,7 +1557,7 @@ def _select_threads_to_resume(
     )
     if max_resumes is None or max_resumes >= len(unique_threads):
         return unique_threads
-    return unique_threads[-max_resumes:]
+    return [*unique_threads[-max_resumes:], *reversed(unique_threads[:-max_resumes])]
 
 
 def _has_restart_interrupted_note(body: str) -> bool:
