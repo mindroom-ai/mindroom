@@ -84,7 +84,7 @@ from mindroom.workers.runtime import shutdown_primary_worker_manager
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
-from .config.main import Config, RuntimeConfig, load_config
+from .config.main import Config, RuntimeConfig, ensure_config_source_current, load_config
 from .credentials_sync import sync_env_to_credentials
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
@@ -840,6 +840,7 @@ class _MultiAgentOrchestrator:
         )
         try:
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
+            await asyncio.to_thread(ensure_config_source_current, new_config, self.runtime_paths)
             prepared_api_snapshot = await self._external_trigger_runtime.prepare_api_config_snapshot(new_config)
             self._external_trigger_runtime.publish_prepared_api_config_snapshot(prepared_api_snapshot)
         except Exception:
@@ -937,6 +938,7 @@ class _MultiAgentOrchestrator:
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
+        await asyncio.to_thread(ensure_config_source_current, config, self.runtime_paths)
         self.config = config
         self._activate_hook_registry(apply_prepared_plugin_reload(prepared_plugin_reload).hook_registry)
         await self._sync_mcp_manager(config)
@@ -1179,6 +1181,7 @@ class _MultiAgentOrchestrator:
         )
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
         await self._prepare_entity_accounts(new_config, entity_names)
+        await asyncio.to_thread(ensure_config_source_current, new_config, self.runtime_paths)
         self.config = new_config
         self._activate_hook_registry(apply_prepared_plugin_reload(prepared_plugin_reload).hook_registry)
         await self._sync_mcp_manager(new_config)

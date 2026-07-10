@@ -25,7 +25,7 @@ from mindroom.agent_policy import (
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.errors import ConfigRuntimeValidationError
+from mindroom.config.errors import ConfigRuntimeValidationError, ConfigSourceChangedError
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: TC001
 from mindroom.config.matrix import (
@@ -954,6 +954,20 @@ class RuntimeConfig(Config):
             thread_id=thread_id,
             default_model_name=default_model_name,
         )
+
+
+def ensure_config_source_current(config: RuntimeConfig, runtime_paths: RuntimePaths) -> None:
+    """Reject a disk source that no longer matches one staged runtime config."""
+    if not config.source_files:
+        return
+    data, source_files = load_yaml_config_source(runtime_paths.config_path)
+    try:
+        authored = Config.model_validate(data)
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        attach_partial_source_files(exc, source_files)
+        raise
+    if source_files != config.source_files or authored.authored_model_dump() != config.authored_model_dump():
+        raise ConfigSourceChangedError(source_files)
 
 
 def load_config(

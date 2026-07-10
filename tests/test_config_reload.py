@@ -20,7 +20,7 @@ import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig
 from mindroom.config.errors import ConfigSourceChangedError
-from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.file_watcher import _tree_snapshot
@@ -149,6 +149,38 @@ async def test_config_reload_retries_source_change_publication_conflict(tmp_path
 
     assert update_config.await_count == 2
     assert lifecycle.failed_reload_source_files is None
+
+
+@pytest.mark.asyncio
+async def test_no_api_reload_requeues_source_change_before_commit(tmp_path: Path) -> None:
+    """The no-API runtime must reject and requeue a staged config whose source changed."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    runtime_paths.config_path.write_text("agents: {}\ntimezone: UTC\n", encoding="utf-8")
+    staged_config = load_config(runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, api_enabled=False)
+    orchestrator.config = staged_config
+    orchestrator.running = True
+    runtime_paths.config_path.write_text("agents: {}\ntimezone: America/New_York\n", encoding="utf-8")
+
+    async def publish_staged_config() -> bool:
+        await orchestrator._apply_plugin_snapshot_for_config_update(
+            current_config=staged_config,
+            new_config=staged_config,
+            changed_server_ids=set(),
+        )
+        return True
+
+    orchestrator.config_reload.update_config = publish_staged_config
+    with (
+        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_restore_pre_stopped_mcp_entities", new=AsyncMock()),
+    ):
+        await orchestrator.config_reload._apply_queued_config_reload()
+
+    assert orchestrator.config is staged_config
+    assert orchestrator.config_reload.failed_reload_source_files == frozenset({runtime_paths.config_path.resolve()})
+    assert orchestrator.config_reload._requested_at is not None
 
 
 @pytest.mark.asyncio
@@ -1010,6 +1042,7 @@ async def test_config_update_rebuilds_runtime_from_prepared_plugin_snapshot(tmp_
             "capture",
             "prepare_plugin_reload",
             "_rebuild_config_with_tool_state",
+            "ensure_config_source_current",
         ] * 2
     finally:
         TOOL_REGISTRY.clear()
@@ -1091,6 +1124,45 @@ async def test_initial_config_rebuilds_runtime_from_prepared_plugin_snapshot(
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["initialize", "load_initial_config"])
+async def test_initial_publication_rejects_source_changed_during_account_preparation(
+    tmp_path: Path,
+    entrypoint: str,
+) -> None:
+    """Initial publication must reject a source changed during account preparation."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    runtime_paths.config_path.write_text("agents: {}\ntimezone: UTC\n", encoding="utf-8")
+    staged_config = load_config(runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, api_enabled=False)
+
+    async def prepare_entity_accounts(
+        _config: object,
+        entity_names: Iterable[str],
+    ) -> dict[str, MagicMock]:
+        runtime_paths.config_path.write_text(
+            "agents: {}\ntimezone: America/New_York\n",
+            encoding="utf-8",
+        )
+        return {entity_name: MagicMock() for entity_name in entity_names}
+
+    async def publish_initial_config() -> None:
+        if entrypoint == "initialize":
+            await orchestrator.initialize()
+        else:
+            await orchestrator._load_initial_config(staged_config)
+
+    with (
+        patch("mindroom.orchestrator.load_config", return_value=staged_config),
+        patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
+        patch.object(orchestrator, "_prepare_entity_accounts", new=prepare_entity_accounts),
+        pytest.raises(ConfigSourceChangedError),
+    ):
+        await publish_initial_config()
+
+    assert orchestrator.config is None
 
 
 @pytest.mark.asyncio
