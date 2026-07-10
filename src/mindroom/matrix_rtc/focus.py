@@ -13,11 +13,12 @@ from dataclasses import dataclass
 import httpx
 
 from mindroom.logging_config import get_logger
-from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport
+from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, validate_server_fetch_url
 
 logger = get_logger(__name__)
 
 _RTC_FOCI_WELL_KNOWN_KEY = "org.matrix.msc4143.rtc_foci"
+_LIVEKIT_SCHEMES = frozenset({"ws", "wss"})
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,31 @@ class SfuGrant:
 
     url: str
     jwt: str
+
+
+def _validate_sfu_url(url: str, *, allow_private_networks: bool) -> str:
+    """Apply the focus network policy to the LiveKit endpoint it returns."""
+    normalized_url = url.strip()
+    try:
+        parsed = httpx.URL(normalized_url)
+    except httpx.InvalidURL as error:
+        msg = "MatrixRTC authorization service returned an invalid SFU URL"
+        raise ValueError(msg) from error
+    if (
+        parsed.scheme not in _LIVEKIT_SCHEMES
+        or parsed.host is None
+        or parsed.userinfo
+        or parsed.fragment
+        or (not allow_private_networks and parsed.scheme != "wss")
+    ):
+        msg = "MatrixRTC authorization service returned an invalid SFU URL"
+        raise ValueError(msg)
+    validation_scheme = "https" if parsed.scheme == "wss" else "http"
+    validate_server_fetch_url(
+        str(parsed.copy_with(scheme=validation_scheme)),
+        allow_private_networks=allow_private_networks,
+    )
+    return normalized_url
 
 
 async def discover_livekit_service_url(
@@ -115,4 +141,7 @@ async def request_sfu_grant(
     if not isinstance(url, str) or not url or not isinstance(jwt, str) or not jwt:
         msg = f"MatrixRTC authorization service returned an invalid grant: {sorted(payload)}"
         raise ValueError(msg)
-    return SfuGrant(url=url, jwt=jwt)
+    return SfuGrant(
+        url=_validate_sfu_url(url, allow_private_networks=allow_private_networks),
+        jwt=jwt,
+    )
