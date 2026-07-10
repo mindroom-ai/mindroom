@@ -1355,6 +1355,51 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
 
 
 @pytest.mark.asyncio
+async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_change(
+    tmp_path: Path,
+) -> None:
+    """Manual plugin reloads and MCP restarts must wait for config application."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+    apply_started = asyncio.Event()
+    finish_apply = asyncio.Event()
+
+    async def apply_update_plan(
+        _current_config: Config,
+        _plan: ConfigUpdatePlan,
+        _plugin_changes: tuple[str, ...],
+    ) -> bool:
+        apply_started.set()
+        await finish_apply.wait()
+        return False
+
+    reload_result = PluginReloadResult(HookRegistry.empty(), (), 0)
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=config),
+        patch.object(orchestrator.config_reload, "apply_update_plan", new=apply_update_plan),
+        patch("mindroom.orchestrator.reload_plugins", return_value=reload_result) as reload_plugins_mock,
+    ):
+        config_task = asyncio.create_task(orchestrator.config_reload.update_config())
+        await asyncio.wait_for(apply_started.wait(), timeout=1)
+        plugin_task = asyncio.create_task(orchestrator.reload_plugins_now(source="test"))
+        mcp_task = asyncio.create_task(orchestrator._handle_mcp_catalog_change("demo"))
+        await asyncio.sleep(0)
+
+        assert not plugin_task.done()
+        assert not mcp_task.done()
+        reload_plugins_mock.assert_not_called()
+
+        finish_apply.set()
+        assert await config_task is False
+        assert await plugin_task is reload_result
+        await mcp_task
+
+    reload_plugins_mock.assert_called_once_with(config, orchestrator.runtime_paths)
+
+
+@pytest.mark.asyncio
 async def test_queued_config_reload_waits_for_in_flight_response_without_event_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

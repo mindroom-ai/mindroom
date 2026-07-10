@@ -216,8 +216,7 @@ class _MultiAgentOrchestrator:
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
-    _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _plugin_reload_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     plugin_watch: PluginWatchState = field(init=False)
@@ -253,6 +252,7 @@ class _MultiAgentOrchestrator:
             in_flight_response_count=self.in_flight_response_count,
             load_initial_config=self._load_initial_config,
             apply_update_plan=self._apply_config_update_plan,
+            config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
             runtime_paths=self.runtime_paths,
@@ -750,7 +750,7 @@ class _MultiAgentOrchestrator:
         if not self.running:
             msg = "Plugin reload unavailable until startup finishes."
             raise RuntimeError(msg)
-        async with self._plugin_reload_lock:
+        async with self._config_update_lock:
             config = self._require_config()
             logger.info(
                 "Reloading plugins",
@@ -788,30 +788,29 @@ class _MultiAgentOrchestrator:
         changed_server_ids: set[str],
     ) -> set[str]:
         """Stage and commit plugin changes without interleaving live reloads."""
-        async with self._plugin_reload_lock:
-            prepared_plugin_roots, prepared_plugin_root_snapshots = self.plugin_watch.capture(new_config)
-            prepared_plugin_reload = prepare_plugin_reload(
-                new_config,
-                self.runtime_paths,
-                skip_broken_plugins=True,
-            )
-            pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
-                current_config,
-                new_config,
-                changed_server_ids,
-            )
-            self.config = new_config
-            new_hook_registry = apply_prepared_plugin_reload(
-                prepared_plugin_reload,
-                cancel_existing_tasks=True,
-            ).hook_registry
-            self.plugin_watch.replace_snapshots(
-                prepared_plugin_roots,
-                prepared_plugin_root_snapshots,
-            )
-            self._activate_hook_registry(new_hook_registry)
-            clear_worker_validation_snapshot_cache()
-            return pre_stopped_mcp_entities
+        prepared_plugin_roots, prepared_plugin_root_snapshots = self.plugin_watch.capture(new_config)
+        prepared_plugin_reload = prepare_plugin_reload(
+            new_config,
+            self.runtime_paths,
+            skip_broken_plugins=True,
+        )
+        pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
+            current_config,
+            new_config,
+            changed_server_ids,
+        )
+        self.config = new_config
+        new_hook_registry = apply_prepared_plugin_reload(
+            prepared_plugin_reload,
+            cancel_existing_tasks=True,
+        ).hook_registry
+        self.plugin_watch.replace_snapshots(
+            prepared_plugin_roots,
+            prepared_plugin_root_snapshots,
+        )
+        self._activate_hook_registry(new_hook_registry)
+        clear_worker_validation_snapshot_cache()
+        return pre_stopped_mcp_entities
 
     async def _start_entities_once(
         self,
@@ -1247,7 +1246,7 @@ class _MultiAgentOrchestrator:
 
     async def _handle_mcp_catalog_change(self, server_id: str) -> None:
         """Restart entities that reference one changed MCP catalog."""
-        async with self._mcp_catalog_change_lock:
+        async with self._config_update_lock:
             if not self.running or self.config is None:
                 return
             clear_worker_validation_snapshot_cache()

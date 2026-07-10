@@ -107,6 +107,9 @@ class ConfigReloadLifecycle:
     in_flight_response_count: Callable[[], int]
     load_initial_config: Callable[[Config], Awaitable[bool]]
     apply_update_plan: Callable[[Config, ConfigUpdatePlan, tuple[str, ...]], Awaitable[bool]]
+    # Shared with manual plugin reloads and MCP catalog-change handling so no
+    # two publication flows can interleave their read-plan-apply sequences.
+    config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _reload_task: asyncio.Task | None = field(default=None, init=False)
     _requested_at: float | None = field(default=None, init=False)
     # Source files of the last reload attempt that failed to load, so the
@@ -138,25 +141,26 @@ class ConfigReloadLifecycle:
 
     async def update_config(self) -> bool:
         """Reload configuration from disk and dispatch the resulting update plan."""
-        # Config validation executes plugin modules and walks the filesystem;
-        # keep it off the event loop (#1260).
-        new_config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
-        current_config = self.current_config()
-        if current_config is None:
-            return await self.load_initial_config(new_config)
+        async with self.config_update_lock:
+            # Config validation executes plugin modules and walks the filesystem;
+            # keep it off the event loop (#1260).
+            new_config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
+            current_config = self.current_config()
+            if current_config is None:
+                return await self.load_initial_config(new_config)
 
-        agent_bots = self.agent_bots()
-        plugin_changes = plugin_change_paths(current_config, new_config)
-        plan = build_config_update_plan(
-            current_config=current_config,
-            new_config=new_config,
-            configured_entities=set(configured_entity_names(new_config)),
-            existing_entities=set(agent_bots.keys()),
-            agent_bots=agent_bots,
-        )
-        if plugin_changes:
-            plan = replace(plan, entities_to_restart=plan.entities_to_restart | set(agent_bots))
-        return await self.apply_update_plan(current_config, plan, plugin_changes)
+            agent_bots = self.agent_bots()
+            plugin_changes = plugin_change_paths(current_config, new_config)
+            plan = build_config_update_plan(
+                current_config=current_config,
+                new_config=new_config,
+                configured_entities=set(configured_entity_names(new_config)),
+                existing_entities=set(agent_bots.keys()),
+                agent_bots=agent_bots,
+            )
+            if plugin_changes:
+                plan = replace(plan, entities_to_restart=plan.entities_to_restart | set(agent_bots))
+            return await self.apply_update_plan(current_config, plan, plugin_changes)
 
     async def _wait_for_reload_debounce(
         self,
