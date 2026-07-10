@@ -304,11 +304,6 @@ async def _has_newer_human_thread_activity(
             interrupted_thread.thread_id,
             caller_label="auto_resume_after_restart",
         )
-        original_event = await client.room_get_event(
-            interrupted_thread.room_id,
-            interrupted_thread.target_event_id,
-        )
-        internal_sender_ids = current_internal_sender_ids(config, runtime_paths)
     except Exception as exc:
         logger.warning(
             "Failed to check newer thread activity before auto-resume",
@@ -322,6 +317,20 @@ async def _has_newer_human_thread_activity(
             "Skipping auto-resume because thread activity history is not authoritative",
             room_id=interrupted_thread.room_id,
             thread_id=interrupted_thread.thread_id,
+        )
+        return True
+    try:
+        original_event = await client.room_get_event(
+            interrupted_thread.room_id,
+            interrupted_thread.target_event_id,
+        )
+        internal_sender_ids = current_internal_sender_ids(config, runtime_paths)
+    except Exception as exc:
+        logger.warning(
+            "Failed to check newer thread activity before auto-resume",
+            room_id=interrupted_thread.room_id,
+            thread_id=interrupted_thread.thread_id,
+            error=str(exc),
         )
         return True
     if not isinstance(original_event, nio.RoomGetEventResponse) or not isinstance(
