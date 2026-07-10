@@ -14,7 +14,7 @@ import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from livekit import rtc
-from livekit.agents import APIConnectionError, APIStatusError, CloseReason, llm, room_io
+from livekit.agents import APIConnectionError, APIStatusError, CloseReason, llm
 from livekit.agents.voice import io as agents_io
 from openai import AsyncOpenAI
 from structlog.testing import capture_logs
@@ -184,17 +184,23 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
         def on(self, event: str, callback: object) -> None:
             self.handlers[event] = callback
 
+        async def aclose(self) -> None:
+            return
+
     fake_session = FakeSession()
     fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
+    fake_model = SimpleNamespace(aclose=AsyncMock())
     monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: fake_session)
     monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
-    monkeypatch.setattr("livekit.plugins.openai.realtime.RealtimeModel", lambda **_kwargs: object())
+    monkeypatch.setattr("livekit.plugins.openai.realtime.RealtimeModel", lambda **_kwargs: fake_model)
     monkeypatch.setattr(
         "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
         lambda *_args: fake_audio_input,
     )
     bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
     bridge._room = MagicMock()
+    bridge._room.disconnect = AsyncMock()
 
     await bridge.start_agent(VoiceAgentOptions(instructions="Be concise.", model="gpt-realtime-2.1", api_key="sk"))
 
@@ -203,6 +209,10 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     assert fake_session.room_options.text_input is False
     assert fake_session.room_options.text_output is False
     assert fake_session.room_options.close_on_disconnect is False
+
+    await bridge.aclose()
+
+    fake_model.aclose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -847,7 +857,10 @@ async def test_start_agent_logs_detailed_media_snapshot_once(monkeypatch: pytest
     fake_session = FakeSession()
     monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: fake_session)
     monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
-    monkeypatch.setattr("livekit.plugins.openai.realtime.RealtimeModel", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "livekit.plugins.openai.realtime.RealtimeModel",
+        lambda **_kwargs: SimpleNamespace(aclose=AsyncMock()),
+    )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
         lambda *_args: MagicMock(),

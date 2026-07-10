@@ -108,11 +108,6 @@ class _AuthorizedParticipantAudioInput:
         """Describe this leaf in LiveKit's input-chain diagnostics."""
         return "authorized MatrixRTC participants"
 
-    @property
-    def source(self) -> None:
-        """Mark this custom input as the leaf of LiveKit's source chain."""
-        return None
-
     async def __anext__(self) -> rtc.AudioFrame:
         return await self._mixer.__anext__()
 
@@ -398,6 +393,7 @@ class RealtimeVoiceBridge:
             model = realtime.RealtimeModel(model=options.model, api_key=options.api_key, voice=options.voice)
         else:
             model = realtime.RealtimeModel(model=options.model, api_key=options.api_key)
+        self._owned_speech_resource_closers += (model.aclose,)
         session = AgentSession(llm=model)
         agent = Agent(instructions=options.instructions, tools=list(options.tools))
         await self._start_session(session, agent, options, rtc_module=rtc, room_io_module=room_io)
