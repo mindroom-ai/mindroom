@@ -117,10 +117,10 @@ def parse_membership_event(event_source: dict[str, Any]) -> CallMember | None:
         return None
     origin_ts = event_source.get("origin_server_ts", 0)
     created_ts = content.get("created_ts")
-    if not isinstance(created_ts, int):
-        created_ts = origin_ts if isinstance(origin_ts, int) else 0
+    if not isinstance(created_ts, int) or isinstance(created_ts, bool):
+        created_ts = origin_ts if isinstance(origin_ts, int) and not isinstance(origin_ts, bool) else 0
     expires = content.get("expires")
-    if not isinstance(expires, int):
+    if not isinstance(expires, int) or isinstance(expires, bool):
         expires = DEFAULT_MEMBERSHIP_EXPIRES_MS
     return CallMember(
         user_id=sender,

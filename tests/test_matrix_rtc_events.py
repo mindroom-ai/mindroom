@@ -158,6 +158,27 @@ def test_parse_membership_defaults_expiry() -> None:
     assert member.expires_ms == DEFAULT_MEMBERSHIP_EXPIRES_MS
 
 
+def test_parse_membership_rejects_boolean_timestamps() -> None:
+    """Boolean JSON values cannot masquerade as integer timestamps."""
+    content = build_membership_content(
+        user_id=USER,
+        device_id=DEVICE,
+        livekit_service_url=SERVICE_URL,
+        expires_ms=123,
+        created_ts=42,
+    )
+    content["expires"] = True
+    content["created_ts"] = True
+    event = _membership_event(content)
+    event["origin_server_ts"] = True
+
+    member = parse_membership_event(event)
+
+    assert member is not None
+    assert member.created_ts == 0
+    assert member.expires_ms == DEFAULT_MEMBERSHIP_EXPIRES_MS
+
+
 def test_key_to_device_content_round_trip() -> None:
     """Key to device content round trip."""
     content = build_key_to_device_content(
