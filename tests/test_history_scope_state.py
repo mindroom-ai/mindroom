@@ -404,3 +404,54 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
         "response-3",
         "response-4",
     }
+
+
+@pytest.mark.asyncio
+async def test_compaction_keeps_unrecovered_interrupted_replay_live(tmp_path: Path) -> None:
+    """Compaction cannot erase the provenance needed by a pending sync-restart retry."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    completed = _completed_run("completed")
+    completed.metadata = {"matrix_seen_event_ids": ["older-event"]}
+    interrupted = _completed_run("interrupted")
+    interrupted.metadata = {
+        "matrix_seen_event_ids": ["source-event"],
+        MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
+    }
+    session = _session("session-1", runs=[completed, interrupted])
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(
+                return_value=SessionSummary(summary="older summary", updated_at=datetime.now(UTC)),
+            ),
+        ),
+    ):
+        await prepare_history_for_run_for_test(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs or []] == ["interrupted"]
+    assert scope_has_recovered_interrupted_event(persisted, scope, "source-event") is False

@@ -1741,6 +1741,13 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
     mock_team.arun = AsyncMock(
         return_value=TeamRunOutput(
             content="validation failed in team",
+            member_responses=[
+                RunOutput(
+                    agent_name="GeneralAgent",
+                    content="Half done",
+                    status=RunStatus.completed,
+                ),
+            ],
             tools=[
                 ToolExecution(
                     tool_name="write_file",
@@ -1779,6 +1786,7 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.original_status is RunStatus.error
     assert snapshot.seen_event_ids == ("e1",)
+    assert "Half done" in snapshot.partial_text
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["write_file"]
 
 
@@ -2992,7 +3000,25 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
     )
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-        yield TeamRunOutput(content="validation failed in team", status=RunStatus.error)
+        yield TeamRunOutput(
+            content="validation failed in team",
+            member_responses=[
+                RunOutput(
+                    agent_name="GeneralAgent",
+                    content="Half done",
+                    status=RunStatus.completed,
+                ),
+            ],
+            tools=[
+                ToolExecution(
+                    tool_name="write_file",
+                    tool_args={"path": "result.txt"},
+                    result="saved",
+                    tool_call_error=False,
+                ),
+            ],
+            status=RunStatus.error,
+        )
 
     team_agent_ids = [
         fixture_entity_matrix_id(
@@ -3002,6 +3028,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
         ),
     ]
 
+    recorder = _team_turn_recorder("Analyze this.")
     with (
         patch(
             "mindroom.teams.resolve_agent_knowledge_access",
@@ -3017,15 +3044,20 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
             async for chunk in team_response_stream(
                 agent_ids=team_agent_ids,
                 message="Analyze this.",
-                turn_recorder=_team_turn_recorder("Analyze this."),
+                turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(session_id=None),
+                ctx=make_turn_context(session_id=None, reply_to_event_id="e1"),
                 mode=TeamMode.COORDINATE,
             )
         ]
 
     assert chunks == ["friendly-team-error"]
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.original_status is RunStatus.error
+    assert snapshot.seen_event_ids == ("e1",)
+    assert "Half done" in snapshot.partial_text
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["write_file"]
 
 
 @pytest.mark.asyncio

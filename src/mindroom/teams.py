@@ -1195,6 +1195,24 @@ def _extract_interrupted_team_partial_text(response: TeamRunOutput | RunOutput) 
     return content
 
 
+def _extract_errored_team_partial_text(response: TeamRunOutput | RunOutput) -> str:
+    """Extract model-produced partial text without persisting provider error prose."""
+    if isinstance(response, TeamRunOutput):
+        return _extract_interrupted_team_partial_text(replace(response, content=None))
+    assistant_parts = [
+        str(message.content).strip()
+        for message in response.messages or []
+        if (
+            isinstance(message, Message)
+            and message.role == "assistant"
+            and not message.from_history
+            and isinstance(message.content, str)
+            and message.content.strip()
+        )
+    ]
+    return assistant_parts[-1] if assistant_parts else ""
+
+
 def _extract_completed_team_tool_trace(response: TeamRunOutput | RunOutput) -> list[ToolTraceEntry]:
     """Extract completed tool calls from a possibly nested team response."""
     trace: list[ToolTraceEntry] = []
@@ -2180,6 +2198,7 @@ async def team_response(  # noqa: C901, PLR0915
                     Exception(str(response.content or "Unknown team error")),
                     team_name,
                 ),
+                partial_text=_extract_errored_team_partial_text(response),
                 completed_tools=tuple(completed_tools),
                 interrupted_tools=tuple(interrupted_tools),
                 metadata_content=metadata_content,
@@ -2831,13 +2850,16 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             pending_retry_decision = retry_decision
                             media_fallback_retry_requested = True
                             break
-                        # The attempt handles its own delivery, so publish the
-                        # errored run's usage directly before ending the turn.
-                        if run_metadata_collector is not None and event_metadata_content is not None:
-                            run_metadata_collector.update(event_metadata_content)
-                        _record_interrupted_team_turn()
-                        yield get_user_friendly_error_message(Exception(error_text), team_label)
-                        yield AttemptResolved(HandledAttempt())
+                        completed_tool_trace, interrupted_tool_trace = _extract_cancelled_team_tool_trace(event)
+                        yield AttemptResolved(
+                            ErroredAttempt(
+                                get_user_friendly_error_message(Exception(error_text), team_label),
+                                partial_text=_extract_errored_team_partial_text(event),
+                                completed_tools=tuple(completed_tool_trace),
+                                interrupted_tools=tuple(interrupted_tool_trace),
+                                metadata_content=event_metadata_content,
+                            ),
+                        )
                         return
 
                     if pending_retry_decision is not None:

@@ -260,6 +260,25 @@ def seen_event_ids_for_runs(runs: Iterable[RunOutput | TeamRunOutput]) -> set[st
     return seen_event_ids
 
 
+def unrecovered_interrupted_run_ids(runs: Iterable[RunOutput | TeamRunOutput]) -> set[str]:
+    """Return trailing interrupted replay runs that no later visible run recovered."""
+    pending_run_ids: set[str] = set()
+    for run in runs:
+        if not is_model_history_visible_run(run):
+            continue
+        metadata = run.metadata
+        is_interrupted_replay = (
+            isinstance(metadata, dict)
+            and metadata.get(MINDROOM_REPLAY_STATE_METADATA_KEY) == MINDROOM_REPLAY_STATE_INTERRUPTED
+        )
+        if is_interrupted_replay:
+            if isinstance(run.run_id, str) and run.run_id:
+                pending_run_ids.add(run.run_id)
+            continue
+        pending_run_ids.clear()
+    return pending_run_ids
+
+
 def scope_has_recovered_interrupted_event(
     session: AgentSession | TeamSession,
     scope: HistoryScope,

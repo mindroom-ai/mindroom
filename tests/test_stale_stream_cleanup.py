@@ -889,7 +889,7 @@ async def test_auto_resume_skips_human_activity_after_original_event(
             thread_id="$threaded",
         ),
     ]
-    conversation_cache.get_event.return_value = _room_get_event_response(
+    client.room_get_event.return_value = _room_get_event_response(
         _make_message_event(
             event_id="$target",
             body="Interrupted response",
@@ -923,6 +923,12 @@ async def test_auto_resume_skips_human_activity_after_original_event(
 
     assert resumed_count == 0
     mock_send.assert_not_awaited()
+    conversation_cache.get_thread_history.assert_awaited_once_with(
+        ROOM_ID,
+        "$threaded",
+        caller_label="auto_resume_after_restart",
+    )
+    client.room_get_event.assert_awaited_once_with(ROOM_ID, "$target")
 
 
 @pytest.mark.asyncio
@@ -948,7 +954,7 @@ async def test_auto_resume_skips_when_original_event_lookup_fails(tmp_path: Path
             thread_id="$threaded",
         ),
     ]
-    conversation_cache.get_event.side_effect = RuntimeError("event lookup failed")
+    client.room_get_event.side_effect = RuntimeError("event lookup failed")
     interrupted = [
         InterruptedThread(
             room_id=ROOM_ID,
@@ -980,7 +986,7 @@ async def test_auto_resume_skips_when_original_event_lookup_fails(tmp_path: Path
         "$threaded",
         caller_label="auto_resume_after_restart",
     )
-    conversation_cache.get_event.assert_awaited_once_with(ROOM_ID, "$target")
+    client.room_get_event.assert_awaited_once_with(ROOM_ID, "$target")
 
 
 @pytest.mark.asyncio
@@ -2561,7 +2567,11 @@ async def test_auto_resume_cap_backfills_after_newer_human_activity(tmp_path: Pa
         for timestamp in (100, 200, 300)
     ]
 
-    async def has_newer_human_activity(interrupted_thread: InterruptedThread, **_kwargs: object) -> bool:
+    async def has_newer_human_activity(
+        _client: nio.AsyncClient,
+        interrupted_thread: InterruptedThread,
+        **_kwargs: object,
+    ) -> bool:
         return interrupted_thread.thread_id == "$thread-300"
 
     with (
@@ -2608,7 +2618,11 @@ async def test_auto_resume_rechecks_human_activity_after_rate_limit_delay(tmp_pa
     ]
     human_threads: set[str] = set()
 
-    async def has_newer_human_activity(interrupted_thread: InterruptedThread, **_kwargs: object) -> bool:
+    async def has_newer_human_activity(
+        _client: nio.AsyncClient,
+        interrupted_thread: InterruptedThread,
+        **_kwargs: object,
+    ) -> bool:
         return interrupted_thread.thread_id in human_threads
 
     async def human_replies_during_delay(_delay: float) -> None:

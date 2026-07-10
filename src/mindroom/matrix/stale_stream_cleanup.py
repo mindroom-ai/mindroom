@@ -232,6 +232,7 @@ async def auto_resume_interrupted_threads(
                 await asyncio.sleep(delay)
                 send_attempted = False
             if await _has_newer_human_thread_activity(
+                client,
                 interrupted_thread,
                 conversation_cache=conversation_cache,
                 config=config,
@@ -286,6 +287,7 @@ async def auto_resume_interrupted_threads(
 
 
 async def _has_newer_human_thread_activity(
+    client: nio.AsyncClient,
     interrupted_thread: InterruptedThread,
     *,
     conversation_cache: ConversationCacheProtocol | None,
@@ -301,7 +303,7 @@ async def _has_newer_human_thread_activity(
             interrupted_thread.thread_id,
             caller_label="auto_resume_after_restart",
         )
-        original_event = await conversation_cache.get_event(
+        original_event = await client.room_get_event(
             interrupted_thread.room_id,
             interrupted_thread.target_event_id,
         )
