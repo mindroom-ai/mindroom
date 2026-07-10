@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.config.main import Config, RuntimeConfig
 from mindroom.logging_config import get_logger
@@ -75,12 +75,24 @@ def _coerce_oauth_providers(registered: Any) -> list[OAuthProvider]:  # noqa: AN
     return providers
 
 
+def plugin_oauth_providers_from_module(
+    module: Any,  # noqa: ANN401
+    settings: dict[str, Any],
+    runtime_paths: RuntimePaths,
+) -> tuple[OAuthProvider, ...]:
+    """Materialize plugin OAuth providers from one already-isolated module."""
+    callback = _module_oauth_provider_callback(module)
+    return tuple(_coerce_oauth_providers(callback(settings, runtime_paths)))
+
+
 def _load_plugin_oauth_providers(
     config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     skip_broken_plugins: bool,
 ) -> list[OAuthProvider]:
+    if config.runtime_plugin_oauth_providers is not None:
+        return cast("list[OAuthProvider]", list(config.runtime_plugin_oauth_providers))
     providers: list[OAuthProvider] = []
     plugin_bases = plugin_imports._collect_plugin_bases(
         config.plugins,
@@ -100,9 +112,13 @@ def _load_plugin_oauth_providers(
             )
             if module is None:
                 continue
-            callback = _module_oauth_provider_callback(module)
-            registered = callback(plugin_entry.settings, runtime_paths)
-            providers.extend(_coerce_oauth_providers(registered))
+            providers.extend(
+                plugin_oauth_providers_from_module(
+                    module,
+                    plugin_entry.settings,
+                    runtime_paths,
+                ),
+            )
         except (Exception, SystemExit) as exc:
             if not skip_broken_plugins:
                 if isinstance(exc, SystemExit):

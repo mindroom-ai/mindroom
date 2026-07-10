@@ -22,7 +22,6 @@ from httpx import HTTPError, HTTPStatusError, Request, Response
 from mindroom import constants
 from mindroom.api import auth, main
 from mindroom.api.oauth import router as oauth_router
-from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
 from mindroom.oauth import registry as oauth_registry
@@ -354,7 +353,7 @@ def test_plugin_config_registers_oauth_provider(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.model_validate(
+    config = runtime_config_from_data(
         {
             **_config_payload(),
             "plugins": [
@@ -367,6 +366,7 @@ def test_plugin_config_registers_oauth_provider(tmp_path: Path) -> None:
                 },
             ],
         },
+        runtime_paths,
     )
 
     providers = load_oauth_providers(config, runtime_paths)
@@ -414,11 +414,12 @@ def test_plugin_oauth_provider_rejects_duplicate_service_names(tmp_path: Path) -
         encoding="utf-8",
     )
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.model_validate(
+    config = runtime_config_from_data(
         {
             **_config_payload(),
             "plugins": [{"path": str(plugin_dir)}],
         },
+        runtime_paths,
     )
 
     with pytest.raises(plugin_imports.PluginValidationError, match="Duplicate OAuth provider service name"):
@@ -465,11 +466,12 @@ def test_plugin_oauth_provider_rejects_tool_config_overlap(tmp_path: Path) -> No
         encoding="utf-8",
     )
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.model_validate(
+    config = runtime_config_from_data(
         {
             **_config_payload(),
             "plugins": [{"path": str(plugin_dir)}],
         },
+        runtime_paths,
     )
 
     with pytest.raises(plugin_imports.PluginValidationError, match="Duplicate OAuth provider service name"):
@@ -504,11 +506,12 @@ def test_plugin_oauth_provider_rejects_ordinary_tool_credential_service_overlap(
         encoding="utf-8",
     )
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.model_validate(
+    config = runtime_config_from_data(
         {
             **_config_payload(),
             "plugins": [{"path": str(plugin_dir)}],
         },
+        runtime_paths,
     )
 
     with pytest.raises(plugin_imports.PluginValidationError, match="overlap existing tool service"):
@@ -544,11 +547,12 @@ def test_plugin_oauth_provider_rejects_unrelated_tool_config_service_overlap(tmp
         encoding="utf-8",
     )
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.model_validate(
+    config = runtime_config_from_data(
         {
             **_config_payload(),
             "plugins": [{"path": str(plugin_dir)}],
         },
+        runtime_paths,
     )
 
     with pytest.raises(plugin_imports.PluginValidationError, match="overlap existing tool service"):
@@ -583,11 +587,12 @@ def test_plugin_oauth_provider_rejects_client_config_token_service_overlap(tmp_p
         encoding="utf-8",
     )
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.model_validate(
+    config = runtime_config_from_data(
         {
             **_config_payload(),
             "plugins": [{"path": str(plugin_dir)}],
         },
+        runtime_paths,
     )
 
     with pytest.raises(ValueError, match=r"credential_service.*must not end with '_oauth_client'"):
@@ -622,11 +627,12 @@ def test_plugin_oauth_provider_rejects_provider_specific_client_config_reuse(tmp
         encoding="utf-8",
     )
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config.model_validate(
+    config = runtime_config_from_data(
         {
             **_config_payload(),
             "plugins": [{"path": str(plugin_dir)}],
         },
+        runtime_paths,
     )
 
     with pytest.raises(plugin_imports.PluginValidationError, match="Duplicate OAuth provider service name"):

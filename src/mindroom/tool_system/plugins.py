@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookCallback
+    from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.catalog import ResolvedToolRuntimeState
     from mindroom.tool_system.declarations import ToolMetadata
 
@@ -73,6 +74,7 @@ class _Plugin:
     hooks_module_path: Path | None
     skill_dirs: list[Path]
     discovered_hooks: tuple[HookCallback, ...]
+    oauth_providers: tuple[OAuthProvider, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +99,7 @@ class _PreparedPluginReload:
     module_import_cache: dict[Path, Any]
     synthetic_modules: dict[str, ModuleType]
     previous_package_roots: frozenset[str]
+    plugin_oauth_providers: tuple[OAuthProvider, ...]
 
 
 def _hook_display_name(callback: HookCallback) -> str:
@@ -162,6 +165,8 @@ def load_plugins(
                         plugin_entry,
                         plugin_order,
                         module_plugin_name=f"{plugin_base.name}{import_name_suffix}",
+                        runtime_paths=runtime_paths,
+                        skip_broken_plugins=skip_broken_plugins,
                     )
                 except (Exception, SystemExit) as exc:
                     restore_tool_registry_snapshot(plugin_snapshot)
@@ -307,6 +312,7 @@ def prepare_plugin_reload(
                 module_import_cache=candidate_module_import_cache,
                 synthetic_modules=candidate_synthetic_modules,
                 previous_package_roots=frozenset(previous_package_roots),
+                plugin_oauth_providers=tuple(provider for plugin in plugins for provider in plugin.oauth_providers),
             )
             prepared_succeeded = True
             return prepared_reload
@@ -449,6 +455,8 @@ def _materialize_plugin(
     plugin_order: int,
     *,
     module_plugin_name: str,
+    runtime_paths: RuntimePaths,
+    skip_broken_plugins: bool,
 ) -> _Plugin:
     tools_module = load_plugin_module(module_plugin_name, plugin.root, plugin.tools_module_path, kind="tools")
     hooks_module_path = plugin.hooks_module_path or plugin.tools_module_path
@@ -466,6 +474,30 @@ def _materialize_plugin(
             plugin_name=plugin.name,
             hook_names=[_hook_display_name(hook) for hook in discovered_hooks],
         )
+    oauth_providers: tuple[OAuthProvider, ...] = ()
+    if plugin.oauth_module_path is not None:
+        try:
+            oauth_module = load_plugin_module(
+                module_plugin_name,
+                plugin.root,
+                plugin.oauth_module_path,
+                kind="oauth",
+            )
+            if oauth_module is not None:
+                from mindroom.oauth.registry import plugin_oauth_providers_from_module  # noqa: PLC0415
+
+                oauth_providers = plugin_oauth_providers_from_module(
+                    oauth_module,
+                    entry_config.settings,
+                    runtime_paths,
+                )
+        except (Exception, SystemExit) as exc:
+            if not skip_broken_plugins:
+                if isinstance(exc, SystemExit):
+                    msg = f"Plugin OAuth provider registration failed for {plugin.root}: {exc}"
+                    raise _PluginValidationError(msg) from exc
+                raise
+            plugin_imports._log_skipped_plugin_entry(entry_config.path, plugin.root, exc)
     return _Plugin(
         name=plugin.name,
         root=plugin.root,
@@ -477,6 +509,7 @@ def _materialize_plugin(
         hooks_module_path=plugin.hooks_module_path,
         skill_dirs=plugin.skill_dirs,
         discovered_hooks=discovered_hooks,
+        oauth_providers=oauth_providers,
     )
 
 
