@@ -1083,6 +1083,16 @@ _SERVER_TOOL_USE_BLOCK = {
     "name": "tool_search_tool_regex",
     "input": {"pattern": "weather"},
 }
+_ORPHAN_TOOL_SEARCH_USE_BLOCK = {
+    **_SERVER_TOOL_USE_BLOCK,
+    "id": "srvtoolu_01ORPHAN",
+}
+_OTHER_SERVER_TOOL_USE_BLOCK = {
+    "type": "server_tool_use",
+    "id": "srvtoolu_01OTHER",
+    "name": "web_search",
+    "input": {"query": "weather"},
+}
 _TOOL_SEARCH_RESULT_BLOCK = {
     "type": "tool_search_tool_result",
     "tool_use_id": "srvtoolu_01ABC",
@@ -1185,6 +1195,105 @@ def test_replay_safe_tool_search_results_strips_response_only_fields() -> None:
     assert prepared["messages"][0]["content"][1] == {"type": "text", "text": "found it"}
     assert "citations" in request_kwargs["messages"][0]["content"][0]
     assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+
+
+def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> None:
+    """Only regex-search uses missing a same-message result should be removed."""
+    request_kwargs = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    dict(_ORPHAN_TOOL_SEARCH_USE_BLOCK),
+                    dict(_OTHER_SERVER_TOOL_USE_BLOCK),
+                    dict(_SERVER_TOOL_USE_BLOCK),
+                    dict(_DIRTY_TOOL_SEARCH_RESULT_BLOCK),
+                    {"type": "text", "text": "found it"},
+                ],
+            },
+        ],
+    }
+
+    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+
+    assert prepared["messages"][0]["content"] == [
+        _OTHER_SERVER_TOOL_USE_BLOCK,
+        _SERVER_TOOL_USE_BLOCK,
+        _TOOL_SEARCH_RESULT_BLOCK,
+        {"type": "text", "text": "found it"},
+    ]
+    assert request_kwargs["messages"][0]["content"][0] == _ORPHAN_TOOL_SEARCH_USE_BLOCK
+    assert "citations" in request_kwargs["messages"][0]["content"][3]
+
+
+@pytest.mark.asyncio
+async def test_prompt_cache_hook_drops_orphaned_search_use_from_streaming_replay() -> None:
+    """Mixed client/server tool history must remain valid on the next streamed request."""
+    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    captured_kwargs: list[dict[str, object]] = []
+
+    class _EmptyAsyncStream:
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def __aiter__(self) -> object:
+            return self
+
+        async def __anext__(self) -> object:
+            raise StopAsyncIteration
+
+    class _FakeAsyncMessagesAPI:
+        def stream(self, **kwargs: object) -> object:
+            captured_kwargs.append(kwargs)
+            return _EmptyAsyncStream()
+
+    class _FakeAsyncClient:
+        def __init__(self) -> None:
+            self.messages = _FakeAsyncMessagesAPI()
+
+    vars(model)["get_async_client"] = lambda: _FakeAsyncClient()
+    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {}
+    vars(model)["_has_beta_features"] = lambda **_kwargs: False
+    install_claude_prompt_cache_hook(model)
+    messages = [
+        Message(role="user", content="Run the tool sweep."),
+        Message(
+            role="assistant",
+            content="Calling tools.",
+            tool_calls=[
+                {
+                    "id": "toolu_01CLIENT",
+                    "function": {"name": "demo_tool", "arguments": "{}"},
+                },
+            ],
+            provider_data={"server_tool_blocks": [dict(_ORPHAN_TOOL_SEARCH_USE_BLOCK)]},
+        ),
+        Message(role="tool", tool_call_id="toolu_01CLIENT", content="ok"),
+        Message(role="user", content="Continue."),
+    ]
+
+    responses = [
+        response
+        async for response in model.ainvoke_stream(
+            messages=messages,
+            assistant_message=Message(role="assistant"),
+        )
+    ]
+
+    assert responses == []
+    wire_messages = captured_kwargs[0]["messages"]
+    assistant_wire = next(message for message in wire_messages if message["role"] == "assistant")
+    assert not any(
+        isinstance(block, dict)
+        and block.get("type") == "server_tool_use"
+        and block.get("name") == "tool_search_tool_regex"
+        for block in assistant_wire["content"]
+    )
+    assert any(getattr(block, "type", None) == "tool_use" for block in assistant_wire["content"])
+    assert wire_messages[-1]["content"][0]["type"] == "tool_result"
 
 
 def _dirty_replay_messages() -> list[Message]:

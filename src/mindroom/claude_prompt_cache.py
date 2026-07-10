@@ -39,12 +39,12 @@ deferred sorted by name). Deferred tools may not carry ``cache_control`` (the
 API rejects the request), which is why the ladder's tools marker targets the
 last non-deferred tool.
 
-The hook's third job is history repair: replayed tool-search result blocks
-are stripped down to the request schema on every request, because Agno
-persists the response-shape block verbatim and the API rejects its extra
-fields as a 400. This is why the client proxy is installed unconditionally —
-the ladder and defer tagging gate themselves per request, but a cache-disabled
-model with no deferred tools can still replay poisoned history.
+The hook's third job is history repair: replayed tool-search results are
+stripped down to the request schema, and search uses missing their result are
+removed. Both response shapes otherwise produce a 400 on the next request.
+This is why the client proxy is installed unconditionally — the ladder and
+defer tagging gate themselves per request, but a cache-disabled model with no
+deferred tools can still replay poisoned history.
 """
 
 from __future__ import annotations
@@ -69,6 +69,7 @@ _TOOL_SEARCH_TOOL_TYPE = "tool_search_tool_regex_20251119"
 _TOOL_SEARCH_TOOL_NAME = "tool_search_tool_regex"
 _NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic", "vertexai_claude"})
 
+_SERVER_TOOL_USE_BLOCK_TYPE = "server_tool_use"
 _TOOL_SEARCH_RESULT_BLOCK_TYPE = "tool_search_tool_result"
 # The request schema for replayed tool-search results accepts only these keys
 # (ToolSearchToolResultBlockParam); response blocks additionally carry
@@ -237,7 +238,7 @@ def _model_deferred_tool_names(model: AnthropicClaude) -> frozenset[str]:
 
 
 def _request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Strip response-only fields from replayed tool-search result blocks.
+    """Repair replayed tool-search blocks before sending assistant history.
 
     Agno replays captured server-tool blocks verbatim in assistant history,
     and the SDK response block carries fields (``citations``, ``parsed_output``,
@@ -245,7 +246,13 @@ def _request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[st
     not permitted"). Once such a block is persisted, every later turn of that
     conversation replays it, so the thread stays broken until the block is
     sanitized here. Keys used for history identity (``type``, ``tool_use_id``)
-    are preserved. The input structure is never mutated.
+    are preserved.
+
+    Anthropic can also return a ``server_tool_use`` without its matching
+    ``tool_search_tool_result`` when native search and client tools are called
+    together. Replaying that orphan produces another 400. Drop only unmatched
+    regex-search uses; valid pairs and other server-tool types remain intact.
+    The input structure is never mutated.
     """
     messages = request_kwargs.get("messages")
     if not isinstance(messages, list):
@@ -257,18 +264,38 @@ def _request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[st
         content = message_dict.get("content") if message_dict is not None else None
         if message_dict is None or not isinstance(content, list):
             continue
-        sanitized_content = list(content)
+        paired_result_ids = {
+            tool_use_id
+            for block in content
+            if (block_dict := _as_dict(block)) is not None
+            and block_dict.get("type") == _TOOL_SEARCH_RESULT_BLOCK_TYPE
+            and isinstance(tool_use_id := block_dict.get("tool_use_id"), str)
+        }
+        sanitized_content: list[Any] = []
         content_changed = False
-        for block_index, block in enumerate(sanitized_content):
+        for block in content:
             block_dict = _as_dict(block)
-            if block_dict is None or block_dict.get("type") != _TOOL_SEARCH_RESULT_BLOCK_TYPE:
+            if block_dict is None:
+                sanitized_content.append(block)
                 continue
-            if set(block_dict) <= _TOOL_SEARCH_RESULT_INPUT_KEYS:
+            block_id = block_dict.get("id")
+            if (
+                block_dict.get("type") == _SERVER_TOOL_USE_BLOCK_TYPE
+                and block_dict.get("name") == _TOOL_SEARCH_TOOL_NAME
+                and (not isinstance(block_id, str) or block_id not in paired_result_ids)
+            ):
+                content_changed = True
                 continue
-            sanitized_content[block_index] = {
-                key: value for key, value in block_dict.items() if key in _TOOL_SEARCH_RESULT_INPUT_KEYS
-            }
-            content_changed = True
+            if block_dict.get("type") == _TOOL_SEARCH_RESULT_BLOCK_TYPE and not (
+                set(block_dict) <= _TOOL_SEARCH_RESULT_INPUT_KEYS
+            ):
+                prepared_block = {
+                    key: value for key, value in block_dict.items() if key in _TOOL_SEARCH_RESULT_INPUT_KEYS
+                }
+                content_changed = True
+            else:
+                prepared_block = block
+            sanitized_content.append(prepared_block)
         if content_changed:
             sanitized_message = dict(message_dict)
             sanitized_message["content"] = sanitized_content
@@ -434,9 +461,8 @@ def install_claude_prompt_cache_hook(model: object) -> None:
     request inside ``_prepared``, so callers that deliberately disable caching
     (for example one-off summary calls) stay unmarked even when they reuse a
     hooked model instance. The proxy is never skipped outright because
-    replayed tool-search result blocks must be sanitized on every request —
-    a cache-disabled model with no deferred tools still replays poisoned
-    history.
+    replayed tool-search blocks must be repaired on every request — a
+    cache-disabled model with no deferred tools still replays poisoned history.
     """
     claude_model = as_anthropic_claude(model)
     if claude_model is None:
