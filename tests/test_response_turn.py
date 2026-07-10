@@ -10,16 +10,16 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from agno.models.response import ToolExecution
+from agno.run.base import RunStatus
 
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingTurnAdapter,
-    CancelledAttempt,
     CompletedAttempt,
     DynamicContinuationRunState,
     EmptyRunDiscard,
-    ErroredAttempt,
+    ExcludedAttempt,
     HandledAttempt,
     ResponseTurnContext,
     StandaloneReplaySnapshot,
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 class _FakeTurnRecorder:
     """Minimal TurnRecorder double tracking recorded outcomes."""
 
+    outcome: str = "pending"
     run_metadata: dict[str, Any] | None = None
     assistant_text: str = ""
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
@@ -79,6 +80,7 @@ class _FakeTurnRecorder:
         assistant_text: str,
         completed_tools: Sequence[ToolTraceEntry],
     ) -> None:
+        self.outcome = "completed"
         self.completed_calls.append(
             {
                 "run_metadata": run_metadata,
@@ -94,7 +96,9 @@ class _FakeTurnRecorder:
         assistant_text: str,
         completed_tools: Sequence[ToolTraceEntry],
         interrupted_tools: Sequence[ToolTraceEntry],
+        original_status: RunStatus = RunStatus.cancelled,  # noqa: ARG002
     ) -> None:
+        self.outcome = "interrupted"
         self.interrupted_calls.append(
             {
                 "run_metadata": run_metadata,
@@ -289,8 +293,8 @@ def test_blocking_errored_attempt_returns_user_text() -> None:
     """An errored attempt short-circuits to its user-facing text."""
     log = _AdapterLog()
 
-    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> ErroredAttempt:
-        return ErroredAttempt("friendly error")
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> ExcludedAttempt:
+        return ExcludedAttempt(RunStatus.error, "friendly error")
 
     result = asyncio.run(
         run_blocking_response_turn(
@@ -308,9 +312,9 @@ def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:
     """A cancelled attempt without recorder persists one standalone replay and raises."""
     log = _AdapterLog()
 
-    async def _attempt(run: TurnRunState, _c: DynamicContinuationRunState) -> CancelledAttempt:
+    async def _attempt(run: TurnRunState, _c: DynamicContinuationRunState) -> ExcludedAttempt:
         run.run_metadata = {"room_id": "!room"}
-        return CancelledAttempt(
+        return ExcludedAttempt(
             reason="user stop",
             partial_text="partial",
             completed_tools=(_trace("search"),),
@@ -345,9 +349,9 @@ def test_blocking_cancelled_attempt_with_recorder_records_twice() -> None:
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
 
-    async def _attempt(run: TurnRunState, _c: DynamicContinuationRunState) -> CancelledAttempt:
+    async def _attempt(run: TurnRunState, _c: DynamicContinuationRunState) -> ExcludedAttempt:
         run.run_metadata = {"room_id": "!room"}
-        return CancelledAttempt(reason="stop", partial_text="partial")
+        return ExcludedAttempt(RunStatus.cancelled, reason="stop", partial_text="partial")
 
     async def _run() -> None:
         await run_blocking_response_turn(
@@ -401,9 +405,9 @@ def test_blocking_external_cancel_skips_persist_after_inline_persist() -> None:
     """The standalone replay is not persisted twice for one cancelled turn."""
     log = _AdapterLog()
 
-    async def _attempt(run: TurnRunState, _c: DynamicContinuationRunState) -> CancelledAttempt:
+    async def _attempt(run: TurnRunState, _c: DynamicContinuationRunState) -> ExcludedAttempt:
         run.run_metadata = {"room_id": "!room"}
-        return CancelledAttempt(reason="stop")
+        return ExcludedAttempt(RunStatus.cancelled, reason="stop")
 
     async def _run() -> None:
         await run_blocking_response_turn(
@@ -509,7 +513,7 @@ def test_blocking_empty_run_grants_one_retry_then_notice() -> None:
 
     assert result == EMPTY_RESPONSE_NOTICE
     assert attempts == 2
-    assert [discard.run_id for discard in log.discards] == ["run-1", "run-2"]
+    assert [discard.run_id for discard in log.discards] == ["run-1"]
     assert log.released == 1
     assert recorder.completed_calls == [
         {"run_metadata": None, "assistant_text": "", "completed_tools": []},
@@ -561,7 +565,7 @@ def test_blocking_discarded_empty_run_metadata_stays_out_of_collector() -> None:
     async def _attempt(
         _run: TurnRunState,
         _c: DynamicContinuationRunState,
-    ) -> CompletedAttempt | ErroredAttempt:
+    ) -> CompletedAttempt | ExcludedAttempt:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -570,7 +574,7 @@ def test_blocking_discarded_empty_run_metadata_stays_out_of_collector() -> None:
                 run_id="run-empty",
                 metadata_content={"io.mindroom.ai_run": {"run_id": "run-empty", "status": "completed"}},
             )
-        return ErroredAttempt("friendly error")
+        return ExcludedAttempt(RunStatus.error, "friendly error")
 
     result = asyncio.run(
         run_blocking_response_turn(
@@ -694,8 +698,8 @@ def test_streaming_turn_yields_chunks_and_filters_sentinel() -> None:
     assert log.finalized == 1
 
 
-def test_streaming_handled_attempt_ends_turn_without_recording() -> None:
-    """A handled attempt (self-reported error) ends the turn without recording."""
+def test_streaming_excluded_attempt_records_even_without_partial_output() -> None:
+    """An excluded attempt records even when no partial output exists."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
 
@@ -719,6 +723,7 @@ def test_streaming_handled_attempt_ends_turn_without_recording() -> None:
 
     assert chunks == ["friendly error"]
     assert recorder.completed_calls == []
+    assert len(recorder.interrupted_calls) == 1
     assert log.finalized == 1
 
 
@@ -734,7 +739,7 @@ def test_streaming_cancelled_attempt_records_updates_collector_and_raises() -> N
         run.run_metadata = {"room_id": "!room"}
         yield "partial"
         yield AttemptResolved(
-            CancelledAttempt(
+            ExcludedAttempt(
                 reason="stop",
                 partial_text="partial",
                 metadata_content={"io.mindroom.ai_run": {"status": "cancelled"}},
@@ -775,7 +780,9 @@ def test_streaming_cancelled_attempt_with_recorder_records_twice() -> None:
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         run.run_metadata = {"room_id": "!room"}
         yield "partial"
-        yield AttemptResolved(CancelledAttempt(reason="stop", partial_text="attempt partial"))
+        yield AttemptResolved(
+            ExcludedAttempt(RunStatus.cancelled, reason="stop", partial_text="attempt partial"),
+        )
 
     async def _run() -> None:
         async for _chunk in stream_response_turn(
@@ -893,7 +900,7 @@ def test_streaming_empty_run_retries_then_yields_notice_and_records() -> None:
 
     assert chunks == [f"notice:{EMPTY_RESPONSE_NOTICE}"]
     assert attempts == 2
-    assert [discard.run_id for discard in log.discards] == ["run-1", "run-2"]
+    assert [discard.run_id for discard in log.discards] == ["run-1"]
     # The notice-only turn still records an empty completion.
     assert recorder.completed_calls[-1]["assistant_text"] == ""
 

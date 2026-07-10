@@ -321,6 +321,7 @@ async def test_generate_team_response_preserves_retry_model_prompt(tmp_path: Pat
 
     async def fake_team_response(*_args: object, **kwargs: object) -> str:
         model_message = cast("str", kwargs["message"])
+        cast("TurnRecorder", kwargs["turn_recorder"]).mark_completed()
         run_id = cast("str | None", kwargs["ctx"].run_id)
         seen_run_ids.append(run_id)
         run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
@@ -619,7 +620,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "Team hello\n\n(turn interrupted by the user before completion)"),
+        ("assistant", "Team hello\n\n(turn failed before completion)"),
     ]
 
 
@@ -706,7 +707,7 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
     assert assistant_text.count("run_shell_command") == 1
     assert assistant_text == (
         "🤝 **Team Response** (General):\n\nTeam hello\n\n"
-        "(turn interrupted by the user before completion; "
+        "(turn failed before completion; "
         "1 tool call(s) had completed: run_shell_command)"
     )
 
@@ -785,7 +786,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
     assert persisted_run.messages[0].role == "user"
     assert "Hello" in cast("str", persisted_run.messages[0].content)
     assert [(message.role, message.content) for message in persisted_run.messages[-1:]] == [
-        ("assistant", "(turn interrupted by the user before completion)"),
+        ("assistant", "(turn stopped before completion)"),
     ]
 
 
@@ -793,7 +794,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
 async def test_generate_team_response_helper_persists_interrupted_history_when_final_delivery_is_cancelled(
     tmp_path: Path,
 ) -> None:
-    """Delivery-stage cancellation after a completed team run should still persist replay."""
+    """Delivery cancellation after a completed provider run must not create replay."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
@@ -839,16 +840,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
         )
 
     assert resolution is None
-    persisted_session = cast("TeamSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
-    assert persisted_run.run_id == "team-run-delivery-cancel"
-    assert persisted_run.messages is not None
-    assert [(message.role, message.content) for message in persisted_run.messages] == [
-        ("user", "Hello"),
-        ("assistant", "🤝 Team Response:\n\nTeam hello\n\n(turn interrupted by the user before completion)"),
-    ]
+    assert storage.session is None
 
 
 @pytest.mark.asyncio
@@ -903,9 +895,10 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
             AsyncMock(side_effect=consume_stream),
         )
 
-        def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        def fake_team_response_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
             async def fake_stream() -> AsyncIterator[str]:
                 yield "Team hello"
+                cast("TurnRecorder", kwargs["turn_recorder"]).mark_completed()
 
             return fake_stream()
 
@@ -979,7 +972,7 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "Team hello\n\n(turn interrupted by the user before completion)"),
+        ("assistant", "Team hello\n\n(turn failed before completion)"),
     ]
 
 
@@ -1156,6 +1149,23 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
     assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
 
+    paused_recorder = TurnRecorder(user_message="Hello")
+    paused_recorder.mark_interrupted(RunStatus.paused)
+    assert coordinator._record_stream_delivery_error(
+        recorder=paused_recorder,
+        accumulated_text="delivery failed",
+        tool_trace=[],
+    )
+    assert paused_recorder.original_status is RunStatus.paused
+
+    empty_recorder = TurnRecorder(user_message="Hello")
+    assert coordinator._record_stream_delivery_error(
+        recorder=empty_recorder,
+        accumulated_text="",
+        tool_trace=[],
+    )
+    assert empty_recorder.original_status is RunStatus.error
+
 
 @pytest.mark.asyncio
 async def test_generate_team_response_helper_persists_original_user_message_for_cancelled_team_run(
@@ -1235,7 +1245,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "(turn interrupted by the user before completion)"),
+        ("assistant", "(turn stopped before completion)"),
     ]
 
 
@@ -1463,6 +1473,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
         async def fake_team_response(*_args: object, **kwargs: object) -> str:
             session_id = kwargs["ctx"].session_id
             assert isinstance(session_id, str)
+            cast("TurnRecorder", kwargs["turn_recorder"]).mark_interrupted(RunStatus.error)
             storage.session = TeamSession(
                 session_id=session_id,
                 team_id="team_general",
@@ -1480,6 +1491,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
         )
 
     assert sequence == ["started:team:team_general:team_general"]
+    assert len(cast("TeamSession", storage.session).runs or []) == 1
 
 
 @pytest.mark.asyncio
@@ -1650,6 +1662,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
                     assistant_text="Team partial",
                     completed_tools=[],
                     interrupted_tools=[],
+                    original_status=RunStatus.error,
                 )
 
             return fake_stream()
@@ -1669,7 +1682,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "Team partial\n\n(turn interrupted by the user before completion)"),
+        ("assistant", "Team partial\n\n(turn failed before completion)"),
     ]
 
 

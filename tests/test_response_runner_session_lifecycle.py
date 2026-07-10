@@ -240,7 +240,7 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
                 run_id="run-1",
             )
 
-    coordinator._persist_interrupted_recorder.assert_called_once()
+    coordinator._persist_interrupted_recorder.assert_called()
     coordinator.deps.delivery_gateway.deps.redact_message_event.assert_awaited_once()
 
 
@@ -891,7 +891,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "Partial answer\n\n(turn interrupted by the user before completion)"),
+        ("assistant", "Partial answer\n\n(turn failed before completion)"),
     ]
 
 
@@ -963,8 +963,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
         ("user", "Hello"),
         (
             "assistant",
-            "Partial answer\n\n(turn interrupted by the user before completion; "
-            "1 tool call(s) had completed: run_shell_command)",
+            "Partial answer\n\n(turn failed before completion; 1 tool call(s) had completed: run_shell_command)",
         ),
     ]
 
@@ -1049,8 +1048,7 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
     assert "🔧 `run_shell_command` [1]" not in assistant_text
     assert assistant_text.count("run_shell_command") == 1
     assert assistant_text == (
-        "Partial answer\n\n(turn interrupted by the user before completion; "
-        "1 tool call(s) had completed: run_shell_command)"
+        "Partial answer\n\n(turn failed before completion; 1 tool call(s) had completed: run_shell_command)"
     )
 
 
@@ -1276,7 +1274,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
     assert persisted_run.messages[0].role == "user"
     assert "Hello" in cast("str", persisted_run.messages[0].content)
     assert [(message.role, message.content) for message in persisted_run.messages[-1:]] == [
-        ("assistant", "(turn interrupted by the user before completion)"),
+        ("assistant", "(turn stopped before completion)"),
     ]
 
 

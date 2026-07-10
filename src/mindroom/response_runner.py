@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import uuid4
 
 from agno.db.base import SessionType
+from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
@@ -546,7 +547,7 @@ class ResponseRunner:
 
     def _ensure_recorder_interrupted(self, recorder: TurnRecorder) -> None:
         """Mark one recorder interrupted unless lower layers already captured richer state."""
-        if recorder.outcome != "interrupted":
+        if recorder.outcome == "pending":
             recorder.mark_interrupted()
 
     def _persist_interrupted_recorder(
@@ -615,6 +616,8 @@ class ResponseRunner:
         tool_trace: Sequence[ToolTraceEntry],
     ) -> bool:
         """Capture canonical interrupted replay state from one failed stream delivery."""
+        if recorder.outcome != "pending":
+            return recorder.outcome == "interrupted"
         partial_text = clean_partial_reply_text(strip_visible_tool_markers(accumulated_text))
         completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
         if not partial_text:
@@ -623,13 +626,12 @@ class ResponseRunner:
             completed_tools = list(recorder.completed_tools)
         if not interrupted_tools:
             interrupted_tools = list(recorder.interrupted_tools)
-        if not partial_text and not completed_tools and not interrupted_tools:
-            return False
         recorder.record_interrupted(
             run_metadata=recorder.run_metadata,
             assistant_text=partial_text,
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
+            original_status=RunStatus.error,
         )
         return True
 
@@ -1463,6 +1465,21 @@ class ResponseRunner:
             matrix_run_metadata=matrix_run_metadata,
         )
 
+        async def persist_failed_team_turn() -> None:
+            if team_turn_recorder.outcome == "completed" or team_turn_recorder.original_status is RunStatus.cancelled:
+                return
+            if team_turn_recorder.outcome == "pending":
+                team_turn_recorder.mark_interrupted(RunStatus.error)
+            await self._persist_interrupted_recorder_off_loop(
+                recorder=team_turn_recorder,
+                session_scope=session_scope,
+                session_id=session_id,
+                execution_identity=tool_dispatch.execution_identity,
+                run_id=response_run_id,
+                is_team=True,
+                response_event_id=progress.tracked_event_id,
+            )
+
         persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
             session_type=session_type,
@@ -1567,16 +1584,7 @@ class ResponseRunner:
                         await lifecycle.emit_session_started(session_started_watch)
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("streaming_complete")
-                if team_turn_recorder.outcome == "interrupted":
-                    await self._persist_interrupted_recorder_off_loop(
-                        recorder=team_turn_recorder,
-                        session_scope=session_scope,
-                        session_id=session_id,
-                        execution_identity=tool_dispatch.execution_identity,
-                        run_id=response_run_id,
-                        is_team=True,
-                        response_event_id=progress.tracked_event_id,
-                    )
+                await persist_failed_team_turn()
                 delivery_kind: Literal["sent", "edited"] = "edited" if message_id else "sent"
                 finalize_request = FinalizeStreamedResponseRequest(
                     target=delivery_target,
@@ -1647,6 +1655,7 @@ class ResponseRunner:
                                 raise
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
+                        await persist_failed_team_turn()
                 except asyncio.CancelledError as exc:
                     log_cancelled_response(
                         self.deps.logger,
@@ -2197,6 +2206,18 @@ class ResponseRunner:
                 )
             finally:
                 await lifecycle.emit_session_started(session_started_watch)
+                if turn_recorder.outcome != "completed" and turn_recorder.original_status is not RunStatus.cancelled:
+                    if turn_recorder.outcome == "pending":
+                        turn_recorder.mark_interrupted(RunStatus.error)
+                    await self._persist_interrupted_recorder_off_loop(
+                        recorder=turn_recorder,
+                        session_scope=session_scope,
+                        session_id=runtime.session_id,
+                        execution_identity=runtime.tool_dispatch.execution_identity,
+                        run_id=run_id,
+                        is_team=False,
+                        response_event_id=request.existing_event_id,
+                    )
         except asyncio.CancelledError as exc:
             cancel_source = classify_cancel_source(exc)
             log_cancelled_response(

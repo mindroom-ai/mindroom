@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
-from uuid import uuid4
 
 from agno.db.base import SessionType
 from agno.models.message import Message
@@ -19,6 +18,7 @@ from agno.run.agent import (
     RunContentEvent,
     RunErrorEvent,
     RunOutput,
+    RunPausedEvent,
     ToolCallCompletedEvent,
     ToolCallStartedEvent,
 )
@@ -71,10 +71,9 @@ from mindroom.response_turn import (
     AttemptResolved,
     BlockingAttemptResolution,
     BlockingTurnAdapter,
-    CancelledAttempt,
     CompletedAttempt,
     DynamicContinuationRunState,
-    ErroredAttempt,
+    ExcludedAttempt,
     HandledAttempt,
     ResponseTurnContext,
     StreamingTurnAdapter,
@@ -312,6 +311,7 @@ class _StreamingAttemptState:
     latest_request_cache_read_tokens: int | None = None
     latest_request_cache_write_tokens: int | None = None
     cancelled_run_event: RunCancelledEvent | None = None
+    paused_run_event: RunPausedEvent | None = None
     completed_run_event: RunCompletedEvent | None = None
     canonical_final_body_candidate: str | None = None
     completed_tool_executions: list[ToolExecution] = field(default_factory=list)
@@ -1265,7 +1265,7 @@ async def _prepare_agent_run_context(
     )
 
 
-async def ai_response(
+async def ai_response(  # noqa: C901
     ctx: ResponseTurnContext,
     prompt: str,
     runtime_paths: RuntimePaths,
@@ -1421,7 +1421,7 @@ async def ai_response(
             )
         except Exception as e:
             logger.exception("Error preparing agent", agent=agent_name)
-            return ErroredAttempt(get_user_friendly_error_message(e, agent_name))
+            return ExcludedAttempt(RunStatus.error, get_user_friendly_error_message(e, agent_name))
         prepared_run = run_context.prepared_run
         holder.agent = prepared_run.agent
         run.unseen_event_ids = prepared_run.unseen_event_ids
@@ -1444,7 +1444,8 @@ async def ai_response(
             pipeline_timing=pipeline_timing,
         )
         if attempt_result.user_error is not None:
-            return ErroredAttempt(get_user_friendly_error_message(attempt_result.user_error, agent_name))
+            error_text = get_user_friendly_error_message(attempt_result.user_error, agent_name)
+            return ExcludedAttempt(RunStatus.error, error_text)
         response = cast("RunOutput", attempt_result.response)
 
         response_tool_trace = _extract_tool_trace(response)
@@ -1466,27 +1467,29 @@ async def ai_response(
                 prepared_history=prepared_run.prepared_history,
             )
 
-        if response.status == RunStatus.cancelled:
+        if response.status in (RunStatus.cancelled, RunStatus.error, RunStatus.paused):
             partial_text = _extract_interrupted_partial_text(
                 response.content,
                 messages=response.messages,
             )
             completed_tools, interrupted_tools = _extract_cancelled_tool_trace(response)
-            return CancelledAttempt(
+            response_text = ""
+            if response.status is RunStatus.error:
+                response_text = get_user_friendly_error_message(
+                    Exception(str(response.content or "Unknown agent error")),
+                    agent_name,
+                )
+            elif response.status is RunStatus.paused:
+                response_text = _extract_response_content(response, show_tool_calls=show_tool_calls)
+            return ExcludedAttempt(
+                original_status=response.status,
+                response_text=response_text,
                 reason=response.content,
                 partial_text=partial_text,
                 completed_tools=tuple(completed_tools),
                 interrupted_tools=tuple(interrupted_tools),
                 session_id=response.session_id,
                 run_id=response.run_id or attempt.attempt_run_id,
-                metadata_content=metadata_content,
-            )
-        if response.status == RunStatus.error:
-            return ErroredAttempt(
-                get_user_friendly_error_message(
-                    Exception(str(response.content or "Unknown agent error")),
-                    agent_name,
-                ),
                 metadata_content=metadata_content,
             )
         return CompletedAttempt(
@@ -1616,6 +1619,12 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
 
             if isinstance(event, RunCancelledEvent):
                 state.cancelled_run_event = event
+                if state_updated is not None:
+                    state_updated()
+                return
+
+            if isinstance(event, RunPausedEvent):
+                state.paused_run_event = event
                 if state_updated is not None:
                     state_updated()
                 return
@@ -1831,7 +1840,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901, PLR0915
+    async def _run_streaming_attempt(  # noqa: C901
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -1925,29 +1934,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
             run_error = state.user_error or state.stream_exception
             if run_error is not None:
-                if state.assistant_text or state.completed_tools or state.pending_tools:
-                    interrupted_tools = [pending.trace_entry for pending in state.pending_tools]
-                    if turn_recorder is not None:
-                        turn_state.record_interrupted(
-                            turn_recorder,
-                            run_metadata=run.run_metadata,
-                            assistant_text=state.assistant_text,
-                            completed_tools=state.completed_tools,
-                            interrupted_tools=interrupted_tools,
-                        )
-                    elif not run.standalone_replay_persisted:
-                        persist_interrupted_replay(
-                            scope_context=run.scope_context,
-                            session_id=session_id,
-                            run_id=attempt.attempt_run_id or str(uuid4()),
-                            user_message=prompt,
-                            partial_text=state.assistant_text,
-                            completed_tools=turn_state.completed_tools_for(state.completed_tools),
-                            interrupted_tools=interrupted_tools,
-                            run_metadata=run.run_metadata,
-                            is_team=False,
-                        )
-                        run.standalone_replay_persisted = True
                 yield get_user_friendly_error_message(run_error, agent_name)
                 yield AttemptResolved(HandledAttempt())
                 return
@@ -1977,7 +1963,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                         prepared_history=prepared_run.prepared_history,
                     )
                 yield AttemptResolved(
-                    CancelledAttempt(
+                    ExcludedAttempt(
                         reason=state.cancelled_run_event.reason,
                         partial_text=state.assistant_text,
                         completed_tools=tuple(state.completed_tools),
@@ -1985,6 +1971,21 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                         session_id=state.cancelled_run_event.session_id,
                         run_id=state.cancelled_run_event.run_id or attempt.attempt_run_id,
                         metadata_content=cancelled_metadata,
+                    ),
+                )
+                return
+
+            if state.paused_run_event is not None:
+                paused_content = str(state.paused_run_event.content or "")
+                yield AttemptResolved(
+                    ExcludedAttempt(
+                        original_status=RunStatus.paused,
+                        response_text=paused_content,
+                        partial_text=state.assistant_text or paused_content,
+                        completed_tools=tuple(state.completed_tools),
+                        interrupted_tools=tuple(pending.trace_entry for pending in state.pending_tools),
+                        session_id=state.paused_run_event.session_id,
+                        run_id=state.paused_run_event.run_id or attempt.attempt_run_id,
                     ),
                 )
                 return

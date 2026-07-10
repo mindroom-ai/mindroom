@@ -333,7 +333,7 @@ class TestCleanPartialReplyBody:
         ]
 
         assert rendered[0] == rendered[1] == rendered[2]
-        assert rendered[0] == b"Partial answer\n\n(turn interrupted by the user before completion)"
+        assert rendered[0] == b"Partial answer\n\n(turn stopped before completion)"
 
 
 class TestUnseenMessagesPartialReplies:
