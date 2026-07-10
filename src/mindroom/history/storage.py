@@ -29,10 +29,11 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
@@ -55,6 +56,15 @@ _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
 _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
 _COMPACTED_RUN_ID_RETENTION_LIMIT = 1_024
+
+
+def is_model_history_visible_run(run: object) -> TypeGuard[RunOutput | TeamRunOutput]:
+    """Return whether one run is represented in Agno model history."""
+    return (
+        isinstance(run, (RunOutput, TeamRunOutput))
+        and run.parent_run_id is None
+        and run.status not in {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
+    )
 
 
 def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> AgentSession | TeamSession:
@@ -227,7 +237,7 @@ def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: Histor
     """Return the consumed Matrix event ids for one session scope."""
     seen_event_ids = _read_preserved_scope_seen_event_ids(session, scope)
     for run in session.runs or []:
-        if not isinstance(run, (RunOutput, TeamRunOutput)):
+        if not is_model_history_visible_run(run):
             continue
         if _scope_for_run(run) != scope:
             continue
@@ -236,9 +246,11 @@ def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: Histor
 
 
 def seen_event_ids_for_runs(runs: Iterable[RunOutput | TeamRunOutput]) -> set[str]:
-    """Return Matrix event ids already represented by run metadata."""
+    """Return Matrix event ids represented by model-history-visible runs."""
     seen_event_ids: set[str] = set()
     for run in runs:
+        if not is_model_history_visible_run(run):
+            continue
         seen_event_ids.update(_run_seen_event_ids(run))
     return seen_event_ids
 

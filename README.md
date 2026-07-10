@@ -13,7 +13,7 @@
 
 **AI agents that live in your chat rooms.**
 
-MindRoom is an open-source multi-agent runtime built on [Matrix](https://matrix.org/).
+MindRoom is an open-source multi-agent runtime built on [Matrix](https://matrix.org/) that works with nearly any [cloud or local AI model](docs/configuration/models.md).
 You define agents in a YAML file or in the web dashboard; MindRoom gives each one a Matrix account, and you talk to them in threads in the [MindRoom chat client](https://github.com/mindroom-ai/mindroom-cinny) — or any other Matrix client you already use.
 Because Matrix bridges to other platforms, the same agents also work in Slack, Telegram, Discord, WhatsApp, IRC, and email — with the same persistent memory everywhere.
 Self-host the whole stack, or run only the MindRoom backend locally and pair it with hosted Matrix at [mindroom.chat](https://mindroom.chat).

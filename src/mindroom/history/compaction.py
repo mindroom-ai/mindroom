@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.summary import SessionSummary
 from agno.utils.message import filter_tool_calls
@@ -21,6 +20,7 @@ from pydantic import BaseModel
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, prompt_roles_for_history_storage
 from mindroom.history.storage import (
     compacted_run_ids_with,
+    is_model_history_visible_run,
     record_compaction_chunk,
     remove_runs_by_id,
     seen_event_ids_for_runs,
@@ -1043,29 +1043,19 @@ def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str]:
     return sorted(prompt_roles_for_history_storage(history_settings.system_message_role))
 
 
-def _completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
-    """Return completed top-level runs that can contribute to persisted replay."""
-    skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
-    return [
-        run
-        for run in session.runs or []
-        if isinstance(run, (RunOutput, TeamRunOutput)) and run.parent_run_id is None and run.status not in skip_statuses
-    ]
-
-
 def scope_visible_runs(
     session: AgentSession | TeamSession,
     scope: HistoryScope,
 ) -> list[RunOutput | TeamRunOutput]:
-    """Return this scope's completed top-level runs in stored order."""
-    return _runs_for_scope(_completed_top_level_runs(session), scope)
+    """Return this scope's model-history-visible runs in stored order."""
+    return _runs_for_scope([run for run in session.runs or [] if is_model_history_visible_run(run)], scope)
 
 
 def _runs_for_scope(
     runs: Sequence[RunOutput | TeamRunOutput],
     scope: HistoryScope,
 ) -> list[RunOutput | TeamRunOutput]:
-    """Filter completed top-level runs down to one persisted history scope."""
+    """Filter model-history-visible runs down to one persisted history scope."""
     if scope.kind == "team":
         return [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id]
     return [run for run in runs if isinstance(run, RunOutput) and run.agent_id == scope.scope_id]
