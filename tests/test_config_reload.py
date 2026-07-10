@@ -1354,6 +1354,150 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
 
 
 @pytest.mark.asyncio
+async def test_update_config_keeps_live_plugins_when_api_snapshot_sync_fails(tmp_path: Path) -> None:
+    """A failed publication must discard the staged plugin runtime and keep the live one."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    hooks_path = plugin_root / "hooks.py"
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name":"demo","hooks_module":"hooks.py","skills":[]}',
+        encoding="utf-8",
+    )
+    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    other_root = tmp_path / "plugins" / "other"
+    other_root.mkdir(parents=True)
+    (other_root / "mindroom.plugin.json").write_text(
+        '{"name":"other","hooks_module":"hooks.py","skills":[]}',
+        encoding="utf-8",
+    )
+    (other_root / "hooks.py").write_text("OTHER = 1\n", encoding="utf-8")
+
+    current_config = _runtime_bound_config(
+        Config(
+            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            plugins=["./plugins/demo"],
+        ),
+        tmp_path,
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            plugins=["./plugins/demo", "./plugins/other"],
+        ),
+        tmp_path,
+    )
+
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
+    orchestrator.config = current_config
+    orchestrator.running = True
+
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    try:
+        await orchestrator.reload_plugins_now(source="initial")
+        live_hook_registry = orchestrator.hook_registry
+        publish_error = RuntimeError("Failed to publish external trigger API config snapshot")
+
+        with (
+            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+            patch.object(
+                orchestrator._external_trigger_runtime,
+                "sync_api_config_snapshot",
+                new=AsyncMock(side_effect=publish_error),
+            ),
+            pytest.raises(RuntimeError, match="Failed to publish"),
+        ):
+            await orchestrator.config_reload.update_config()
+
+        assert orchestrator.config is current_config
+        assert orchestrator.hook_registry is live_hook_registry
+
+        result = await orchestrator.reload_plugins_now(source="recovery")
+        assert result.active_plugin_names == ("demo",)
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_plugin_watcher_drops_pending_changes_when_reload_commits_during_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A reload committing mid-scan must clear stale pending edits instead of re-reloading them."""
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_SCAN_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_TREE_DEBOUNCE_SECONDS", 0.0)
+
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "demo", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+
+    reload_calls: list[tuple[str, tuple[Path, ...]]] = []
+
+    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+        reload_calls.append((source, changed_paths))
+        return PluginReloadResult(HookRegistry.empty(), (), 0)
+
+    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+
+    from mindroom.orchestration.plugin_watch import _collect_plugin_root_changes as real_collect  # noqa: PLC0415
+
+    race_state = {"saw_edit": False, "raced": False}
+
+    async def racing_collect(
+        configured_roots: tuple[Path, ...],
+        last_snapshot_by_root: dict[Path, dict[Path, int]],
+    ) -> set[Path]:
+        changed = await real_collect(configured_roots, last_snapshot_by_root)
+        if changed:
+            race_state["saw_edit"] = True
+            return changed
+        if race_state["saw_edit"] and not race_state["raced"]:
+            # Simulate a manual reload committing fresh baselines while this scan ran.
+            race_state["raced"] = True
+            orchestrator.plugin_watch.refresh(orchestrator.config)
+        return changed
+
+    monkeypatch.setattr("mindroom.orchestration.plugin_watch._collect_plugin_root_changes", racing_collect)
+
+    watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
+    try:
+        await asyncio.sleep(0.05)
+        (plugin_root / "hooks.py").write_text("VALUE = 2\n", encoding="utf-8")
+        await asyncio.sleep(0.15)
+    finally:
+        watcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher_task
+
+    assert race_state["raced"] is True
+    assert reload_calls == []
+
+
+@pytest.mark.asyncio
 async def test_queued_config_reload_waits_for_in_flight_response_without_event_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

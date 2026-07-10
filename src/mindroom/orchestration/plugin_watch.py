@@ -110,6 +110,13 @@ async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
                 watch_state_revision = watch_state.revision
             pending_changes = _filter_pending_plugin_changes(pending_changes, configured_roots)
             changed_paths = await _collect_plugin_root_changes(configured_roots, watch_state.last_snapshot_by_root)
+            if watch_state_revision != watch_state.revision:
+                # A reload committed fresh baselines while the scan ran off-loop;
+                # drop the stale dirty state instead of re-reloading consumed edits.
+                pending_changes.clear()
+                last_change_at = None
+                watch_state_revision = watch_state.revision
+                continue
 
             if changed_paths:
                 pending_changes.update(changed_paths)
