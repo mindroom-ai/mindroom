@@ -1,10 +1,10 @@
 """Persistent transcripts for MatrixRTC voice calls.
 
 Each call writes a markdown transcript incrementally (so a crash keeps the
-turns recorded so far). Agents with a private workspace get the transcript
-inside their workspace under ``calls/``, where their file tools can read it
-later; agents without one get it under the runtime storage root. When the
-call ends, a short summary entry is appended to the agent's daily memory.
+turns recorded so far). Agents using file-backed memory get the transcript
+inside their canonical workspace under ``calls/``, where their file tools
+can read it later; other agents get it under the runtime storage root. When
+the call ends, a short summary entry is appended to the agent's daily memory.
 """
 
 from __future__ import annotations
@@ -40,11 +40,10 @@ def _call_transcript_path(
 ) -> Path:
     """Choose the transcript location for one call.
 
-    Agents with a private workspace keep transcripts inside it; others use
+    Agents with file-backed memory keep transcripts inside their workspace; others use
     ``<storage>/calls/<agent>/``.
     """
-    agent_config = config.agents.get(agent_name)
-    if agent_config is not None and agent_config.private is not None:
+    if config.resolve_entity(agent_name).memory_backend == "file":
         base = agent_workspace_root_path(storage_path, agent_name) / _TRANSCRIPT_DIRNAME
     else:
         base = storage_path / _TRANSCRIPT_DIRNAME / agent_name

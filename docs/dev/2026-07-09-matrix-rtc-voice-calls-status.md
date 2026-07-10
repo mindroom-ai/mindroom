@@ -5,7 +5,7 @@ This is the single source of truth for the voice-call effort; update it with eve
 
 ## Goal
 
-MindRoom agents join Element Call (MatrixRTC) voice calls in their rooms and hold real spoken conversations through an OpenAI realtime speech-to-speech model (`gpt-realtime-2.1`), as the *same agent* as in text chat: same system prompt, same tools (approval rules enforced), with a transcript saved to the agent workspace and a daily-memory entry per call.
+MindRoom agents join Element Call (MatrixRTC) voice calls in their rooms and hold real spoken conversations through an OpenAI realtime speech-to-speech model (`gpt-realtime-2.1`), as the *same agent* as in text chat: same system prompt, same tools (approval rules enforced), with a transcript saved to the canonical workspace for file-memory agents or call storage for other agents and a daily-memory entry per call.
 Primary target deployment: production `mindroom.chat` (Cinny at `chat.mindroom.chat`).
 The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) is a separate deployment and gets its own RTC backend later — prod first.
 

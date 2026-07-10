@@ -122,6 +122,7 @@ def _remote_member_event(
     *,
     created_ts: int | None = None,
     expires_ms: int = 10_000_000,
+    livekit_service_url: str = SERVICE_URL,
 ) -> dict:
     return {
         "type": CALL_MEMBER_EVENT_TYPE,
@@ -132,7 +133,7 @@ def _remote_member_event(
         "content": build_membership_content(
             user_id=user,
             device_id=device,
-            livekit_service_url=SERVICE_URL,
+            livekit_service_url=livekit_service_url,
             expires_ms=expires_ms,
             created_ts=created_ts,
         ),
@@ -190,7 +191,6 @@ def _manager(
         config=config or _config(),
         client=client,
         runtime_paths=test_runtime_paths(tmp_path),
-        homeserver_url="https://matrix.example.org",
         ssl_verify=True,
         bridge_factory=lambda _identity, _e2ee: bridge,
         tool_support=tool_support,  # type: ignore[arg-type]
@@ -570,7 +570,6 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         config=_config(enabled=False),
         client=client,
         runtime_paths=runtime_paths,
-        homeserver_url="https://matrix.example.org",
         ssl_verify=True,
     )
     assert disabled is None
@@ -579,7 +578,6 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         config=_config(),
         client=client,
         runtime_paths=runtime_paths,
-        homeserver_url="https://matrix.example.org",
         ssl_verify=True,
     )
     assert not_listed is None
@@ -588,7 +586,6 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         config=_config(),
         client=client,
         runtime_paths=runtime_paths,
-        homeserver_url="https://matrix.example.org",
         ssl_verify=True,
     )
     assert isinstance(enabled, CallManager)
@@ -610,7 +607,6 @@ def test_maybe_build_call_manager_survives_missing_livekit_package(
         config=_config(),
         client=_client(),
         runtime_paths=test_runtime_paths(tmp_path),
-        homeserver_url="https://matrix.example.org",
         ssl_verify=True,
     )
     assert manager is None
@@ -633,7 +629,12 @@ def test_build_call_instructions_prefers_chat_system_prompt() -> None:
     assert "Answer questions" not in text
 
 
-def _member(user: str, device: str, created_ts: int = 0) -> CallMember:
+def _member(
+    user: str,
+    device: str,
+    created_ts: int = 0,
+    livekit_service_url: str | None = SERVICE_URL,
+) -> CallMember:
     from mindroom.matrix_rtc.events import CallMember  # noqa: PLC0415
 
     return CallMember(
@@ -642,6 +643,7 @@ def _member(user: str, device: str, created_ts: int = 0) -> CallMember:
         created_ts=created_ts,
         expires_ms=10_000_000,
         membership_id=f"{user}:{device}",
+        livekit_service_url=livekit_service_url,
     )
 
 
@@ -935,21 +937,62 @@ async def test_manager_replays_a_key_received_while_starting(
 
 
 @pytest.mark.asyncio
-async def test_manager_never_uses_a_remote_member_foci_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A remote participant cannot choose where the bot sends its OpenID token."""
+async def test_manager_uses_oldest_membership_focus_after_remote_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A federated call follows its oldest member only after server-name discovery agrees."""
+    config = Config(
+        agents={"helper": AgentConfig(display_name="Helper")},
+        models={},
+        calls=CallsConfig(enabled=True, agents=["helper"]),
+    )
+    discovered_for: list[str] = []
+
+    async def trusted_discovery(server_name: str, **_kwargs: object) -> str:
+        discovered_for.append(server_name)
+        return "https://rtc.remote.example"
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.discover_livekit_service_url", trusted_discovery)
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
+    members = [
+        _member(
+            "@oldest:remote.example",
+            "OLD",
+            created_ts=1,
+            livekit_service_url="https://rtc.remote.example/",
+        ),
+        _member("@newer:example.org", "NEW", created_ts=2),
+    ]
+
+    assert await manager._resolve_service_url(members) == "https://rtc.remote.example"
+    assert discovered_for == ["remote.example"]
+
+
+@pytest.mark.asyncio
+async def test_manager_rejects_oldest_membership_focus_that_discovery_does_not_trust(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A participant-advertised focus cannot redirect the bot's OpenID token."""
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
         models={},
         calls=CallsConfig(enabled=True, agents=["helper"]),
     )
 
-    async def no_discovery(*_args: object, **_kwargs: object) -> None:
-        return None
+    async def trusted_discovery(_server_name: str, **_kwargs: object) -> str:
+        return "https://trusted.remote.example"
 
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.discover_livekit_service_url", no_discovery)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.discover_livekit_service_url", trusted_discovery)
     manager = _manager(_client(), FakeBridge(), tmp_path, config)
+    member = _member(
+        "@alice:remote.example",
+        "ALICEDEV",
+        livekit_service_url="https://attacker.example",
+    )
 
-    assert await manager._resolve_service_url() is None
+    assert await manager._resolve_service_url([member]) is None
 
 
 @pytest.mark.asyncio
@@ -1365,3 +1408,35 @@ def test_calls_config_rejects_agents_sharing_a_resolved_room(tmp_path: Path) -> 
             },
             runtime_paths,
         )
+
+
+def test_calls_config_rejects_equivalent_room_refs_before_matrix_state(tmp_path: Path) -> None:
+    """Managed room keys and their full aliases cannot bypass call ownership validation."""
+    with pytest.raises(ValueError, match=r"calls\.agents configures multiple agents for room"):
+        Config.validate_with_runtime(
+            {
+                "agents": {
+                    "one": {"display_name": "One", "rooms": ["voice"]},
+                    "two": {"display_name": "Two", "rooms": ["#voice:example.org"]},
+                },
+                "calls": {"enabled": True, "agents": ["one", "two"]},
+            },
+            test_runtime_paths(tmp_path),
+        )
+
+
+def test_manager_fails_closed_when_live_room_resolves_multiple_call_agents(tmp_path: Path) -> None:
+    """Unexpected live alias ambiguity keeps every configured call agent out."""
+    config = Config(
+        models={},
+        agents={
+            "helper": AgentConfig(display_name="Helper", rooms=[ROOM_ID]),
+            "other": AgentConfig(display_name="Other", rooms=["#voice:example.org"]),
+        },
+        calls=CallsConfig(enabled=True, agents=["helper", "other"]),
+    )
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
+    room = _room()
+    room.canonical_alias = "#voice:example.org"
+
+    assert not manager._is_configured_call_room(room)

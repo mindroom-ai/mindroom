@@ -7,7 +7,7 @@ uses. It proves the control-plane + credential chain end to end without
 needing a second Element Call client:
 
 1. Token-register a throwaway Matrix user on the homeserver.
-2. Discover the LiveKit service URL from ``.well-known`` ``rtc_foci``.
+2. Discover the LiveKit service URL from the user's server-name ``.well-known`` ``rtc_foci``.
 3. Request a Matrix OpenID token.
 4. Exchange it at lk-jwt-service for a real LiveKit JWT (``request_sfu_grant``).
 5. Connect to the LiveKit SFU signaling endpoint with that JWT.
@@ -100,7 +100,8 @@ async def main() -> int:
         user_id, device_id, access_token = await _register(http, username, password, reg_token)
         log(f"PASS register: {user_id} device={device_id}")
 
-        service_url = await discover_livekit_service_url(HOMESERVER)
+        server_name = user_id.split(":", 1)[1]
+        service_url = await discover_livekit_service_url(server_name)
         log(f"{'PASS' if service_url else 'FAIL'} well-known rtc_foci: {service_url}")
         if not service_url:
             return 1

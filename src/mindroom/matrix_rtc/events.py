@@ -25,6 +25,20 @@ _ROOM_CALL_SCOPE = "m.room"
 DEFAULT_MEMBERSHIP_EXPIRES_MS = 4 * 60 * 60 * 1000
 
 
+def _preferred_livekit_service_url(content: dict[str, Any]) -> str | None:
+    """Return the first usable preferred LiveKit focus URL."""
+    foci = content.get("foci_preferred")
+    if not isinstance(foci, list):
+        return None
+    for focus in foci:
+        if not isinstance(focus, dict) or focus.get("type") != "livekit":
+            continue
+        candidate = focus.get("livekit_service_url")
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return None
+
+
 @dataclass(frozen=True)
 class CallMember:
     """One active device in a room call, parsed from a membership state event."""
@@ -34,6 +48,7 @@ class CallMember:
     created_ts: int
     expires_ms: int
     membership_id: str
+    livekit_service_url: str | None = None
 
     def is_expired(self, now_ms: int) -> bool:
         """Whether the membership state event has outlived its validity window."""
@@ -109,6 +124,7 @@ def parse_membership_event(event_source: dict[str, Any]) -> CallMember | None:
         created_ts=created_ts,
         expires_ms=expires,
         membership_id=membership_id,
+        livekit_service_url=_preferred_livekit_service_url(content),
     )
 
 

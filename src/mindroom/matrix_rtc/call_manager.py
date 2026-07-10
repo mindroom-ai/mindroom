@@ -19,8 +19,9 @@ import nio
 
 from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply
 from mindroom.credentials_sync import get_api_key_for_provider
-from mindroom.entity_resolution import configured_routable_entity_names_for_room
+from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix_rtc.call_session import CallJoinError, CallSession, CallSessionDeps, required_device_id
 from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools
 from mindroom.matrix_rtc.events import (
@@ -89,7 +90,6 @@ def maybe_build_call_manager(
     config: Config,
     client: nio.AsyncClient,
     runtime_paths: RuntimePaths,
-    homeserver_url: str,
     ssl_verify: bool,
     tool_support: ToolRuntimeSupport | None = None,
 ) -> CallManager | None:
@@ -110,7 +110,6 @@ def maybe_build_call_manager(
         config=config,
         client=client,
         runtime_paths=runtime_paths,
-        homeserver_url=homeserver_url,
         ssl_verify=ssl_verify,
         tool_support=tool_support,
     )
@@ -126,7 +125,6 @@ class CallManager:
         config: Config,
         client: nio.AsyncClient,
         runtime_paths: RuntimePaths,
-        homeserver_url: str,
         ssl_verify: bool,
         bridge_factory: Callable[[str, bool], VoiceBridgeLike] = _default_bridge_factory,
         tool_support: ToolRuntimeSupport | None = None,
@@ -136,7 +134,6 @@ class CallManager:
         self._config = config
         self._client = client
         self._runtime_paths = runtime_paths
-        self._homeserver_url = homeserver_url
         self._ssl_verify = ssl_verify
         self._bridge_factory = bridge_factory
         self._tool_support = tool_support
@@ -299,12 +296,17 @@ class CallManager:
         """Return whether this agent is configured to join calls in ``room``."""
         room_alias = room.canonical_alias
         room_aliases = (room_alias,) if isinstance(room_alias, str) and room_alias else ()
-        return self._agent_name in configured_routable_entity_names_for_room(
-            self._config,
-            room.room_id,
-            self._runtime_paths,
-            room_aliases=room_aliases,
-        )
+        try:
+            configured_agent = configured_call_agent_name_for_room(
+                self._config,
+                room.room_id,
+                self._runtime_paths,
+                room_aliases=room_aliases,
+            )
+        except ValueError as error:
+            logger.warning("call_room_ownership_ambiguous", room_id=room.room_id, error=str(error))
+            return False
+        return configured_agent == self._agent_name
 
     def _is_configured_call_room_id(self, room_id: str) -> bool:
         """Return whether this agent is configured to join calls in ``room_id``."""
@@ -409,8 +411,8 @@ class CallManager:
             logger.warning("call_join_skipped_no_openai_key", room_id=room_id, agent=self._agent_name)
             return False
         try:
-            service_url = await self._resolve_service_url()
-        except _CALL_NETWORK_ERRORS as error:
+            service_url = await self._resolve_service_url(members)
+        except (ValueError, *_CALL_NETWORK_ERRORS) as error:
             logger.warning("call_service_discovery_failed", room_id=room_id, agent=self._agent_name, error=str(error))
             return False
         if service_url is None:
@@ -556,13 +558,28 @@ class CallManager:
             logger.warning("call_tools_build_failed", agent=self._agent_name, room_id=room_id, error=str(error))
             return CallAgentTooling(tools=[], tool_names=())
 
-    async def _resolve_service_url(self) -> str | None:
-        if self._config.calls.livekit_service_url:
-            return self._config.calls.livekit_service_url
-        discovered = await discover_livekit_service_url(self._homeserver_url, ssl_verify=self._ssl_verify)
-        if discovered:
-            return discovered
-        return None
+    async def _resolve_service_url(self, members: list[CallMember]) -> str | None:
+        """Resolve and authenticate the legacy oldest-membership LiveKit focus."""
+        oldest_member = min(members, key=lambda member: member.created_ts)
+        advertised_url = oldest_member.livekit_service_url
+        if advertised_url is None:
+            return None
+        oldest_server_name = MatrixID.parse(oldest_member.user_id).domain
+        local_server_name = MatrixID.parse(self._client.user_id).domain
+        if oldest_server_name == local_server_name and self._config.calls.livekit_service_url:
+            trusted_url = self._config.calls.livekit_service_url
+        else:
+            trusted_url = await discover_livekit_service_url(oldest_server_name, ssl_verify=self._ssl_verify)
+        advertised_focus = _normalized_service_url(advertised_url)
+        trusted_focus = _normalized_service_url(trusted_url) if trusted_url is not None else None
+        if advertised_focus is None or advertised_focus != trusted_focus:
+            logger.warning(
+                "call_focus_not_trusted",
+                user_id=oldest_member.user_id,
+                advertised_url=advertised_url,
+            )
+            return None
+        return trusted_url
 
     async def _fetch_grant(self, room_id: str, service_url: str) -> SfuGrant:
         client = self._client
@@ -583,3 +600,14 @@ class CallManager:
             openid_token=openid_token,
             ssl_verify=self._ssl_verify,
         )
+
+
+def _normalized_service_url(url: str) -> str | None:
+    """Normalize insignificant URL spelling differences for focus comparison."""
+    try:
+        parsed = httpx.URL(url)
+    except httpx.InvalidURL:
+        return None
+    if parsed.scheme not in {"http", "https"} or parsed.host is None:
+        return None
+    return str(parsed).rstrip("/")

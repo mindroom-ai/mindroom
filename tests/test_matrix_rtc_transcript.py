@@ -8,7 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.calls import CallsConfig
 from mindroom.config.main import Config
 from mindroom.matrix_rtc.transcript import CallTranscript, _call_transcript_path
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -21,12 +22,16 @@ AGENT = "helper"
 ROOM_ID = "!room:example.org"
 
 
-def _config(*, private: bool = False) -> Config:
+def _config(*, file_memory: bool = False) -> Config:
     agent = AgentConfig(
         display_name="Helper",
-        private=AgentPrivateConfig(per="user") if private else None,
+        memory_backend="file" if file_memory else None,
     )
-    return Config(agents={AGENT: agent}, models={})
+    return Config(
+        agents={AGENT: agent},
+        models={},
+        calls=CallsConfig(enabled=True, agents=[AGENT]),
+    )
 
 
 def _transcript(tmp_path: Path, config: Config | None = None) -> CallTranscript:
@@ -166,19 +171,19 @@ async def test_finalize_contains_transcript_io_failure(tmp_path: Path) -> None:
     assert transcript._pending == ["- preserved\n"]
 
 
-def test_transcript_path_prefers_agent_workspace(tmp_path: Path) -> None:
-    """Private agents keep transcripts inside their workspace."""
+def test_transcript_path_prefers_file_memory_workspace(tmp_path: Path) -> None:
+    """File-memory agents keep transcripts inside their canonical workspace."""
     from datetime import UTC, datetime  # noqa: PLC0415
 
     started = datetime.now(tz=UTC)
-    private_path = _call_transcript_path(
+    workspace_path = _call_transcript_path(
         agent_name=AGENT,
-        config=_config(private=True),
+        config=_config(file_memory=True),
         storage_path=tmp_path,
         room_id=ROOM_ID,
         started_at=started,
     )
-    assert private_path.is_relative_to(agent_workspace_root_path(tmp_path, AGENT))
+    assert workspace_path.is_relative_to(agent_workspace_root_path(tmp_path, AGENT))
     shared_path = _call_transcript_path(
         agent_name=AGENT,
         config=_config(),

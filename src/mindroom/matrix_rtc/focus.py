@@ -2,8 +2,8 @@
 
 The MatrixRTC Authorization Service (``lk-jwt-service``) verifies a Matrix
 OpenID token and mints a LiveKit JWT scoped to the call's SFU room. The
-service URL is advertised in the homeserver's ``.well-known/matrix/client``
-under ``org.matrix.msc4143.rtc_foci``.
+service URL is advertised on the Matrix server name's
+``.well-known/matrix/client`` under ``org.matrix.msc4143.rtc_foci``.
 """
 
 from __future__ import annotations
@@ -37,9 +37,9 @@ class SfuGrant:
     jwt: str
 
 
-async def discover_livekit_service_url(homeserver_url: str, *, ssl_verify: bool = True) -> str | None:
-    """Read the LiveKit service URL from the homeserver's client well-known."""
-    well_known_url = f"{homeserver_url.rstrip('/')}/.well-known/matrix/client"
+async def discover_livekit_service_url(server_name: str, *, ssl_verify: bool = True) -> str | None:
+    """Read the LiveKit service URL from a Matrix server name's client well-known."""
+    well_known_url = f"https://{server_name}/.well-known/matrix/client"
     async with httpx.AsyncClient(verify=ssl_verify, timeout=10.0, follow_redirects=True) as client:
         try:
             response = await client.get(well_known_url)

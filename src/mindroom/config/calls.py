@@ -24,5 +24,5 @@ class CallsConfig(BaseModel):
     )
     livekit_service_url: str | None = Field(
         default=None,
-        description="MatrixRTC authorization service URL override (otherwise discovered from .well-known)",
+        description="Same-server MatrixRTC authorization service URL override (otherwise discovered from .well-known)",
     )

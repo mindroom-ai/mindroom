@@ -30,7 +30,7 @@ calls:
   agents: [assistant]        # shared agents that may join calls in their configured rooms
   model: gpt-realtime-2.1    # OpenAI realtime model
   voice: marin               # optional voice preset
-  # livekit_service_url: https://rtc.example.org   # override .well-known discovery
+  # livekit_service_url: https://rtc.example.org   # same-server .well-known override
 ```
 
 Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`) and an `OPENAI_API_KEY` in your credentials.
@@ -44,7 +44,7 @@ Your Matrix deployment needs the standard Element Call backend:
 
 - A [LiveKit SFU](https://github.com/livekit/livekit) reachable by call participants.
 - The [MatrixRTC authorization service](https://github.com/element-hq/lk-jwt-service) (`lk-jwt-service`) that exchanges Matrix OpenID tokens for LiveKit JWTs.
-- The homeserver's `.well-known/matrix/client` must advertise the service:
+- The Matrix server-name domain's `.well-known/matrix/client` must advertise the service:
 
 ```json
 {
@@ -56,7 +56,7 @@ Your Matrix deployment needs the standard Element Call backend:
 
 Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/livekit/docs/self-hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables all of it with `matrix_rtc_enabled: true`.
 
-MindRoom uses this configured or homeserver-discovered service URL only and never trusts a call member's advertised URL when exchanging its OpenID token.
+MindRoom follows MatrixRTC's oldest-membership focus selection, but exchanges its OpenID token only when that member's advertised URL matches trusted discovery on the member's Matrix server-name domain or the same-server configured override.
 
 The room's power levels must allow members to send `org.matrix.msc3401.call.member` state events (Element Call-capable clients set this up when they create rooms).
 
@@ -74,7 +74,7 @@ Calls in unencrypted rooms need none of this and work with plain SFU media.
 
 ## Transcripts and memory
 
-Every call writes a markdown transcript incrementally: agents with a private workspace keep it in `calls/` inside their workspace (readable through their file tools later), other agents under `<storage>/calls/<agent>/`.
+Every call writes a markdown transcript incrementally: agents using file-backed memory keep it in `calls/` inside their canonical workspace (readable through their file tools later), while other agents use `<storage>/calls/<agent>/`.
 When the call ends, the agent appends a one-line summary with the transcript location to its daily memory.
 
 ## Limitations

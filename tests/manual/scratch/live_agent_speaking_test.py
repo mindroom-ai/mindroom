@@ -365,7 +365,6 @@ async def main() -> int:  # noqa: PLR0915
         config=config,
         client=bot_client,
         runtime_paths=paths,
-        homeserver_url=HOMESERVER,
         ssl_verify=True,
         tool_support=LiveToolSupport(),  # type: ignore[arg-type]
     )

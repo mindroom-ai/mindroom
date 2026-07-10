@@ -44,6 +44,7 @@ def test_membership_content_round_trip() -> None:
     assert member.user_id == USER
     assert member.device_id == DEVICE
     assert member.membership_id == f"{USER}:{DEVICE}"
+    assert member.livekit_service_url == SERVICE_URL
     assert member.created_ts == 1_000
     assert not member.is_expired(1_000 + DEFAULT_MEMBERSHIP_EXPIRES_MS - 1)
     assert member.is_expired(1_000 + DEFAULT_MEMBERSHIP_EXPIRES_MS)
@@ -219,5 +220,12 @@ async def test_request_sfu_grant_rejects_non_object_body(monkeypatch: pytest.Mon
 @pytest.mark.asyncio
 async def test_discovery_tolerates_non_object_well_known(monkeypatch: pytest.MonkeyPatch) -> None:
     """A non-object well-known body yields None instead of AttributeError."""
-    _patched_httpx_client(monkeypatch, lambda _request: httpx.Response(200, json=["not", "a", "well-known"]))
-    assert await discover_livekit_service_url("https://matrix.example.org") is None
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        return httpx.Response(200, json=["not", "a", "well-known"])
+
+    _patched_httpx_client(monkeypatch, handler)
+    assert await discover_livekit_service_url("example.org") is None
+    assert seen_urls == ["https://example.org/.well-known/matrix/client"]
