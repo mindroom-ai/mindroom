@@ -544,12 +544,11 @@ class HandledTurnLedger:
                     for event_id in resolved_record.indexed_event_ids:
                         persisted_responses[event_id] = resolved_record
                     self._write_responses_file_locked(persisted_responses)
-                resolved_event_ids = tuple(
-                    dict.fromkeys(
-                        (
-                            *turn_record.indexed_event_ids,
-                            *(resolved_record.indexed_event_ids if resolved_record is not None else ()),
-                        ),
+                resolved_event_ids = _indexed_record_closure(
+                    persisted_responses,
+                    (
+                        *turn_record.indexed_event_ids,
+                        *(resolved_record.indexed_event_ids if resolved_record is not None else ()),
                     ),
                 )
                 return _PersistedTurnResult(
@@ -569,12 +568,19 @@ class HandledTurnLedger:
     def _apply_persist_result_locked(self, result: _PersistedTurnResult) -> None:
         """Replace still-current requested rows with their authoritative disk values."""
         for event_id, persisted_record in result.records_by_event_id:
-            if self._responses.get(event_id) != result.requested_record:
+            current_record = self._responses.get(event_id)
+            if current_record is None:
+                if persisted_record is not None:
+                    self._responses[event_id] = persisted_record
                 continue
-            if persisted_record is None:
-                self._responses.pop(event_id, None)
-            else:
-                self._responses[event_id] = persisted_record
+            if current_record == result.requested_record:
+                if persisted_record is None:
+                    self._responses.pop(event_id, None)
+                else:
+                    self._responses[event_id] = persisted_record
+                continue
+            if persisted_record is not None and same_turn_identity(current_record, persisted_record):
+                self._responses[event_id] = _merge_same_identity_records(current_record, persisted_record)
 
     def _write_responses_file_locked(self, responses: dict[str, TurnRecord]) -> None:
         """Atomically write one versioned ledger payload while the file lock is held."""
@@ -669,6 +675,24 @@ class HandledTurnLedger:
         return quarantined_file
 
 
+def _indexed_record_closure(
+    records: Mapping[str, TurnRecord],
+    event_ids: Sequence[str],
+) -> tuple[str, ...]:
+    """Return event IDs plus every indexed ID claimed by their resolved records."""
+    closure = list(_normalize_source_event_ids(event_ids))
+    seen_event_ids = set(closure)
+    for event_id in closure:
+        record = records.get(event_id)
+        if record is None:
+            continue
+        for indexed_event_id in record.indexed_event_ids:
+            if indexed_event_id not in seen_event_ids:
+                seen_event_ids.add(indexed_event_id)
+                closure.append(indexed_event_id)
+    return tuple(closure)
+
+
 def _normalize_source_event_ids(source_event_ids: Sequence[object]) -> tuple[str, ...]:
     """Deduplicate non-empty source event IDs while preserving order."""
     normalized_event_ids: list[str] = []
@@ -705,10 +729,14 @@ def _resolve_turn_record(
         if (existing_record := existing_records.get(event_id)) is not None
         and same_turn_identity(existing_record, turn_record)
     )
-    newest_existing_record = max(same_identity_records, key=lambda record: record.timestamp, default=None)
+    highest_precedence_existing_record = max(
+        same_identity_records,
+        key=lambda record: (record.completed, record.timestamp),
+        default=None,
+    )
     resolved_record = (
-        _merge_same_identity_records(turn_record, newest_existing_record)
-        if newest_existing_record is not None
+        _merge_same_identity_records(turn_record, highest_precedence_existing_record)
+        if highest_precedence_existing_record is not None
         else turn_record
     )
     discovery_event_ids = tuple(
@@ -723,7 +751,10 @@ def _resolve_turn_record(
 
 def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) -> TurnRecord:
     """Keep the newer same-turn record while preserving older echo and discovery facts."""
-    newer, older = (candidate, existing) if candidate.timestamp >= existing.timestamp else (existing, candidate)
+    if candidate.completed != existing.completed:
+        newer, older = (candidate, existing) if candidate.completed else (existing, candidate)
+    else:
+        newer, older = (candidate, existing) if candidate.timestamp > existing.timestamp else (existing, candidate)
     return replace(
         newer,
         discovery_event_ids=(*newer.discovery_event_ids, *older.discovery_event_ids),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -398,7 +399,15 @@ def _reconcile_ledger_and_recovery(ledger_record: TurnRecord, recovery_record: T
         or recovery_record.response_event_id is None
         or not same_turn_identity(ledger_record, recovery_record)
     ):
-        return _backfill_missing_turn_facts(ledger_record, recovery_record)
+        backfilled_record = _backfill_missing_turn_facts(ledger_record, recovery_record)
+        return (
+            replace(
+                backfilled_record,
+                timestamp=math.nextafter(ledger_record.timestamp, math.inf),
+            )
+            if backfilled_record != ledger_record
+            else ledger_record
+        )
     return replace(
         ledger_record,
         discovery_event_ids=(*ledger_record.discovery_event_ids, *recovery_record.discovery_event_ids),
@@ -411,5 +420,5 @@ def _reconcile_ledger_and_recovery(ledger_record: TurnRecord, recovery_record: T
         correlation_id=recovery_record.correlation_id or ledger_record.correlation_id,
         history_scope=recovery_record.history_scope or ledger_record.history_scope,
         conversation_target=recovery_record.conversation_target or ledger_record.conversation_target,
-        timestamp=max(recovery_record.timestamp, ledger_record.timestamp),
+        timestamp=max(recovery_record.timestamp, math.nextafter(ledger_record.timestamp, math.inf)),
     )

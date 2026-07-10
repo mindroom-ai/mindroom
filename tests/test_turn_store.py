@@ -239,7 +239,7 @@ def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(tmp_path:
 
     assert loaded is not None
     assert loaded.response_event_id == "$new-response"
-    assert loaded.timestamp == 10.9
+    assert loaded.timestamp > 10.9
 
 
 def test_newer_interrupted_run_keeps_delivered_ledger_outcome(tmp_path: Path) -> None:
@@ -397,7 +397,7 @@ def test_load_turn_uses_ledger_identity_and_outcome_then_backfills_missing_conte
     assert loaded.response_owner == "agent"
     assert loaded.history_scope == HistoryScope(kind="agent", scope_id="agent")
     assert loaded.conversation_target == recovery_target
-    assert loaded.timestamp == persisted_ledger_record.timestamp
+    assert loaded.timestamp > persisted_ledger_record.timestamp
     repaired = store.get_turn_record("$first")
     assert repaired == loaded
 
