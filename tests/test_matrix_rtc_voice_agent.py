@@ -12,11 +12,14 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from livekit import rtc
 from livekit.agents import APIConnectionError, APIStatusError, CloseReason
+from livekit.agents.voice import io as agents_io
+from structlog.testing import capture_logs
 
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.voice_agent import (
     RealtimeVoiceBridge,
     VoiceAgentOptions,
+    _AudioFrameStream,
     _AuthorizedParticipantAudioInput,
 )
 
@@ -282,6 +285,101 @@ def test_bridge_limits_output_subscriptions_to_matrix_roster() -> None:
     ]
 
 
+def test_bridge_logs_sorted_output_permission_roster() -> None:
+    """Output permission diagnostics preserve the authoritative sorted roster."""
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    room = MagicMock()
+    bridge._room = room
+
+    with capture_logs() as logs:
+        bridge.set_participant_identities(
+            frozenset({"@bob:example.org:BOBDEV", "@alice:example.org:ALICEDEV"}),
+        )
+
+    assert logs == [
+        {
+            "event": "call_output_permissions_applied",
+            "log_level": "info",
+            "participants": ["@alice:example.org:ALICEDEV", "@bob:example.org:BOBDEV"],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_audio_frame_stream_logs_first_frame_once_with_participant_identity() -> None:
+    """Only the first decoded frame emits the participant-scoped diagnostic."""
+
+    class FakeAudioStream:
+        def __init__(self) -> None:
+            self.frames = iter(("first", "second"))
+
+        async def __anext__(self) -> object:
+            return SimpleNamespace(frame=next(self.frames))
+
+    stream = _AudioFrameStream(
+        cast("rtc.AudioStream", FakeAudioStream()),
+        "@alice:example.org:ALICEDEV",
+    )
+
+    with capture_logs() as logs:
+        assert await stream.__anext__() == "first"
+        assert await stream.__anext__() == "second"
+
+    assert logs == [
+        {
+            "event": "call_audio_first_frame",
+            "log_level": "info",
+            "participant": "@alice:example.org:ALICEDEV",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_authorized_audio_input_logs_added_stream_identity_and_sid() -> None:
+    """Stream-add diagnostics identify both Matrix participant and LiveKit publication."""
+
+    class FakeAudioStream:
+        async def aclose(self) -> None:
+            return
+
+    class FakeMixer:
+        def add_stream(self, _stream: object) -> None:
+            return
+
+        def remove_stream(self, _stream: object) -> None:
+            return
+
+        async def aclose(self) -> None:
+            return
+
+    fake_rtc = cast(
+        "ModuleType",
+        SimpleNamespace(
+            AudioMixer=lambda *_args, **_kwargs: FakeMixer(),
+            AudioStream=lambda *_args, **_kwargs: FakeAudioStream(),
+            TrackKind=SimpleNamespace(KIND_AUDIO=1),
+            TrackSource=SimpleNamespace(SOURCE_MICROPHONE=2),
+        ),
+    )
+    room = MagicMock()
+    room.remote_participants = {}
+    identity = "@alice:example.org:ALICEDEV"
+    audio_input = _AuthorizedParticipantAudioInput(room, fake_rtc, frozenset({identity}))
+
+    with capture_logs() as logs:
+        audio_input._add_stream("alice-mic", identity, cast("rtc.RemoteTrack", object()))
+
+    assert logs == [
+        {
+            "event": "call_audio_stream_added",
+            "log_level": "info",
+            "participant": identity,
+            "publication_sid": "alice-mic",
+        },
+    ]
+    await audio_input.aclose()
+
+
 @pytest.mark.asyncio
 async def test_authorized_audio_input_mixes_all_and_only_rostered_microphones() -> None:
     """Group audio subscribes every rostered microphone and rejects an SFU-only identity."""
@@ -371,7 +469,6 @@ async def test_authorized_audio_input_satisfies_agent_session_audio_interface() 
     chain; a missing attribute aborts the realtime agent start and the bot
     leaves the call immediately after joining.
     """
-    from livekit.agents.voice import io as agents_io  # noqa: PLC0415
 
     class FakeMixer:
         def add_stream(self, _stream: object) -> None:
@@ -396,10 +493,67 @@ async def test_authorized_audio_input_satisfies_agent_session_audio_interface() 
     assert audio_input.label
     audio_input.on_attached()
     audio_input.on_detached()
-    required = [name for name in dir(agents_io.AudioInput) if not name.startswith("_")]
-    missing = [name for name in required if not hasattr(audio_input, name)]
-    assert not missing, f"AgentSession audio-input interface attributes missing: {missing}"
+    required = {name for name in dir(agents_io.AudioInput) if not name.startswith("_")}
+    implemented = {name for name in dir(type(audio_input)) if not name.startswith("_")}
+    assert required <= implemented
     await audio_input.aclose()
+
+
+@pytest.mark.asyncio
+async def test_start_agent_logs_detailed_media_snapshot_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Agent startup emits one INFO snapshot with local, remote, and roster fields."""
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.input = SimpleNamespace(audio=None)
+
+        async def start(self, _agent: object, *, room: object, room_options: object) -> None:
+            assert room is bridge._room
+            assert room_options is not None
+
+    fake_session = FakeSession()
+    monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: fake_session)
+    monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
+    monkeypatch.setattr("livekit.plugins.openai.realtime.RealtimeModel", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args: MagicMock(),
+    )
+    alice_identity = "@alice:example.org:ALICEDEV"
+    bob_identity = "@bob:example.org:BOBDEV"
+    room = SimpleNamespace(
+        local_participant=SimpleNamespace(
+            track_publications={"local": SimpleNamespace(sid="bot-audio")},
+        ),
+        remote_participants={
+            "alice": SimpleNamespace(
+                identity=alice_identity,
+                track_publications={
+                    "mic": SimpleNamespace(sid="alice-mic", subscribed=True, muted=False),
+                },
+            ),
+        },
+    )
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = room
+    bridge._participant_identities = frozenset({bob_identity, alice_identity})
+
+    with capture_logs() as logs:
+        await bridge.start_agent(
+            VoiceAgentOptions(instructions="Be concise.", model="gpt-realtime-2.1", api_key="sk"),
+        )
+
+    assert logs == [
+        {
+            "event": "call_media_snapshot",
+            "local_published_tracks": ["bot-audio"],
+            "log_level": "info",
+            "remote_participants": {
+                alice_identity: [{"sid": "alice-mic", "subscribed": True, "muted": False}],
+            },
+            "roster": [alice_identity, bob_identity],
+        },
+    ]
 
 
 @pytest.mark.asyncio

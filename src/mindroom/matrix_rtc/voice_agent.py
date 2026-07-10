@@ -45,7 +45,7 @@ _AUDIO_FRAME_SIZE_MS = 50
 class _AudioFrameStream:
     """Convert LiveKit ``AudioFrameEvent`` items into mixer-ready frames."""
 
-    def __init__(self, stream: rtc.AudioStream, participant_identity: str = "") -> None:
+    def __init__(self, stream: rtc.AudioStream, participant_identity: str) -> None:
         self._stream = stream
         self._participant_identity = participant_identity
         self._received_first_frame = False
