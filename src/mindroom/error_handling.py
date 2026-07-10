@@ -12,7 +12,10 @@ from mindroom.redaction import redact_sensitive_text
 
 logger = get_logger(__name__)
 
-_TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
+# Shared by provider retry policy and final user-message routing. Status 200 is
+# the Claude mid-stream SSE error case: the HTTP response was already committed
+# before the provider emitted an error event.
+TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
 
 
 class AvatarGenerationError(RuntimeError):
@@ -60,12 +63,19 @@ def _structured_provider_error(error_str: str) -> tuple[str, str] | None:
     return error_type.casefold(), message.casefold()
 
 
+def _has_provider_status(error: Exception, status_code: int) -> bool:
+    """Return whether a typed provider exception has the given status."""
+    if getattr(error, "status_code", None) != status_code:
+        return False
+    return isinstance(error, ModelProviderError) or _extract_provider_from_error(error) is not None
+
+
 def _is_transient_provider_error(error: Exception) -> bool:
     """Recognize provider failures that already exhausted automatic retries."""
     status_code = getattr(error, "status_code", None)
-    if isinstance(error, ModelProviderError) and status_code in _TRANSIENT_PROVIDER_STATUS_CODES:
+    if isinstance(error, ModelProviderError) and status_code in TRANSIENT_PROVIDER_STATUS_CODES:
         return True
-    if _extract_provider_from_error(error) is not None and status_code in _TRANSIENT_PROVIDER_STATUS_CODES:
+    if _extract_provider_from_error(error) is not None and status_code in TRANSIENT_PROVIDER_STATUS_CODES:
         return True
 
     structured_error = _structured_provider_error(str(error))
@@ -105,7 +115,7 @@ def get_user_friendly_error_message(error: Exception, agent_name: str | None = N
         provider = _extract_provider_from_error(error)
         provider_hint = f" ({provider})" if provider else ""
         return f"{agent_prefix}❌ Authentication failed{provider_hint}: {safe_error}"
-    if any(x in error_str for x in ["rate", "429", "quota"]):
+    if any(x in error_str for x in ["rate", "429", "quota"]) or _has_provider_status(error, 429):
         return f"{agent_prefix}⏱️ Rate limited. Please wait a moment and try again."
     if _is_transient_provider_error(error):
         return (

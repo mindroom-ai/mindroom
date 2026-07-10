@@ -65,6 +65,16 @@ def test_rate_limit_error() -> None:
     assert "Rate limited" in message
 
 
+def test_typed_rate_limit_error_uses_status_code() -> None:
+    """Typed 429 errors remain rate limits even when their message is generic."""
+    error = ModelProviderError(message="upstream unavailable", status_code=429)
+
+    message = get_user_friendly_error_message(error)
+
+    assert "Rate limited" in message
+    assert "temporarily unavailable" not in message
+
+
 def test_overloaded_provider_error_is_user_friendly() -> None:
     """An exhausted provider overload must not dump its raw payload to Matrix."""
     error = Exception(

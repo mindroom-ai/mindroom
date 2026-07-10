@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, cast
 from agno.exceptions import ContextWindowExceededError, ModelProviderError
 
 from mindroom.claude_prompt_cache import as_anthropic_claude
+from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -47,18 +48,12 @@ _STREAM_RETRY_HOOK_ATTR = "_mindroom_claude_stream_retry_hook_installed"
 _MAX_TRANSIENT_RETRIES = 4
 _RETRY_BASE_DELAY_SECONDS = 1.0
 
-# Statuses that indicate a transient provider fault. 200 is the mid-stream SSE
-# ``error`` event case (the HTTP response was already committed when the server
-# failed). 502 is also Agno's default when it wraps connection errors and
-# unexpected SDK exceptions, which are equally worth one more attempt.
-_RETRYABLE_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
-
 
 def _is_transient_model_error(error: BaseException) -> bool:
     """Return whether one model-call failure is worth re-issuing the request."""
     if isinstance(error, ContextWindowExceededError):
         return False
-    return isinstance(error, ModelProviderError) and error.status_code in _RETRYABLE_STATUS_CODES
+    return isinstance(error, ModelProviderError) and error.status_code in TRANSIENT_PROVIDER_STATUS_CODES
 
 
 def _has_meaningful_output(response: ModelResponse) -> bool:
