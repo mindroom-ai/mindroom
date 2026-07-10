@@ -923,6 +923,58 @@ async def test_auto_resume_skips_human_activity_after_original_event(
 
     assert resumed_count == 0
     mock_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_skips_when_original_event_lookup_fails(tmp_path: Path) -> None:
+    """Recovery fails closed when it cannot place already-fetched human activity in time."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = AsyncMock(spec=nio.AsyncClient)
+    conversation_cache = AsyncMock()
+    conversation_cache.get_thread_history.return_value = [
+        ResolvedVisibleMessage.synthetic(
+            sender=BOT_USER_ID,
+            body="Interrupted response",
+            event_id="$target",
+            timestamp=300,
+            thread_id="$threaded",
+        ),
+        ResolvedVisibleMessage.synthetic(
+            sender=USER_ID,
+            body="Please continue",
+            event_id="$new-user-message",
+            timestamp=200,
+            thread_id="$threaded",
+        ),
+    ]
+    conversation_cache.get_event.side_effect = RuntimeError("event lookup failed")
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$threaded",
+            target_event_id="$target",
+            partial_text="Interrupted response",
+            agent_name="test_agent",
+            original_sender_id=USER_ID,
+            timestamp_ms=300,
+        ),
+    ]
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message_result",
+        new=AsyncMock(return_value=delivered_matrix_event("$resume")),
+    ) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_cache=conversation_cache,
+        )
+
+    assert resumed_count == 0
+    mock_send.assert_not_awaited()
     conversation_cache.get_thread_history.assert_awaited_once_with(
         ROOM_ID,
         "$threaded",

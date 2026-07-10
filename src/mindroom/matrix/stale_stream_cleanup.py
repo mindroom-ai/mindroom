@@ -313,7 +313,7 @@ async def _has_newer_human_thread_activity(
             thread_id=interrupted_thread.thread_id,
             error=str(exc),
         )
-        return False
+        return True
     original_timestamp_ms = interrupted_thread.timestamp_ms
     if isinstance(original_event, nio.RoomGetEventResponse) and isinstance(original_event.event.server_timestamp, int):
         original_timestamp_ms = original_event.event.server_timestamp
