@@ -184,7 +184,13 @@ class CallManager:
         if session is not None and session.on_key_received(received):
             return
         members = await self._fetch_remote_members(room_id)
-        if members is None or not self._received_key_matches_member(received, members):
+        if members is None:
+            self._queue_pending_key(room_id, received)
+            room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
+            if room is not None:
+                self._schedule_reconcile_retry(room)
+            return
+        if not self._received_key_matches_member(received, members):
             logger.warning(
                 "call_frame_key_rejected_nonmember",
                 room_id=room_id,
@@ -340,7 +346,7 @@ class CallManager:
         pending[identity] = received
 
     def _replay_pending_keys(self, room_id: str, session: CallSession) -> None:
-        """Replay validated keys after the session receives an authoritative roster."""
+        """Replay bounded keys after the session receives an authoritative roster."""
         for received in self._pending_keys.pop(room_id, {}).values():
             if session.on_key_received(received):
                 continue

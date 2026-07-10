@@ -874,6 +874,36 @@ async def test_manager_replays_a_key_received_before_startup_reconciliation(
 
 
 @pytest.mark.asyncio
+async def test_manager_replays_key_after_transient_admission_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A one-shot to-device key survives a transient roster-fetch failure."""
+
+    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
+        return targets
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
+    client = _client()
+    client.rooms = {ROOM_ID: _room(encrypted=True)}
+    message = "offline"
+    client.room_get_state.side_effect = [
+        aiohttp.ClientError(message),
+        _state_response(_remote_member_event()),
+    ]
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    await manager.on_to_device_event(_frame_key_event())
+    assert ROOM_ID in manager._pending_keys
+    await manager.reconcile_joined_rooms()
+
+    assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
+    assert manager._pending_keys == {}
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_manager_replays_a_key_received_before_active_roster_update(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
