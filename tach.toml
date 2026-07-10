@@ -95,17 +95,11 @@ depends_on = [
     "mindroom.media_inputs",
     "mindroom.memory",
     "mindroom.metadata_merge",
-    "mindroom.preparation_concurrency",
     "mindroom.response_turn",
     "mindroom.timing",
     "mindroom.tool_system.events",
     "mindroom.user_turn_time",
 ]
-
-[[modules]]
-path = "mindroom.preparation_concurrency"
-depends_on = []
-visibility = ["mindroom.ai"]
 
 # The shared response-turn drivers own the turn lifecycle for both the agent
 # and (after adoption) team envelopes; entity modules inject adapters.

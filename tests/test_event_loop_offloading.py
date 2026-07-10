@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -107,7 +108,10 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
     agent_started = threading.Event()
     agent_release = threading.Event()
     agent_finished = threading.Event()
+    prompt_composed = asyncio.Event()
     history_started = asyncio.Event()
+    context_marker = ContextVar("prompt_preparation_context", default="missing")
+    context_token = context_marker.set("preserved")
     built_agent = MagicMock()
     built_agent.additional_context = "existing context"
 
@@ -121,6 +125,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
         return MemoryPromptParts(session_preamble="session memory", turn_context="turn memory")
 
     def gated_create_agent(*_args: object, **_kwargs: object) -> MagicMock:
+        assert context_marker.get() == "preserved"
         agent_started.set()
         if not agent_release.wait(5.0):
             msg = "timed out waiting to release agent construction"
@@ -140,8 +145,21 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
             messages=(Message(role="user", content=kwargs["prompt"]),),
         )
 
+    original_compose = ai_module._compose_current_turn_prompt
+
+    def compose_prompt(*, raw_prompt: str, model_prompt: str | None, prompt_parts: MemoryPromptParts) -> str:
+        assert memory_finished.is_set()
+        assert agent_finished.is_set()
+        prompt_composed.set()
+        return original_compose(
+            raw_prompt=raw_prompt,
+            model_prompt=model_prompt,
+            prompt_parts=prompt_parts,
+        )
+
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", gated_memory)
     monkeypatch.setattr(ai_module, "create_agent", gated_create_agent)
+    monkeypatch.setattr(ai_module, "_compose_current_turn_prompt", compose_prompt)
     monkeypatch.setattr(ai_module, "prepare_agent_execution_context", prepare_history)
 
     config = _prompt_preparation_config()
@@ -165,12 +183,14 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
             agent_release.set()
             assert await asyncio.to_thread(agent_finished.wait, 1.0)
         await asyncio.sleep(0)
+        assert not prompt_composed.is_set()
         assert not history_started.is_set()
 
         memory_release.set()
         agent_release.set()
         prepared_run = await prepare_task
     finally:
+        context_marker.reset(context_token)
         memory_release.set()
         agent_release.set()
 
@@ -180,7 +200,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failing_branch", ["memory", "agent"])
+@pytest.mark.parametrize("failing_branch", ["memory", "agent", "both", "memory_cancelled"])
 async def test_prepare_agent_and_prompt_propagates_branch_failure_directly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -188,31 +208,39 @@ async def test_prepare_agent_and_prompt_propagates_branch_failure_directly(
 ) -> None:
     """Either branch failure keeps its original exception and prevents history preparation."""
     rendezvous = threading.Barrier(2)
-    error = RuntimeError(f"{failing_branch} failed")
+    memory_error = (
+        asyncio.CancelledError("memory cancelled")
+        if failing_branch == "memory_cancelled"
+        else RuntimeError("memory failed")
+    )
+    agent_error = RuntimeError("agent failed")
     built_agent = MagicMock()
     built_agent.additional_context = ""
     prepare_history = AsyncMock()
     close_unreturned = MagicMock()
+    test_logger = MagicMock()
 
     async def memory_branch(*_args: object, **_kwargs: object) -> MemoryPromptParts:
         await asyncio.to_thread(rendezvous.wait, 5.0)
-        if failing_branch == "memory":
-            raise error
+        if failing_branch in {"memory", "both", "memory_cancelled"}:
+            raise memory_error
         return MemoryPromptParts()
 
     def agent_branch(*_args: object, **_kwargs: object) -> MagicMock:
         rendezvous.wait(5.0)
-        if failing_branch == "agent":
-            raise error
+        if failing_branch in {"agent", "both"}:
+            raise agent_error
         return built_agent
 
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", memory_branch)
     monkeypatch.setattr(ai_module, "create_agent", agent_branch)
     monkeypatch.setattr(ai_module, "prepare_agent_execution_context", prepare_history)
     monkeypatch.setattr(ai_module, "close_agent_runtime_state_dbs", close_unreturned)
+    monkeypatch.setattr(ai_module, "logger", test_logger)
 
     config = _prompt_preparation_config()
-    with pytest.raises(RuntimeError) as raised:
+    expected_error_type = asyncio.CancelledError if failing_branch == "memory_cancelled" else RuntimeError
+    with pytest.raises(expected_error_type) as raised:
         await ai_module._prepare_agent_and_prompt(
             make_turn_context("general"),
             prompt="hello",
@@ -220,24 +248,25 @@ async def test_prepare_agent_and_prompt_propagates_branch_failure_directly(
             config=config,
         )
 
-    assert raised.value is error
+    expected_error = agent_error if failing_branch == "agent" else memory_error
+    assert raised.value is expected_error
     prepare_history.assert_not_awaited()
-    if failing_branch == "memory":
+    if failing_branch in {"memory", "memory_cancelled"}:
         close_unreturned.assert_called_once_with(built_agent, shared_scope_storage=None)
     else:
         close_unreturned.assert_not_called()
+    if failing_branch == "both":
+        test_logger.error.assert_called_once()
+    else:
+        test_logger.error.assert_not_called()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "agent_finishes_before_cancel",
-    [False, True],
-    ids=["agent-pending", "agent-finished"],
-)
-async def test_prepare_agent_and_prompt_cancellation_cleans_agent_build_in_either_order(  # noqa: PLR0915
+@pytest.mark.parametrize("agent_outcome", ["pending", "finished", "fails", "cancelled"])
+async def test_prepare_agent_and_prompt_cancellation_cleans_agent_build_in_either_order(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    agent_finishes_before_cancel: bool,
+    agent_outcome: str,
 ) -> None:
     """Cancellation drains offloaded construction and closes its agent without leaked tasks."""
     memory_started = asyncio.Event()
@@ -248,6 +277,7 @@ async def test_prepare_agent_and_prompt_cancellation_cleans_agent_build_in_eithe
     built_agent = MagicMock()
     built_agent.additional_context = ""
     close_unreturned = MagicMock()
+    test_logger = MagicMock()
 
     async def blocked_memory(*_args: object, **_kwargs: object) -> MemoryPromptParts:
         memory_started.set()
@@ -258,19 +288,25 @@ async def test_prepare_agent_and_prompt_cancellation_cleans_agent_build_in_eithe
 
     def blocked_agent(*_args: object, **_kwargs: object) -> MagicMock:
         agent_started.set()
-        if agent_finishes_before_cancel:
+        if agent_outcome == "finished":
             agent_finished.set()
             return built_agent
         if not agent_release.wait(5.0):
             msg = "timed out waiting to release cancelled agent construction"
             raise TimeoutError(msg)
         agent_finished.set()
+        if agent_outcome == "fails":
+            msg = "agent failed after cancellation"
+            raise RuntimeError(msg)
+        if agent_outcome == "cancelled":
+            raise asyncio.CancelledError
         return built_agent
 
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", blocked_memory)
     monkeypatch.setattr(ai_module, "create_agent", blocked_agent)
     monkeypatch.setattr(ai_module, "prepare_agent_execution_context", AsyncMock())
     monkeypatch.setattr(ai_module, "close_agent_runtime_state_dbs", close_unreturned)
+    monkeypatch.setattr(ai_module, "logger", test_logger)
 
     config = _prompt_preparation_config()
     baseline_tasks = set(asyncio.all_tasks())
@@ -285,12 +321,16 @@ async def test_prepare_agent_and_prompt_cancellation_cleans_agent_build_in_eithe
     try:
         await asyncio.wait_for(memory_started.wait(), timeout=1.0)
         assert await asyncio.to_thread(agent_started.wait, 1.0)
-        if agent_finishes_before_cancel:
+        if agent_outcome == "finished":
             assert await asyncio.to_thread(agent_finished.wait, 1.0)
         prepare_task.cancel()
         await asyncio.wait_for(memory_cleaned.wait(), timeout=1.0)
         await asyncio.sleep(0)
-        if not agent_finishes_before_cancel:
+        if agent_outcome != "finished":
+            assert not prepare_task.done()
+        if agent_outcome == "pending":
+            prepare_task.cancel()
+            await asyncio.sleep(0)
             assert not prepare_task.done()
 
         agent_release.set()
@@ -300,7 +340,14 @@ async def test_prepare_agent_and_prompt_cancellation_cleans_agent_build_in_eithe
         agent_release.set()
 
     assert agent_finished.is_set()
-    close_unreturned.assert_called_once_with(built_agent, shared_scope_storage=None)
+    if agent_outcome in {"fails", "cancelled"}:
+        close_unreturned.assert_not_called()
+    else:
+        close_unreturned.assert_called_once_with(built_agent, shared_scope_storage=None)
+    if agent_outcome == "fails":
+        test_logger.error.assert_called_once()
+    else:
+        test_logger.error.assert_not_called()
     await asyncio.sleep(0)
     leaked_tasks = {task for task in asyncio.all_tasks() - baseline_tasks if not task.done()}
     assert leaked_tasks == set()
@@ -328,17 +375,18 @@ async def test_prepare_agent_and_prompt_keeps_file_memory_before_agent_build(
 
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", prepare_memory)
     monkeypatch.setattr(ai_module, "create_agent", build_agent)
+    prepare_history = AsyncMock(
+        return_value=SimpleNamespace(
+            prepared_history=PreparedHistoryState(),
+            replay_plan=None,
+            unseen_event_ids=[],
+            messages=(Message(role="user", content="hello"),),
+        ),
+    )
     monkeypatch.setattr(
         ai_module,
         "prepare_agent_execution_context",
-        AsyncMock(
-            return_value=SimpleNamespace(
-                prepared_history=PreparedHistoryState(),
-                replay_plan=None,
-                unseen_event_ids=[],
-                messages=(Message(role="user", content="hello"),),
-            ),
-        ),
+        prepare_history,
     )
 
     config = _prompt_preparation_config("file")
@@ -350,6 +398,7 @@ async def test_prepare_agent_and_prompt_keeps_file_memory_before_agent_build(
     )
 
     assert prepared.agent is built_agent
+    assert prepare_history.await_args.kwargs["resolved_runtime_model"] is None
 
 
 @pytest.mark.asyncio

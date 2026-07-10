@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 from collections.abc import Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -66,7 +68,6 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs, MediaKind
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
-from mindroom.preparation_concurrency import join_preparation_branches
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingAttemptResolution,
@@ -87,7 +88,7 @@ from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, ti
 from mindroom.tool_system.events import StreamingToolTracker, complete_pending_tool_block, format_tool_combined
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
     from contextlib import AbstractContextManager
 
     from agno.agent import Agent
@@ -1076,6 +1077,123 @@ def _close_unreturned_agent(agent: Agent, scope_context: ScopeSessionContext | N
         logger.exception("Failed to close unreturned agent runtime state", agent=agent.id)
 
 
+async def _drain_unreturned_agent_build(
+    build_future: asyncio.Future[tuple[ResolvedRuntimeModel, Agent]],
+    *,
+    cleanup_agent: Callable[[Agent], None],
+    on_error: Callable[[Exception], None],
+) -> None:
+    """Wait through repeated cancellation and clean an unreturned agent build."""
+    while not build_future.done():
+        try:
+            await asyncio.shield(build_future)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    try:
+        _, unreturned_agent = build_future.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as error:
+        on_error(error)
+    else:
+        cleanup_agent(unreturned_agent)
+
+
+def _discard_unreturned_agent_result(
+    result: tuple[ResolvedRuntimeModel, Agent] | Exception,
+    *,
+    cleanup_agent: Callable[[Agent], None],
+    on_error: Callable[[Exception], None],
+) -> None:
+    """Log a failed build or close an agent that preparation cannot return."""
+    if isinstance(result, Exception):
+        on_error(result)
+    else:
+        cleanup_agent(result[1])
+
+
+async def _prepare_mem0_branches(
+    *,
+    prepare_memory: Callable[[], Awaitable[MemoryPromptParts]],
+    build_agent: Callable[[], tuple[ResolvedRuntimeModel, Agent]],
+    cleanup_agent: Callable[[Agent], None],
+    agent_name: str,
+    pipeline_timing: DispatchPipelineTiming | None,
+) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, Agent]:
+    """Overlap Mem0 preparation with agent construction and join both safely."""
+
+    def _log_secondary_agent_error(error: Exception) -> None:
+        logger.error(
+            "Agent construction failed while memory preparation was unavailable",
+            agent=agent_name,
+            error=repr(error),
+        )
+
+    async def _memory_branch() -> MemoryPromptParts | Exception:
+        _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
+        try:
+            return await prepare_memory()
+        except Exception as error:
+            return error
+        finally:
+            _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
+
+    context = contextvars.copy_context()
+    _mark_pipeline_timing(pipeline_timing, "agent_build_start")
+    build_future = asyncio.get_running_loop().run_in_executor(None, context.run, build_agent)
+    build_future.add_done_callback(
+        lambda _future: _mark_pipeline_timing(pipeline_timing, "agent_build_ready"),
+    )
+
+    async def _agent_branch() -> tuple[ResolvedRuntimeModel, Agent] | Exception:
+        try:
+            return await asyncio.shield(build_future)
+        except Exception as error:
+            return error
+
+    try:
+        async with asyncio.TaskGroup() as task_group:
+            agent_task = task_group.create_task(
+                _agent_branch(),
+                name=f"agent_prepare:{agent_name}",
+            )
+            memory_task = task_group.create_task(
+                _memory_branch(),
+                name=f"memory_prepare:{agent_name}",
+            )
+    except BaseException:
+        await _drain_unreturned_agent_build(
+            build_future,
+            cleanup_agent=cleanup_agent,
+            on_error=_log_secondary_agent_error,
+        )
+        raise
+
+    agent_result = agent_task.result()
+    try:
+        memory_result = memory_task.result()
+    except BaseException:
+        _discard_unreturned_agent_result(
+            agent_result,
+            cleanup_agent=cleanup_agent,
+            on_error=_log_secondary_agent_error,
+        )
+        raise
+    if isinstance(memory_result, Exception):
+        _discard_unreturned_agent_result(
+            agent_result,
+            cleanup_agent=cleanup_agent,
+            on_error=_log_secondary_agent_error,
+        )
+        raise memory_result
+    if isinstance(agent_result, Exception):
+        raise agent_result
+    runtime_model, agent = agent_result
+    return memory_result, runtime_model, agent
+
+
 @timed("system_prompt_assembly")
 async def _prepare_agent_and_prompt(
     ctx: ResponseTurnContext,
@@ -1137,88 +1255,95 @@ async def _prepare_agent_and_prompt(
     parallel_branches = config.resolve_entity(agent_name).memory_backend == "mem0"
     if pipeline_timing is not None:
         pipeline_timing.note(prompt_branches_parallel=parallel_branches)
-    _mark_pipeline_timing(pipeline_timing, "prompt_branches_start")
-    try:
+    if parallel_branches:
+        _mark_pipeline_timing(pipeline_timing, "prompt_branches_start")
         with timed_block(
             "system_prompt_assembly.memory_agent_join",
-            parallel=parallel_branches,
+            parallel=True,
         ):
-            prompt_parts, (runtime_model, agent) = await join_preparation_branches(
-                prepare_memory=lambda: build_memory_prompt_parts(
-                    prompt,
-                    agent_name,
-                    storage_path,
-                    config,
-                    runtime_paths,
-                    execution_identity=execution_identity,
-                ),
-                build_agent=_resolve_model_and_build_agent,
-                parallel=parallel_branches,
-                cleanup_agent=lambda result: _close_unreturned_agent(result[1], scope_context),
-                on_memory_start=lambda: _mark_pipeline_timing(pipeline_timing, "memory_prepare_start"),
-                on_memory_ready=lambda: _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready"),
-                on_agent_start=lambda: _mark_pipeline_timing(pipeline_timing, "agent_build_start"),
-                on_agent_ready=lambda: _mark_pipeline_timing(pipeline_timing, "agent_build_ready"),
-                on_secondary_agent_error=lambda error: logger.error(
-                    "Agent construction failed while memory preparation was unavailable",
-                    agent=agent_name,
-                    error=repr(error),
-                ),
-                task_name=agent_name,
-            )
-    finally:
-        _mark_pipeline_timing(pipeline_timing, "prompt_branches_ready")
-
-    try:
+            try:
+                prompt_parts, runtime_model, agent = await _prepare_mem0_branches(
+                    prepare_memory=lambda: build_memory_prompt_parts(
+                        prompt,
+                        agent_name,
+                        storage_path,
+                        config,
+                        runtime_paths,
+                        execution_identity=execution_identity,
+                    ),
+                    build_agent=_resolve_model_and_build_agent,
+                    cleanup_agent=lambda built_agent: _close_unreturned_agent(built_agent, scope_context),
+                    agent_name=agent_name,
+                    pipeline_timing=pipeline_timing,
+                )
+            finally:
+                _mark_pipeline_timing(pipeline_timing, "prompt_branches_ready")
         current_turn_prompt = _compose_current_turn_prompt(
             raw_prompt=prompt,
             model_prompt=model_prompt,
             prompt_parts=prompt_parts,
         )
-        _append_additional_context(agent, prompt_parts.session_preamble)
-        if ctx.system_enrichment_items:
-            _append_additional_context(
-                agent,
-                _render_system_enrichment_context(ctx.system_enrichment_items),
-            )
+    else:
+        _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
+        prompt_parts = await build_memory_prompt_parts(
+            prompt,
+            agent_name,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        )
+        current_turn_prompt = _compose_current_turn_prompt(
+            raw_prompt=prompt,
+            model_prompt=model_prompt,
+            prompt_parts=prompt_parts,
+        )
+        _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
+        _mark_pipeline_timing(pipeline_timing, "agent_build_start")
+        runtime_model, agent = await asyncio.to_thread(_resolve_model_and_build_agent)
+        _mark_pipeline_timing(pipeline_timing, "agent_build_ready")
 
-        prepared_execution = await prepare_agent_execution_context(
-            ctx,
-            scope_context=scope_context,
-            agent=agent,
-            prompt=current_turn_prompt,
-            thread_history=thread_history,
-            runtime_paths=runtime_paths,
-            config=config,
-            resolved_runtime_model=runtime_model,
-            compaction_lifecycle=compaction_lifecycle,
-            current_sender_id=None if include_openai_compat_guidance else ctx.requester_id,
-            current_timestamp_ms=current_timestamp_ms,
-            current_prompt_is_structured=current_prompt_is_structured,
-            include_openai_compat_guidance=include_openai_compat_guidance,
-            pipeline_timing=pipeline_timing,
+    _append_additional_context(agent, prompt_parts.session_preamble)
+    if ctx.system_enrichment_items:
+        _append_additional_context(
+            agent,
+            _render_system_enrichment_context(ctx.system_enrichment_items),
         )
-        prepared_history = prepared_execution.prepared_history
-        if prepared_execution.replay_plan is not None:
-            apply_replay_plan(target=agent, replay_plan=prepared_execution.replay_plan)
-        unseen_event_ids = prepared_execution.unseen_event_ids
-        run_messages = prepared_execution.messages
 
-        logger.info(
-            "Preparing agent and prompt",
-            agent=agent_name,
-            full_prompt=render_prepared_messages_text(run_messages),
-        )
-        return _PreparedAgentRun(
-            agent=agent,
-            messages=run_messages,
-            unseen_event_ids=unseen_event_ids,
-            prepared_history=prepared_history,
-            runtime_model_name=runtime_model.model_name,
-        )
-    except BaseException:
-        _close_unreturned_agent(agent, scope_context)
-        raise
+    prepared_execution = await prepare_agent_execution_context(
+        ctx,
+        scope_context=scope_context,
+        agent=agent,
+        prompt=current_turn_prompt,
+        thread_history=thread_history,
+        runtime_paths=runtime_paths,
+        config=config,
+        resolved_runtime_model=runtime_model if parallel_branches else None,
+        compaction_lifecycle=compaction_lifecycle,
+        current_sender_id=None if include_openai_compat_guidance else ctx.requester_id,
+        current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
+        include_openai_compat_guidance=include_openai_compat_guidance,
+        pipeline_timing=pipeline_timing,
+    )
+    prepared_history = prepared_execution.prepared_history
+    if prepared_execution.replay_plan is not None:
+        apply_replay_plan(target=agent, replay_plan=prepared_execution.replay_plan)
+    unseen_event_ids = prepared_execution.unseen_event_ids
+    run_messages = prepared_execution.messages
+
+    logger.info(
+        "Preparing agent and prompt",
+        agent=agent_name,
+        full_prompt=render_prepared_messages_text(run_messages),
+    )
+    return _PreparedAgentRun(
+        agent=agent,
+        messages=run_messages,
+        unseen_event_ids=unseen_event_ids,
+        prepared_history=prepared_history,
+        runtime_model_name=runtime_model.model_name,
+    )
 
 
 async def _prepare_agent_run_context(
