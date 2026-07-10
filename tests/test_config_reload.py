@@ -771,11 +771,11 @@ async def test_manual_plugin_reload_keeps_edit_landing_while_source_loads(
 
 
 @pytest.mark.asyncio
-async def test_watcher_reload_drops_stale_revision_after_waiting_for_plugin_lock(tmp_path: Path) -> None:
+async def test_watcher_reload_drops_stale_revision_after_waiting_for_config_lock(tmp_path: Path) -> None:
     """A newer publication while lock-blocked should consume watcher work."""
     orchestrator, config, _, hooks_path = _plugin_watcher_race_runtime(tmp_path)
     orchestrator.plugin_watch.sync_roots(config)
-    await orchestrator._plugin_reload_lock.acquire()
+    await orchestrator._config_update_lock.acquire()
     task = asyncio.create_task(
         orchestrator.reload_plugins_now(
             source="watcher",
@@ -785,7 +785,7 @@ async def test_watcher_reload_drops_stale_revision_after_waiting_for_plugin_lock
     )
     await asyncio.sleep(0)
     orchestrator.plugin_watch.refresh(config)
-    orchestrator._plugin_reload_lock.release()
+    orchestrator._config_update_lock.release()
     assert await task is None
 
 
@@ -1451,6 +1451,51 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_change(
+    tmp_path: Path,
+) -> None:
+    """Manual plugin reloads and MCP restarts must wait for config application."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+    apply_started = asyncio.Event()
+    finish_apply = asyncio.Event()
+
+    async def apply_update_plan(
+        _current_config: Config,
+        _plan: ConfigUpdatePlan,
+        _plugin_changes: tuple[str, ...],
+    ) -> bool:
+        apply_started.set()
+        await finish_apply.wait()
+        return False
+
+    reload_result = PluginReloadResult(HookRegistry.empty(), (), 0)
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=config),
+        patch.object(orchestrator.config_reload, "apply_update_plan", new=apply_update_plan),
+        patch("mindroom.orchestrator.reload_plugins", return_value=reload_result) as reload_plugins_mock,
+    ):
+        config_task = asyncio.create_task(orchestrator.config_reload.update_config())
+        await asyncio.wait_for(apply_started.wait(), timeout=1)
+        plugin_task = asyncio.create_task(orchestrator.reload_plugins_now(source="test"))
+        mcp_task = asyncio.create_task(orchestrator._handle_mcp_catalog_change("demo"))
+        await asyncio.sleep(0)
+
+        assert not plugin_task.done()
+        assert not mcp_task.done()
+        reload_plugins_mock.assert_not_called()
+
+        finish_apply.set()
+        assert await config_task is False
+        assert await plugin_task is reload_result
+        await mcp_task
+
+    reload_plugins_mock.assert_called_once_with(config, orchestrator.runtime_paths)
 
 
 @pytest.mark.asyncio

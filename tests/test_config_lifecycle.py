@@ -489,3 +489,36 @@ async def test_update_config_loads_config_off_event_loop(
     gate.set()
     assert await update_task is True
     lifecycle.load_initial_config.assert_awaited_once_with(loaded_config)
+
+
+@pytest.mark.asyncio
+async def test_update_config_waits_for_lock_before_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Config loading must not start until the shared update lock is available."""
+    lock = asyncio.Lock()
+    config = Config()
+    to_thread_started = asyncio.Event()
+    real_to_thread = asyncio.to_thread
+
+    async def observed_to_thread(*args: object, **kwargs: object) -> object:
+        to_thread_started.set()
+        return await real_to_thread(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle_module.asyncio, "to_thread", observed_to_thread)
+    load_config_mock = MagicMock(return_value=config)
+    monkeypatch.setattr(lifecycle_module, "load_config", load_config_mock)
+    lifecycle = _make_lifecycle(tmp_path, current_config=config)
+    lifecycle.config_update_lock = lock
+
+    await lock.acquire()
+    update_task = asyncio.create_task(lifecycle.update_config())
+    await asyncio.sleep(0)
+    assert not to_thread_started.is_set()
+
+    lock.release()
+    await asyncio.wait_for(to_thread_started.wait(), timeout=1.0)
+    assert await update_task is True
+    load_config_mock.assert_called_once()
+    lifecycle.apply_update_plan.assert_awaited_once()

@@ -45,14 +45,20 @@ _AUDIO_FRAME_SIZE_MS = 50
 class _AudioFrameStream:
     """Convert LiveKit ``AudioFrameEvent`` items into mixer-ready frames."""
 
-    def __init__(self, stream: rtc.AudioStream) -> None:
+    def __init__(self, stream: rtc.AudioStream, participant_identity: str) -> None:
         self._stream = stream
+        self._participant_identity = participant_identity
+        self._received_first_frame = False
 
     def __aiter__(self) -> _AudioFrameStream:
         return self
 
     async def __anext__(self) -> rtc.AudioFrame:
-        return (await self._stream.__anext__()).frame
+        frame = (await self._stream.__anext__()).frame
+        if not self._received_first_frame:
+            self._received_first_frame = True
+            logger.info("call_audio_first_frame", participant=self._participant_identity)
+        return frame
 
     async def aclose(self) -> None:
         """Close the underlying SDK audio stream."""
@@ -90,6 +96,11 @@ class _AuthorizedParticipantAudioInput:
 
     async def __anext__(self) -> rtc.AudioFrame:
         return await self._mixer.__anext__()
+
+    @property
+    def source(self) -> AudioInput | None:
+        """Satisfy the LiveKit AgentSession audio-input interface (terminal input, no upstream)."""
+        return None
 
     def on_attached(self) -> None:
         """Satisfy the LiveKit AgentSession audio-input interface."""
@@ -136,9 +147,11 @@ class _AuthorizedParticipantAudioInput:
                 num_channels=_AUDIO_CHANNELS,
                 frame_size_ms=_AUDIO_FRAME_SIZE_MS,
             ),
+            participant_identity,
         )
         self._streams[publication_sid] = (participant_identity, stream)
         self._mixer.add_stream(stream)
+        logger.info("call_audio_stream_added", participant=participant_identity, publication_sid=publication_sid)
 
     def _remove_stream(self, publication_sid: str) -> None:
         entry = self._streams.pop(publication_sid, None)
@@ -312,6 +325,7 @@ class RealtimeVoiceBridge:
             allow_all_participants=False,
             participant_permissions=permissions,
         )
+        logger.info("call_output_permissions_applied", participants=sorted(self._participant_identities))
 
     def set_frame_key(self, participant_identity: str, key: bytes, key_index: int) -> None:
         """Install a media frame key for one participant (or ourselves)."""
@@ -349,8 +363,30 @@ class RealtimeVoiceBridge:
                 close_on_disconnect=False,
             ),
         )
+        self._log_media_snapshot()
         if options.greeting_instructions:
             session.generate_reply(instructions=options.greeting_instructions)
+
+    def _log_media_snapshot(self) -> None:
+        """Log local publications and remote subscription state for call diagnostics."""
+        if self._room is None:
+            return
+        local_tracks = [
+            str(publication.sid) for publication in self._room.local_participant.track_publications.values()
+        ]
+        remotes = {
+            participant.identity: [
+                {"sid": str(publication.sid), "subscribed": publication.subscribed, "muted": publication.muted}
+                for publication in participant.track_publications.values()
+            ]
+            for participant in self._room.remote_participants.values()
+        }
+        logger.info(
+            "call_media_snapshot",
+            local_published_tracks=local_tracks,
+            remote_participants=remotes,
+            roster=sorted(self._participant_identities),
+        )
 
     def _register_session_listeners(self, session: AgentSession, options: VoiceAgentOptions) -> None:
         from livekit.agents.llm import ChatMessage  # noqa: PLC0415
