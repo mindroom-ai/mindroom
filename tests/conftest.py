@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import uuid
+import warnings
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
@@ -106,6 +107,7 @@ if TYPE_CHECKING:
 _STRUCTLOG_CONFIGURE = structlog.configure
 _POSTGRES_CONTAINER_NAME_STASH_KEY = pytest.StashKey[str]()
 _POSTGRES_CONTAINER_PREFIX = "mindroom-postgres-cache-test-"
+_POSTGRES_STARTUP_TIMEOUT_SECONDS = 30
 
 
 def _configure_quiet_structlog() -> None:
@@ -428,7 +430,7 @@ async def drain_coalescing(*bots: RuntimeBot) -> None:
 def _wait_for_postgres_container(database_url: str) -> None:
     import psycopg  # noqa: PLC0415
 
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + _POSTGRES_STARTUP_TIMEOUT_SECONDS
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
@@ -454,7 +456,8 @@ def _create_postgres_worker_database(database_url: str, worker_id: str) -> str:
 
 def _wait_for_postgres_container_port(docker: str, container_name: str) -> str:
     """Wait for Docker to publish a shared container's random host port."""
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + _POSTGRES_STARTUP_TIMEOUT_SECONDS
+    last_error = ""
     while time.monotonic() < deadline:
         result = subprocess.run(
             [docker, "port", container_name, "5432/tcp"],
@@ -464,11 +467,11 @@ def _wait_for_postgres_container_port(docker: str, container_name: str) -> str:
         )
         if result.returncode == 0 and result.stdout.strip():
             mapped_port = result.stdout.strip().splitlines()[-1]
-            host, port = mapped_port.rsplit(":", 1)
-            clean_host = host.removeprefix("[").removesuffix("]")
-            return f"postgresql://cache:test@{clean_host}:{port}/mindroom"
+            _, port = mapped_port.rsplit(":", 1)
+            return f"postgresql://cache:test@127.0.0.1:{port}/mindroom"
+        last_error = result.stderr.strip()
         time.sleep(0.05)
-    msg = "Postgres test container did not publish a port"
+    msg = f"Postgres test container did not publish a port: {last_error}"
     raise RuntimeError(msg)
 
 
@@ -479,12 +482,16 @@ def _postgres_container_name(run_id: str) -> str:
 
 def _remove_postgres_container(docker: str, container_name: str) -> None:
     """Remove one disposable Postgres container if it exists."""
-    subprocess.run(
+    result = subprocess.run(
         [docker, "rm", "-f", container_name],
         check=False,
         capture_output=True,
         text=True,
     )
+    if result.returncode == 0 or "No such container" in result.stderr:
+        return
+    msg = f"Could not remove Postgres test container {container_name}: {result.stderr.strip()}"
+    raise RuntimeError(msg)
 
 
 def pytest_configure_node(node: "WorkerController") -> None:
@@ -501,7 +508,11 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     container_name = session.config.stash.get(_POSTGRES_CONTAINER_NAME_STASH_KEY, None)
     docker = shutil.which("docker")
     if container_name is not None and docker is not None:
-        _remove_postgres_container(docker, container_name)
+        try:
+            _remove_postgres_container(docker, container_name)
+        except RuntimeError as exc:
+            warnings.warn(pytest.PytestWarning(str(exc)), stacklevel=1)
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.fixture(scope="session")
@@ -552,13 +563,16 @@ def postgres_event_cache_url(
     )
     if run_result.returncode != 0:
         inspect_result = subprocess.run(
-            [docker, "inspect", container_name],
+            [docker, "inspect", "--format", "{{.State.Status}}", container_name],
             check=False,
             capture_output=True,
             text=True,
         )
         if not shared_across_workers or inspect_result.returncode != 0:
             pytest.skip(f"Could not start Postgres test container: {run_result.stderr.strip()}")
+        if inspect_result.stdout.strip() in {"dead", "exited"}:
+            msg = f"Shared Postgres test container is {inspect_result.stdout.strip()}"
+            raise RuntimeError(msg)
 
     try:
         database_url = _wait_for_postgres_container_port(docker, container_name)
