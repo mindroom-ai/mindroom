@@ -6,7 +6,7 @@ import asyncio
 import itertools
 import sys
 import tokenize
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
@@ -261,7 +261,16 @@ def prepare_plugin_reload(
                 skip_broken_plugins=skip_broken_plugins,
                 import_name_suffix=f"{_RUNTIME_PLUGIN_MODULE_SUFFIX}{next(_RUNTIME_PLUGIN_GENERATIONS)}",
             )
+            active_tool_module_names = {module_name for _, module_name in _active_plugin_tool_modules(plugins)}
             candidate_tool_registry_snapshot = capture_tool_registry_snapshot()
+            candidate_tool_registry_snapshot = replace(
+                candidate_tool_registry_snapshot,
+                plugin_tool_metadata_by_module={
+                    module_name: registrations
+                    for module_name, registrations in candidate_tool_registry_snapshot.plugin_tool_metadata_by_module.items()
+                    if module_name in active_tool_module_names
+                },
+            )
             from mindroom.mcp.registry import reconcile_mcp_tool_registry  # noqa: PLC0415
             from mindroom.tool_system.catalog import resolved_tool_runtime_state_from_registry  # noqa: PLC0415
 
@@ -417,6 +426,23 @@ def _evict_synthetic_plugin_subtrees(package_roots: set[str]) -> None:
             sys.modules.pop(module_name, None)
 
 
+def _evict_stale_oauth_package_modules(
+    plugin_name: str,
+    plugin_root: Path,
+    module_path: Path,
+) -> None:
+    """Remove OAuth package modules not owned by another active module-cache entry."""
+    package_root = plugin_imports._plugin_package_name(plugin_name, plugin_root)
+    preserved_module_names = {
+        entry.module_name
+        for cached_path, entry in plugin_imports._MODULE_IMPORT_CACHE.items()
+        if cached_path != module_path
+    }
+    for loaded_module_name in tuple(sys.modules):
+        if loaded_module_name.startswith(f"{package_root}.") and loaded_module_name not in preserved_module_names:
+            sys.modules.pop(loaded_module_name, None)
+
+
 def _materialize_plugin(
     plugin: plugin_imports._PluginBase,
     entry_config: PluginEntryConfig,
@@ -512,6 +538,9 @@ def load_plugin_module(
     previous_registrations_by_module_name = (
         _prepare_plugin_tool_module_reload(module_name, cached) if kind == "tools" else {}
     )
+
+    if kind == "oauth":
+        _evict_stale_oauth_package_modules(plugin_name, plugin_root, module_path)
 
     if cached is not None and cached.module_name != module_name:
         sys.modules.pop(cached.module_name, None)

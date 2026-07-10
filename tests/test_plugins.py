@@ -26,6 +26,7 @@ from mindroom.mcp.registry import resolved_mcp_tool_state
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import PluginReloadResult, get_configured_plugin_roots, load_plugins
+from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -2858,25 +2859,24 @@ async def test_runtime_validation_rejects_plugin_import_background_tasks(tmp_pat
 
 
 def test_reload_plugins_invalidates_cached_oauth_providers(tmp_path: Path) -> None:
-    """Plugin reloads should refresh OAuth providers loaded through the registry."""
+    """Plugin reloads should refresh OAuth providers and their relative imports."""
     plugin_root = tmp_path / "plugins" / "oauth-reload"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
         json.dumps({"name": "oauth-reload", "oauth_module": "oauth_provider.py", "skills": []}),
         encoding="utf-8",
     )
-    display_path = plugin_root / "display.txt"
-    display_path.write_text("before\n", encoding="utf-8")
+    helper_path = plugin_root / "helper.py"
+    helper_path.write_text("DISPLAY_NAME = 'before'\n", encoding="utf-8")
     (plugin_root / "oauth_provider.py").write_text(
-        "from pathlib import Path\n"
+        "from .helper import DISPLAY_NAME\n"
         "from mindroom.oauth import OAuthProvider\n"
         "\n"
         "def register_oauth_providers(settings, runtime_paths):\n"
         "    del settings, runtime_paths\n"
-        "    display_name = Path(__file__).with_name('display.txt').read_text(encoding='utf-8').strip()\n"
         "    return [OAuthProvider(\n"
         "        id='plugin_oauth_reload',\n"
-        "        display_name=display_name,\n"
+        "        display_name=DISPLAY_NAME,\n"
         "        authorization_url='https://auth.example.test/authorize',\n"
         "        token_url='https://auth.example.test/token',\n"
         "        scopes=('plugin.read',),\n"
@@ -2899,7 +2899,7 @@ def test_reload_plugins_invalidates_cached_oauth_providers(tmp_path: Path) -> No
         initial = load_oauth_providers(config, runtime_paths)
         assert initial["plugin_oauth_reload"].display_name == "before"
 
-        display_path.write_text("after\n", encoding="utf-8")
+        helper_path.write_text("DISPLAY_NAME = 'after'\n", encoding="utf-8")
         _reload_plugins(config, runtime_paths)
         reloaded = load_oauth_providers(config, runtime_paths)
 
@@ -2914,6 +2914,38 @@ def test_reload_plugins_invalidates_cached_oauth_providers(tmp_path: Path) -> No
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+def test_plugin_reload_snapshot_keeps_only_active_generation_registrations(tmp_path: Path) -> None:
+    """Repeated reloads must not retain registration maps from obsolete generations."""
+    plugin_root = tmp_path / "plugins" / "registration-reload"
+    _write_working_tool_plugin(
+        plugin_root,
+        plugin_name="registration-reload",
+        tool_name="registration_reload_tool",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/registration-reload"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+    original_snapshot = capture_tool_registry_snapshot()
+
+    try:
+        with _preserved_plugin_loader_state():
+            generation_counts: list[int] = []
+            for _ in range(3):
+                _reload_plugins(config, runtime_paths)
+                snapshot = capture_tool_registry_snapshot()
+                generation_counts.append(
+                    sum(
+                        "registration_reload__runtime__" in module_name
+                        for module_name in snapshot.plugin_tool_metadata_by_module
+                    ),
+                )
+
+            assert generation_counts == [1, 1, 1]
+    finally:
+        restore_tool_registry_snapshot(original_snapshot)
 
 
 def test_load_oauth_providers_isolates_system_exit_from_plugin_callback(tmp_path: Path) -> None:
