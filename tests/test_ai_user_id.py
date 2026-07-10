@@ -49,6 +49,7 @@ from mindroom.constants import (
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+    MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.execution_preparation import _PreparedExecutionContext
@@ -2976,13 +2977,14 @@ class TestUserIdPassthrough:
         assert "cached_input_tokens" not in payload["context"]
         assert payload["context"]["window_tokens"] == 200_000
 
-    def test_build_matrix_run_metadata_merges_coalesced_source_event_ids(self) -> None:
-        """Run metadata should mark every source event in a coalesced batch as seen."""
+    def test_build_matrix_run_metadata_merges_source_and_discovery_event_ids(self) -> None:
+        """Run metadata should mark canonical sources and discovery aliases as seen."""
         metadata = build_matrix_run_metadata(
             "$primary",
             ["$unseen"],
             extra_metadata={
                 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],
+                MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$selection"],
                 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$first": "first", "$primary": "primary"},
             },
         )
@@ -2992,8 +2994,9 @@ class TestUserIdPassthrough:
             "tools_schema": [],
             "model_params": {},
             MATRIX_EVENT_ID_METADATA_KEY: "$primary",
-            MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$primary", "$first", "$unseen"],
+            MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$primary", "$first", "$selection", "$unseen"],
             MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],
+            MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$selection"],
             MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$first": "first", "$primary": "primary"},
         }
 

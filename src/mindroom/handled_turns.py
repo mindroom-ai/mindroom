@@ -74,6 +74,7 @@ class TurnRecord:
     """Canonical immutable identity, outcome, and regeneration facts for one turn."""
 
     source_event_ids: tuple[str, ...]
+    discovery_event_ids: tuple[str, ...] = ()
     anchor_event_id: str | None = None
     response_event_id: str | None = None
     completed: bool = True
@@ -90,6 +91,12 @@ class TurnRecord:
     def __post_init__(self) -> None:
         """Normalize every construction path into the canonical schema once."""
         source_event_ids = _normalize_source_event_ids(self.source_event_ids)
+        source_event_id_set = set(source_event_ids)
+        discovery_event_ids = tuple(
+            event_id
+            for event_id in _normalize_source_event_ids(self.discovery_event_ids)
+            if event_id not in source_event_id_set
+        )
         anchor_event_id = _normalize_string(self.anchor_event_id)
         if anchor_event_id is None and source_event_ids:
             anchor_event_id = source_event_ids[-1]
@@ -98,6 +105,7 @@ class TurnRecord:
             float(timestamp) if isinstance(timestamp, int | float) and not isinstance(timestamp, bool) else 0.0
         )
         object.__setattr__(self, "source_event_ids", source_event_ids)
+        object.__setattr__(self, "discovery_event_ids", discovery_event_ids)
         object.__setattr__(self, "anchor_event_id", anchor_event_id)
         object.__setattr__(self, "response_event_id", _normalize_string(self.response_event_id))
         object.__setattr__(self, "visible_echo_event_id", _normalize_string(self.visible_echo_event_id))
@@ -131,6 +139,7 @@ class TurnRecord:
         cls,
         source_event_ids: Sequence[str],
         *,
+        discovery_event_ids: Sequence[str] = (),
         anchor_event_id: str | None = None,
         response_event_id: str | None = None,
         completed: bool = True,
@@ -147,6 +156,7 @@ class TurnRecord:
         """Create a record while accepting sequence and mapping inputs from runtime flows."""
         return cls(
             source_event_ids=tuple(source_event_ids),
+            discovery_event_ids=tuple(discovery_event_ids),
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
@@ -165,6 +175,11 @@ class TurnRecord:
     def is_coalesced(self) -> bool:
         """Return whether the turn combines multiple source events."""
         return len(self.source_event_ids) > 1
+
+    @property
+    def indexed_event_ids(self) -> tuple[str, ...]:
+        """Return canonical source IDs followed by non-source discovery aliases."""
+        return (*self.source_event_ids, *self.discovery_event_ids)
 
 
 class TurnRecordCodec:
@@ -185,6 +200,8 @@ class TurnRecordCodec:
             "completed": record.completed,
             "timestamp": record.timestamp,
         }
+        if record.discovery_event_ids:
+            payload["discovery_event_ids"] = list(record.discovery_event_ids)
         if record.visible_echo_event_id is not None:
             payload["visible_echo_event_id"] = record.visible_echo_event_id
         if record.source_event_prompts is not None:
@@ -212,12 +229,14 @@ class TurnRecordCodec:
             return None
         record = typing.cast("Mapping[str, object]", raw_record)
         raw_source_event_ids = record.get("source_event_ids")
+        raw_discovery_event_ids = record.get("discovery_event_ids", [])
         anchor_event_id = record.get("anchor_event_id")
         completed = record.get("completed")
         timestamp = record.get("timestamp")
         response_event_id = record.get("response_event_id")
         if (
             not isinstance(raw_source_event_ids, list)
+            or not isinstance(raw_discovery_event_ids, list)
             or not isinstance(anchor_event_id, str)
             or not anchor_event_id
             or not isinstance(completed, bool)
@@ -229,6 +248,7 @@ class TurnRecordCodec:
         source_event_ids = _normalize_source_event_ids(raw_source_event_ids)
         turn_record = TurnRecord.create(
             source_event_ids,
+            discovery_event_ids=_normalize_source_event_ids(raw_discovery_event_ids),
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
@@ -242,7 +262,7 @@ class TurnRecordCodec:
             conversation_target=MessageTarget.from_metadata(record.get("conversation_target")),
             timestamp=float(timestamp),
         )
-        if event_id not in turn_record.source_event_ids:
+        if event_id not in turn_record.indexed_event_ids:
             return None
         return turn_record
 
@@ -255,6 +275,8 @@ class TurnRecordCodec:
             constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
             constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(record.source_event_ids),
         }
+        if record.discovery_event_ids:
+            metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] = list(record.discovery_event_ids)
         if record.source_event_prompts is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(record.source_event_prompts)
         if record.source_event_metadata is not None:
@@ -279,6 +301,7 @@ class TurnRecordCodec:
         if not isinstance(anchor_event_id, str) or not anchor_event_id:
             return None
         raw_source_event_ids = metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
+        raw_discovery_event_ids = metadata.get(constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY)
         source_event_ids = (
             _normalize_source_event_ids(raw_source_event_ids)
             if isinstance(raw_source_event_ids, list)
@@ -287,6 +310,11 @@ class TurnRecordCodec:
         response_event_id = _normalize_string(metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY))
         return TurnRecord.create(
             source_event_ids,
+            discovery_event_ids=(
+                _normalize_source_event_ids(raw_discovery_event_ids)
+                if isinstance(raw_discovery_event_ids, list)
+                else ()
+            ),
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=response_event_id is not None,
@@ -384,7 +412,7 @@ class HandledTurnLedger:
     def record_handled_turn(self, turn_record: TurnRecord) -> None:
         """Persist one exact record for every source event in the turn."""
         persisted_record = self.update_handled_turn(
-            turn_record.source_event_ids,
+            turn_record.indexed_event_ids,
             lambda _existing_records: turn_record,
         )
         if persisted_record is None:
@@ -392,19 +420,21 @@ class HandledTurnLedger:
 
     def update_handled_turn(
         self,
-        source_event_ids: Sequence[str],
-        update: Callable[[tuple[TurnRecord, ...]], TurnRecord],
+        lookup_event_ids: Sequence[str],
+        update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
     ) -> TurnRecord | None:
-        """Atomically derive and persist one exact record from current source records."""
-        normalized_source_event_ids = _normalize_source_event_ids(source_event_ids)
-        if not normalized_source_event_ids:
+        """Atomically derive and persist one exact record from current indexed rows."""
+        normalized_lookup_event_ids = _normalize_source_event_ids(lookup_event_ids)
+        if not normalized_lookup_event_ids:
             return None
         with self._state.lock:
             self._ensure_loaded_locked()
-            existing_records = tuple(
-                record
-                for event_id in normalized_source_event_ids
-                if (record := self._responses.get(event_id)) is not None
+            existing_records = MappingProxyType(
+                {
+                    event_id: record
+                    for event_id in normalized_lookup_event_ids
+                    if (record := self._responses.get(event_id)) is not None
+                },
             )
             turn_record = update(existing_records)
             if not turn_record.source_event_ids:
@@ -412,10 +442,10 @@ class HandledTurnLedger:
             persisted_record = (
                 turn_record if turn_record.timestamp != 0.0 else replace(turn_record, timestamp=time.time())
             )
-            for event_id in persisted_record.source_event_ids:
+            for event_id in persisted_record.indexed_event_ids:
                 self._responses[event_id] = persisted_record
-            self._schedule_persist_locked(persisted_record.source_event_ids)
-        logger.debug("handled_turn_recorded", source_event_count=len(persisted_record.source_event_ids))
+            self._schedule_persist_locked(persisted_record.indexed_event_ids)
+        logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
         return persisted_record
 
     def has_responded(self, event_id: str) -> bool:
@@ -542,9 +572,7 @@ class HandledTurnLedger:
                 invalid_event_ids.append(event_id if isinstance(event_id, str) else repr(event_id))
                 continue
             records[event_id] = record
-        rehydrated_records = {
-            source_event_id: record for record in records.values() for source_event_id in record.source_event_ids
-        }
+        rehydrated_records = {event_id: record for record in records.values() for event_id in record.indexed_event_ids}
         rehydrated_records.update(records)
         records = rehydrated_records
         if invalid_event_ids and not records:
@@ -647,7 +675,7 @@ def _responses_file_path(base_path: Path, agent_name: str) -> Path:
 
 @dataclass(frozen=True)
 class _ResponseGroup:
-    """Logical handled-turn group keyed by its canonical source identity."""
+    """Logical handled-turn group keyed by its complete indexed identity."""
 
     timestamp: float
     records: dict[str, TurnRecord]
@@ -672,22 +700,22 @@ def _cleaned_responses(
 
 
 def _response_groups(responses: dict[str, TurnRecord]) -> list[_ResponseGroup]:
-    """Return handled turns grouped by canonical source-event identity."""
+    """Return handled turns grouped by canonical sources and discovery aliases."""
     grouped_records: dict[tuple[str, ...], dict[str, TurnRecord]] = {}
     grouped_timestamps: dict[tuple[str, ...], float] = {}
     for event_id, record in responses.items():
-        grouped_records.setdefault(record.source_event_ids, {})[event_id] = record
-        grouped_timestamps[record.source_event_ids] = max(
-            grouped_timestamps.get(record.source_event_ids, 0.0),
+        grouped_records.setdefault(record.indexed_event_ids, {})[event_id] = record
+        grouped_timestamps[record.indexed_event_ids] = max(
+            grouped_timestamps.get(record.indexed_event_ids, 0.0),
             record.timestamp,
         )
     return sorted(
         (
             _ResponseGroup(
-                timestamp=grouped_timestamps[source_event_ids],
+                timestamp=grouped_timestamps[indexed_event_ids],
                 records=records,
             )
-            for source_event_ids, records in grouped_records.items()
+            for indexed_event_ids, records in grouped_records.items()
         ),
         key=lambda group: group.timestamp,
     )

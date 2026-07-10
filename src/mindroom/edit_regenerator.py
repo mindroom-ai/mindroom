@@ -228,7 +228,7 @@ class EditRegenerator:
             current_prompt_is_structured = False
         regeneration_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
             regeneration_turn_record,
-            additional_source_event_ids=(
+            additional_discovery_event_ids=(
                 (original_event_id,)
                 if not regeneration_turn_record.is_coalesced
                 and original_event_id != regeneration_turn_record.anchor_event_id

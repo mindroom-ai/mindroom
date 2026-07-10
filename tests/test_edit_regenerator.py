@@ -224,7 +224,7 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     assert envelope_kwargs["requester_user_id"] == USER_ID
 
     metadata_kwargs = harness.turn_store.build_run_metadata.call_args.kwargs
-    assert metadata_kwargs["additional_source_event_ids"] == ()
+    assert metadata_kwargs["additional_discovery_event_ids"] == ()
 
     harness.turn_store.record_turn.assert_called_once()
     recorded = harness.turn_store.record_turn.call_args.args[0]
@@ -278,7 +278,7 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
         first_event_id: "edited first message",
         second_event_id: "second message",
     }
-    assert metadata_call.kwargs["additional_source_event_ids"] == ()
+    assert metadata_call.kwargs["additional_discovery_event_ids"] == ()
 
     recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
@@ -494,7 +494,7 @@ async def test_edit_context_realigned_to_recorded_thread_root(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_non_coalesced_anchor_mismatch_extends_run_metadata_sources(tmp_path: Path) -> None:
+async def test_non_coalesced_anchor_mismatch_adds_run_discovery_alias(tmp_path: Path) -> None:
     """A non-coalesced turn anchored to another event keeps the edited event discoverable."""
     anchor_event_id = "$question:example.org"
     record = _turn_record(source_event_ids=(anchor_event_id,), anchor_event_id=anchor_event_id)
@@ -504,7 +504,7 @@ async def test_non_coalesced_anchor_mismatch_extends_run_metadata_sources(tmp_pa
     await _handle_edit(harness, event, event_info)
 
     metadata_kwargs = harness.turn_store.build_run_metadata.call_args.kwargs
-    assert metadata_kwargs["additional_source_event_ids"] == (ORIGINAL_EVENT_ID,)
+    assert metadata_kwargs["additional_discovery_event_ids"] == (ORIGINAL_EVENT_ID,)
 
 
 @pytest.mark.asyncio

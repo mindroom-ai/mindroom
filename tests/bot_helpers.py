@@ -72,7 +72,7 @@ from tests.conftest import replace_turn_policy_deps as shared_replace_turn_polic
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 
     from agno.knowledge.document import Document
 
@@ -233,14 +233,14 @@ def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> Magi
     """Swap the private handled-turn ledger behind one turn store for test assertions."""
 
     def update_handled_turn(
-        source_event_ids: Sequence[str],
-        update: Callable[[tuple[TurnRecord, ...]], TurnRecord],
+        lookup_event_ids: Sequence[str],
+        update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
     ) -> TurnRecord:
-        existing_records = tuple(
-            turn_record
-            for source_event_id in source_event_ids
+        existing_records = {
+            source_event_id: turn_record
+            for source_event_id in lookup_event_ids
             if isinstance((turn_record := tracker.get_turn_record(source_event_id)), TurnRecord)
-        )
+        }
         turn_record = update(existing_records)
         tracker.record_handled_turn(turn_record)
         return turn_record

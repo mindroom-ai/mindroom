@@ -49,8 +49,11 @@ def _write_responses_file(
     for event_id, raw_record in responses.items():
         raw_source_event_ids = raw_record.get("source_event_ids")
         source_event_ids = raw_source_event_ids if isinstance(raw_source_event_ids, list) else [event_id]
+        raw_discovery_event_ids = raw_record.get("discovery_event_ids")
+        discovery_event_ids = raw_discovery_event_ids if isinstance(raw_discovery_event_ids, list) else []
         record = TurnRecord.create(
             source_event_ids,
+            discovery_event_ids=discovery_event_ids,
             anchor_event_id=raw_record.get("anchor_event_id")
             if isinstance(raw_record.get("anchor_event_id"), str)
             else None,
@@ -441,6 +444,28 @@ def test_persistence_round_trip(temp_dir: Path) -> None:
         "$first": "first",
         "$second": "second",
     }
+
+
+def test_discovery_alias_persists_without_becoming_a_coalesced_source(temp_dir: Path) -> None:
+    """Discovery aliases should rehydrate to the canonical record without changing source semantics."""
+    tracker1 = HandledTurnLedger("test_discovery_alias", base_path=temp_dir)
+    tracker1.record_handled_turn(
+        TurnRecord.create(
+            ["$question"],
+            discovery_event_ids=["$selection"],
+            response_event_id="$response",
+        ),
+    )
+
+    tracker2 = _reload_ledger("test_discovery_alias", temp_dir)
+
+    question_record = tracker2.get_turn_record("$question")
+    selection_record = tracker2.get_turn_record("$selection")
+    assert question_record is not None
+    assert selection_record == question_record
+    assert question_record.source_event_ids == ("$question",)
+    assert question_record.discovery_event_ids == ("$selection",)
+    assert not question_record.is_coalesced
 
 
 def test_persistence_round_trip_preserves_response_context(temp_dir: Path) -> None:

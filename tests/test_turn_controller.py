@@ -16,7 +16,7 @@ from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, Lan
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
+from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -339,7 +339,8 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     assert captured_envelope.source_event_id == "$selection:localhost"
     assert captured_envelope.target.resolved_thread_id == selection.thread_id
     assert captured_metadata is not None
-    assert captured_metadata[MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == ["$selection:localhost"]
+    assert captured_metadata[MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == [selection.question_event_id]
+    assert captured_metadata[MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] == ["$selection:localhost"]
 
 
 @pytest.mark.asyncio

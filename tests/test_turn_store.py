@@ -67,6 +67,7 @@ def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> Non
     target = MessageTarget.resolve("!room:example.org", "$thread", "$anchor")
     turn_record = TurnRecord.create(
         ["$first", "$anchor"],
+        discovery_event_ids=["$selection"],
         response_event_id="$response",
         source_event_prompts={"$first": "first", "$anchor": "anchor"},
         source_event_metadata={
@@ -91,23 +92,62 @@ def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> Non
     parsed = TurnRecordCodec.from_run_metadata(metadata)
 
     assert metadata[constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY] == TurnRecordCodec.schema_version()
+    assert metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] == ["$selection"]
     assert parsed == turn_record
 
 
-def test_build_run_metadata_normalizes_additional_source_ids(tmp_path: Path) -> None:
+def test_build_run_metadata_normalizes_discovery_aliases(tmp_path: Path) -> None:
     """Additional discovery IDs should share canonical source-ID normalization."""
     store = _store(tmp_path)
     turn_record = TurnRecord.create(["$first", "$anchor"])
 
     metadata = store.build_run_metadata(
         turn_record,
-        additional_source_event_ids=("", "$first", "$selection", "$selection"),
+        additional_discovery_event_ids=("", "$first", "$selection", "$selection"),
     )
 
     assert metadata == {
         constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
-        constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$anchor", "$selection"],
+        constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$anchor"],
+        constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$selection"],
     }
+
+
+def test_discovery_alias_recovery_repairs_anchor_and_alias_rows(tmp_path: Path) -> None:
+    """Missing-ledger recovery should index one non-coalesced turn by its anchor and discovery alias."""
+    metadata = TurnRecordCodec.to_run_metadata(
+        TurnRecord.create(
+            ["$question"],
+            response_owner="agent",
+        ),
+    )
+    metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] = ["$selection"]
+    metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = "$question"
+    metadata[constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = "$response"
+    recovery_record = TurnRecordCodec.from_run_metadata(metadata)
+
+    assert recovery_record is not None
+    assert recovery_record.source_event_ids == ("$question",)
+    assert recovery_record.discovery_event_ids == ("$selection",)
+    assert not recovery_record.is_coalesced
+
+    for lookup_event_id in ("$question", "$selection"):
+        store = _store(tmp_path / lookup_event_id.removeprefix("$"))
+        loaded = _load_with_recovery(
+            store,
+            original_event_id=lookup_event_id,
+            recovery_record=recovery_record,
+        )
+
+        assert loaded is not None
+        assert loaded.source_event_ids == ("$question",)
+        assert loaded.discovery_event_ids == ("$selection",)
+        for indexed_event_id in ("$question", "$selection"):
+            repaired = store.get_turn_record(indexed_event_id)
+            assert repaired is not None
+            assert repaired.source_event_ids == ("$question",)
+            assert repaired.discovery_event_ids == ("$selection",)
+            assert store.is_handled(indexed_event_id)
 
 
 def test_run_metadata_without_current_schema_version_is_not_recovery_data() -> None:

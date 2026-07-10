@@ -16,6 +16,8 @@ from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCode
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     import nio
 
     from mindroom.conversation_resolver import ConversationResolver
@@ -77,8 +79,8 @@ class TurnStore:
         if not turn_record.source_event_ids:
             return
 
-        def terminal_record(existing_records: tuple[TurnRecord, ...]) -> TurnRecord:
-            existing_record = existing_records[0] if existing_records else None
+        def terminal_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            existing_record = next(iter(existing_records.values()), None)
             merged_record = (
                 _backfill_missing_turn_facts(turn_record, existing_record)
                 if existing_record is not None
@@ -87,7 +89,7 @@ class TurnStore:
             visible_echo_event_id = merged_record.visible_echo_event_id or next(
                 (
                     existing.visible_echo_event_id
-                    for existing in existing_records
+                    for existing in existing_records.values()
                     if existing.visible_echo_event_id is not None
                 ),
                 None,
@@ -98,7 +100,7 @@ class TurnStore:
                 visible_echo_event_id=visible_echo_event_id,
             )
 
-        self._ledger.update_handled_turn(turn_record.source_event_ids, terminal_record)
+        self._ledger.update_handled_turn(turn_record.indexed_event_ids, terminal_record)
 
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
@@ -111,9 +113,11 @@ class TurnStore:
     def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         """Track a visible echo without changing an existing completion outcome."""
 
-        def visible_echo_record(existing_records: tuple[TurnRecord, ...]) -> TurnRecord:
+        def visible_echo_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             turn_record = (
-                existing_records[0] if existing_records else TurnRecord.create([source_event_id], completed=False)
+                existing_records[source_event_id]
+                if source_event_id in existing_records
+                else TurnRecord.create([source_event_id], completed=False)
             )
             return replace(turn_record, visible_echo_event_id=echo_event_id)
 
@@ -164,21 +168,20 @@ class TurnStore:
         self,
         turn_record: TurnRecord,
         *,
-        additional_source_event_ids: tuple[str, ...] = (),
+        additional_discovery_event_ids: tuple[str, ...] = (),
     ) -> dict[str, Any] | None:
         """Project one record into versioned recoverable Agno run metadata.
 
-        ``additional_source_event_ids`` lets one anchored run stay discoverable by
+        ``additional_discovery_event_ids`` lets one anchored run stay discoverable by
         extra triggering events, such as a numeric interactive reply whose response
         still anchors to the original question event.
         """
         projected_record = turn_record
-        if additional_source_event_ids:
-            base_source_event_ids = turn_record.source_event_ids if turn_record.is_coalesced else ()
-            normalized_source_event_ids = TurnRecord.create(
-                (*base_source_event_ids, *additional_source_event_ids),
-            ).source_event_ids
-            projected_record = replace(turn_record, source_event_ids=normalized_source_event_ids)
+        if additional_discovery_event_ids:
+            projected_record = replace(
+                turn_record,
+                discovery_event_ids=(*turn_record.discovery_event_ids, *additional_discovery_event_ids),
+            )
         metadata = TurnRecordCodec.to_run_metadata(projected_record)
         return dict(metadata) if metadata else None
 
@@ -202,8 +205,8 @@ class TurnStore:
         if recovery_record is None:
             return self._ledger.get_turn_record(original_event_id)
 
-        def repaired_record(existing_records: tuple[TurnRecord, ...]) -> TurnRecord:
-            ledger_record = existing_records[0] if existing_records else None
+        def repaired_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            ledger_record = existing_records.get(original_event_id)
             return (
                 _backfill_missing_turn_facts(ledger_record, recovery_record)
                 if ledger_record is not None
@@ -211,7 +214,7 @@ class TurnStore:
             )
 
         return self._ledger.update_handled_turn(
-            (original_event_id, *recovery_record.source_event_ids),
+            (original_event_id, *recovery_record.indexed_event_ids),
             repaired_record,
         )
 
@@ -245,7 +248,7 @@ class TurnStore:
                 continue
             if (
                 original_event_id != turn_record.anchor_event_id
-                and original_event_id not in turn_record.source_event_ids
+                and original_event_id not in turn_record.indexed_event_ids
             ):
                 continue
             run_created_at = run.created_at if isinstance(run.created_at, int | float) else 0
@@ -326,7 +329,7 @@ class TurnStore:
         removed_any = False
         try:
             session_type = self.deps.state_writer.session_type_for_scope(turn_record.history_scope)
-            for source_event_id in turn_record.source_event_ids:
+            for source_event_id in turn_record.indexed_event_ids:
                 removed_any = (
                     remove_run_by_event_id(
                         storage,
@@ -357,6 +360,7 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
     """
     return replace(
         authority,
+        discovery_event_ids=(*authority.discovery_event_ids, *recovery.discovery_event_ids),
         response_event_id=authority.response_event_id or recovery.response_event_id,
         visible_echo_event_id=authority.visible_echo_event_id or recovery.visible_echo_event_id,
         source_event_prompts=(

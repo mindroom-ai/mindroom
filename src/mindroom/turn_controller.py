@@ -1303,7 +1303,9 @@ class TurnController:
         )
         selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
             selection_handled_turn,
-            additional_source_event_ids=((source_event_id,) if source_event_id != selection.question_event_id else ()),
+            additional_discovery_event_ids=(
+                (source_event_id,) if source_event_id != selection.question_event_id else ()
+            ),
         )
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         response_envelope = MessageEnvelope(

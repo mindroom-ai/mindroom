@@ -31,6 +31,7 @@ from mindroom.constants import (
     MATRIX_HISTORY_SCOPE_METADATA_KEY,
     MATRIX_RESPONSE_OWNER_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
+    MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
     MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY,
     ROUTER_AGENT_NAME,
     resolve_runtime_paths,
@@ -814,6 +815,36 @@ def test_remove_run_by_event_id_matches_coalesced_source_event_ids() -> None:
         storage,
         "session-1",
         "$first:example.com",
+        session_type=SessionType.TEAM,
+    )
+
+    assert removed is True
+    assert session.runs == []
+
+
+def test_remove_run_by_event_id_matches_discovery_aliases() -> None:
+    """Interactive discovery aliases should remove the run they identify."""
+    session = TeamSession(
+        session_id="session-1",
+        team_id="test_team",
+        runs=[
+            TeamRunOutput(
+                session_id="session-1",
+                metadata={
+                    MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
+                    "matrix_event_id": "$question:example.com",
+                    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$question:example.com"],
+                    MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
+                },
+            ),
+        ],
+    )
+    storage = _FakeTeamStorage(session)
+
+    removed = remove_run_by_event_id(
+        storage,
+        "session-1",
+        "$selection:example.com",
         session_type=SessionType.TEAM,
     )
 
@@ -2063,7 +2094,8 @@ def test_load_turn_keeps_ledger_anchor_for_interactive_selection(tmp_path: Path)
                 metadata={
                     MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                     "matrix_event_id": "$question:example.com",
-                    "matrix_source_event_ids": ["$selection:example.com"],
+                    "matrix_source_event_ids": ["$question:example.com"],
+                    MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
                     "matrix_response_event_id": "$response-persisted:example.com",
                 },
             ),
@@ -2595,7 +2627,8 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
                 metadata={
                     MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                     "matrix_event_id": "$question:example.com",
-                    "matrix_source_event_ids": ["$selection:example.com"],
+                    "matrix_source_event_ids": ["$question:example.com"],
+                    MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
                     "matrix_response_event_id": "$response:example.com",
                 },
             ),
@@ -2731,7 +2764,8 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
                 metadata={
                     MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
                     "matrix_event_id": "$question:example.com",
-                    "matrix_source_event_ids": ["$selection:example.com"],
+                    "matrix_source_event_ids": ["$question:example.com"],
+                    MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
                     "matrix_response_event_id": "$response:example.com",
                 },
             ),
@@ -3763,7 +3797,8 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         assert request.thread_id == "thread_id"
         assert request.response_envelope.source_event_id == "$reaction:example.com"
         assert request.matrix_run_metadata == {
-            MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$reaction:example.com"],
+            MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$question:example.com"],
+            MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$reaction:example.com"],
             **_run_response_context_metadata(
                 response_owner="test_agent",
                 history_scope=_agent_history_scope("test_agent"),
@@ -3954,7 +3989,8 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
     assert request.thread_id == "$thread:example.com"
     assert request.existing_event_id == "$ack:example.com"
     assert request.matrix_run_metadata == {
-        MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
+        MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$question:example.com"],
+        MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
         **_run_response_context_metadata(
             response_owner="test_agent",
             history_scope=_agent_history_scope("test_agent"),
