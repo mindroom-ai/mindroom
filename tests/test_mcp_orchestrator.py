@@ -532,8 +532,9 @@ async def test_trigger_support_only_reload_unbinds_and_raises_when_api_publish_f
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
         patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
-        patch(
-            "mindroom.orchestration.external_trigger_runtime.asyncio.to_thread",
+        patch.object(
+            orchestrator._external_trigger_runtime,
+            "prepare_api_config_snapshot",
             new=AsyncMock(return_value=MagicMock()),
         ),
         patch("mindroom.api.config_lifecycle.publish_prepared_runtime_config_into_app", return_value=False),

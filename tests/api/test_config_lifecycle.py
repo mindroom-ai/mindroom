@@ -519,6 +519,40 @@ class TestExternalWriterPublishing:
         assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, loaded_app) is False
         assert _snapshot(loaded_app) is newer
 
+    def test_same_source_tool_publish_invalidates_in_flight_write(self, loaded_app: FastAPI) -> None:
+        """Publishing a new tool snapshot advances the revision seen by stale writers."""
+        before = _snapshot(loaded_app)
+        assert before.runtime_config is not None
+        stale_result, stale_payload, stale_runtime = config_lifecycle._build_mutated_config(
+            before,
+            lambda payload: payload["defaults"].update({"markdown": False}),
+            before.runtime_paths,
+        )
+        prepared = config_lifecycle.prepare_runtime_config_publish(
+            before.runtime_config.model_copy(
+                update={"unavailable_plugin_tool_names": frozenset({"new_plugin_tool"})},
+            ),
+            before.runtime_paths,
+            loaded_app,
+        )
+        assert prepared.source_fingerprint == before.source_fingerprint
+
+        assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, loaded_app) is True
+        published = _snapshot(loaded_app)
+        assert published.generation == before.generation + 1
+        with pytest.raises(HTTPException, match="Configuration changed") as exc_info:
+            config_lifecycle._commit_mutated_snapshot(
+                loaded_app,
+                config_lifecycle.require_api_state(loaded_app),
+                expected_generation=before.generation,
+                runtime_paths=before.runtime_paths,
+                validated_payload=stale_payload,
+                validated_config=stale_runtime,
+                result=stale_result,
+            )
+        assert exc_info.value.status_code == 409
+        assert _snapshot(loaded_app) is published
+
 
 class TestConcurrencySmoke:
     """Interleaved writers racing on the same committed snapshot."""

@@ -51,7 +51,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -849,7 +849,7 @@ async def test_plugin_reload_rebuilds_runtime_tool_overrides(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_config_update_rebuilds_runtime_from_prepared_plugin_snapshot(tmp_path: Path) -> None:
-    """A plugin edit after config loading cannot split config and live registry generations."""
+    """A plugin edit is prepared off-loop and cannot split live runtime generations."""
     plugin_root = tmp_path / "plugins" / "override-reload"
     _write_reload_override_plugin(plugin_root, "text")
     current_config = _runtime_bound_config(Config(defaults={"tools": []}), tmp_path)
@@ -877,8 +877,15 @@ async def test_config_update_rebuilds_runtime_from_prepared_plugin_snapshot(tmp_
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
+    offloaded_functions: list[object] = []
+
+    async def run_off_loop(function: Callable[..., object], *args: object, **kwargs: object) -> object:
+        offloaded_functions.append(function)
+        return function(*args, **kwargs)
+
     try:
         with (
+            patch.object(orchestrator_module.asyncio, "to_thread", side_effect=run_off_loop),
             patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
             patch.object(
                 orchestrator._external_trigger_runtime,
@@ -901,7 +908,10 @@ async def test_config_update_rebuilds_runtime_from_prepared_plugin_snapshot(tmp_
         assert orchestrator.config is current_config
         assert original_metadata == TOOL_METADATA
 
-        with patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())):
+        with (
+            patch.object(orchestrator_module.asyncio, "to_thread", side_effect=run_off_loop),
+            patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        ):
             rebuilt_config, _ = await orchestrator._apply_plugin_snapshot_for_config_update(
                 current_config=current_config,
                 new_config=new_config,
@@ -912,6 +922,11 @@ async def test_config_update_rebuilds_runtime_from_prepared_plugin_snapshot(tmp_
             "paths": "one, two",
         }
         assert (TOOL_METADATA["reload_override_tool"].agent_override_fields or [])[0].type == "string[]"
+        assert [getattr(function, "__name__", None) for function in offloaded_functions] == [
+            "capture",
+            "prepare_plugin_reload",
+            "_rebuild_config_with_tool_state",
+        ] * 2
     finally:
         TOOL_REGISTRY.clear()
         TOOL_REGISTRY.update(original_registry)

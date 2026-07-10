@@ -810,13 +810,18 @@ class _MultiAgentOrchestrator:
         changed_server_ids: set[str],
     ) -> tuple[RuntimeConfig, set[str]]:
         """Publish one config with the exact plugin snapshot staged for it."""
-        prepared_plugin_roots, prepared_plugin_root_snapshots = self.plugin_watch.capture(new_config)
-        prepared_plugin_reload = prepare_plugin_reload(
+        prepared_plugin_roots, prepared_plugin_root_snapshots = await asyncio.to_thread(
+            self.plugin_watch.capture,
+            new_config,
+        )
+        prepared_plugin_reload = await asyncio.to_thread(
+            prepare_plugin_reload,
             new_config,
             self.runtime_paths,
             skip_broken_plugins=True,
         )
-        new_config = self._rebuild_config_with_tool_state(
+        new_config = await asyncio.to_thread(
+            self._rebuild_config_with_tool_state,
             new_config,
             prepared_plugin_reload.resolved_tool_state,
         )
@@ -1146,12 +1151,14 @@ class _MultiAgentOrchestrator:
 
     async def _load_initial_config(self, new_config: RuntimeConfig) -> bool:
         """Handle config loading before the runtime has an active config."""
-        prepared_plugin_reload = prepare_plugin_reload(
+        prepared_plugin_reload = await asyncio.to_thread(
+            prepare_plugin_reload,
             new_config,
             self.runtime_paths,
             skip_broken_plugins=True,
         )
-        new_config = self._rebuild_config_with_tool_state(
+        new_config = await asyncio.to_thread(
+            self._rebuild_config_with_tool_state,
             new_config,
             prepared_plugin_reload.resolved_tool_state,
         )

@@ -853,14 +853,12 @@ def publish_prepared_runtime_config_into_app(
                 publish_config_path=str(prepared.runtime_paths.config_path),
             )
             return False
-        same_source = prepared.source_fingerprint == current.source_fingerprint
         if source_load_failed:
             published_source_files = prepared.source_files or current.source_files
             if prepared.source_files is not None and current.source_files is not None:
                 published_source_files = prepared.source_files | current.source_files
             current_state.snapshot = _published_snapshot(
                 current,
-                increment_generation=not same_source,
                 config_load_result=prepared.source_load_result,
                 source_fingerprint=prepared.source_fingerprint,
                 source_files=published_source_files,
@@ -868,7 +866,6 @@ def publish_prepared_runtime_config_into_app(
             return False
         current_state.snapshot = _published_snapshot(
             current,
-            increment_generation=not same_source,
             config_data=prepared.validated_payload,
             runtime_config=prepared.runtime_config,
             config_load_result=ConfigLoadResult(success=True),
