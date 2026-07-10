@@ -364,6 +364,45 @@ async def test_authorized_audio_input_mixes_all_and_only_rostered_microphones() 
 
 
 @pytest.mark.asyncio
+async def test_authorized_audio_input_satisfies_agent_session_audio_interface() -> None:
+    """The mixer input must expose every public AudioInput attribute AgentSession reads.
+
+    AgentSession.start walks ``input.audio.source`` recursively to log the IO
+    chain; a missing attribute aborts the realtime agent start and the bot
+    leaves the call immediately after joining.
+    """
+    from livekit.agents.voice import io as agents_io  # noqa: PLC0415
+
+    class FakeMixer:
+        def add_stream(self, _stream: object) -> None:
+            return
+
+        async def aclose(self) -> None:
+            return
+
+    fake_rtc = cast(
+        "ModuleType",
+        SimpleNamespace(
+            AudioMixer=lambda *_args, **_kwargs: FakeMixer(),
+            TrackKind=SimpleNamespace(KIND_AUDIO=1),
+            TrackSource=SimpleNamespace(SOURCE_MICROPHONE=2),
+        ),
+    )
+    room = MagicMock()
+    room.remote_participants = {}
+    audio_input = _AuthorizedParticipantAudioInput(room, fake_rtc, frozenset())
+
+    assert audio_input.source is None
+    assert audio_input.label
+    audio_input.on_attached()
+    audio_input.on_detached()
+    required = [name for name in dir(agents_io.AudioInput) if not name.startswith("_")]
+    missing = [name for name in required if not hasattr(audio_input, name)]
+    assert not missing, f"AgentSession audio-input interface attributes missing: {missing}"
+    await audio_input.aclose()
+
+
+@pytest.mark.asyncio
 async def test_aclose_disconnects_room_when_session_close_fails() -> None:
     """A failing realtime session close must not leave the SFU connection open."""
     bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
