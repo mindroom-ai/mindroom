@@ -77,7 +77,6 @@ from mindroom.tool_system.catalog import (
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
-    discard_prepared_plugin_reload,
     load_plugins,
     prepare_plugin_reload,
 )
@@ -790,11 +789,7 @@ class _MultiAgentOrchestrator:
             except Exception:
                 logger.warning("Plugin reload failed; previous runtime snapshot retained", source=source)
                 raise
-            try:
-                self._external_trigger_runtime.publish_prepared_api_config_snapshot(prepared_api_snapshot)
-            except BaseException:
-                discard_prepared_plugin_reload(prepared_plugin_reload)
-                raise
+            self._external_trigger_runtime.publish_prepared_api_config_snapshot(prepared_api_snapshot)
             result = apply_prepared_plugin_reload(
                 prepared_plugin_reload,
                 cancel_existing_tasks=True,

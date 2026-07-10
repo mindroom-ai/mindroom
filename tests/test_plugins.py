@@ -2589,6 +2589,74 @@ def test_prepare_plugin_reload_keeps_live_import_state_until_apply(tmp_path: Pat
                 sys.modules.pop(module_name, None)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raise_after_schedule", [False, True])
+async def test_plugin_import_rejects_background_tasks(
+    tmp_path: Path,
+    *,
+    raise_after_schedule: bool,
+) -> None:
+    """Plugin imports cannot start tasks before their runtime snapshot is committed."""
+    plugin_root = tmp_path / "plugins" / "task-import"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "task-import", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    marker_path = tmp_path / "task-ran"
+    failure = "raise RuntimeError('scheduled failure')\n" if raise_after_schedule else ""
+    (plugin_root / "hooks.py").write_text(
+        "import asyncio\n"
+        "from pathlib import Path\n"
+        "async def background():\n"
+        f"    Path({str(marker_path)!r}).write_text('ran', encoding='utf-8')\n"
+        "TASK = asyncio.create_task(background())\n"
+        f"{failure}",
+        encoding="utf-8",
+    )
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    config = RuntimeConfig.from_authored(
+        Config(defaults={"tools": []}, plugins=["./plugins/task-import"]),
+        runtime_paths,
+        tool_validation_snapshot={},
+    )
+
+    with _preserved_plugin_loader_state():
+        with pytest.raises(plugin_module.PluginValidationError, match="Plugin hooks module execution failed"):
+            plugins_module.prepare_plugin_reload(config, runtime_paths)
+        await asyncio.sleep(0)
+
+    assert not marker_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_runtime_validation_rejects_plugin_import_background_tasks(tmp_path: Path) -> None:
+    """Runtime validation cancels tasks created in its temporary plugin import."""
+    plugin_root = tmp_path / "plugins" / "validation-task"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "validation-task", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    marker_path = tmp_path / "validation-task-ran"
+    (plugin_root / "hooks.py").write_text(
+        "import asyncio\n"
+        "from pathlib import Path\n"
+        "async def background():\n"
+        f"    Path({str(marker_path)!r}).write_text('ran', encoding='utf-8')\n"
+        "TASK = asyncio.create_task(background())\n",
+        encoding="utf-8",
+    )
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+
+    with _preserved_plugin_loader_state():
+        with pytest.raises(ConfigRuntimeValidationError, match="created async tasks during import"):
+            RuntimeConfig.from_authored(Config(plugins=["./plugins/validation-task"]), runtime_paths)
+        await asyncio.sleep(0)
+
+    assert not marker_path.exists()
+
+
 def test_reload_plugins_invalidates_cached_oauth_providers(tmp_path: Path) -> None:
     """Plugin reloads should refresh OAuth providers loaded through the registry."""
     plugin_root = tmp_path / "plugins" / "oauth-reload"

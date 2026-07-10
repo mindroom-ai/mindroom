@@ -923,65 +923,6 @@ async def test_reload_plugins_now_retains_last_good_snapshot_after_failure(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_reload_plugins_now_discards_candidate_tasks_when_api_publish_fails(tmp_path: Path) -> None:
-    """A rejected API commit should cancel tasks created by the discarded plugin candidate."""
-    plugin_root = tmp_path / "plugins" / "discarded-reload"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        '{"name": "discarded-reload", "hooks_module": "hooks.py", "skills": []}',
-        encoding="utf-8",
-    )
-    hooks_path = (plugin_root / "hooks.py").resolve()
-    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
-    config = _runtime_bound_config(Config(plugins=["./plugins/discarded-reload"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), api_enabled=False)
-    orchestrator.config = config
-    orchestrator.running = True
-
-    original_plugin_roots = _get_plugin_skill_roots()
-    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-    original_modules = set(sys.modules)
-    try:
-        await orchestrator.reload_plugins_now(source="initial")
-        live_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
-        hooks_path.write_text(
-            "import asyncio\nCANDIDATE_TASK = asyncio.create_task(asyncio.Event().wait())\nVALUE = 2\n",
-            encoding="utf-8",
-        )
-        discard = MagicMock(wraps=orchestrator_module.discard_prepared_plugin_reload)
-
-        with (
-            patch.object(
-                orchestrator._external_trigger_runtime,
-                "publish_prepared_api_config_snapshot",
-                side_effect=RuntimeError("stale API snapshot"),
-            ),
-            patch("mindroom.orchestrator.discard_prepared_plugin_reload", new=discard),
-            pytest.raises(RuntimeError, match="stale API snapshot"),
-        ):
-            await orchestrator.reload_plugins_now(source="test")
-        await asyncio.sleep(0)
-
-        prepared_reload = discard.call_args.args[0]
-        candidate_module = next(
-            module for module in prepared_reload.synthetic_modules.values() if "CANDIDATE_TASK" in vars(module)
-        )
-        assert candidate_module.CANDIDATE_TASK.cancelled()
-        assert plugin_module._MODULE_IMPORT_CACHE[hooks_path].module is live_module
-        assert live_module.VALUE == 1
-    finally:
-        plugin_module._PLUGIN_CACHE.clear()
-        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._MODULE_IMPORT_CACHE.clear()
-        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
-        set_plugin_skill_roots(original_plugin_roots)
-        for module_name in set(sys.modules) - original_modules:
-            if module_name.startswith("mindroom_plugin_"):
-                sys.modules.pop(module_name, None)
-
-
-@pytest.mark.asyncio
 async def test_reload_plugins_now_retains_all_plugins_when_candidate_manifest_is_invalid(
     tmp_path: Path,
 ) -> None:

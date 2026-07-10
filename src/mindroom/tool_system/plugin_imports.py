@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sys
@@ -67,6 +68,26 @@ class _ModuleCacheEntry:
 
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
 _MODULE_IMPORT_CACHE: dict[Path, _ModuleCacheEntry] = {}
+
+
+def _running_tasks() -> frozenset[asyncio.Task[Any]]:
+    """Return tasks on the current event loop, or none outside async execution."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return frozenset()
+    return frozenset(asyncio.all_tasks(loop))
+
+
+def _cancel_tasks_created_since(previous_tasks: frozenset[asyncio.Task[Any]]) -> int:
+    """Cancel tasks created since one synchronous plugin import began."""
+    cancelled = 0
+    for task in _running_tasks() - previous_tasks:
+        if task.done():
+            continue
+        task.cancel()
+        cancelled += 1
+    return cancelled
 
 
 def _warn_once(message: str, *, path: Path) -> None:

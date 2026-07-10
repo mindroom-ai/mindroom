@@ -729,6 +729,9 @@ def _execute_validation_plugin_module(
         for module_name, loaded_module in loaded_modules.items()
         if _module_origin_within_root(loaded_module, plugin_root)
     }
+    tasks_before_import = plugin_module._running_tasks()
+    execution_error: Exception | None = None
+    created_task_count = 0
     try:
         with (
             scoped_plugin_registration_store(registrations_by_module),
@@ -736,9 +739,9 @@ def _execute_validation_plugin_module(
         ):
             loader.exec_module(module)
     except Exception as exc:
-        msg = f"Plugin validation module execution failed for {module_path}: {exc}"
-        raise ToolMetadataValidationError(msg) from exc
+        execution_error = exc
     finally:
+        created_task_count = plugin_module._cancel_tasks_created_since(tasks_before_import)
         for loaded_module_name, loaded_module in sys.modules.copy().items():
             if loaded_module_name not in previous_modules_within_root and _module_origin_within_root(
                 loaded_module,
@@ -753,6 +756,12 @@ def _execute_validation_plugin_module(
         else:
             sys.modules[validation_module_name] = previous_module
 
+    if execution_error is not None:
+        msg = f"Plugin validation module execution failed for {module_path}: {execution_error}"
+        raise ToolMetadataValidationError(msg) from execution_error
+    if created_task_count:
+        msg = f"Plugin validation module created async tasks during import: {module_path}"
+        raise ToolMetadataValidationError(msg)
     return validation_module_name
 
 

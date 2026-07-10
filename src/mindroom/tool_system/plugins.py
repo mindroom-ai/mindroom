@@ -297,11 +297,6 @@ def apply_prepared_plugin_reload(
     )
 
 
-def discard_prepared_plugin_reload(prepared_reload: _PreparedPluginReload) -> int:
-    """Cancel tasks created by a prepared plugin snapshot that will not be applied."""
-    return _cancel_tasks_in_modules(prepared_reload.synthetic_modules.values())
-
-
 def _cancel_plugin_module_tasks(package_roots: set[str]) -> int:
     """Best-effort cancel module-global tasks owned by one synthetic plugin subtree."""
     if not package_roots:
@@ -318,14 +313,19 @@ def _cancel_plugin_module_tasks(package_roots: set[str]) -> int:
 
 def _cancel_tasks_in_modules(modules: Iterable[ModuleType]) -> int:
     """Best-effort cancel module-global tasks in the supplied plugin modules."""
+    return _cancel_tasks(
+        task for module in modules for value in vars(module).values() for task in _iter_module_tasks(value)
+    )
+
+
+def _cancel_tasks(tasks: Iterable[asyncio.Task[Any]]) -> int:
+    """Best-effort cancel each distinct pending task."""
     cancelled_task_ids: set[int] = set()
-    for module in modules:
-        for value in vars(module).values():
-            for task in _iter_module_tasks(value):
-                if task.done() or id(task) in cancelled_task_ids:
-                    continue
-                task.cancel()
-                cancelled_task_ids.add(id(task))
+    for task in tasks:
+        if task.done() or id(task) in cancelled_task_ids:
+            continue
+        task.cancel()
+        cancelled_task_ids.add(id(task))
     return len(cancelled_task_ids)
 
 
@@ -470,13 +470,8 @@ def load_plugin_module(
         logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
         raise _PluginValidationError(msg)
     module, _, previous_packages = prepared_module
-
     try:
-        if kind == "tools":
-            with scoped_plugin_registration_owner(module_name):
-                _exec_plugin_source(module_path, module)
-        else:
-            _exec_plugin_source(module_path, module)
+        _exec_plugin_module_source(module_path, module, module_name=module_name, kind=kind)
     except BaseException as exc:
         if kind == "tools":
             _restore_failed_plugin_tool_module_reload(
@@ -504,6 +499,29 @@ def load_plugin_module(
         module=module,
     )
     return module
+
+
+def _exec_plugin_module_source(
+    module_path: Path,
+    module: ModuleType,
+    *,
+    module_name: str,
+    kind: str,
+) -> None:
+    """Execute a plugin module while rejecting import-time background tasks."""
+    tasks_before_import = plugin_imports._running_tasks()
+    try:
+        if kind == "tools":
+            with scoped_plugin_registration_owner(module_name):
+                _exec_plugin_source(module_path, module)
+        else:
+            _exec_plugin_source(module_path, module)
+    except BaseException:
+        plugin_imports._cancel_tasks_created_since(tasks_before_import)
+        raise
+    if plugin_imports._cancel_tasks_created_since(tasks_before_import):
+        msg = f"Plugin {kind} module created async tasks during import: {module_path}"
+        raise _PluginValidationError(msg)
 
 
 def _exec_plugin_source(module_path: Path, module: ModuleType) -> None:
