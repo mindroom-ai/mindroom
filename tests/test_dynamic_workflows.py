@@ -2018,6 +2018,12 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
     )
     persist_entity_accounts(config, runtime_paths)
     context = replace(context, config=config, runtime_paths=runtime_paths)
+    snapshot_config = config.model_copy()
+    snapshot_hooks = Mock()
+    plugin_runtime_snapshot = SimpleNamespace(
+        runtime_config=snapshot_config,
+        hook_registry=snapshot_hooks,
+    )
     parent_loop = asyncio.new_event_loop()
 
     def assert_run(prompt: str, *, user_id: str, session_id: str) -> None:
@@ -2025,6 +2031,8 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
         assert runtime_context is not None
         assert asyncio.get_running_loop() is parent_loop
         assert runtime_context.agent_name == "specialist"
+        assert runtime_context.config is snapshot_config
+        assert runtime_context.hook_registry is snapshot_hooks
         assert runtime_context.session_id == session_id
         assert runtime_context.active_model_name == "large"
         assert "competitor-research-report:run_1:writer_a" in session_id
@@ -2032,7 +2040,13 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
         assert user_id == "@user:localhost"
 
     fake_agent = _fake_stream_agent(content="done", on_run=assert_run)
-    with patch("mindroom.agents.create_agent", return_value=fake_agent) as create_agent_mock:
+    with (
+        patch(
+            "mindroom.agents.capture_agent_plugin_runtime",
+            return_value=plugin_runtime_snapshot,
+        ) as capture_runtime_mock,
+        patch("mindroom.agents.create_agent", return_value=fake_agent) as create_agent_mock,
+    ):
         asyncio.set_event_loop(parent_loop)
         try:
             result = parent_loop.run_until_complete(
@@ -2048,7 +2062,10 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
             parent_loop.close()
 
     assert result == "done"
+    capture_runtime_mock.assert_called_once_with(config, runtime_paths)
+    assert create_agent_mock.call_args.args[1] is snapshot_config
     create_kwargs = create_agent_mock.call_args.kwargs
+    assert create_kwargs["plugin_runtime_snapshot"] is plugin_runtime_snapshot
     assert create_kwargs["session_id"].endswith(":dynamic_workflow:competitor-research-report:run_1:writer_a")
     assert create_kwargs["active_model_name"] == "large"
     assert create_kwargs["knowledge"] is None

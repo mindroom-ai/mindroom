@@ -9,6 +9,14 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
+def activate_tool_registry(runtime_paths: RuntimePaths, config: Config) -> None:
+    """Explicitly switch the process-global registry to one committed config."""
+    import mindroom.tools  # noqa: F401, PLC0415
+    from mindroom.tool_system.plugins import reload_plugins  # noqa: PLC0415
+
+    reload_plugins(config, runtime_paths, skip_broken_plugins=True)
+
+
 def ensure_tool_registry_loaded(
     runtime_paths: RuntimePaths,
     config: Config | None = None,
@@ -22,9 +30,13 @@ def ensure_tool_registry_loaded(
         return
 
     if load_plugin_tools:
-        from mindroom.tool_system.plugins import load_plugins  # noqa: PLC0415
+        from mindroom.tool_system.plugins import (  # noqa: PLC0415
+            active_plugin_hook_registry,
+            reload_plugins,
+        )
 
-        load_plugins(config, runtime_paths, set_skill_roots=False)
+        if active_plugin_hook_registry(config, runtime_paths) is None:
+            reload_plugins(config, runtime_paths, skip_broken_plugins=True)
 
     from mindroom.mcp.registry import sync_mcp_tool_registry  # noqa: PLC0415
 

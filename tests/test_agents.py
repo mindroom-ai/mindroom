@@ -22,6 +22,7 @@ from agno.session import AgentSession
 from agno.tools.function import Function
 from pydantic import ValidationError
 
+import mindroom.agents as agents_module
 from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
     _CULTURE_MANAGER_CACHE,
@@ -46,6 +47,7 @@ from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.history.runtime import close_team_runtime_state_dbs
+from mindroom.hooks import HookRegistry
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.matrix.state import MatrixState
@@ -56,7 +58,9 @@ from mindroom.prompts import (
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.teams import materialize_exact_team_members
+from mindroom.tool_system.declarations import ToolCategory, ToolMetadata
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.plugins import PluginRuntimeSnapshot
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -630,11 +634,14 @@ def test_create_agent_bootstraps_tool_registry_once_for_multiple_tools(
     config.agents["general"].tools = ["shell", "coding", "duckduckgo", "website"]
     config.agents["general"].include_default_tools = False
 
-    with patch("mindroom.agents.ensure_tool_registry_loaded") as mock_ensure_registry:
+    with patch(
+        "mindroom.agents.capture_plugin_runtime_snapshot",
+        wraps=agents_module.capture_plugin_runtime_snapshot,
+    ) as mock_capture_runtime:
         _create_agent_for_test("general", config=config)
 
     assert len(mock_get_tool_by_name.call_args_list) == 4
-    assert mock_ensure_registry.call_count == 1
+    assert mock_capture_runtime.call_count == 1
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -685,6 +692,8 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         tool_output_workspace_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
+        tool_registry: object | None = None,
+        tool_metadata: object | None = None,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -697,6 +706,8 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             allowed_shared_services,
             tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes,
+            tool_registry,
+            tool_metadata,
             worker_target,
         )
         if name == "browser":
@@ -743,6 +754,8 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         tool_output_workspace_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
+        tool_registry: object | None = None,
+        tool_metadata: object | None = None,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -756,6 +769,8 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes,
             worker_target,
+            tool_registry,
+            tool_metadata,
         )
         if name == "stale_tool":
             msg = "Unknown tool: stale_tool"
@@ -1602,9 +1617,7 @@ def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
     assert overrides_by_tool["duckduckgo"] is None
 
 
-@patch("mindroom.agents.load_plugins")
 def test_create_agent_threads_config_path_to_plugin_loading(
-    mock_load_plugins: MagicMock,
     tmp_path: Path,
 ) -> None:
     """Agent creation should resolve relative plugin paths from the active config file."""
@@ -1612,13 +1625,17 @@ def test_create_agent_threads_config_path_to_plugin_loading(
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config = _test_config()
     runtime_paths = _runtime_paths(tmp_path, config_path=config_path)
+    with (
+        patch("mindroom.agent_storage.SqliteDb"),
+        patch(
+            "mindroom.agents.capture_plugin_runtime_snapshot",
+            wraps=agents_module.capture_plugin_runtime_snapshot,
+        ) as capture_runtime,
+    ):
+        bound_config = _bind_runtime_paths(config, runtime_paths)
+        _create_agent_for_test("general", config=bound_config)
 
-    with patch("mindroom.agent_storage.SqliteDb"):
-        _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
-
-    mock_load_plugins.assert_called_once()
-    assert mock_load_plugins.call_args.args[0] is not None  # config
-    assert mock_load_plugins.call_args.args[1] is not None  # runtime_paths
+    capture_runtime.assert_called_once_with(bound_config, runtime_paths)
 
 
 def test_config_rejects_removed_memory_file_path_field() -> None:
@@ -1969,6 +1986,8 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         tool_output_workspace_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
+        tool_registry: object | None = None,
+        tool_metadata: object | None = None,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -1980,6 +1999,8 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
             allowed_shared_services,
             tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes,
+            tool_registry,
+            tool_metadata,
         )
         credentials = load_scoped_credentials(
             tool_name,
@@ -1994,8 +2015,27 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         return tool
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", _get_tool_by_name)
+    plugin_runtime_snapshot = PluginRuntimeSnapshot(
+        hook_registry=HookRegistry.empty(),
+        runtime_config=config,
+        tool_registry={"credentialed_toolkit": MagicMock},
+        tool_metadata={
+            "credentialed_toolkit": ToolMetadata(
+                name="credentialed_toolkit",
+                display_name="Credentialed Toolkit",
+                description="Test toolkit",
+                category=ToolCategory.DEVELOPMENT,
+            ),
+        },
+        plugin_skill_roots=(),
+    )
 
-    agent = _create_agent_for_test("general", config=config, execution_identity=shared_identity)
+    agent = _create_agent_for_test(
+        "general",
+        config=config,
+        execution_identity=shared_identity,
+        plugin_runtime_snapshot=plugin_runtime_snapshot,
+    )
 
     assert [tool.name for tool in agent.tools] == ["credentialed_toolkit"]
 

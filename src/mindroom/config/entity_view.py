@@ -11,11 +11,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.config.agent import CultureConfig
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryBackend, MemorySearchConfig
     from mindroom.config.models import CompactionConfig, EffectiveToolConfig
     from mindroom.history.types import ResolvedHistorySettings
+    from mindroom.tool_system.declarations import ToolMetadata
     from mindroom.tool_system.worker_routing import WorkerScope
 
 
@@ -108,9 +111,18 @@ class ResolvedEntityView:
         """Return one authored deferred tool config by authored name."""
         return self._config._agent_authored_deferred_tool_config(self._agent_name(), authored_tool_name)
 
-    def tool_runtime_overrides(self, tool_name: str) -> dict[str, object] | None:
+    def tool_runtime_overrides(
+        self,
+        tool_name: str,
+        *,
+        tool_metadata: Mapping[str, ToolMetadata] | None = None,
+    ) -> dict[str, object] | None:
         """Return runtime kwargs derived from this agent's authored overrides for one tool."""
-        return self._config._agent_tool_runtime_overrides(self._agent_name(), tool_name)
+        return self._config._agent_tool_runtime_overrides(
+            self._agent_name(),
+            tool_name,
+            tool_metadata=tool_metadata,
+        )
 
     def deferred_tool_scope_incompatible_tools(self, authored_tool_name: str) -> list[str]:
         """Return expanded deferred tools invalid for this agent's effective execution scope."""

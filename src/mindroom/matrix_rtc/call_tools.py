@@ -106,7 +106,6 @@ async def build_call_tools(
             runtime_paths,
             execution_identity,
             session_id=session_id,
-            hook_registry=context.hook_registry,
             knowledge=knowledge,
             include_interactive_questions=False,
             refresh_scheduler=refresh_scheduler,

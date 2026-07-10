@@ -1227,7 +1227,11 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.load_config", return_value=mock_config) as mock_load_config,
-            patch("mindroom.orchestrator.load_plugins"),
+            patch.object(
+                _MultiAgentOrchestrator,
+                "_build_hook_registry",
+                return_value=HookRegistry.empty(),
+            ),
             patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
             patch.object(
                 _MultiAgentOrchestrator,
@@ -1281,7 +1285,7 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.load_config", return_value=config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
+            patch.object(orchestrator, "_build_hook_registry", return_value=HookRegistry.empty()),
             patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch(
@@ -1362,8 +1366,7 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.load_config", return_value=config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
-            patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
+            patch.object(orchestrator, "_build_hook_registry", return_value=new_hook_registry),
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
             patch.object(
                 orchestrator,
@@ -2385,7 +2388,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=config),
-            patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_updates._identify_entities_to_restart",
                 return_value=set(),
@@ -2728,7 +2730,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config) as mock_load_config,
-            patch("mindroom.orchestrator.load_plugins"),
             patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
             patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
@@ -2752,7 +2753,6 @@ class TestMultiAgentOrchestrator:
         new_config.authorization.global_users = []
         new_config.cache = MagicMock()
         old_hook_registry = HookRegistry.empty()
-        new_hook_registry = HookRegistry.empty()
 
         orchestrator.config = current_config
         orchestrator.hook_registry = old_hook_registry
@@ -2770,10 +2770,10 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
-            patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
-            patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
+            patch(
+                "mindroom.orchestrator.clear_serialized_worker_validation_snapshot_cache",
+            ) as mock_clear_snapshot_cache,
             patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
             patch.object(
                 orchestrator,
@@ -2839,7 +2839,9 @@ class TestMultiAgentOrchestrator:
                 "mindroom.orchestrator.prepare_plugin_reload",
                 side_effect=RuntimeError("broken plugin"),
             ),
-            patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
+            patch(
+                "mindroom.orchestrator.clear_serialized_worker_validation_snapshot_cache",
+            ) as mock_clear_snapshot_cache,
             pytest.raises(RuntimeError, match="broken plugin"),
         ):
             await orchestrator.config_reload.update_config()
@@ -3087,7 +3089,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         ):
@@ -3154,7 +3155,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         ):
@@ -3238,7 +3238,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_updates._identify_entities_to_restart",
                 return_value=set(),
@@ -3334,7 +3333,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_updates._identify_entities_to_restart",
                 return_value=set(),

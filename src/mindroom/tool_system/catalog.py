@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
+from mindroom.tool_system.bootstrap import activate_tool_registry, ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -15,6 +15,7 @@ from mindroom.tool_system.declarations import (
 )
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
+    ResolvedToolState,
     ToolConfigOverrideError,
     ToolInitOverrideError,
     ToolMetadataValidationError,
@@ -26,18 +27,24 @@ from mindroom.tool_system.metadata import (
     export_tools_metadata,
     get_tool_by_name,
     normalize_authored_tool_overrides,
-    resolved_failed_plugin_names_for_runtime,
+    publish_resolved_tool_state_for_runtime,
+    refresh_resolved_mcp_tool_state_for_runtime,
     resolved_tool_metadata_for_runtime,
+    resolved_tool_state_from_loaded_registry,
+    resolved_tool_state_with_unavailable_tools,
     resolved_tool_validation_snapshot_for_runtime,
     safe_tool_init_override_fields,
     sanitize_tool_init_overrides,
     serialize_tool_validation_snapshot,
+    tool_validation_snapshot_from_resolved_state,
+    unresolved_plugin_tool_sources_for_runtime,
     validate_authored_tool_entry_overrides,
 )
 
 __all__ = [
     "TOOL_METADATA",
     "ConfigField",
+    "ResolvedToolState",
     "SetupType",
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
@@ -48,6 +55,7 @@ __all__ = [
     "ToolMetadataValidationError",
     "ToolStatus",
     "ToolValidationInfo",
+    "activate_tool_registry",
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
     "clear_resolved_tool_state_cache",
@@ -57,11 +65,16 @@ __all__ = [
     "export_tools_metadata",
     "get_tool_by_name",
     "normalize_authored_tool_overrides",
-    "resolved_failed_plugin_names_for_runtime",
+    "publish_resolved_tool_state_for_runtime",
+    "refresh_resolved_mcp_tool_state_for_runtime",
     "resolved_tool_metadata_for_runtime",
+    "resolved_tool_state_from_loaded_registry",
+    "resolved_tool_state_with_unavailable_tools",
     "resolved_tool_validation_snapshot_for_runtime",
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
+    "tool_validation_snapshot_from_resolved_state",
+    "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
 ]

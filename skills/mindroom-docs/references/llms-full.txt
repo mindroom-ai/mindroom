@@ -10513,14 +10513,17 @@ The manifest is a JSON file named `mindroom.plugin.json` at the plugin root:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `name` | string | **yes** | Plugin identifier. Must be lowercase ASCII letters, digits, `-`, and `_` only (pattern: `^[a-z0-9_-]+$`). Must be unique across all configured plugins. Invalid or duplicate names abort plugin loading entirely. |
+| `name` | string | **yes** | Unique plugin identifier using lowercase ASCII letters, digits, `-`, and `_` only (pattern: `^[a-z0-9_-]+$`). |
 | `tools_module` | string | no | Relative path to the Python module containing `@register_tool_with_metadata` factories. Must exist on disk if declared. |
 | `oauth_module` | string | no | Relative path to the Python module containing `register_oauth_providers(settings, runtime_paths)`. Must exist on disk if declared. |
 | `hooks_module` | string | no | Relative path to the Python module containing `@hook`-decorated functions. Must exist on disk if declared. |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories (each with a `SKILL.md`). Each directory must exist on disk. |
 
 Unknown fields are silently ignored.
-Invalid, duplicate, or malformed manifests are configuration errors and stop all plugin loading.
+Duplicate manifest names stop plugin loading in every mode.
+`mindroom config validate` rejects missing, invalid, or malformed plugin entries.
+Normal `mindroom run` startup skips plugin entries that cannot resolve or load, logs a warning, and disables their known tools for that runtime snapshot.
+If a skipped plugin's tool names cannot be fully resolved, unknown authored tool references are also disabled with a warning that asks the operator to check for a typo.
 All declared module files and skill directories must exist on disk.
 
 If `hooks_module` is omitted, MindRoom auto-scans `tools_module` for `@hook`-decorated functions.
@@ -10970,6 +10973,7 @@ No service restart and no agent session disruption.
 - A background watcher polls each configured plugin root every ~1s and debounces saves over a ~1s window.
 - On change, the synthetic plugin package subtree is evicted from `sys.modules`, `load_plugins()` re-runs, a fresh `HookRegistry` is built, and the live registry is swapped atomically.
 - Module-level `asyncio.Task` objects, and one-level containers like `dict[..., Task]`, on the old module are best-effort cancelled before the swap.
+- Plugin imports must not start background `asyncio.Task` objects because candidate modules are staged before activation; start them from an `@hook("agent:started")` callback and deduplicate stored tasks per entity instead.
 - The watcher ignores `__pycache__/`, `*.pyc`, `*.pyo`, editor swap files (`*.swp`, `*~`, `.#*`, `*.tmp`), and tool caches (`.ruff_cache/`, `.mypy_cache/`, `.pytest_cache/`).
 
 ### Iterating on a plugin
@@ -10987,6 +10991,7 @@ journalctl -u mindroom.service -f | grep -E 'Reloading plugins|Plugin reload com
 
 You can break and fix a plugin freely.
 A broken save that prevents reload, such as an import error or plugin validation error, can deactivate the affected plugin set, and the next valid save reloads it successfully.
+Recovered plugin tools become available again after the next valid reload.
 A hook that only raises at runtime is different: that failure is logged for that event, and the hook is tried again on the next matching event.
 There is no quarantine, failure threshold, or cooldown.
 Each save just reloads.

@@ -288,7 +288,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     assert len(tooling.tools) == 1
     assert tooling.instructions == "THE CHAT SYSTEM PROMPT"
     assert create_kwargs["eager_deferred_tools"] is True
-    assert create_kwargs["hook_registry"] is hook_registry
+    assert "hook_registry" not in create_kwargs
     assert create_kwargs["knowledge"] is knowledge
     assert create_kwargs["refresh_scheduler"] is refresh_scheduler
     assert create_calls

@@ -34,7 +34,9 @@ class ToolMetadataValidationError(ValueError):
 
 
 @dataclass(frozen=True)
-class _ToolRegistrySnapshot:
+class ToolRegistrySnapshot:
+    """Transactional snapshot of all mutable tool-registry state."""
+
     registry: dict[str, Callable[[], type[Toolkit]]]
     metadata: dict[str, ToolMetadata]
     builtin_registry: dict[str, Callable[[], type[Toolkit]]]
@@ -210,10 +212,10 @@ def register_plugin_tool_metadata(module_name: str, metadata: ToolMetadata) -> N
     module_registrations[metadata.name] = metadata
 
 
-def capture_tool_registry_snapshot() -> _ToolRegistrySnapshot:
+def capture_tool_registry_snapshot() -> ToolRegistrySnapshot:
     """Capture the mutable tool/plugin registry state for transactional restoration."""
     loaded_modules = sys.modules.copy()
-    return _ToolRegistrySnapshot(
+    return ToolRegistrySnapshot(
         registry=TOOL_REGISTRY.copy(),
         metadata=TOOL_METADATA.copy(),
         builtin_registry=BUILTIN_TOOL_REGISTRY.copy(),
@@ -230,7 +232,7 @@ def capture_tool_registry_snapshot() -> _ToolRegistrySnapshot:
     )
 
 
-def restore_tool_registry_snapshot(snapshot: _ToolRegistrySnapshot) -> None:
+def restore_tool_registry_snapshot(snapshot: ToolRegistrySnapshot) -> None:
     """Restore one previously captured tool/plugin registry snapshot."""
     TOOL_REGISTRY.clear()
     TOOL_REGISTRY.update(snapshot.registry)

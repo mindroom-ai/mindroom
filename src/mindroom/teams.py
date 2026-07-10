@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from mindroom import ai_runtime, model_loading
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import get_team_session
-from mindroom.agents import create_agent, enable_all_history_replay
+from mindroom.agents import capture_agent_plugin_runtime, create_agent, enable_all_history_replay
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
@@ -1552,6 +1552,7 @@ def materialize_exact_team_members(
     """
     if not requested_agent_names:
         raise ValueError(_NO_AGENTS_RESPONSE)
+    plugin_runtime_snapshot = capture_agent_plugin_runtime(config, runtime_paths)
 
     def _build_member(agent_name: str) -> Agent:
         knowledge_resolution = resolve_agent_knowledge_access(
@@ -1568,6 +1569,7 @@ def materialize_exact_team_members(
             config,
             runtime_paths,
             execution_identity=execution_identity,
+            plugin_runtime_snapshot=plugin_runtime_snapshot,
             session_id=session_id
             if session_id is not None
             else execution_identity.session_id

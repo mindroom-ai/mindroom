@@ -911,7 +911,6 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             knowledge=knowledge,
             execution_identity=None,
-            hook_registry=self.hook_registry,
             refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
         )
 

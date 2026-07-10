@@ -89,7 +89,11 @@ from mindroom.tool_system.worker_routing import unsupported_shared_only_integrat
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
-    from mindroom.tool_system.catalog import ToolValidationInfo
+    from collections.abc import Callable, Mapping
+
+    from agno.tools import Toolkit
+
+    from mindroom.tool_system.catalog import ResolvedToolState, ToolMetadata, ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
@@ -154,6 +158,15 @@ class ConfigRuntimeValidationError(ValueError):
         """Return one ValidationError-like payload for shared config UX code."""
         del include_context
         return [{"loc": ("config",), "msg": str(self), "type": "value_error"}]
+
+
+@dataclass(frozen=True)
+class RuntimeToolAvailabilitySnapshot:
+    """Prepared Config availability plus its exact resolved runtime tool state."""
+
+    unavailable_tool_names: frozenset[str]
+    resolved_tool_state: ResolvedToolState
+    tolerate_plugin_load_errors: bool
 
 
 CONFIG_LOAD_USER_ERROR_TYPES = (
@@ -350,8 +363,8 @@ class Config(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     _source_files: frozenset[Path] = PrivateAttr(default=frozenset())
-    _unavailable_plugin_tool_names: set[str] = PrivateAttr(default_factory=set)
-    _plugin_load_failure_names: frozenset[str] = PrivateAttr(default=frozenset())
+    _unavailable_plugin_tool_names: frozenset[str] = PrivateAttr(default=frozenset())
+    _runtime_tool_validation_complete: bool = PrivateAttr(default=False)
     _runtime_approved_egress_injected_default_tool: bool = PrivateAttr(default=False)
     _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
 
@@ -1347,8 +1360,10 @@ class Config(BaseModel):
         *,
         config_path_prefix: str,
         tool_validation_snapshot: dict[str, ToolValidationInfo],
-    ) -> None:
-        """Validate one authored tool entry against the resolved validation snapshot."""
+        unresolved_plugin_tool_sources: frozenset[str],
+        unknown_tool_is_unavailable: bool = False,
+    ) -> bool:
+        """Validate one authored tool entry and return whether it remains available."""
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import (  # noqa: PLC0415
             ToolConfigOverrideError,
@@ -1357,19 +1372,22 @@ class Config(BaseModel):
 
         validation_info = tool_validation_snapshot.get(entry.name)
         if entry.name not in tool_validation_snapshot and not self.is_tool_preset(entry.name):
-            if self._plugin_load_failure_names:
-                # A failed plugin's tool names cannot always be recovered from its
-                # broken source, so this unknown name may belong to one of them;
-                # disable the tool instead of refusing to start.
+            if unresolved_plugin_tool_sources:
                 logger.warning(
-                    "Unknown tool may belong to a plugin that failed to load; "
+                    "Unknown tool may belong to a plugin whose tool names could not be fully resolved; "
                     "disabling it for this run (verify the tool name is not a typo)",
                     config_path=config_path_prefix,
                     tool_name=entry.name,
-                    failed_plugins=sorted(self._plugin_load_failure_names),
+                    unresolved_plugin_sources=sorted(unresolved_plugin_tool_sources),
                 )
-                self._unavailable_plugin_tool_names.add(entry.name)
-                return
+                return False
+            if unknown_tool_is_unavailable:
+                logger.warning(
+                    "Plugin tool unavailable after plugin reload",
+                    config_path=config_path_prefix,
+                    tool_name=entry.name,
+                )
+                return False
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
             raise ToolConfigOverrideError(msg)
         if validation_info is not None and validation_info.unavailable_due_to_plugin_load_error:
@@ -1378,7 +1396,7 @@ class Config(BaseModel):
                 config_path=config_path_prefix,
                 tool_name=entry.name,
             )
-            return
+            return False
 
         validate_authored_tool_entry_overrides(
             entry.name,
@@ -1386,6 +1404,147 @@ class Config(BaseModel):
             config_path_prefix=config_path_prefix,
             tool_metadata=tool_validation_snapshot,
         )
+        return True
+
+    def _resolve_authored_tool_availability_from_snapshot(
+        self,
+        tool_validation_snapshot: dict[str, ToolValidationInfo],
+        unresolved_plugin_tool_sources: frozenset[str],
+        *,
+        unknown_tool_is_unavailable: bool = False,
+    ) -> frozenset[str]:
+        """Resolve unavailable authored tools from one immutable validation snapshot."""
+        unavailable_tool_names = {
+            tool_name
+            for tool_name, validation_info in tool_validation_snapshot.items()
+            if validation_info.unavailable_due_to_plugin_load_error
+        }
+
+        def validate_entry(entry: ToolConfigEntry, config_path_prefix: str) -> None:
+            if not self._validate_authored_tool_entry(
+                entry,
+                config_path_prefix=config_path_prefix,
+                tool_validation_snapshot=tool_validation_snapshot,
+                unresolved_plugin_tool_sources=unresolved_plugin_tool_sources,
+                unknown_tool_is_unavailable=unknown_tool_is_unavailable,
+            ):
+                unavailable_tool_names.add(entry.name)
+
+        for index, entry in enumerate(self.defaults.tools):
+            validate_entry(entry, f"defaults.tools[{index}]")
+        for agent_name, agent_config in self.agents.items():
+            for index, entry in enumerate(agent_config.tools):
+                validate_entry(entry, f"agents.{agent_name}.tools[{index}]")
+
+        return frozenset(unavailable_tool_names)
+
+    def _resolve_authored_tool_availability(
+        self,
+        runtime_paths: RuntimePaths,
+        *,
+        tolerate_plugin_load_errors: bool = False,
+    ) -> frozenset[str]:
+        """Resolve unavailable authored tools without publishing partial state."""
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import (  # noqa: PLC0415
+            resolved_tool_validation_snapshot_for_runtime,
+            unresolved_plugin_tool_sources_for_runtime,
+        )
+
+        tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
+            runtime_paths,
+            self,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+        unresolved_plugin_tool_sources = unresolved_plugin_tool_sources_for_runtime(
+            runtime_paths,
+            self,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+        return self._resolve_authored_tool_availability_from_snapshot(
+            tool_validation_snapshot,
+            unresolved_plugin_tool_sources,
+        )
+
+    def prepare_runtime_tool_availability(
+        self,
+        tool_registry: Mapping[str, Callable[[], type[Toolkit]]],
+        tool_metadata: Mapping[str, ToolMetadata],
+        *,
+        tolerate_plugin_load_errors: bool = False,
+    ) -> RuntimeToolAvailabilitySnapshot:
+        """Prepare availability from the exact plugin registry staged for a reload."""
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import (  # noqa: PLC0415
+            ToolConfigOverrideError,
+            ToolMetadataValidationError,
+            resolved_tool_state_from_loaded_registry,
+            resolved_tool_state_with_unavailable_tools,
+            tool_validation_snapshot_from_resolved_state,
+        )
+
+        try:
+            resolved_state = resolved_tool_state_from_loaded_registry(
+                self,
+                tool_registry,
+                tool_metadata,
+            )
+            tool_validation_snapshot = tool_validation_snapshot_from_resolved_state(resolved_state)
+            unavailable_tool_names = self._resolve_authored_tool_availability_from_snapshot(
+                tool_validation_snapshot,
+                frozenset(),
+                unknown_tool_is_unavailable=self._runtime_tool_validation_complete,
+            )
+            resolved_state = resolved_tool_state_with_unavailable_tools(
+                resolved_state,
+                unavailable_tool_names,
+            )
+        except (PluginValidationError, ToolConfigOverrideError, ToolMetadataValidationError) as exc:
+            raise ConfigRuntimeValidationError(str(exc)) from exc
+        return RuntimeToolAvailabilitySnapshot(
+            unavailable_tool_names=unavailable_tool_names,
+            resolved_tool_state=resolved_state,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+
+    def apply_runtime_tool_availability(
+        self,
+        runtime_paths: RuntimePaths,
+        snapshot: RuntimeToolAvailabilitySnapshot,
+    ) -> None:
+        """Publish one prepared availability snapshot and its exact resolved state."""
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import publish_resolved_tool_state_for_runtime  # noqa: PLC0415
+
+        publish_resolved_tool_state_for_runtime(
+            runtime_paths,
+            self,
+            snapshot.resolved_tool_state,
+            tolerate_plugin_load_errors=snapshot.tolerate_plugin_load_errors,
+        )
+        self._unavailable_plugin_tool_names = snapshot.unavailable_tool_names
+        self._runtime_tool_validation_complete = True
+
+    def copy_with_runtime_tool_availability(
+        self,
+        snapshot: RuntimeToolAvailabilitySnapshot,
+    ) -> Config:
+        """Freeze one config copy to the tool availability captured for an agent build."""
+        runtime_config = self.model_copy()
+        runtime_config._unavailable_plugin_tool_names = snapshot.unavailable_tool_names
+        runtime_config._runtime_tool_validation_complete = True
+        return runtime_config
+
+    def mark_runtime_tool_validation_complete(self) -> None:
+        """Trust upstream authored-tool validation and defer locally missing tools."""
+        self._runtime_tool_validation_complete = True
+
+    def refresh_runtime_mcp_tool_state(self, runtime_paths: RuntimePaths) -> None:
+        """Refresh cached MCP metadata without reloading plugin source."""
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import refresh_resolved_mcp_tool_state_for_runtime  # noqa: PLC0415
+
+        refresh_resolved_mcp_tool_state_for_runtime(runtime_paths, self)
 
     def _validate_authored_tool_entries(
         self,
@@ -1394,50 +1553,12 @@ class Config(BaseModel):
         tolerate_plugin_load_errors: bool = False,
     ) -> None:
         """Validate authored tool references against one resolved validation snapshot."""
-        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
-        from mindroom.tool_system.catalog import (  # noqa: PLC0415
-            resolved_failed_plugin_names_for_runtime,
-            resolved_tool_validation_snapshot_for_runtime,
-        )
-
-        tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
+        unavailable_tool_names = self._resolve_authored_tool_availability(
             runtime_paths,
-            self,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
         )
-        self._plugin_load_failure_names = resolved_failed_plugin_names_for_runtime(
-            runtime_paths,
-            self,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
-        self._unavailable_plugin_tool_names = {
-            tool_name
-            for tool_name, validation_info in tool_validation_snapshot.items()
-            if validation_info.unavailable_due_to_plugin_load_error
-        }
-        self._validate_authored_tool_entries_with_snapshot(
-            tool_validation_snapshot=tool_validation_snapshot,
-        )
-
-    def _validate_authored_tool_entries_with_snapshot(
-        self,
-        *,
-        tool_validation_snapshot: dict[str, ToolValidationInfo],
-    ) -> None:
-        """Validate authored tool references against one already-resolved validation snapshot."""
-        for index, entry in enumerate(self.defaults.tools):
-            self._validate_authored_tool_entry(
-                entry,
-                config_path_prefix=f"defaults.tools[{index}]",
-                tool_validation_snapshot=tool_validation_snapshot,
-            )
-        for agent_name, agent_config in self.agents.items():
-            for index, entry in enumerate(agent_config.tools):
-                self._validate_authored_tool_entry(
-                    entry,
-                    config_path_prefix=f"agents.{agent_name}.tools[{index}]",
-                    tool_validation_snapshot=tool_validation_snapshot,
-                )
+        self._unavailable_plugin_tool_names = unavailable_tool_names
+        self._runtime_tool_validation_complete = True
 
     def _get_agent_authored_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
         """Return effective authored tool config entries before preset/implied expansion."""
@@ -1557,16 +1678,22 @@ class Config(BaseModel):
                 return entry
         return None
 
-    def _agent_tool_runtime_overrides(self, agent_name: str, tool_name: str) -> dict[str, object] | None:
+    def _agent_tool_runtime_overrides(
+        self,
+        agent_name: str,
+        tool_name: str,
+        *,
+        tool_metadata: Mapping[str, ToolMetadata] | None = None,
+    ) -> dict[str, object] | None:
         """Return runtime kwargs derived from one agent's authored tool overrides."""
         from mindroom.tool_system.catalog import authored_tool_overrides_to_runtime  # noqa: PLC0415
 
         agent_config = self.get_agent(agent_name)
-        overrides = agent_config.get_tool_overrides(tool_name)
+        overrides = agent_config.get_tool_overrides(tool_name, tool_metadata=tool_metadata)
         if not overrides:
             return None
 
-        return authored_tool_overrides_to_runtime(tool_name, overrides)
+        return authored_tool_overrides_to_runtime(tool_name, overrides, tool_metadata=tool_metadata)
 
     def _agent_hard_dependency_tool_names(self, agent_name: str) -> set[str]:
         """Return tool names that are hard startup dependencies for one agent."""

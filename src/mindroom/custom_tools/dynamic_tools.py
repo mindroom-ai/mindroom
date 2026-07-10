@@ -19,7 +19,10 @@ from mindroom.tool_system.dynamic_toolkits import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.config.main import Config
+    from mindroom.tool_system.declarations import ToolMetadata
     from mindroom.tool_system.dynamic_toolkits import DeferredToolCatalogEntry
 
 
@@ -41,11 +44,13 @@ class DynamicToolsToolkit(Toolkit):
         session_id: str | None,
         stop_after_tool_call: bool = False,
         hidden_tool_names: frozenset[str] = frozenset(),
+        tool_metadata: Mapping[str, ToolMetadata] | None = None,
     ) -> None:
         self._agent_name = agent_name
         self._config = config
         self._session_id = session_id
         self._hidden_tool_names = hidden_tool_names
+        self._tool_metadata = tool_metadata
         super().__init__(
             name="dynamic_tools",
             instructions=config.get_prompt("DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS"),
@@ -83,6 +88,7 @@ class DynamicToolsToolkit(Toolkit):
                 agent_name=self._agent_name,
                 config=self._config,
                 loaded_tools=loaded_tools if loaded_tools is not None else self._loaded_tools(),
+                tool_metadata=self._tool_metadata,
             )
             if entry.name not in self._hidden_tool_names
         ]

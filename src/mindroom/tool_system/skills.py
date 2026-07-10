@@ -159,6 +159,7 @@ def build_agent_skills(
     runtime_paths: RuntimePaths,
     *,
     skill_roots: Sequence[Path] | None = None,
+    plugin_skill_roots: Sequence[Path] | None = None,
     workspace_skills_root: Path | None = None,
     env_vars: Mapping[str, str] | None = None,
     credential_keys: set[str] | None = None,
@@ -172,7 +173,10 @@ def build_agent_skills(
     configured_loader = None
     if agent_config.skills:
         configured_loader = _MindroomSkillsLoader(
-            roots=_resolve_configured_skill_roots(skill_roots),
+            roots=_resolve_configured_skill_roots(
+                skill_roots,
+                plugin_skill_roots=plugin_skill_roots,
+            ),
             config=config,
             runtime_paths=runtime_paths,
             allowlist=agent_config.skills,
@@ -266,9 +270,17 @@ def _get_agent_workspace_skill_root(runtime_paths: RuntimePaths, agent_name: str
     return agent_workspace_root_path(runtime_paths.storage_root, agent_name) / "skills"
 
 
-def _resolve_configured_skill_roots(skill_roots: Sequence[Path] | None = None) -> list[Path]:
+def _resolve_configured_skill_roots(
+    skill_roots: Sequence[Path] | None = None,
+    *,
+    plugin_skill_roots: Sequence[Path] | None = None,
+) -> list[Path]:
     """Return configured global skill roots without the agent workspace root."""
-    return _unique_paths(list(skill_roots) if skill_roots is not None else _get_default_skill_roots())
+    if skill_roots is not None:
+        return _unique_paths(list(skill_roots))
+    if plugin_skill_roots is None:
+        return _get_default_skill_roots()
+    return _unique_paths([_get_bundled_skills_dir(), *plugin_skill_roots, get_user_skills_dir()])
 
 
 def list_skill_listings(roots: Sequence[Path] | None = None) -> list[_SkillListing]:

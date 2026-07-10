@@ -2666,6 +2666,7 @@ path = "mindroom.tool_system.plugins"
 depends_on = [
     "mindroom.constants",
     "mindroom.hooks",
+    "mindroom.mcp.registry",
     "mindroom.tool_schema_cache",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.registry_state",
@@ -3018,6 +3019,7 @@ expose = [
     "ensure_default_agent_workspaces",
     "show_tool_calls_for_agent",
     "build_agent_toolkit",
+    "capture_agent_plugin_runtime",
     "get_agent_toolkit_names",
     "remove_run_by_event_id",
 ]
@@ -3469,6 +3471,7 @@ from = ["mindroom.tool_system.registration"]
 [[interfaces]]
 expose = [
     "TOOL_METADATA",
+    "ResolvedToolState",
     "ToolConfigOverrideError",
     "ToolInitOverrideError",
     "ToolMetadataValidationError",
@@ -3480,12 +3483,17 @@ expose = [
     "export_tools_metadata",
     "get_tool_by_name",
     "normalize_authored_tool_overrides",
-    "resolved_failed_plugin_names_for_runtime",
+    "publish_resolved_tool_state_for_runtime",
+    "refresh_resolved_mcp_tool_state_for_runtime",
     "resolved_tool_metadata_for_runtime",
+    "resolved_tool_state_from_loaded_registry",
+    "resolved_tool_state_with_unavailable_tools",
     "resolved_tool_validation_snapshot_for_runtime",
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
+    "tool_validation_snapshot_from_resolved_state",
+    "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
 ]
 from = ["mindroom.tool_system.metadata"]
@@ -3493,7 +3501,7 @@ visibility = ["mindroom.tool_system.catalog"]
 exclusive = true
 
 [[interfaces]]
-expose = ["ensure_tool_registry_loaded"]
+expose = ["activate_tool_registry", "ensure_tool_registry_loaded"]
 from = ["mindroom.tool_system.bootstrap"]
 visibility = ["mindroom.tool_system.catalog"]
 exclusive = true
@@ -3502,6 +3510,7 @@ exclusive = true
 expose = [
     "TOOL_METADATA",
     "ConfigField",
+    "ResolvedToolState",
     "SetupType",
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
@@ -3512,6 +3521,7 @@ expose = [
     "ToolMetadataValidationError",
     "ToolStatus",
     "ToolValidationInfo",
+    "activate_tool_registry",
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
     "clear_resolved_tool_state_cache",
@@ -3521,12 +3531,17 @@ expose = [
     "export_tools_metadata",
     "get_tool_by_name",
     "normalize_authored_tool_overrides",
-    "resolved_failed_plugin_names_for_runtime",
+    "publish_resolved_tool_state_for_runtime",
+    "refresh_resolved_mcp_tool_state_for_runtime",
     "resolved_tool_metadata_for_runtime",
+    "resolved_tool_state_from_loaded_registry",
+    "resolved_tool_state_with_unavailable_tools",
     "resolved_tool_validation_snapshot_for_runtime",
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
+    "tool_validation_snapshot_from_resolved_state",
+    "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
 ]
 from = ["mindroom.tool_system.catalog"]
@@ -3540,6 +3555,7 @@ expose = [
     "PLUGIN_MODULE_PREFIX",
     "PLUGIN_REGISTRATION_SCOPE",
     "TOOL_REGISTRY",
+    "ToolRegistrySnapshot",
     "capture_tool_registry_snapshot",
     "clear_plugin_tool_registrations",
     "locked_tool_registry_state",
@@ -3565,7 +3581,9 @@ exclusive = true
 
 [[interfaces]]
 expose = [
+    "ModuleImportState",
     "PluginValidationError",
+    "TrackedModuleImports",
     "_MODULE_IMPORT_CACHE",
     "_ModuleCacheEntry",
     "_PluginBase",
@@ -3576,9 +3594,17 @@ expose = [
     "_reject_duplicate_plugin_manifest_names",
     "_restore_plugin_package_chain",
     "_snapshot_plugin_package_chain",
+    "cancel_asyncio_tasks_created_since",
+    "tracked_module_imports",
+    "reject_asyncio_tasks_created_since",
+    "resolve_plugin_root",
+    "restore_module_import_state",
+    "running_asyncio_tasks",
+    "snapshot_module_import_state",
 ]
 from = ["mindroom.tool_system.plugin_imports"]
 visibility = [
+    "mindroom.api.sandbox_runner",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.registry_state",

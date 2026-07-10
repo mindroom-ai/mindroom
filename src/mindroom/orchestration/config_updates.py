@@ -82,11 +82,21 @@ def configured_entity_names(config: Config) -> list[str]:
 
 def plugin_change_paths(current_config: Config, new_config: Config) -> tuple[str, ...]:
     """Return plugin paths whose entry config changed across a reload."""
-    old_entries = {entry.path: entry.model_dump(mode="python") for entry in current_config.plugins}
-    new_entries = {entry.path: entry.model_dump(mode="python") for entry in new_config.plugins}
-    changed_paths = {
-        path for path in set(old_entries) | set(new_entries) if old_entries.get(path) != new_entries.get(path)
+    old_entries = [(entry.path, entry.model_dump(mode="python")) for entry in current_config.plugins]
+    new_entries = [(entry.path, entry.model_dump(mode="python")) for entry in new_config.plugins]
+    if old_entries == new_entries:
+        return ()
+
+    all_paths = {path for path, _entry in [*old_entries, *new_entries]}
+    old_entries_by_path = {
+        path: [entry for entry_path, entry in old_entries if entry_path == path] for path in all_paths
     }
+    new_entries_by_path = {
+        path: [entry for entry_path, entry in new_entries if entry_path == path] for path in all_paths
+    }
+    changed_paths = {path for path in all_paths if old_entries_by_path[path] != new_entries_by_path[path]}
+    if [path for path, _entry in old_entries] != [path for path, _entry in new_entries]:
+        changed_paths.update(all_paths)
     return tuple(sorted(changed_paths))
 
 

@@ -60,7 +60,7 @@ from mindroom.matrix.users import (
 )
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 from mindroom.mcp.manager import MCPServerManager
-from mindroom.mcp.registry import mcp_tool_name
+from mindroom.mcp.registry import mcp_tool_name, sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
@@ -73,16 +73,20 @@ from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
     deactivate_plugins,
-    load_plugins,
+    prepare_active_plugin_tool_state_for_config,
     prepare_plugin_reload,
+    publish_active_plugin_runtime,
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
-from mindroom.workers.runtime import clear_worker_validation_snapshot_cache, shutdown_primary_worker_manager
+from mindroom.workers.runtime import (
+    clear_serialized_worker_validation_snapshot_cache,
+    shutdown_primary_worker_manager,
+)
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
-from .config.main import Config, load_config
+from .config.main import Config, ConfigRuntimeValidationError, load_config
 from .credentials_sync import sync_env_to_credentials
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
@@ -600,7 +604,11 @@ class _MultiAgentOrchestrator:
             )
             self._mcp_manager = manager
         bind_mcp_server_manager(manager)
-        return await manager.sync_servers(config)
+        changed_server_ids = await manager.sync_servers(config)
+        sync_mcp_tool_registry(config)
+        config.refresh_runtime_mcp_tool_state(self.runtime_paths)
+        clear_serialized_worker_validation_snapshot_cache()
+        return changed_server_ids
 
     def _entities_blocked_by_failed_mcp_servers(self, entity_names: set[str], config: Config) -> set[str]:
         """Return entities blocked because a required MCP server is currently unavailable."""
@@ -729,9 +737,12 @@ class _MultiAgentOrchestrator:
         return bot
 
     def _build_hook_registry(self, config: Config) -> HookRegistry:
-        """Load plugins and rebuild the immutable hook-registry snapshot."""
-        plugins = load_plugins(config, self.runtime_paths)
-        return HookRegistry.from_plugins(plugins)
+        """Load one exact startup plugin snapshot and return its hook registry."""
+        return reload_plugins(
+            config,
+            self.runtime_paths,
+            skip_broken_plugins=True,
+        ).hook_registry
 
     def _activate_hook_registry(self, hook_registry: HookRegistry) -> None:
         """Commit one hook-registry snapshot to the live runtime."""
@@ -785,18 +796,21 @@ class _MultiAgentOrchestrator:
             watch_roots, watch_root_snapshots = self.plugin_watch.capture(config)
             try:
                 result = reload_plugins(config, self.runtime_paths)
+            except ConfigRuntimeValidationError:
+                self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
+                raise
             except Exception:
                 recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
                     config,
                     self.runtime_paths,
                 )
                 self._activate_hook_registry(recovery_result.hook_registry)
-                clear_worker_validation_snapshot_cache()
+                clear_serialized_worker_validation_snapshot_cache()
                 self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
                 logger.warning(warning_message, source=source, **warning_kwargs)
                 raise
             self._activate_hook_registry(result.hook_registry)
-            clear_worker_validation_snapshot_cache()
+            clear_serialized_worker_validation_snapshot_cache()
             self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
             logger.info(
                 "Plugin reload complete",
@@ -828,6 +842,7 @@ class _MultiAgentOrchestrator:
         self.config = new_config
         new_hook_registry = apply_prepared_plugin_reload(
             prepared_plugin_reload,
+            new_config,
             cancel_existing_tasks=True,
         ).hook_registry
         self.plugin_watch.replace_snapshots(
@@ -835,7 +850,7 @@ class _MultiAgentOrchestrator:
             prepared_plugin_root_snapshots,
         )
         self._activate_hook_registry(new_hook_registry)
-        clear_worker_validation_snapshot_cache()
+        clear_serialized_worker_validation_snapshot_cache()
         return pre_stopped_mcp_entities
 
     async def _start_entities_once(
@@ -1147,7 +1162,6 @@ class _MultiAgentOrchestrator:
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(new_config)
         await self._sync_runtime_support_services(new_config, start_watcher=self.running)
-        clear_worker_validation_snapshot_cache()
         return False
 
     async def _update_unchanged_bots(self, plan: ConfigUpdatePlan) -> None:
@@ -1283,7 +1297,9 @@ class _MultiAgentOrchestrator:
         async with self._config_update_lock:
             if not self.running or self.config is None:
                 return
-            clear_worker_validation_snapshot_cache()
+            sync_mcp_tool_registry(self.config)
+            self.config.refresh_runtime_mcp_tool_state(self.runtime_paths)
+            clear_serialized_worker_validation_snapshot_cache()
             changed_entities = self.config.get_entities_referencing_tools({mcp_tool_name(server_id)})
             if not changed_entities:
                 return
@@ -1391,6 +1407,9 @@ class _MultiAgentOrchestrator:
                     changed_server_ids=plan.changed_mcp_servers,
                 )
             else:
+                runtime_tool_availability = prepare_active_plugin_tool_state_for_config(
+                    new_config,
+                )
                 pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
                     current_config,
                     new_config,
@@ -1398,9 +1417,18 @@ class _MultiAgentOrchestrator:
                 )
                 # Only apply the new config after validation and account checks succeed.
                 self.config = new_config
+                new_config.apply_runtime_tool_availability(
+                    self.runtime_paths,
+                    runtime_tool_availability,
+                )
+                publish_active_plugin_runtime(
+                    new_config,
+                    self.runtime_paths,
+                    self.hook_registry,
+                )
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
-                clear_worker_validation_snapshot_cache()
+                clear_serialized_worker_validation_snapshot_cache()
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
             await self._sync_event_cache_service(new_config)
             logger.info(
@@ -1750,7 +1778,7 @@ def _recover_failed_plugin_reload(
         recovery_result = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
     except Exception as degraded_error:
         return (
-            deactivate_plugins(),
+            deactivate_plugins(config, runtime_paths),
             "Plugin reload failed; all plugins deactivated",
             {"degraded_error": str(degraded_error)},
         )

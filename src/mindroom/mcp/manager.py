@@ -80,6 +80,27 @@ class _MCPSessionKey:
     worker_key: str
 
 
+@dataclass(frozen=True, slots=True)
+class MCPServerBinding:
+    """Immutable link between one tool snapshot and one server runtime generation."""
+
+    manager: MCPServerManager
+    server_id: str
+    server_config: MCPServerConfig
+    generation: int
+
+    def is_current(self, active_manager: MCPServerManager | None) -> bool:
+        """Return whether this binding still targets the active matching server generation."""
+        return active_manager is self.manager and self.manager.server_binding_is_current(self)
+
+    def require_current(self, active_manager: MCPServerManager | None) -> MCPServerManager:
+        """Return the bound manager or reject a stale tool snapshot."""
+        if not self.is_current(active_manager):
+            msg = f"MCP server '{self.server_id}' changed after this tool snapshot was captured"
+            raise MCPConnectionError(self.server_id, msg)
+        return self.manager
+
+
 class MCPServerManager:
     """Own one live MCP session per configured server."""
 
@@ -91,6 +112,7 @@ class MCPServerManager:
     ) -> None:
         self.runtime_paths = runtime_paths
         self._states: dict[str, MCPServerState] = {}
+        self._server_generations: dict[str, int] = {}
         self._scoped_states: dict[_MCPSessionKey, MCPServerState] = {}
         self._catalog_validation_lock = asyncio.Lock()
         self._on_catalog_change = on_catalog_change
@@ -123,6 +145,33 @@ class MCPServerManager:
         msg = f"MCP server '{server_id}' is not connected"
         raise MCPConnectionError(server_id, msg)
 
+    def capture_server_binding(
+        self,
+        server_id: str,
+        server_config: MCPServerConfig,
+    ) -> MCPServerBinding:
+        """Capture the observed runtime generation for one snapshot-owned MCP tool."""
+        return MCPServerBinding(
+            manager=self,
+            server_id=server_id,
+            server_config=server_config,
+            generation=self._server_generations.get(server_id, 0),
+        )
+
+    def server_binding_is_current(self, binding: MCPServerBinding) -> bool:
+        """Return whether a captured server binding still matches live manager state."""
+        state = self._states.get(binding.server_id)
+        return (
+            binding.manager is self
+            and state is not None
+            and state.config == binding.server_config
+            and self._server_generations.get(binding.server_id, 0) == binding.generation
+        )
+
+    def _advance_server_generation(self, server_id: str) -> None:
+        """Advance when a server config or provider-visible catalog surface changes."""
+        self._server_generations[server_id] = self._server_generations.get(server_id, 0) + 1
+
     async def sync_servers(self, config: Config) -> set[str]:
         """Reconcile live server sessions against the active config."""
         self._config = config
@@ -137,6 +186,7 @@ class MCPServerManager:
         for server_id, server_config in desired_servers.items():
             state = self._states.get(server_id)
             if state is None:
+                self._advance_server_generation(server_id)
                 state = MCPServerState(server_id=server_id, config=server_config)
                 self._states[server_id] = state
             elif state.config != server_config:
@@ -144,6 +194,7 @@ class MCPServerManager:
                 async with state.lock:
                     await self._disconnect_state_when_idle(state)
                     await self._remove_scoped_server_states(server_id)
+                    self._advance_server_generation(server_id)
                     state.config = server_config
                     state.catalog = None
                     state.last_error = None
@@ -535,6 +586,8 @@ class MCPServerManager:
                     state.last_error = exc
                     state.connected = False
                     state.catalog = None
+                    if previous_hash is not None and self._states.get(state.server_id) is state:
+                        self._advance_server_generation(state.server_id)
                     state.consecutive_failures += 1
                     log = logger.debug if repeated_error else logger.warning
                     log(
@@ -557,6 +610,8 @@ class MCPServerManager:
                 state.last_error = None
                 state.consecutive_failures = 0
                 changed = previous_hash != catalog.catalog_hash
+                if changed and self._states.get(state.server_id) is state:
+                    self._advance_server_generation(state.server_id)
                 should_notify_catalog_change = notify and changed and self._on_catalog_change is not None
         invalid_server_ids = await self._validate_global_function_names()
         if state.server_id in invalid_server_ids:
@@ -780,6 +835,7 @@ class MCPServerManager:
         state = self._states.pop(server_id, None)
         if state is None:
             return
+        self._advance_server_generation(server_id)
         await self._cancel_refresh_task(state)
         await self._remove_scoped_server_states(server_id)
         await self._disconnect_state_when_idle(state)
@@ -991,6 +1047,8 @@ class MCPServerManager:
             async with state.lock:
                 await self._disconnect_state_when_idle(state)
                 await self._mark_scoped_states_failed(server_id, error_message)
+                if state.catalog is not None:
+                    self._advance_server_generation(server_id)
                 state.catalog = None
                 state.last_error = MCPProtocolError(server_id, error_message)
                 state.stale = False

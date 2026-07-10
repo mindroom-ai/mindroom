@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.mcp.config import MCPServerConfig
-    from mindroom.mcp.manager import MCPServerManager
+    from mindroom.mcp.manager import MCPServerBinding, MCPServerManager
     from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -57,6 +57,7 @@ class MindRoomMCPToolkit(Toolkit):
         catalog: MCPServerCatalog | None,
         tool_name: str | None = None,
         server_config: MCPServerConfig | None = None,
+        server_binding: MCPServerBinding | None = None,
         include_tools: list[str] | str | None = None,
         exclude_tools: list[str] | str | None = None,
         call_timeout_seconds: float | None = None,
@@ -72,6 +73,7 @@ class MindRoomMCPToolkit(Toolkit):
         self.manager = manager
         self.catalog = catalog
         self.server_config = server_config
+        self.server_binding = server_binding
         self.runtime_paths = runtime_paths
         self.credentials_manager = credentials_manager
         self.worker_target = worker_target
@@ -81,7 +83,8 @@ class MindRoomMCPToolkit(Toolkit):
         if self._is_oauth_backed():
             self._register_oauth_bridge_tools()
             if self.manager is not None:
-                cached_catalog = self.manager.cached_request_catalog(
+                manager = self._require_current_manager()
+                cached_catalog = manager.cached_request_catalog(
                     self.server_id,
                     worker_target=self.worker_target,
                 )
@@ -96,6 +99,16 @@ class MindRoomMCPToolkit(Toolkit):
 
     def _is_oauth_backed(self) -> bool:
         return self.server_config is not None and self.server_config.auth is not None
+
+    def _require_current_manager(self) -> MCPServerManager:
+        """Return the toolkit manager after rejecting a stale snapshot binding."""
+        manager = self.manager
+        if manager is None:
+            msg = f"MCP server '{self.server_id}' is not connected"
+            raise RuntimeError(msg)
+        if self.server_binding is not None:
+            return self.server_binding.require_current(require_mcp_server_manager())
+        return manager
 
     def _filtered_catalog_tools(self, catalog: MCPServerCatalog) -> list[MCPDiscoveredTool]:
         filtered: list[MCPDiscoveredTool] = []
@@ -170,10 +183,8 @@ class MindRoomMCPToolkit(Toolkit):
         return json.dumps(oauth_connection_required_payload(exc))
 
     async def _oauth_request_catalog(self) -> MCPServerCatalog:
-        if self.manager is None:
-            msg = f"MCP server '{self.server_id}' is not connected"
-            raise RuntimeError(msg)
-        return await self.manager.get_request_catalog(
+        manager = self._require_current_manager()
+        return await manager.get_request_catalog(
             self.server_id,
             credentials_manager=self.credentials_manager,
             worker_target=self.worker_target,
@@ -229,11 +240,9 @@ class MindRoomMCPToolkit(Toolkit):
                     "available_tools": sorted(tools_by_name),
                 },
             )
-        if self.manager is None:
-            msg = f"MCP server '{self.server_id}' is not connected"
-            raise RuntimeError(msg)
+        manager = self._require_current_manager()
         try:
-            return await self.manager.call_tool(
+            return await manager.call_tool(
                 self.server_id,
                 tool_name,
                 dict(arguments or {}),
@@ -246,8 +255,8 @@ class MindRoomMCPToolkit(Toolkit):
 
     def _build_function(self, tool: MCPDiscoveredTool) -> Function:
         async def _call_tool(**kwargs: object) -> ToolResult:
-            assert self.manager is not None
-            return await self.manager.call_tool(
+            manager = self._require_current_manager()
+            return await manager.call_tool(
                 self.server_id,
                 tool.remote_name,
                 dict(kwargs),

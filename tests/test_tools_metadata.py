@@ -7,13 +7,15 @@ from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Never
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import agno.tools.crawl4ai as agno_crawl4ai
 import pytest
 from agno.tools import Toolkit
 
 import mindroom.tool_system.metadata as metadata_module
+import mindroom.tool_system.plugin_imports as plugin_imports_module
+import mindroom.tool_system.registry_state as registry_state_module
 
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
@@ -367,7 +369,7 @@ def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch
     module_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     snapshot_modules = SnapshotOnlyModules(sys.modules.copy())
-    monkeypatch.setattr(metadata_module.sys, "modules", snapshot_modules)
+    monkeypatch.setattr(plugin_imports_module.sys, "modules", snapshot_modules)
 
     snapshot = capture_tool_registry_snapshot()
     assert isinstance(snapshot.plugin_modules, dict)
@@ -378,35 +380,42 @@ def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch
     assert "__validation__" in module_name
 
 
-def test_module_origin_within_root_caches_path_resolution(
-    tmp_path: Path,
+def test_restore_module_import_state_removes_new_parent_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rolling back a rejected dependency import must clear importlib's parent child binding."""
+    parent = ModuleType("plugin_test_parent")
+    monkeypatch.setitem(sys.modules, "plugin_test_parent", parent)
+    snapshot = plugin_imports_module.snapshot_module_import_state()
+    tracked_imports = plugin_imports_module.TrackedModuleImports()
+    tracked_imports.record("plugin_test_parent.child")
+    child = ModuleType("plugin_test_parent.child")
+    sys.modules["plugin_test_parent.child"] = child
+    parent.child = child
+
+    plugin_imports_module.restore_module_import_state(snapshot, tracked_imports)
+
+    assert "plugin_test_parent.child" not in sys.modules
+    assert not hasattr(parent, "child")
+
+
+def test_restore_module_import_state_restores_preexisting_parent_attribute(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Repeated origin checks for one module file should not re-resolve the path."""
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    module_path = plugin_root / "helper.py"
-    module_path.write_text("VALUE = 1\n", encoding="utf-8")
-    module = ModuleType("demo.helper")
-    module.__file__ = str(module_path)
-    resolve_calls = 0
-    original_resolve = Path.resolve
+    """Rollback must restore a non-module parent attribute replaced by importlib."""
+    parent = ModuleType("plugin_test_existing_parent")
+    previous_child = object()
+    parent.child = previous_child
+    monkeypatch.setitem(sys.modules, "plugin_test_existing_parent", parent)
+    snapshot = plugin_imports_module.snapshot_module_import_state()
+    tracked_imports = plugin_imports_module.TrackedModuleImports()
+    tracked_imports.record("plugin_test_existing_parent.child")
+    child = ModuleType("plugin_test_existing_parent.child")
+    sys.modules["plugin_test_existing_parent.child"] = child
+    parent.child = child
 
-    def counted_resolve(self: Path, *args: object, **kwargs: object) -> Path:
-        nonlocal resolve_calls
-        if self == Path(str(module_path)):
-            resolve_calls += 1
-        return original_resolve(self, *args, **kwargs)
+    plugin_imports_module.restore_module_import_state(snapshot, tracked_imports)
 
-    metadata_module._resolved_module_file.cache_clear()
-    monkeypatch.setattr(metadata_module.Path, "resolve", counted_resolve)
-    try:
-        assert metadata_module._module_origin_within_root(module, plugin_root)
-        assert metadata_module._module_origin_within_root(module, plugin_root)
-    finally:
-        metadata_module._resolved_module_file.cache_clear()
-
-    assert resolve_calls == 1
+    assert "plugin_test_existing_parent.child" not in sys.modules
+    assert parent.child is previous_child
 
 
 def test_restore_tool_registry_snapshot_uses_sys_modules_snapshot(
@@ -432,11 +441,11 @@ def test_restore_tool_registry_snapshot_uses_sys_modules_snapshot(
 
     snapshot_modules = SnapshotOnlyModules(sys.modules.copy())
     snapshot_modules[leaked_module_name] = leaked_module
-    monkeypatch.setattr(metadata_module.sys, "modules", snapshot_modules)
+    monkeypatch.setattr(registry_state_module.sys, "modules", snapshot_modules)
 
     restore_tool_registry_snapshot(snapshot)
 
-    assert leaked_module_name not in metadata_module.sys.modules
+    assert leaked_module_name not in registry_state_module.sys.modules
 
 
 def test_tool_metadata_consistency() -> None:
@@ -896,9 +905,9 @@ def test_resolved_tool_state_cached_per_config_object(
 ) -> None:
     """One config object should resolve its tool state once across all consumers."""
     compute_calls = 0
-    dummy_state = metadata_module._ResolvedToolState({}, {}, {})
+    dummy_state = metadata_module.ResolvedToolState({}, {}, {})
 
-    def counted_compute(*_args: object, **_kwargs: object) -> metadata_module._ResolvedToolState:
+    def counted_compute(*_args: object, **_kwargs: object) -> metadata_module.ResolvedToolState:
         nonlocal compute_calls
         compute_calls += 1
         return dummy_state
@@ -946,7 +955,7 @@ def test_resolved_tool_state_cache_evicts_on_config_gc(
     monkeypatch.setattr(
         metadata_module,
         "_compute_resolved_tool_state_for_runtime",
-        lambda *_args, **_kwargs: metadata_module._ResolvedToolState({}, {}, {}),
+        lambda *_args, **_kwargs: metadata_module.ResolvedToolState({}, {}, {}),
     )
     metadata_module.clear_resolved_tool_state_cache()
     runtime_paths = resolve_runtime_paths(
@@ -963,3 +972,102 @@ def test_resolved_tool_state_cache_evicts_on_config_gc(
         assert not metadata_module._RESOLVED_TOOL_STATE_CACHE
     finally:
         metadata_module.clear_resolved_tool_state_cache()
+
+
+def test_published_tool_state_registers_one_finalizer_per_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated strict and degraded publications must not accumulate finalizers."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    config = Config()
+    config_id = id(config)
+    finalize = MagicMock()
+    monkeypatch.setattr(metadata_module.weakref, "finalize", finalize)
+    metadata_module.clear_resolved_tool_state_cache()
+    metadata_module._RESOLVED_TOOL_STATE_FINALIZER_CONFIG_IDS.discard(config_id)
+    state = metadata_module.ResolvedToolState({}, {}, {})
+    try:
+        for tolerate_plugin_load_errors in (False, False, True, False):
+            metadata_module.publish_resolved_tool_state_for_runtime(
+                runtime_paths,
+                config,
+                state,
+                tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+            )
+
+        finalize.assert_called_once_with(config, metadata_module._evict_resolved_tool_states, config_id)
+    finally:
+        metadata_module.clear_resolved_tool_state_cache()
+        metadata_module._RESOLVED_TOOL_STATE_FINALIZER_CONFIG_IDS.discard(config_id)
+
+
+def test_refresh_resolved_mcp_state_preserves_exact_plugin_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MCP catalog refreshes must not re-execute or replace loaded plugin metadata."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    config = Config(
+        mcp_servers={
+            "demo": {
+                "transport": "stdio",
+                "command": "npx",
+            },
+        },
+    )
+    mcp_tool_name = ["mcp_before"]
+
+    def tool_factory() -> type[Toolkit]:
+        return Toolkit
+
+    def resolved_mcp_state(_config: Config) -> tuple[dict[str, object], dict[str, object]]:
+        tool_name = mcp_tool_name[0]
+        return (
+            {tool_name: tool_factory},
+            {
+                tool_name: metadata_module.ToolMetadata(
+                    name=tool_name,
+                    display_name="MCP Demo",
+                    description="Test MCP state",
+                    category=ToolCategory.DEVELOPMENT,
+                ),
+            },
+        )
+
+    monkeypatch.setattr("mindroom.mcp.registry.resolved_mcp_tool_state", resolved_mcp_state)
+    plugin_metadata = metadata_module.ToolMetadata(
+        name="plugin_tool",
+        display_name="Plugin Tool",
+        description="Exact loaded plugin state",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    resolved_state = metadata_module.resolved_tool_state_from_loaded_registry(
+        config,
+        {"plugin_tool": tool_factory},
+        {"plugin_tool": plugin_metadata},
+    )
+    metadata_module.publish_resolved_tool_state_for_runtime(
+        runtime_paths,
+        config,
+        resolved_state,
+        tolerate_plugin_load_errors=False,
+    )
+
+    mcp_tool_name[:] = ["mcp_after"]
+    metadata_module.refresh_resolved_mcp_tool_state_for_runtime(runtime_paths, config)
+
+    refreshed = metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
+    assert refreshed.tool_metadata["plugin_tool"] is plugin_metadata
+    assert "mcp_before" not in refreshed.tool_registry
+    assert "mcp_before" not in refreshed.tool_metadata
+    assert "mcp_after" in refreshed.tool_registry
+    assert "mcp_after" in refreshed.tool_metadata

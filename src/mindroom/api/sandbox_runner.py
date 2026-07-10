@@ -47,6 +47,7 @@ from mindroom.tool_system.catalog import (
     ToolConfigOverrideError,
     ToolInitOverrideError,
     ToolValidationInfo,
+    activate_tool_registry,
     deserialize_tool_validation_snapshot,
     ensure_tool_registry_loaded,
     get_tool_by_name,
@@ -249,6 +250,7 @@ def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Co
         normalized_config_data(data),
         context={"runtime_paths": runtime_paths},
     )
+    config.mark_runtime_tool_validation_complete()
     return _config_with_available_plugins(config, runtime_paths)
 
 
@@ -267,7 +269,7 @@ def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) 
             continue
 
         try:
-            plugin_root = plugin_imports._resolve_plugin_root(plugin_entry.path, runtime_paths)
+            plugin_root = plugin_imports.resolve_plugin_root(plugin_entry.path, runtime_paths)
         except Exception:
             skipped_plugin_paths.append(plugin_entry.path)
             continue
@@ -302,13 +304,18 @@ def initialize_sandbox_runner_app(
 ) -> None:
     """Attach one explicit runtime context to a sandbox-runner app instance."""
     committed_config = config or _runtime_config_or_empty(runtime_paths)
-    _ensure_registry_loaded_with_config(runtime_paths, committed_config)
+    _activate_registry_with_config(runtime_paths, committed_config)
     api_app.state.sandbox_runner_context = _SandboxRunnerContext(
         runtime_paths=runtime_paths,
         config=committed_config,
         tool_metadata=TOOL_METADATA.copy(),
         runner_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
     )
+
+
+def _activate_registry_with_config(runtime_paths: RuntimePaths, config: Config) -> None:
+    """Explicitly switch the process-global registry to one committed runner config."""
+    activate_tool_registry(runtime_paths, config)
 
 
 def _ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config) -> None:

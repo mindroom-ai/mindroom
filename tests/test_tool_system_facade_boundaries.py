@@ -34,6 +34,7 @@ ALLOWED_PUBLIC_CATALOG_REEXPORTS = {
 EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "TOOL_METADATA",
     "ConfigField",
+    "ResolvedToolState",
     "SetupType",
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
@@ -44,6 +45,7 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "ToolMetadataValidationError",
     "ToolStatus",
     "ToolValidationInfo",
+    "activate_tool_registry",
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
     "clear_resolved_tool_state_cache",
@@ -53,12 +55,17 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "export_tools_metadata",
     "get_tool_by_name",
     "normalize_authored_tool_overrides",
-    "resolved_failed_plugin_names_for_runtime",
+    "publish_resolved_tool_state_for_runtime",
+    "refresh_resolved_mcp_tool_state_for_runtime",
     "resolved_tool_metadata_for_runtime",
+    "resolved_tool_state_from_loaded_registry",
+    "resolved_tool_state_with_unavailable_tools",
     "resolved_tool_validation_snapshot_for_runtime",
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
+    "tool_validation_snapshot_from_resolved_state",
+    "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
 ]
 
@@ -360,6 +367,7 @@ def test_private_registry_state_import_is_whitelisted_outside_tool_system() -> N
     """Only the MCP registry may import private registry state directly outside tool_system."""
     assert _private_registry_state_importers_outside_tool_system() == {
         ("mindroom.mcp.registry", "TOOL_REGISTRY"),
+        ("mindroom.mcp.registry", "locked_tool_registry_state"),
         ("mindroom.mcp.registry", "reconcile_dynamic_tool_state"),
     }
 

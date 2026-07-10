@@ -52,7 +52,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.scheduling import ScheduledWorkflow
 from mindroom.session_ids import create_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
-from mindroom.tool_system.plugins import load_plugins
+from mindroom.tool_system.plugins import _load_plugins as load_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import (
