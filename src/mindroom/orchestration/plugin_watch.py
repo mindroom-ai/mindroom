@@ -104,6 +104,10 @@ async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
                 continue
 
             configured_roots = watch_state.sync_roots(config)
+            if watch_state_revision != watch_state.revision:
+                pending_changes.clear()
+                last_change_at = None
+                watch_state_revision = watch_state.revision
             pending_changes = _filter_pending_plugin_changes(pending_changes, configured_roots)
             changed_paths = await _collect_plugin_root_changes(configured_roots, watch_state.last_snapshot_by_root)
             if watch_state_revision != watch_state.revision:

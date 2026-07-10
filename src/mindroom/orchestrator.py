@@ -831,6 +831,8 @@ class _MultiAgentOrchestrator:
             new_config,
             changed_server_ids,
         )
+        prepared_api_snapshot = await self._external_trigger_runtime.prepare_api_config_snapshot(new_config)
+        self._external_trigger_runtime.publish_prepared_api_config_snapshot(prepared_api_snapshot)
         self.config = new_config
         new_hook_registry = apply_prepared_plugin_reload(
             prepared_plugin_reload,
@@ -1407,7 +1409,8 @@ class _MultiAgentOrchestrator:
                 "updating_config_authorization",
                 authorized_user_ids=new_config.authorization.global_users,
             )
-            await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
+            if not plugin_changes:
+                await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
             if changed_runtime_mcp_servers:
                 plan = replace(
                     plan,

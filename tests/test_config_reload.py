@@ -720,6 +720,47 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
 
 
 @pytest.mark.asyncio
+async def test_plugin_watcher_keeps_edit_after_manual_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An edit after a manual baseline refresh remains visible to the watcher."""
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_SCAN_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_TREE_DEBOUNCE_SECONDS", 0.01)
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "demo", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    hooks_path = plugin_root / "hooks.py"
+    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+    config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), api_enabled=False)
+    orchestrator.config = config
+    orchestrator.running = True
+    reload_seen = asyncio.Event()
+
+    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+        assert source == "watcher"
+        assert hooks_path in changed_paths
+        reload_seen.set()
+        return PluginReloadResult(HookRegistry.empty(), (), 0)
+
+    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
+    try:
+        await asyncio.sleep(0.05)
+        orchestrator.plugin_watch.refresh(config)
+        hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
+        await asyncio.wait_for(reload_seen.wait(), timeout=1)
+    finally:
+        watcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher_task
+
+
+@pytest.mark.asyncio
 async def test_plugin_reload_rebuilds_runtime_tool_overrides(tmp_path: Path) -> None:
     """A plugin metadata edit should publish one newly resolved runtime config everywhere."""
     plugin_root = tmp_path / "plugins" / "override-reload"
@@ -832,6 +873,29 @@ async def test_config_update_rebuilds_runtime_from_prepared_plugin_snapshot(tmp_
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
     try:
+        with (
+            patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+            patch.object(
+                orchestrator._external_trigger_runtime,
+                "prepare_api_config_snapshot",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch.object(
+                orchestrator._external_trigger_runtime,
+                "publish_prepared_api_config_snapshot",
+                side_effect=RuntimeError("stale API snapshot"),
+            ),
+            pytest.raises(RuntimeError, match="stale API snapshot"),
+        ):
+            await orchestrator._apply_plugin_changes_for_config_update(
+                current_config=current_config,
+                new_config=new_config,
+                changed_server_ids=set(),
+            )
+
+        assert orchestrator.config is current_config
+        assert original_metadata == TOOL_METADATA
+
         with patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())):
             rebuilt_config, _ = await orchestrator._apply_plugin_changes_for_config_update(
                 current_config=current_config,
