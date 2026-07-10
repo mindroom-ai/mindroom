@@ -92,6 +92,57 @@ def test_parse_membership_rejects_other_applications_and_leaves() -> None:
     assert parse_membership_event(leave) is None
 
 
+@pytest.mark.parametrize("scope", ["m.user", "org.example.other"])
+def test_parse_membership_rejects_non_room_scope(scope: str) -> None:
+    """User-scoped and unknown sessions cannot enter the room-call roster."""
+    content = build_membership_content(
+        user_id=USER,
+        device_id=DEVICE,
+        livekit_service_url=SERVICE_URL,
+        expires_ms=123,
+    )
+
+    assert parse_membership_event(_membership_event({**content, "scope": scope})) is None
+
+
+@pytest.mark.parametrize(
+    "focus_active",
+    [
+        None,
+        {"type": "other", "focus_selection": "oldest_membership"},
+        {"type": "livekit", "focus_selection": "multi_sfu"},
+    ],
+)
+def test_parse_membership_rejects_unsupported_focus_mode(focus_active: object) -> None:
+    """Only LiveKit oldest-membership focus mode enters the single-SFU bridge."""
+    content = build_membership_content(
+        user_id=USER,
+        device_id=DEVICE,
+        livekit_service_url=SERVICE_URL,
+        expires_ms=123,
+    )
+
+    assert parse_membership_event(_membership_event({**content, "focus_active": focus_active})) is None
+
+
+def test_parse_membership_does_not_scan_past_primary_focus() -> None:
+    """An incompatible primary transport cannot be bypassed by a later LiveKit entry."""
+    content = build_membership_content(
+        user_id=USER,
+        device_id=DEVICE,
+        livekit_service_url=SERVICE_URL,
+        expires_ms=123,
+    )
+    content["foci_preferred"] = [
+        {"type": "other", "url": "https://other.example.org"},
+        {"type": "livekit", "livekit_service_url": SERVICE_URL},
+    ]
+
+    member = parse_membership_event(_membership_event(content))
+    assert member is not None
+    assert member.livekit_service_url is None
+
+
 def test_parse_membership_defaults_membership_id_and_expiry() -> None:
     """Parse membership defaults membership id and expiry."""
     event = _membership_event(

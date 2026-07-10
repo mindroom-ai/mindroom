@@ -26,17 +26,28 @@ DEFAULT_MEMBERSHIP_EXPIRES_MS = 4 * 60 * 60 * 1000
 
 
 def _preferred_livekit_service_url(content: dict[str, Any]) -> str | None:
-    """Return the first usable preferred LiveKit focus URL."""
+    """Return the selected first preferred LiveKit focus URL."""
     foci = content.get("foci_preferred")
-    if not isinstance(foci, list):
+    if not isinstance(foci, list) or not foci:
         return None
-    for focus in foci:
-        if not isinstance(focus, dict) or focus.get("type") != "livekit":
-            continue
-        candidate = focus.get("livekit_service_url")
-        if isinstance(candidate, str) and candidate:
-            return candidate
-    return None
+    focus = foci[0]
+    if not isinstance(focus, dict) or focus.get("type") != "livekit":
+        return None
+    candidate = focus.get("livekit_service_url")
+    return candidate if isinstance(candidate, str) and candidate else None
+
+
+def _is_supported_room_call_session(content: dict[str, Any]) -> bool:
+    """Return whether legacy session metadata describes our supported room call."""
+    focus_active = content.get("focus_active")
+    return (
+        content.get("application") == _CALL_APPLICATION
+        and content.get("call_id") in (_ROOM_CALL_ID, "ROOM")
+        and content.get("scope") in (None, _ROOM_CALL_SCOPE)
+        and isinstance(focus_active, dict)
+        and focus_active.get("type") == "livekit"
+        and focus_active.get("focus_selection") == "oldest_membership"
+    )
 
 
 @dataclass(frozen=True)
@@ -100,10 +111,7 @@ def parse_membership_event(event_source: dict[str, Any]) -> CallMember | None:
     content = event_source.get("content")
     if not isinstance(sender, str) or not isinstance(content, dict) or not content:
         return None
-    if content.get("application") != _CALL_APPLICATION:
-        return None
-    call_id = content.get("call_id")
-    if call_id not in (_ROOM_CALL_ID, "ROOM"):
+    if not _is_supported_room_call_session(content):
         return None
     device_id = content.get("device_id")
     if not isinstance(device_id, str) or not device_id:
