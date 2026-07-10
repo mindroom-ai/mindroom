@@ -1216,6 +1216,7 @@ depends_on = [
     "mindroom.response_lifecycle",
     "mindroom.response_terminal",
     "mindroom.streaming",
+    "mindroom.sync_restart_retry",
     "mindroom.teams",
     "mindroom.thread_summary",
     "mindroom.tool_system.dynamic_toolkits",
@@ -1824,8 +1825,15 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.sync_restart_retry"
-depends_on = ["mindroom.logging_config"]
-visibility = ["mindroom.bot"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.history.types",
+    "mindroom.logging_config",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.response_runner",
+]
 
 [[modules]]
 path = "mindroom.sync_bridge_state"

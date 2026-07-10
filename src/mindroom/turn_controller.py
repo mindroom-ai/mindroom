@@ -90,7 +90,7 @@ from mindroom.response_payload_preparation import (
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_responder_for_message
-from mindroom.teams import TeamIntent, select_ad_hoc_team_mode
+from mindroom.teams import TeamIntent, TeamMode, select_ad_hoc_team_mode
 from mindroom.text_ingress_dispatch import dispatch_text_message
 from mindroom.thread_utils import (
     check_agent_mentioned,
@@ -1534,6 +1534,7 @@ class TurnController:
         *,
         handled_turn: TurnRecord,
         matrix_run_metadata: dict[str, Any] | None,
+        retry_team_mode: TeamMode | None,
     ) -> tuple[Callable[[], None], Callable[[str], None]]:
         """Build callbacks for sync-restart retry and deferred handled recording."""
 
@@ -1549,6 +1550,8 @@ class TurnController:
                     dispatch_started_at=time.monotonic(),
                     handled_turn=handled_turn,
                     matrix_run_metadata=matrix_run_metadata,
+                    retry_team_mode=retry_team_mode,
+                    sync_restart_retry_source_event_id=event.event_id,
                 )
 
             self.deps.restart_retry.register(event.event_id, retry)
@@ -1558,7 +1561,7 @@ class TurnController:
 
         return register_sync_restart_retry, record_deferred_outcome
 
-    async def _execute_response_action(  # noqa: C901, PLR0912
+    async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
@@ -1572,6 +1575,8 @@ class TurnController:
         matrix_run_metadata: dict[str, Any] | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
+        retry_team_mode: TeamMode | None = None,
+        sync_restart_retry_source_event_id: str | None = None,
     ) -> None:
         """Execute one final response path for a prepared dispatch action."""
         if room.room_id != dispatch.target.room_id:
@@ -1636,6 +1641,19 @@ class TurnController:
                 context_ready_monotonic=context_ready_monotonic,
             )
 
+            team_mode: TeamMode | None = None
+            if action.kind == "team":
+                assert action.form_team is not None
+                assert action.form_team.mode is not None
+                team_mode = retry_team_mode or action.form_team.mode
+                if retry_team_mode is None and action.form_team.intent is not TeamIntent.CONFIGURED_TEAM and event.body:
+                    team_mode = await select_ad_hoc_team_mode(
+                        event.body,
+                        action.form_team.eligible_members,
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                    )
+
             register_sync_restart_retry, record_deferred_outcome = self._build_response_settlement_callbacks(
                 room,
                 event,
@@ -1644,19 +1662,12 @@ class TurnController:
                 payload_inputs,
                 handled_turn=handled_turn,
                 matrix_run_metadata=matrix_run_metadata,
+                retry_team_mode=team_mode,
             )
             try:
                 if action.kind == "team":
                     assert action.form_team is not None
-                    assert action.form_team.mode is not None
-                    team_mode = action.form_team.mode
-                    if action.form_team.intent is not TeamIntent.CONFIGURED_TEAM and event.body:
-                        team_mode = await select_ad_hoc_team_mode(
-                            event.body,
-                            action.form_team.eligible_members,
-                            self.deps.runtime.config,
-                            self.deps.runtime_paths,
-                        )
+                    assert team_mode is not None
                     response_event_id = await self.deps.response_runner.generate_team_response_helper(
                         ResponseRequest(
                             thread_history=dispatch.context.thread_history,
@@ -1673,6 +1684,7 @@ class TurnController:
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                             on_sync_restart_cancelled=register_sync_restart_retry,
+                            sync_restart_retry_source_event_id=sync_restart_retry_source_event_id,
                             on_deferred_outcome_handled=record_deferred_outcome,
                         ),
                         team_agents=action.form_team.eligible_members,
@@ -1695,6 +1707,7 @@ class TurnController:
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                             on_sync_restart_cancelled=register_sync_restart_retry,
+                            sync_restart_retry_source_event_id=sync_restart_retry_source_event_id,
                             on_deferred_outcome_handled=record_deferred_outcome,
                         ),
                     )

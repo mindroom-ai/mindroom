@@ -1802,7 +1802,16 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        mock_generate_team_response = AsyncMock(return_value="$team-response")
+        team_requests: list[ResponseRequest] = []
+
+        async def generate_team_response(request: ResponseRequest, **_kwargs: object) -> str:
+            team_requests.append(request)
+            if len(team_requests) == 1:
+                assert request.on_sync_restart_cancelled is not None
+                request.on_sync_restart_cancelled()
+            return "$team-response"
+
+        mock_generate_team_response = AsyncMock(side_effect=generate_team_response)
         install_send_response_mock(bot, AsyncMock())
         bot._response_runner.generate_team_response_helper = mock_generate_team_response
         _replace_turn_policy_deps(
@@ -1826,6 +1835,7 @@ class TestAgentBot(AgentBotTestBase):
                 dispatch_started_at=0.0,
                 handled_turn=TurnRecord.create([event.event_id]),
             )
+            await bot._restart_retry_queue.flush()
 
         assert action.form_team is not None
         mock_select_team_mode.assert_awaited_once_with(
@@ -1834,6 +1844,8 @@ class TestAgentBot(AgentBotTestBase):
             bot._turn_controller.deps.runtime.config,
             bot._turn_controller.deps.runtime_paths,
         )
+        assert [request.sync_restart_retry_source_event_id for request in team_requests] == [None, event.event_id]
+        assert mock_generate_team_response.await_count == 2
         assert mock_generate_team_response.await_args.kwargs["team_mode"] == "coordinate"
         assert mock_generate_team_response.await_args.kwargs["team_agents"] == action.form_team.eligible_members
 

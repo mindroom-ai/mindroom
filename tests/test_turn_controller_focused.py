@@ -574,10 +574,15 @@ async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(conf
         await harness.deliver(room, event)
 
     assert harness.restart_retry.has_pending
+    assert harness.runner.requests[0].sync_restart_retry_source_event_id is None
     assert harness.turn_store.is_handled(event.event_id) is True
     record = harness.turn_store.get_turn_record(event.event_id)
     assert record is not None
     assert record.response_event_id == "$response:localhost"
+
+    harness.runner.deferred_sync_restart_error = None
+    await harness.restart_retry.flush()
+    assert harness.runner.requests[1].sync_restart_retry_source_event_id == event.event_id
 
 
 @pytest.mark.asyncio

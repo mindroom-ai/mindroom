@@ -56,6 +56,7 @@ from mindroom.streaming import (
     clean_partial_reply_text,
     strip_visible_tool_markers,
 )
+from mindroom.sync_restart_retry import interrupted_source_needs_retry
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
@@ -267,6 +268,7 @@ class ResponseRequest:
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
     on_sync_restart_cancelled: Callable[[], None] | None = None
+    sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], None] | None = None
 
     @property
@@ -935,15 +937,80 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
-    ) -> ResponseRequest:
+        history_scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity,
+    ) -> ResponseRequest | None:
         """Run the shared post-lock request preparation for one locked turn."""
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
+        request = self._request_with_locked_target(request, resolved_target)
+        if not self._sync_restart_retry_is_current(
+            request,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
+        ):
+            return None
         request = await self._prepare_request_after_lock(request)
         request = self._request_with_locked_target(request, resolved_target)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("thread_refresh_ready")
         return request
+
+    def _sync_restart_retry_is_current(
+        self,
+        request: ResponseRequest,
+        *,
+        history_scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity,
+    ) -> bool:
+        """Fail closed unless persisted history still ends in this retry's interrupted source."""
+        source_event_id = request.sync_restart_retry_source_event_id
+        if source_event_id is None:
+            return True
+
+        storage = None
+        should_retry = False
+        reason = "history_not_pending"
+        try:
+            storage = self.deps.state_writer.create_storage(execution_identity, scope=history_scope)
+            session = storage.get_session(
+                request.response_envelope.target.session_id,
+                self.deps.state_writer.session_type_for_scope(history_scope),
+            )
+            if isinstance(session, AgentSession | TeamSession):
+                should_retry = interrupted_source_needs_retry(
+                    session.runs or (),
+                    scope=history_scope,
+                    source_event_id=source_event_id,
+                )
+            else:
+                reason = "history_missing_or_degraded"
+        except Exception as error:
+            reason = "history_lookup_failed"
+            self.deps.logger.warning(
+                "sync_restart_retry_history_check_failed",
+                source_event_id=source_event_id,
+                session_id=request.response_envelope.target.session_id,
+                scope=history_scope.key,
+                exception_type=error.__class__.__name__,
+            )
+        finally:
+            if storage is not None:
+                try:
+                    storage.close()
+                except Exception:
+                    should_retry = False
+                    reason = "history_storage_close_failed"
+
+        if not should_retry:
+            self.deps.logger.info(
+                "sync_restart_retry_skipped",
+                source_event_id=source_event_id,
+                session_id=request.response_envelope.target.session_id,
+                scope=history_scope.key,
+                reason=reason,
+            )
+        return should_retry
 
     async def _finalize_pre_delivery_terminal(
         self,
@@ -1188,12 +1255,24 @@ class ResponseRunner:
         *,
         resolved_target: MessageTarget,
         response_kind: str,
+        history_scope: HistoryScope | None = None,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> str | None:
         """Finalize one empty prompt through the canonical response lifecycle."""
-        if request.on_lifecycle_lock_acquired is not None:
-            request.on_lifecycle_lock_acquired()
-        request = await self._prepare_request_after_lock(request)
-        request = self._request_with_locked_target(request, resolved_target)
+        resolved_history_scope = history_scope or self.deps.state_writer.history_scope()
+        resolved_execution_identity = execution_identity or self.deps.tool_runtime.build_execution_identity(
+            target=resolved_target,
+            user_id=request.user_id,
+        )
+        prepared_request = await self._begin_locked_turn(
+            request,
+            resolved_target=resolved_target,
+            history_scope=resolved_history_scope,
+            execution_identity=resolved_execution_identity,
+        )
+        if prepared_request is None:
+            return None
+        request = prepared_request
         lifecycle = self._build_lifecycle(
             identity=self._response_identity(request, response_kind=response_kind),
             request=request,
@@ -1255,13 +1334,31 @@ class ResponseRunner:
     ) -> str | None:
         """Generate a team response once the per-thread lifecycle lock is held."""
         request = team_request.request
+        retry_execution_identity = self.deps.tool_runtime.build_execution_identity(
+            target=resolved_target,
+            user_id=request.user_id,
+        )
+        session_scope = self.deps.state_writer.team_history_scope(
+            list(team_request.team_agents),
+            requester_user_id=retry_execution_identity.requester_id,
+        )
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(
                 request,
                 resolved_target=resolved_target,
                 response_kind="team",
+                history_scope=session_scope,
+                execution_identity=retry_execution_identity,
             )
-        request = await self._begin_locked_turn(request, resolved_target=resolved_target)
+        prepared_request = await self._begin_locked_turn(
+            request,
+            resolved_target=resolved_target,
+            history_scope=session_scope,
+            execution_identity=retry_execution_identity,
+        )
+        if prepared_request is None:
+            return None
+        request = prepared_request
         team_request = replace(team_request, request=request)
         requester_user_id = request.user_id or ""
         _memory_prompt, _memory_thread_history, prepared_prompt, model_thread_history = (
@@ -1339,10 +1436,6 @@ class ResponseRunner:
         self.deps.runtime.config.assert_team_agents_supported(
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
             allow_direct_private_agents=allow_direct_private_agents,
-        )
-        session_scope = self.deps.state_writer.team_history_scope(
-            list(team_request.team_agents),
-            requester_user_id=execution_identity.requester_id,
         )
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
@@ -2388,13 +2481,28 @@ class ResponseRunner:
         resolved_target: MessageTarget,
     ) -> str | None:
         """Generate one agent response after acquiring the per-thread lock."""
+        history_scope = self.deps.state_writer.history_scope()
+        execution_identity = self.deps.tool_runtime.build_execution_identity(
+            target=resolved_target,
+            user_id=request.user_id,
+        )
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(
                 request,
                 resolved_target=resolved_target,
                 response_kind="ai",
+                history_scope=history_scope,
+                execution_identity=execution_identity,
             )
-        request = await self._begin_locked_turn(request, resolved_target=resolved_target)
+        prepared_request = await self._begin_locked_turn(
+            request,
+            resolved_target=resolved_target,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
+        )
+        if prepared_request is None:
+            return None
+        request = prepared_request
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,
@@ -2413,10 +2521,6 @@ class ResponseRunner:
         )
 
         session_id = resolved_target.session_id
-        execution_identity = self.deps.tool_runtime.build_execution_identity(
-            target=resolved_target,
-            user_id=request.user_id,
-        )
         reprioritize_auto_flush_sessions(
             self.deps.storage_path,
             self.deps.runtime.config,
@@ -2469,7 +2573,7 @@ class ResponseRunner:
 
         persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
-            session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
+            session_type=self.deps.state_writer.session_type_for_scope(history_scope),
             create_storage=lambda: self.deps.state_writer.create_storage(execution_identity),
         )
 

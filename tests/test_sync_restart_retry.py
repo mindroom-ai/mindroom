@@ -3,19 +3,153 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
+from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 from structlog.testing import capture_logs
 
+from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.response_runner import ResponseRequest, ResponseRunner
-from mindroom.sync_restart_retry import SyncRestartRetryQueue
-from tests.conftest import request_envelope
+from mindroom.history.types import HistoryScope
+from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
+from mindroom.sync_restart_retry import SyncRestartRetryQueue, interrupted_source_needs_retry
+from tests.conftest import request_envelope, unwrap_extracted_collaborator
+from tests.response_runner_helpers import _bot, _plain_request, _target
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
+
+
+def _stored_run(
+    scope: HistoryScope,
+    run_id: str,
+    *,
+    source_event_id: str = "$source",
+    interrupted: bool = False,
+) -> RunOutput | TeamRunOutput:
+    metadata = {MATRIX_EVENT_ID_METADATA_KEY: source_event_id}
+    if interrupted:
+        metadata["mindroom_replay_state"] = "interrupted"
+    run_kwargs = {
+        "run_id": run_id,
+        "status": RunStatus.completed,
+        "content": "answer",
+        "metadata": metadata,
+    }
+    if scope.kind == "team":
+        return TeamRunOutput(team_id=scope.scope_id, **run_kwargs)
+    return RunOutput(agent_id=scope.scope_id, **run_kwargs)
+
+
+def test_retry_history_uses_latest_matching_visible_run() -> None:
+    """Only latest model-visible run for same source and scope decides retry eligibility."""
+    scope = HistoryScope(kind="agent", scope_id="general")
+    interrupted = _stored_run(scope, "interrupted", interrupted=True)
+
+    assert interrupted_source_needs_retry([interrupted], scope=scope, source_event_id="$source") is True
+    assert interrupted_source_needs_retry([], scope=scope, source_event_id="$source") is False
+    for later in (
+        _stored_run(scope, "completed"),
+        _stored_run(scope, "failed-replay", interrupted=True),
+    ):
+        assert interrupted_source_needs_retry([interrupted, later], scope=scope, source_event_id="$source") is False
+    unrelated_runs = [
+        _stored_run(scope, "interrupted", interrupted=True),
+        _stored_run(scope, "other-source", source_event_id="$other"),
+        _stored_run(HistoryScope(kind="team", scope_id="team"), "other-scope"),
+    ]
+    assert interrupted_source_needs_retry(unrelated_runs, scope=scope, source_event_id="$source") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_team", [False, True])
+@pytest.mark.parametrize("history_case", ["current", "superseded", "missing", "degraded", "error"])
+async def test_locked_retry_guard_precedes_payload_and_fails_closed(
+    tmp_path: Path,
+    *,
+    is_team: bool,
+    history_case: str,
+) -> None:
+    """Agent and team retries check history after lock and before payload work."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = _target(reply_to_event_id="$source")
+    execution_identity = runner.deps.tool_runtime.build_execution_identity(
+        target=target,
+        user_id="@user:localhost",
+    )
+    history_scope = (
+        runner.deps.state_writer.team_history_scope(
+            [bot.matrix_id],
+            requester_user_id=execution_identity.requester_id,
+        )
+        if is_team
+        else runner.deps.state_writer.history_scope()
+    )
+    runs = [_stored_run(history_scope, "interrupted", interrupted=True)]
+    if history_case == "superseded":
+        runs.append(_stored_run(history_scope, "completed"))
+    session = (
+        TeamSession(session_id=target.session_id, team_id=history_scope.scope_id, runs=runs)
+        if is_team
+        else AgentSession(session_id=target.session_id, agent_id=history_scope.scope_id, runs=runs)
+    )
+    storage = MagicMock()
+    if history_case == "error":
+        storage.get_session.side_effect = RuntimeError("history unavailable")
+    elif history_case == "missing":
+        storage.get_session.return_value = None
+    elif history_case == "degraded":
+        storage.get_session.return_value = object()
+    else:
+        storage.get_session.return_value = session
+
+    events: list[str] = []
+
+    def create_storage(*_args: object, **_kwargs: object) -> MagicMock:
+        events.append("history")
+        return storage
+
+    async def prepare_payload(_request: ResponseRequest) -> ResponseRequest:
+        events.append("prepare")
+        message = "payload preparation reached"
+        raise RuntimeError(message)
+
+    request = replace(
+        _plain_request(target, source_event_id="$source"),
+        payload_preparation=MagicMock(),
+        sync_restart_retry_source_event_id="$source",
+        on_lifecycle_lock_acquired=lambda: events.append("lock"),
+    )
+    with (
+        patch.object(runner.deps.state_writer, "create_storage", side_effect=create_storage),
+        patch.object(runner.deps.request_preparer, "prepare", new=AsyncMock(side_effect=prepare_payload)),
+    ):
+        response = (
+            runner.generate_team_response_helper(
+                request,
+                team_agents=[bot.matrix_id],
+                team_mode="coordinate",
+            )
+            if is_team
+            else runner.generate_response(request)
+        )
+        if history_case == "current":
+            with pytest.raises(PostLockRequestPreparationError):
+                await response
+        else:
+            assert await response is None
+
+    assert events == (["lock", "history", "prepare"] if history_case == "current" else ["lock", "history"])
+    bot.client.room_send.assert_not_awaited()
 
 
 def _request(on_sync_restart_cancelled: Callable[[], None] | None = None) -> ResponseRequest:
