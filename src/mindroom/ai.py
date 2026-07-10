@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
     from agno.models.response import ToolExecution
+    from agno.tools.function import Function
 
     from mindroom.ai_turn_state import AITurnState
     from mindroom.config.main import Config, ResolvedRuntimeModel
@@ -1077,6 +1078,7 @@ async def _prepare_agent_and_prompt(
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     knowledge: Knowledge | None = None,
     include_interactive_questions: bool = True,
+    tool_function_filter: Callable[[Function], bool] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
@@ -1116,6 +1118,7 @@ async def _prepare_agent_and_prompt(
             active_model_name=runtime_model.model_name,
             knowledge=knowledge,
             include_interactive_questions=include_interactive_questions,
+            tool_function_filter=tool_function_filter,
             include_openai_compat_guidance=include_openai_compat_guidance,
             execution_identity=execution_identity,
             delegation_depth=delegation_depth,
@@ -1229,6 +1232,7 @@ async def _prepare_agent_run_context(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     knowledge: Knowledge | None,
     include_interactive_questions: bool,
+    tool_function_filter: Callable[[Function], bool] | None,
     include_openai_compat_guidance: bool,
     execution_identity: ToolExecutionIdentity | None,
     compaction_lifecycle: CompactionLifecycle | None,
@@ -1252,6 +1256,7 @@ async def _prepare_agent_run_context(
         thread_history=thread_history,
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
+        tool_function_filter=tool_function_filter,
         execution_identity=execution_identity,
         compaction_lifecycle=compaction_lifecycle,
         delegation_depth=delegation_depth,
@@ -1312,6 +1317,7 @@ async def ai_response(  # noqa: C901
     knowledge: Knowledge | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     include_interactive_questions: bool = True,
+    tool_function_filter: Callable[[Function], bool] | None = None,
     include_openai_compat_guidance: bool = False,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
@@ -1344,6 +1350,7 @@ async def ai_response(  # noqa: C901
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        tool_function_filter: Optional policy applied to each resolved agent tool function.
         include_openai_compat_guidance: Whether to omit Matrix-style sender
             attribution for OpenAI-compatible prompt formatting.
         media: Optional multimodal inputs (audio/images/files/videos)
@@ -1384,6 +1391,7 @@ async def ai_response(  # noqa: C901
                 knowledge=knowledge,
                 run_id_callback=run_id_callback,
                 include_interactive_questions=include_interactive_questions,
+                tool_function_filter=tool_function_filter,
                 include_openai_compat_guidance=include_openai_compat_guidance,
                 media=media,
                 show_tool_calls=show_tool_calls,
@@ -1443,6 +1451,7 @@ async def ai_response(  # noqa: C901
                 thread_history=thread_history,
                 knowledge=knowledge,
                 include_interactive_questions=include_interactive_questions,
+                tool_function_filter=tool_function_filter,
                 include_openai_compat_guidance=include_openai_compat_guidance,
                 execution_identity=execution_identity,
                 compaction_lifecycle=compaction_lifecycle,
@@ -1782,6 +1791,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     knowledge: Knowledge | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     include_interactive_questions: bool = True,
+    tool_function_filter: Callable[[Function], bool] | None = None,
     include_openai_compat_guidance: bool = False,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
@@ -1812,6 +1822,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        tool_function_filter: Optional policy applied to each resolved agent tool function.
         include_openai_compat_guidance: Whether to omit Matrix-style sender
             attribution for OpenAI-compatible prompt formatting.
         media: Optional multimodal inputs (audio/images/files/videos)
@@ -1891,6 +1902,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 thread_history=thread_history,
                 knowledge=knowledge,
                 include_interactive_questions=include_interactive_questions,
+                tool_function_filter=tool_function_filter,
                 include_openai_compat_guidance=include_openai_compat_guidance,
                 execution_identity=execution_identity,
                 compaction_lifecycle=compaction_lifecycle,

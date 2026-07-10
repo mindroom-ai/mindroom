@@ -20,6 +20,7 @@ from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.session import AgentSession
 from agno.tools.function import Function
+from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
 from mindroom.agent_storage import get_agent_runtime_state_dbs
@@ -27,6 +28,7 @@ from mindroom.agents import (
     _CULTURE_MANAGER_CACHE,
     _PRIVATE_CULTURE_MANAGER_CACHE,
     _load_context_files,
+    _prune_toolkit_functions,
     build_agent_toolkit,
     create_agent,
     get_agent_toolkit_names,
@@ -2821,6 +2823,19 @@ def test_create_agent_disabled_tool_names_omit_resolved_tools(
 
     assert "calculator" in built_tools
     assert "memory" not in built_tools
+
+
+def test_tool_function_filter_prunes_resolved_functions() -> None:
+    """Channel policies filter actual functions without dropping a safe toolkit peer."""
+    safe = Function(name="safe", entrypoint=lambda: "safe")
+    unsafe = Function(name="unsafe", entrypoint=lambda: "unsafe")
+    toolkit = Toolkit(name="mixed", tools=[safe, unsafe])
+
+    filtered = _prune_toolkit_functions(toolkit, lambda function: function.name == "safe")
+
+    assert filtered is toolkit
+    assert set(toolkit.functions) == {"safe"}
+    assert toolkit.async_functions == {}
 
 
 @patch("mindroom.agent_storage.SqliteDb")

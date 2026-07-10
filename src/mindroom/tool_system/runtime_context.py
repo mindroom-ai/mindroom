@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
+    from agno.tools.function import Function
     from structlog.stdlib import BoundLogger
 
     from mindroom.bot_runtime_view import BotRuntimeView
@@ -83,6 +84,7 @@ class ToolRuntimeContext:
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
+    tool_function_filter: Callable[[Function], bool] | None = None
 
     @property
     def room_id(self) -> str:
