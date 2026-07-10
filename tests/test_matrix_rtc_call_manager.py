@@ -1457,6 +1457,45 @@ async def test_state_fetch_failure_retries_without_another_call_event(
 
 
 @pytest.mark.asyncio
+async def test_shutdown_drains_retry_during_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A retry remains tracked while its homeserver reconciliation is in flight."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._RECONCILE_RETRY_DELAYS_S", (0.0,))
+    entered_retry = asyncio.Event()
+    retry_cancelled = asyncio.Event()
+    calls = 0
+
+    async def fetch_state(_room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return nio.RoomGetStateError("503 upstream sad")
+        entered_retry.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            retry_cancelled.set()
+        return _state_response()
+
+    client = _client()
+    client.room_get_state.side_effect = fetch_state
+    manager = _manager(client, FakeBridge(), tmp_path)
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+    await entered_retry.wait()
+    assert ROOM_ID not in manager._retry_tasks
+    assert manager._background_tasks
+
+    await manager.shutdown()
+
+    assert retry_cancelled.is_set()
+    assert manager._retry_tasks == {}
+    assert manager._background_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_call_member_expiry_reconciles_without_a_new_event(tmp_path: Path) -> None:
     """An expired membership cannot keep a media session alive indefinitely."""
     clock_values = iter((1_000, 1_000, 1_001))

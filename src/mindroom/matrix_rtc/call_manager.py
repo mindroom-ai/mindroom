@@ -531,9 +531,15 @@ class CallManager:
 
     async def _retry_reconcile(self, room: nio.MatrixRoom, delay_s: float) -> None:
         await asyncio.sleep(delay_s)
-        self._retry_tasks.pop(room.room_id, None)
-        if not self._shutting_down:
-            await self._reconcile(room)
+        task = self._retry_tasks.pop(room.room_id, None)
+        if task is None:
+            return
+        self._background_tasks.add(task)
+        try:
+            if not self._shutting_down:
+                await self._reconcile(room)
+        finally:
+            self._background_tasks.discard(task)
 
     def _clear_reconcile_retry(self, room_id: str) -> None:
         self._retry_attempts.pop(room_id, None)
