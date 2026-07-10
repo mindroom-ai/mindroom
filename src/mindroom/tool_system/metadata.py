@@ -885,10 +885,9 @@ _BOUND_RUNTIME_TOOL_STATE_CACHE: dict[int, tuple[RuntimePaths, _ResolvedToolStat
 
 
 def clear_resolved_tool_state_cache() -> None:
-    """Drop cached per-config resolved tool state after live plugin registry changes."""
+    """Drop recomputable authored-config state after live plugin registry changes."""
     with _RESOLVED_TOOL_STATE_LOCK:
         _RESOLVED_TOOL_STATE_CACHE.clear()
-        _BOUND_RUNTIME_TOOL_STATE_CACHE.clear()
 
 
 def bind_resolved_tool_state_cache(

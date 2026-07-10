@@ -913,12 +913,61 @@ def test_runtime_bound_plugin_factory_supports_lazy_relative_imports(tmp_path: P
         )
         assert toolkit.name == "lazy_toolkit"
     finally:
-        metadata_module.clear_resolved_tool_state_cache()
+        del toolkit
+        del config
+        gc.collect()
     assert not any(
         module_name == package_name or module_name.startswith(f"{package_name}.")
         for package_name in owned_package_names
         for module_name in sys.modules
     )
+
+
+def test_cache_clear_preserves_bound_runtime_plugin_generation(tmp_path: Path) -> None:
+    """Clearing recomputable validation state must not replace a live runtime's plugin generation."""
+    plugin_root = tmp_path / "plugins" / "bound"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "bound", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    tools_path = plugin_root / "tools.py"
+    source = (
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "class BoundToolkit(Toolkit):\n"
+        "    def __init__(self):\n"
+        "        super().__init__(name=GENERATION, tools=[])\n"
+        "@register_tool_with_metadata(name='bound_tool', display_name='Bound', "
+        "description='Bound generation.', category=ToolCategory.DEVELOPMENT)\n"
+        "def bound_tool():\n"
+        "    return BoundToolkit\n"
+    )
+    tools_path.write_text("GENERATION = 'before'\n" + source, encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
+    config = RuntimeConfig.from_authored(
+        Config.model_validate({"defaults": {"tools": []}, "plugins": ["./plugins/bound"]}),
+        runtime_paths,
+    )
+
+    tools_path.write_text("GENERATION = 'after'\n" + source, encoding="utf-8")
+    metadata_module.clear_resolved_tool_state_cache()
+    toolkit = get_tool_by_name(
+        "bound_tool",
+        runtime_paths,
+        runtime_config=config,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    try:
+        assert toolkit.name == "before"
+    finally:
+        del toolkit
+        del config
+        gc.collect()
+        metadata_module.clear_resolved_tool_state_cache()
 
 
 def test_deserialize_tool_validation_snapshot_rejects_non_boolean_runtime_loadable() -> None:

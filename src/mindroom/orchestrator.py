@@ -218,7 +218,6 @@ class _MultiAgentOrchestrator:
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
-    _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
@@ -1333,7 +1332,7 @@ class _MultiAgentOrchestrator:
 
     async def _handle_mcp_catalog_change(self, server_id: str) -> None:
         """Restart entities that reference one changed MCP catalog."""
-        async with self._mcp_catalog_change_lock:
+        async with self._config_update_lock:
             if not self.running or self.config is None:
                 return
             refresh_mcp_tool_state_for_runtime(self.runtime_paths, self.config)

@@ -1122,6 +1122,41 @@ async def test_handle_mcp_catalog_change_serializes_overlapping_restarts(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_handle_mcp_catalog_change_waits_for_config_publication(tmp_path: Path) -> None:
+    """Catalog callbacks must restart entities from the config committed ahead of them."""
+    runtime_paths = _runtime_paths(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = _config(tmp_path)
+    committed_config = _config(tmp_path, command="node")
+    orchestrator.running = True
+
+    with (
+        patch("mindroom.orchestrator.refresh_mcp_tool_state_for_runtime") as refresh_tool_state,
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
+        patch.object(orchestrator, "_cancel_bot_start_task", new=AsyncMock()),
+        patch.object(
+            orchestrator,
+            "_create_and_start_entities",
+            new=AsyncMock(return_value=EntityStartResults()),
+        ) as create_and_start,
+    ):
+        async with orchestrator._config_update_lock:
+            callback = asyncio.create_task(orchestrator._handle_mcp_catalog_change("demo"))
+            await asyncio.sleep(0)
+            refresh_tool_state.assert_not_called()
+            orchestrator.config = committed_config
+
+        await callback
+
+    refresh_tool_state.assert_called_once_with(runtime_paths, committed_config)
+    create_and_start.assert_awaited_once_with(
+        {"code", "dev_team"},
+        committed_config,
+        start_sync_tasks=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path: Path) -> None:
     """Stop bots that depend on changed MCP servers before manager sync removes those servers."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
