@@ -639,7 +639,13 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
 
     def _fake_load_result(
         runtime_paths: constants.RuntimePaths,
-    ) -> tuple[config_lifecycle.ConfigLoadResult, dict[str, Any] | None, Config | None, str | None]:
+    ) -> tuple[
+        config_lifecycle.ConfigLoadResult,
+        dict[str, Any] | None,
+        Config | None,
+        str | None,
+        frozenset[Path] | None,
+    ]:
         if runtime_paths == first_runtime:
             started.set()
             allow_finish.wait(timeout=1)
@@ -652,6 +658,7 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
                 None,
                 None,
                 "stale-old-source",
+                frozenset({first_runtime.config_path}),
             )
         return original_load_result(runtime_paths)
 
@@ -669,6 +676,7 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
         assert config_lifecycle.load_config_into_app(second_runtime, fresh_app) is True
         allow_finish.set()
         stale_thread.join(timeout=1)
+        assert not stale_thread.is_alive()
 
     context = main._app_context(fresh_app)
     assert context.runtime_paths == second_runtime

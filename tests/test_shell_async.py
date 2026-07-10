@@ -502,7 +502,7 @@ async def test_check_shell_command_running(tmp_path: Path) -> None:
     assert run_fn is not None
     assert check_fn is not None
 
-    result = await run_fn(["sleep", "300"], timeout=1)
+    result = await run_fn(["sleep", "300"], timeout=0)
     handle = result.split("Handle: ")[1].split("\n")[0]
 
     status = check_fn(handle)
@@ -523,9 +523,9 @@ async def test_check_shell_command_finished(tmp_path: Path) -> None:
     assert run_fn is not None
     assert check_fn is not None
 
-    # Use a command that sleeps longer than the timeout to guarantee backgrounding,
-    # but emits output first so we can verify it after finish.
-    result = await run_fn(["bash", "-c", "echo done-output; sleep 3"], timeout=1)
+    # Force backgrounding immediately, but let the command live long enough for
+    # the monitor path to observe its output and final status.
+    result = await run_fn(["bash", "-c", "echo done-output; sleep 0.05"], timeout=0)
     assert "Handle:" in result
     handle = result.split("Handle: ")[1].split("\n")[0]
 
@@ -534,7 +534,7 @@ async def test_check_shell_command_finished(tmp_path: Path) -> None:
         status = check_fn(handle)
         if "FINISHED" in status:
             break
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.02)
     assert "FINISHED" in status
     assert "done-output" in status
 
@@ -562,15 +562,16 @@ async def test_check_shell_command_partial_output(tmp_path: Path) -> None:
 
     result = await run_fn(
         ["bash", "-c", "for i in 1 2 3; do echo partial-line-$i; done; sleep 300"],
-        timeout=1,
+        timeout=0,
     )
     assert "Handle:" in result
     handle = result.split("Handle: ")[1].split("\n")[0]
 
-    # Give readers a moment to consume output
-    await asyncio.sleep(0.3)
-
-    status = check_fn(handle)
+    for _ in range(50):
+        status = check_fn(handle)
+        if "partial-line" in status:
+            break
+        await asyncio.sleep(0.02)
     assert "RUNNING" in status
     assert "lines buffered" in status
     assert "lines so far" not in status
@@ -598,7 +599,7 @@ async def test_kill_shell_command(tmp_path: Path) -> None:
     assert kill_fn is not None
     assert check_fn is not None
 
-    result = await run_fn(["sleep", "300"], timeout=1)
+    result = await run_fn(["sleep", "300"], timeout=0)
     handle = result.split("Handle: ")[1].split("\n")[0]
 
     kill_result = kill_fn(handle)
@@ -609,7 +610,7 @@ async def test_kill_shell_command(tmp_path: Path) -> None:
         status = check_fn(handle)
         if "FINISHED" in status:
             break
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.02)
 
     assert "FINISHED" in status
 
@@ -623,7 +624,7 @@ async def test_kill_shell_command_force(tmp_path: Path) -> None:
     assert run_fn is not None
     assert kill_fn is not None
 
-    result = await run_fn(["sleep", "300"], timeout=1)
+    result = await run_fn(["sleep", "300"], timeout=0)
     handle = result.split("Handle: ")[1].split("\n")[0]
 
     kill_result = kill_fn(handle, force=True)
@@ -849,7 +850,7 @@ async def test_handle_persists_across_toolkit_instances(tmp_path: Path) -> None:
     run_fn = tool1.async_functions["run_shell_command"].entrypoint
     assert run_fn is not None
 
-    result = await run_fn(["sleep", "300"], timeout=1)
+    result = await run_fn(["sleep", "300"], timeout=0)
     assert "Handle:" in result
     handle = result.split("Handle: ")[1].split("\n")[0]
 
@@ -876,17 +877,19 @@ async def test_handle_check_then_kill_across_instances(tmp_path: Path) -> None:
     run_fn = tool_run.async_functions["run_shell_command"].entrypoint
     assert run_fn is not None
 
-    result = await run_fn(["bash", "-c", "for i in 1 2 3; do echo line-$i; done; sleep 300"], timeout=1)
+    result = await run_fn(["bash", "-c", "for i in 1 2 3; do echo line-$i; done; sleep 300"], timeout=0)
     assert "Handle:" in result
     handle = result.split("Handle: ")[1].split("\n")[0]
-
-    await asyncio.sleep(0.3)
 
     # Check from a fresh instance
     tool_check = _get_toolkit(tmp_path)
     check_fn = tool_check.functions["check_shell_command"].entrypoint
     assert check_fn is not None
-    status = check_fn(handle)
+    for _ in range(50):
+        status = check_fn(handle)
+        if "line-" in status:
+            break
+        await asyncio.sleep(0.02)
     assert "RUNNING" in status
     assert "line-" in status
 
@@ -903,7 +906,7 @@ async def test_handle_check_then_kill_across_instances(tmp_path: Path) -> None:
         status = final_check(handle)
         if "FINISHED" in status:
             break
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.02)
 
     assert "FINISHED" in status
 

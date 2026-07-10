@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from agno.models.message import Message
 from agno.models.response import ModelResponse
+from structlog.testing import capture_logs
 
 import mindroom.background_tasks as background_tasks_module
 from mindroom.agent_storage import create_session_storage, get_agent_session
@@ -346,7 +347,6 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
 @pytest.mark.asyncio
 async def test_compaction_call_timeout_falls_back_in_runtime(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     class _SlowSummaryModel(FakeModel):
         async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
@@ -378,6 +378,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
             return_value=_SlowSummaryModel(id="summary-model", provider="fake"),
         ),
         patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
+        capture_logs() as logs,
     ):
         prepared = await prepare_history_for_run_for_test(
             agent=_agent(db=storage),
@@ -399,9 +400,9 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
     assert prepared.compaction_outcomes == []
     assert prepared.compaction_reply_outcome == "timeout"
-    captured = capsys.readouterr()
-    assert "Compaction failed; continuing without compaction" in captured.out
-    assert "Timed-out compaction request" not in captured.out
+    events = [entry["event"] for entry in logs]
+    assert "Compaction failed; continuing without compaction" in events
+    assert "Timed-out compaction request" not in events
 
 
 def test_build_summary_input_advances_past_oversized_oldest_run() -> None:

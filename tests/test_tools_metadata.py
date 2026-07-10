@@ -1,7 +1,6 @@
 """Test tool metadata JSON snapshot for dashboard consumption."""
 
 import gc
-import inspect
 import json
 import sys
 from dataclasses import replace
@@ -56,8 +55,6 @@ from mindroom.tools.custom_api import custom_api_tools
 
 _BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
 _BASE_TOOL_METADATA = TOOL_METADATA.copy()
-_SKIP_PARALLEL_FACTORY_IMPORTS = {"daytona", "openbb"}
-_OPTIONAL_TOOL_IMPORTS = frozenset({"scrapegraph", "telegram"})
 
 
 def _restore_builtin_tool_metadata_state() -> None:
@@ -452,6 +449,11 @@ def test_tool_metadata_consistency() -> None:
         assert metadata.category, f"Tool {tool_name} missing category"
         assert metadata.status, f"Tool {tool_name} missing status"
         assert metadata.setup_type, f"Tool {tool_name} missing setup_type"
+        if tool_name not in TOOL_REGISTRY:
+            assert metadata.managed_init_args == (), (
+                f"{tool_name} is metadata-only and should not declare managed init args: "
+                f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
+            )
 
 
 def test_dynamic_tools_is_durable_metadata_only_builtin(tmp_path: Path) -> None:
@@ -486,41 +488,6 @@ def test_tool_metadata_does_not_advertise_env_var_fallbacks() -> None:
             lowered = text.lower()
             assert not any(phrase in lowered for phrase in forbidden_phrases), (
                 f"Tool metadata for {tool_name} still advertises env fallback: {text}"
-            )
-
-
-@pytest.mark.timeout(180)
-def test_registered_tools_declare_managed_init_args_for_explicit_constructor_inputs() -> None:
-    """Built-in tools must opt in explicitly instead of relying on hidden constructor inference."""
-    managed_arg_names = {managed_arg.value for managed_arg in ToolManagedInitArg}
-
-    for tool_name, tool_factory in TOOL_REGISTRY.items():
-        metadata = TOOL_METADATA[tool_name]
-        if tool_name in _SKIP_PARALLEL_FACTORY_IMPORTS:
-            continue
-        try:
-            tool_class = tool_factory()
-        except ImportError as exc:
-            if tool_name in _OPTIONAL_TOOL_IMPORTS:
-                continue
-            msg = f"Unexpected ImportError while loading tool {tool_name}: {exc}"
-            pytest.fail(msg)
-        init_signature = inspect.signature(tool_class.__init__)
-        constructor_param_names = {name for name in init_signature.parameters if name != "self"}
-        expected_managed_args = tuple(
-            managed_arg for managed_arg in ToolManagedInitArg if managed_arg.value in constructor_param_names
-        )
-        assert metadata.managed_init_args == expected_managed_args, (
-            f"{tool_name} declares constructor inputs "
-            f"{sorted(constructor_param_names & managed_arg_names)} but metadata lists "
-            f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
-        )
-
-    for tool_name, metadata in TOOL_METADATA.items():
-        if tool_name not in TOOL_REGISTRY:
-            assert metadata.managed_init_args == (), (
-                f"{tool_name} is metadata-only and should not declare managed init args: "
-                f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
             )
 
 

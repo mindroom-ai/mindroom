@@ -197,6 +197,10 @@ env-saas:
 test-saas-backend *args:
     cd saas-platform/platform-backend && uv run pytest {{args}}
 
+# Run SaaS platform backend tests with a terminal coverage report
+test-saas-backend-coverage *args:
+    cd saas-platform/platform-backend && uv run pytest --cov=backend --cov-report=term-missing {{ args }}
+
 # Run SaaS platform frontend tests (Jest)
 test-saas-frontend:
     cd saas-platform/platform-frontend && bun install && bun run test
@@ -211,6 +215,15 @@ test-front:
 test-backend *args:
     uv sync --all-extras
     uv run --all-extras pytest {{args}}
+
+# Run core backend tests with a terminal coverage report
+test-backend-coverage *args:
+    uv sync --all-extras
+    uv run --all-extras pytest --cov=mindroom --cov-report=term-missing {{ args }}
+
+# Run every local automated test suite with dependency preflight and fail-fast behavior
+test-all:
+    ./run-tests.sh
 
 # Check for public symbols that should be private
 check-module-privacy:

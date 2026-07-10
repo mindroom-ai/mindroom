@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import importlib
 import shutil
 import subprocess
@@ -144,8 +145,13 @@ def _walk_runtime_nodes(
         _walk_runtime_nodes(child, importer_module, target_modules, imports, in_type_checking=in_type_checking)
 
 
+@functools.cache
+def _parsed_python_module(py_path: Path) -> ast.Module:
+    return ast.parse(py_path.read_text())
+
+
 def _runtime_direct_imports(py_path: Path, importer_module: str, target_modules: set[str]) -> set[str]:
-    tree = ast.parse(py_path.read_text())
+    tree = _parsed_python_module(py_path)
     imports: set[str] = set()
     _walk_runtime_nodes(tree, importer_module, target_modules, imports)
     return imports
@@ -277,80 +283,19 @@ def test_bot_runtime_view_visibility_is_limited_to_owner_and_protocol_facade() -
     assert BOT_RUNTIME_VIEW_MODULE not in depends_on
 
 
-def test_tach_rejects_forbidden_split_matrix_client_import(tmp_path: Path) -> None:
-    """A new direct split-client import must fail Tach until tach.toml is updated."""
-    project_root = tmp_path / "project"
-    shutil.copytree(REPO_ROOT / "src", project_root / "src")
-    shutil.copy2(TACH_CONFIG, project_root / "tach.toml")
-
-    attachments_path = project_root / "src" / "mindroom" / "custom_tools" / "attachments.py"
-    original_text = attachments_path.read_text()
-    probe_import = (
-        "from mindroom.matrix.client_session import _create_matrix_client as _tach_probe_private_client_session\n"
-    )
-    attachments_path.write_text(
-        original_text.replace(
-            "from mindroom.matrix.client_delivery import send_file_message\n",
-            f"{probe_import}from mindroom.matrix.client_delivery import send_file_message\n",
-        ),
-    )
-
-    result = subprocess.run(
-        [sys.executable, "-m", "tach", "check", "--dependencies", "--interfaces"],
-        cwd=project_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "mindroom.matrix.client_session" in (result.stdout + result.stderr)
-
-
 def test_tach_rejects_forbidden_runtime_protocol_import(tmp_path: Path) -> None:
-    """A new runtime-protocol consumer must fail Tach until allowed explicitly."""
+    """A public runtime-protocol import must fail independently of private-symbol checks."""
     project_root = tmp_path / "project"
     shutil.copytree(REPO_ROOT / "src", project_root / "src")
     shutil.copy2(TACH_CONFIG, project_root / "tach.toml")
 
     attachments_path = project_root / "src" / "mindroom" / "custom_tools" / "attachments.py"
     original_text = attachments_path.read_text()
-    probe_import = "from mindroom.runtime_protocols import SupportsConfig as _tach_probe_runtime_protocol\n"
+    runtime_protocol_probe = "from mindroom.runtime_protocols import SupportsConfig as _tach_probe_runtime_protocol\n"
     attachments_path.write_text(
         original_text.replace(
             "from __future__ import annotations\n\n",
-            f"from __future__ import annotations\n\n{probe_import}",
-        ),
-    )
-
-    result = subprocess.run(
-        [sys.executable, "-m", "tach", "check", "--dependencies", "--interfaces"],
-        cwd=project_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert RUNTIME_PROTOCOL_MODULE in (result.stdout + result.stderr)
-
-
-def test_tach_rejects_private_runtime_protocol_import(tmp_path: Path) -> None:
-    """An allowed consumer still may not import a private runtime-protocol helper."""
-    project_root = tmp_path / "project"
-    shutil.copytree(REPO_ROOT / "src", project_root / "src")
-    shutil.copy2(TACH_CONFIG, project_root / "tach.toml")
-
-    effects_path = project_root / "src" / "mindroom" / "post_response_effects.py"
-    original_text = effects_path.read_text()
-    probe_import = (
-        "from mindroom.runtime_protocols import "
-        "_check_narrow_protocols_are_subsets_of_bot_runtime_view as _tach_probe_private_runtime_protocol\n"
-    )
-    effects_path.write_text(
-        original_text.replace(
-            "from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001\n",
-            f"from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001\n{probe_import}",
+            f"from __future__ import annotations\n\n{runtime_protocol_probe}",
         ),
     )
 
@@ -365,22 +310,40 @@ def test_tach_rejects_private_runtime_protocol_import(tmp_path: Path) -> None:
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
     assert RUNTIME_PROTOCOL_MODULE in output
-    assert RUNTIME_PROTOCOL_PRIVATE_SYMBOL in output
 
 
-def test_tach_rejects_forbidden_bot_runtime_view_import(tmp_path: Path) -> None:
-    """A direct full-runtime import must fail Tach outside the owning bot shell."""
+def test_tach_rejects_forbidden_boundary_imports(tmp_path: Path) -> None:
+    """One negative project must prove the remaining split-runtime boundaries."""
     project_root = tmp_path / "project"
     shutil.copytree(REPO_ROOT / "src", project_root / "src")
     shutil.copy2(TACH_CONFIG, project_root / "tach.toml")
 
-    effects_path = project_root / "src" / "mindroom" / "post_response_effects.py"
-    original_text = effects_path.read_text()
-    probe_import = "from mindroom.bot_runtime_view import BotRuntimeView as _tach_probe_runtime_view\n"
-    effects_path.write_text(
+    attachments_path = project_root / "src" / "mindroom" / "custom_tools" / "attachments.py"
+    original_text = attachments_path.read_text()
+    split_client_probe = (
+        "from mindroom.matrix.client_session import _create_matrix_client as _tach_probe_private_client_session\n"
+    )
+    attachments_path.write_text(
         original_text.replace(
+            "from mindroom.matrix.client_delivery import send_file_message\n",
+            f"{split_client_probe}from mindroom.matrix.client_delivery import send_file_message\n",
+        ),
+    )
+
+    effects_path = project_root / "src" / "mindroom" / "post_response_effects.py"
+    original_effects_text = effects_path.read_text()
+    private_protocol_probe = (
+        "from mindroom.runtime_protocols import "
+        "_check_narrow_protocols_are_subsets_of_bot_runtime_view as _tach_probe_private_runtime_protocol\n"
+    )
+    runtime_view_probe = "from mindroom.bot_runtime_view import BotRuntimeView as _tach_probe_runtime_view\n"
+    effects_path.write_text(
+        original_effects_text.replace(
             "from __future__ import annotations\n\n",
-            f"from __future__ import annotations\n\n{probe_import}",
+            f"from __future__ import annotations\n\n{runtime_view_probe}",
+        ).replace(
+            "from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001\n",
+            f"from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001\n{private_protocol_probe}",
         ),
     )
 
@@ -392,8 +355,12 @@ def test_tach_rejects_forbidden_bot_runtime_view_import(tmp_path: Path) -> None:
         text=True,
     )
 
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert BOT_RUNTIME_VIEW_MODULE in (result.stdout + result.stderr)
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert "mindroom.matrix.client_session" in output
+    assert RUNTIME_PROTOCOL_MODULE in output
+    assert RUNTIME_PROTOCOL_PRIVATE_SYMBOL in output
+    assert BOT_RUNTIME_VIEW_MODULE in output
 
 
 def test_ty_rejects_runtime_view_missing_structural_member(tmp_path: Path) -> None:

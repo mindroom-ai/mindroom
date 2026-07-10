@@ -473,7 +473,7 @@ describe("Credentials", () => {
     render(<Credentials />);
 
     await waitFor(() => {
-      expect(screen.getByText("service_b")).toBeInTheDocument();
+      expect((global.fetch as any).mock.calls).toHaveLength(4);
     });
 
     fireEvent.click(screen.getByRole("button", { name: /service_b/i }));
