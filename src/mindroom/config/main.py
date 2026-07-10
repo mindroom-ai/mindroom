@@ -31,6 +31,7 @@ from mindroom.agent_policy import (
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.calls import CallsConfig
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -397,6 +398,7 @@ class Config(BaseModel):
     )
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
+    calls: CallsConfig = Field(default_factory=CallsConfig, description="Voice call (MatrixRTC) configuration")
     cache: CacheConfig = Field(default_factory=CacheConfig, description="Persistent Matrix event cache")
     timezone: str = Field(
         default="UTC",
@@ -557,6 +559,38 @@ class Config(BaseModel):
             raise ValueError(msg)
         for server_id in self.mcp_servers:
             normalize_mcp_server_id(server_id)
+        return self
+
+    @model_validator(mode="after")
+    def validate_call_agents(self) -> Config:
+        """Ensure call agents exist and no two are configured for one room."""
+        unknown_agents = sorted(set(self.calls.agents) - set(self.agents))
+        if unknown_agents:
+            msg = f"calls.agents references unknown agent(s): {', '.join(unknown_agents)}"
+            raise ValueError(msg)
+
+        private_agents = sorted(
+            agent_name for agent_name in self.calls.agents if self.agents[agent_name].private is not None
+        )
+        if private_agents:
+            msg = (
+                "calls.agents cannot reference requester-private agent(s): "
+                f"{', '.join(private_agents)}; call agents must currently be shared agents"
+            )
+            raise ValueError(msg)
+
+        agents_by_room: dict[str, list[str]] = {}
+        for agent_name in self.calls.agents:
+            for room in self.agents[agent_name].rooms:
+                agents_by_room.setdefault(room, []).append(agent_name)
+        conflicts = [
+            f"{room} ({', '.join(sorted(agent_names))})"
+            for room, agent_names in sorted(agents_by_room.items())
+            if len(agent_names) > 1
+        ]
+        if conflicts:
+            msg = "calls.agents configures multiple agents for room(s): " + "; ".join(conflicts)
+            raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
@@ -1005,6 +1039,9 @@ class Config(BaseModel):
         normalized_data = normalized_config_data(data)
         approved_egress_overlay = apply_runtime_approved_egress_overlay(normalized_data, runtime_paths)
         config = cls.model_validate(approved_egress_overlay.data, context={"runtime_paths": runtime_paths})
+        from mindroom.entity_resolution import validate_call_agent_room_ownership  # noqa: PLC0415
+
+        validate_call_agent_room_ownership(config, runtime_paths)
         config._runtime_approved_egress_injected_default_tool = approved_egress_overlay.injected_default_tool
         config._runtime_approved_egress_injected_approval_rule = approved_egress_overlay.injected_approval_rule
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.

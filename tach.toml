@@ -339,6 +339,7 @@ visibility = [
     "mindroom.approval_inbound",
     "mindroom.approval_transport",
     "mindroom.bot",
+    "mindroom.matrix_rtc.call_tools",
     "mindroom.orchestrator",
     "mindroom.tool_system.tool_hooks",
 ]
@@ -1338,6 +1339,7 @@ depends_on = [
     "mindroom.agent_policy",
     "mindroom.config.agent",
     "mindroom.config.auth",
+    "mindroom.config.calls",
     "mindroom.config.entity_view",
     "mindroom.config.knowledge",
     "mindroom.config.matrix",
@@ -1351,6 +1353,7 @@ depends_on = [
     "mindroom.git_urls",
     "mindroom.history.types",
     "mindroom.logging_config",
+    "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
     "mindroom.mcp.config",
     "mindroom.prompt_templates",
@@ -1925,7 +1928,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.client_session"
-depends_on = ["mindroom.constants"]
+depends_on = ["mindroom.constants", "mindroom.matrix.to_device"]
 visibility = [
     "mindroom.bot",
     "mindroom.cli.doctor",
@@ -1935,6 +1938,15 @@ visibility = [
     "mindroom.matrix.users",
     "mindroom.orchestration.runtime",
     "mindroom.orchestrator",
+]
+
+[[modules]]
+path = "mindroom.matrix.to_device"
+depends_on = []
+visibility = [
+    "mindroom.bot",
+    "mindroom.matrix.client_session",
+    "mindroom.matrix_rtc.call_manager",
 ]
 
 [[modules]]
@@ -2088,6 +2100,81 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.matrix_rtc"
+depends_on = ["mindroom.matrix_rtc.call_manager"]
+
+[[modules]]
+path = "mindroom.matrix_rtc.call_manager"
+depends_on = [
+    "mindroom.authorization",
+    "mindroom.credentials_sync",
+    "mindroom.entity_resolution",
+    "mindroom.logging_config",
+    "mindroom.matrix.to_device",
+    "mindroom.matrix_rtc.call_session",
+    "mindroom.matrix_rtc.call_tools",
+    "mindroom.matrix_rtc.events",
+    "mindroom.matrix_rtc.focus",
+    "mindroom.matrix_rtc.key_transport",
+    "mindroom.matrix_rtc.transcript",
+    "mindroom.matrix_rtc.voice_agent",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.call_tools"
+depends_on = [
+    "mindroom.agents",
+    "mindroom.knowledge.utils",
+    "mindroom.logging_config",
+    "mindroom.message_target",
+    "mindroom.session_ids",
+    "mindroom.tool_approval",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.transcript"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.memory",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.call_session"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.matrix_rtc.events",
+    "mindroom.matrix_rtc.frame_keys",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.events"
+depends_on = []
+
+[[modules]]
+path = "mindroom.matrix_rtc.focus"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.server_fetch_url",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.frame_keys"
+depends_on = ["mindroom.matrix_rtc.events"]
+
+[[modules]]
+path = "mindroom.matrix_rtc.key_transport"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.matrix_rtc.events",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.voice_agent"
+depends_on = ["mindroom.logging_config"]
+
+[[modules]]
 path = "mindroom.conversation_resolver"
 depends_on = [
     "mindroom.constants",
@@ -2141,8 +2228,10 @@ depends_on = [
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
+    "mindroom.matrix.to_device",
     "mindroom.matrix.users",
     "mindroom.matrix.visible_body",
+    "mindroom.matrix_rtc.call_manager",
     "mindroom.memory",
     "mindroom.post_response_effects",
     "mindroom.response_payload_preparation",
@@ -3060,6 +3149,7 @@ expose = [
     "MemoryAutoFlushWorker",
     "MemoryPromptParts",
     "add_agent_memory",
+    "append_agent_daily_memory",
     "auto_flush_enabled",
     "build_memory_enhanced_prompt",
     "build_memory_prompt_parts",
@@ -3256,6 +3346,10 @@ expose = [
     "restore_login",
 ]
 from = ["mindroom.matrix.client_session"]
+
+[[interfaces]]
+expose = ["AuthenticatedToDeviceEvent"]
+from = ["mindroom.matrix.to_device"]
 
 [[interfaces]]
 expose = [

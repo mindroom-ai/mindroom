@@ -1112,11 +1112,11 @@ def _resolve_agent_dynamic_tool_selection(
     session_id: str | None,
     delegation_depth: int,
     native_deferred_tools: bool,
+    eager_deferred_tools: bool,
 ) -> VisibleToolSurface:
-    if native_deferred_tools:
-        # Native server-side tool search: attach every authored deferred
-        # tool so discovered calls execute, skip the dynamic-tools manager,
-        # and never touch session loaded-tool state.
+    if native_deferred_tools or eager_deferred_tools:
+        # Attach every authored deferred tool and skip the dynamic-tools
+        # manager when the consuming runtime cannot rebuild its tool schema.
         return visible_tool_surface(
             agent_name=agent_name,
             config=config,
@@ -1224,6 +1224,7 @@ def _assemble_agent_toolkits(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     dynamic_tool_continuation: bool,
     native_deferred_tools: bool,
+    eager_deferred_tools: bool,
 ) -> _AgentToolAssembly:
     """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
     plugins = _load_agent_plugins(config, runtime_paths)
@@ -1246,6 +1247,7 @@ def _assemble_agent_toolkits(
         session_id=session_id,
         delegation_depth=delegation_depth,
         native_deferred_tools=native_deferred_tools,
+        eager_deferred_tools=eager_deferred_tools,
     )
     hidden_toolkits = _context_hidden_toolkits(execution_identity)
     resolved_tool_configs = {entry.name: entry for entry in dynamic_tool_selection.runtime_tool_configs}
@@ -1422,7 +1424,7 @@ def _build_agent_instructions(
     disable_runtime_capabilities: bool,
     hidden_toolkits: frozenset[str],
     loaded_tools: tuple[str, ...],
-    native_deferred_tools: bool,
+    all_deferred_tools_eager: bool,
 ) -> list[str]:
     """Accumulate the configured and runtime instruction blocks for one agent instance."""
     instructions = list(agent_config.instructions)
@@ -1432,7 +1434,7 @@ def _build_agent_instructions(
 
     # Native server-side tool search replaces the load_tool catalog and
     # loaded-state prompt blocks, so the native path emits neither.
-    enable_dynamic_tools_manager = session_id is not None and not native_deferred_tools
+    enable_dynamic_tools_manager = session_id is not None and not all_deferred_tools_eager
     dynamic_tooling_block = None
     if not disable_runtime_capabilities:
         dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
@@ -1558,6 +1560,7 @@ def create_agent(
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     dynamic_tool_continuation: bool = False,
+    eager_deferred_tools: bool = False,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -1593,6 +1596,9 @@ def create_agent(
             envelope and materialized team members both do). Embedded agents
             without such a loop leave it False so a load/unload takes effect on
             the next request instead of truncating the run.
+        eager_deferred_tools: Whether to materialize every deferred toolkit and
+            omit the dynamic-tools manager for a runtime with an immutable tool
+            schema.
 
     Returns:
         Configured Agent instance
@@ -1638,6 +1644,7 @@ def create_agent(
         refresh_scheduler=refresh_scheduler,
         dynamic_tool_continuation=dynamic_tool_continuation,
         native_deferred_tools=native_deferred_tools,
+        eager_deferred_tools=eager_deferred_tools,
     )
     storage = _open_agent_session_storage(
         agent_name,
@@ -1703,7 +1710,7 @@ def create_agent(
         disable_runtime_capabilities=disable_runtime_capabilities,
         hidden_toolkits=tool_assembly.hidden_toolkits,
         loaded_tools=tool_assembly.loaded_tools,
-        native_deferred_tools=native_deferred_tools,
+        all_deferred_tools_eager=native_deferred_tools or eager_deferred_tools,
     )
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)

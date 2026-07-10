@@ -798,6 +798,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot.last_sync_time = None
     bot._first_sync_done = False
     bot._sync_shutting_down = False
+    bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = False
     bot._restart_retry_queue = SyncRestartRetryQueue()
     bot.client = FakeClient()
@@ -935,6 +936,7 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     bot.logger = MagicMock()
     bot.prepare_for_sync_shutdown = AsyncMock()
     bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._call_manager = None
 
     await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 

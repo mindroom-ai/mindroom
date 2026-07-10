@@ -20,10 +20,20 @@ _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
 _ROOM_ENCRYPTION_EVENT_TYPE = "m.room.encryption"
 _ROOM_ENCRYPTION_CONTENT = {"algorithm": "m.megolm.v1.aes-sha2"}
 _ROOM_ADMIN_POWER_LEVEL = 100
-_THREAD_TAGS_POWER_LEVEL = 0
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _DEFAULT_USER_POWER_LEVEL = 0
 _POWER_USER_POWER_LEVEL = 50
+
+# Element Call membership state event (deployed MSC3401 flavor). Regular room
+# members must be able to publish it to join a call, so it is pinned to PL0 —
+# the same convention Element uses for call-capable rooms. Mirrors
+# ``mindroom.matrix_rtc.events.CALL_MEMBER_EVENT_TYPE`` (kept as a literal here
+# to avoid a core -> matrix_rtc dependency).
+_CALL_MEMBER_EVENT_TYPE = "org.matrix.msc3401.call.member"
+_MANAGED_ROOM_EVENT_POWER_LEVELS = {
+    THREAD_TAGS_EVENT_TYPE: 0,
+    _CALL_MEMBER_EVENT_TYPE: 0,
+}
 
 
 async def invite_to_room(
@@ -51,9 +61,7 @@ def _create_room_initial_state(
     power_level_content: dict[str, Any] = {
         "users_default": _DEFAULT_USER_POWER_LEVEL,
         "state_default": _DEFAULT_STATE_EVENT_POWER_LEVEL,
-        "events": {
-            THREAD_TAGS_EVENT_TYPE: _THREAD_TAGS_POWER_LEVEL,
-        },
+        "events": dict(_MANAGED_ROOM_EVENT_POWER_LEVELS),
     }
     users: dict[str, int] = {}
     if power_users:
@@ -139,12 +147,16 @@ async def ensure_room_encryption_enabled(client: nio.AsyncClient, room_id: str) 
     return False
 
 
-def _with_thread_tags_power_level(power_levels_content: dict[str, Any]) -> dict[str, Any]:
-    """Return power-level content with the thread-tags override applied."""
+def _with_event_power_level(
+    power_levels_content: dict[str, Any],
+    event_type: str,
+    power_level: int,
+) -> dict[str, Any]:
+    """Return power-level content with one event-type override applied."""
     next_content = dict(power_levels_content)
     existing_events = power_levels_content.get("events")
     next_events = dict(existing_events) if isinstance(existing_events, dict) else {}
-    next_events[THREAD_TAGS_EVENT_TYPE] = _THREAD_TAGS_POWER_LEVEL
+    next_events[event_type] = power_level
     next_content["events"] = next_events
     return next_content
 
@@ -156,9 +168,8 @@ async def ensure_managed_room_power_levels(
 ) -> bool:
     """Reconcile managed-room power levels with one read-modify-write.
 
-    Applies the thread-tags override (PL0 users may send thread-tag state
-    events) and grants configured room admins power level 100 in a single
-    conditional PUT, so the two reconciliations cannot clobber each other.
+    Applies the PL0 state events used by MindRoom clients and grants configured
+    room admins power level 100 in one conditional PUT.
     """
     current_response = await client.room_get_state_event(room_id, _POWER_LEVELS_EVENT_TYPE)
     if not isinstance(current_response, nio.RoomGetStateEventResponse):
@@ -177,7 +188,9 @@ async def ensure_managed_room_power_levels(
         return False
     current_content = current_response.content
 
-    desired_content = _with_thread_tags_power_level(current_content)
+    desired_content = current_content
+    for event_type, power_level in _MANAGED_ROOM_EVENT_POWER_LEVELS.items():
+        desired_content = _with_event_power_level(desired_content, event_type, power_level)
     concrete_admin_ids = {user_id for user_id in admin_user_ids if user_id}
     if concrete_admin_ids:
         desired_content = _with_room_admin_power_levels(desired_content, concrete_admin_ids)

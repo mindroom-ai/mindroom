@@ -508,6 +508,14 @@ voice:
   intelligence:
     model: default                 # Model for command recognition
 
+# Voice calls via Element Call / MatrixRTC (optional)
+calls:
+  enabled: false                   # Default: false
+  agents: []                       # Shared agents allowed to join calls in their configured rooms (at most one per room)
+  model: gpt-realtime-2.1          # OpenAI realtime speech-to-speech model
+  voice: null                      # Optional realtime voice preset
+  livekit_service_url: null        # Optional override for .well-known discovery
+
 # Internal MindRoom user account (optional, omit for hosted/public profiles)
 # When present, defaults are: username: mindroom_user, display_name: MindRoomUser
 mindroom_user:
@@ -703,6 +711,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - [Memory](https://docs.mindroom.chat/memory/) - Configure memory providers and behavior
 - [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure file-backed knowledge bases
 - [Voice](https://docs.mindroom.chat/voice/) - Configure speech-to-text voice processing
+- [Voice Calls](https://docs.mindroom.chat/voice-calls/) - Configure agents joining Element Call voice calls
 - [Authorization](https://docs.mindroom.chat/authorization/) - Configure user and room access control
 - [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Configure the root Matrix Space for managed rooms
 - [Skills](https://docs.mindroom.chat/skills/) - Skill format, gating, and allowlists

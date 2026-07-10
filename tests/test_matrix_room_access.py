@@ -351,6 +351,8 @@ async def test_create_room_seeds_thread_tags_power_level(
     assert power_levels["users_default"] == 0
     assert power_levels["state_default"] == 50
     assert power_levels["events"][THREAD_TAGS_EVENT_TYPE] == 0
+    # Element Call membership must be publishable by regular members (PL0).
+    assert power_levels["events"]["org.matrix.msc3401.call.member"] == 0
     assert _SCHEDULED_TASK_EVENT_TYPE not in power_levels["events"]
     assert power_levels["users"]["@agent:example.com"] == 50
     assert power_levels["users"]["@router:example.com"] == 100
@@ -481,7 +483,7 @@ async def test_existing_room_reconciliation_grants_room_admin_power(
 
 
 @pytest.mark.asyncio
-async def test_ensure_managed_room_power_levels_applies_thread_tags_and_admins_in_one_put() -> None:
+async def test_ensure_managed_room_power_levels_applies_client_events_and_admins_in_one_put() -> None:
     """The merged reconciliation should apply both overrides with a single read and write."""
     mock_client = AsyncMock()
     mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
@@ -510,6 +512,7 @@ async def test_ensure_managed_room_power_levels_applies_thread_tags_and_admins_i
     mock_client.room_put_state.assert_awaited_once()
     _, kwargs = mock_client.room_put_state.await_args
     assert kwargs["content"]["events"][THREAD_TAGS_EVENT_TYPE] == 0
+    assert kwargs["content"]["events"]["org.matrix.msc3401.call.member"] == 0
     assert kwargs["content"]["users"]["@admin:example.com"] == 100
     assert kwargs["content"]["users"]["@router:example.com"] == 100
 
@@ -544,6 +547,7 @@ async def test_ensure_managed_room_power_levels_preserves_existing_content() -> 
     assert kwargs["content"]["state_default"] == 50
     assert kwargs["content"]["events"]["m.room.name"] == 50
     assert kwargs["content"]["events"][THREAD_TAGS_EVENT_TYPE] == 0
+    assert kwargs["content"]["events"]["org.matrix.msc3401.call.member"] == 0
     assert _SCHEDULED_TASK_EVENT_TYPE not in kwargs["content"]["events"]
 
 
@@ -616,6 +620,7 @@ async def test_ensure_managed_room_power_levels_idempotent() -> None:
         content={
             "events": {
                 THREAD_TAGS_EVENT_TYPE: 0,
+                "org.matrix.msc3401.call.member": 0,
             },
             "state_default": 50,
             "users": {"@router:example.com": 100},

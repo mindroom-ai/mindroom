@@ -41,6 +41,7 @@
 - [Knowledge Bases](https://docs.mindroom.chat/knowledge/)
 - [Memory System](https://docs.mindroom.chat/memory/)
 - [Voice Messages](https://docs.mindroom.chat/voice/)
+- [Voice Calls](https://docs.mindroom.chat/voice-calls/)
 - [Image Messages](https://docs.mindroom.chat/images/)
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/)
 - [Chat Commands](https://docs.mindroom.chat/chat-commands/)

@@ -108,6 +108,7 @@ def _identify_entities_to_restart(
     teams_to_restart = _get_changed_teams(config, new_config, agent_bots)
 
     entities_to_restart = agents_to_restart | teams_to_restart
+    entities_to_restart |= _call_agents_to_restart(config, new_config)
     if changed_mcp_servers:
         entities_to_restart |= _entities_referencing_mcp_servers(config, new_config, changed_mcp_servers)
 
@@ -115,6 +116,15 @@ def _identify_entities_to_restart(
         entities_to_restart.add("router")
 
     return entities_to_restart
+
+
+def _call_agents_to_restart(config: Config | None, new_config: Config) -> set[str]:
+    """Return call agents whose managers captured an obsolete config snapshot."""
+    if config is None or config == new_config:
+        return set()
+    old_agents = set(config.calls.agents) if config.calls.enabled else set()
+    new_agents = set(new_config.calls.agents) if new_config.calls.enabled else set()
+    return old_agents | new_agents
 
 
 def _get_changed_agents(

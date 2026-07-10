@@ -27,6 +27,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
+from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
@@ -143,6 +144,50 @@ async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
         await bot._on_sync_response(MagicMock())
 
     assert fired_events == ["bot:ready"]
+
+
+@pytest.mark.asyncio
+async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> None:
+    """Calls reconcile after each sync-loop's first successful response."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+    call_manager = MagicMock()
+    call_manager.reconcile_joined_rooms = AsyncMock()
+    bot._call_manager = call_manager
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch.object(bot, "_maybe_start_startup_thread_prewarm"),
+        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+    ):
+        bot.mark_sync_loop_started()
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        bot.mark_sync_loop_started()
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert call_manager.reconcile_joined_rooms.await_count == 2
+
+
+def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Path) -> None:
+    """Call admission is rechecked for call-state and underlying room-member changes."""
+    bot = _agent_bot(tmp_path)
+    client = MagicMock(spec=nio.AsyncClient)
+    call_manager = MagicMock()
+
+    with patch("mindroom.bot.maybe_build_call_manager", return_value=call_manager):
+        bot._register_call_manager_callbacks(client)
+
+    assert bot._call_manager is call_manager
+    assert [call.args[1] for call in client.add_event_callback.call_args_list] == [
+        nio.UnknownEvent,
+        nio.RoomMemberEvent,
+    ]
+    client.add_to_device_callback.assert_called_once_with(ANY, AuthenticatedToDeviceEvent)
 
 
 @pytest.mark.asyncio
