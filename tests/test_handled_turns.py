@@ -133,12 +133,6 @@ def _read_persisted_records(tracker: HandledTurnLedger) -> dict[str, object]:
     return records
 
 
-def _wait_for_disk_persists_without_flushing(tracker: HandledTurnLedger) -> None:
-    """Wait for worker writes while leaving live reconciliation to the next read."""
-    for future in list(tracker._state.pending_persists):
-        future.result(timeout=5)
-
-
 def test_handled_turn_ledger_init(temp_dir: Path) -> None:
     """Initialization should create an empty in-memory ledger."""
     tracker = HandledTurnLedger("test_agent", base_path=temp_dir)
@@ -718,8 +712,8 @@ def test_concurrent_access_keeps_json_valid(temp_dir: Path) -> None:
     assert len(_read_persisted_records(tracker)) == 100
 
 
-def test_cross_process_lock_defers_persist_without_blocking_writers(temp_dir: Path) -> None:
-    """A held cross-process lock should stall only the disk merge, never the recording caller."""
+def test_file_lock_defers_persist_without_blocking_writers(temp_dir: Path) -> None:
+    """A held file lock should stall only disk persistence, never the recording caller."""
     tracker_a = HandledTurnLedger("test_cross_instance_lock", base_path=temp_dir)
     tracker_b = HandledTurnLedger("test_cross_instance_lock", base_path=temp_dir)
     _record_handled_turn(tracker_a, ["$first"], response_event_id="$response-a")
@@ -727,7 +721,7 @@ def test_cross_process_lock_defers_persist_without_blocking_writers(temp_dir: Pa
 
     with advisory_file_lock(tracker_a._responses_lock_file):
         # Recording returns immediately and is visible in shared memory even
-        # while another process holds the ledger file lock.
+        # while the ledger file lock is held.
         _record_handled_turn(tracker_b, ["$second"], response_event_id="$response-b")
         assert _get_response_event_id(tracker_b, "$second") == "$response-b"
         # The queued disk merge cannot complete while the lock is held.
@@ -739,172 +733,8 @@ def test_cross_process_lock_defers_persist_without_blocking_writers(temp_dir: Pa
     assert _get_response_event_id(tracker_c, "$second") == "$response-b"
 
 
-def test_disk_merge_prunes_discovery_alias_claimed_by_another_completed_turn(temp_dir: Path) -> None:
-    """A cross-process winner should remove a stale writer's conflicting discovery alias."""
-    tracker = HandledTurnLedger("test_cross_process_alias", base_path=temp_dir)
-    assert tracker.get_turn_record("$warm") is None
-
-    with advisory_file_lock(tracker._responses_lock_file):
-        tracker.record_handled_turn(
-            TurnRecord.create(
-                ["$question"],
-                discovery_event_ids=["$selection"],
-                response_event_id="$question-response",
-            ),
-        )
-        _write_responses_file(
-            tracker,
-            {
-                "$selection": {
-                    "response_event_id": "$selection-response",
-                    "completed": True,
-                },
-            },
-        )
-
-    _wait_for_disk_persists_without_flushing(tracker)
-    live_question_record = tracker.get_turn_record("$question")
-    live_selection_record = tracker.get_turn_record("$selection")
-    assert live_question_record is not None
-    assert live_question_record.discovery_event_ids == ()
-    assert live_selection_record is not None
-    assert live_selection_record.source_event_ids == ("$selection",)
-    assert live_selection_record.response_event_id == "$selection-response"
-
-    tracker.flush()
-    reloaded = _reload_ledger("test_cross_process_alias", temp_dir)
-    question_record = reloaded.get_turn_record("$question")
-    selection_record = reloaded.get_turn_record("$selection")
-    assert question_record is not None
-    assert question_record.discovery_event_ids == ()
-    assert selection_record is not None
-    assert selection_record.source_event_ids == ("$selection",)
-    assert selection_record.response_event_id == "$selection-response"
-
-
-@pytest.mark.parametrize("stale_timestamp", [10, 20])
-def test_disk_merge_keeps_newer_same_turn_record_and_reconciles_live_state(
-    temp_dir: Path,
-    stale_timestamp: float,
-) -> None:
-    """A stale writer should keep only additive echo and discovery facts."""
-    tracker = HandledTurnLedger("test_cross_process_stale", base_path=temp_dir)
-    assert tracker.get_turn_record("$warm") is None
-
-    with advisory_file_lock(tracker._responses_lock_file):
-        tracker.record_handled_turn(
-            TurnRecord.create(
-                ["$event"],
-                discovery_event_ids=["$stale-alias"],
-                response_event_id="$stale-response",
-                visible_echo_event_id="$echo",
-                source_event_prompts={"$event": "stale prompt"},
-                response_owner="stale-owner",
-                timestamp=stale_timestamp,
-            ),
-        )
-        _write_responses_file(
-            tracker,
-            {
-                "$event": {
-                    "response_event_id": "$new-response",
-                    "completed": True,
-                    "discovery_event_ids": ["$disk-alias"],
-                    "source_event_prompts": {"$event": "new prompt"},
-                    "response_owner": "new-owner",
-                    "timestamp": 20,
-                },
-            },
-        )
-
-    _wait_for_disk_persists_without_flushing(tracker)
-    live_record = tracker.get_turn_record("$event")
-    assert live_record is not None
-    assert live_record.response_event_id == "$new-response"
-    assert live_record.source_event_prompts == {"$event": "new prompt"}
-    assert live_record.response_owner == "new-owner"
-    assert live_record.visible_echo_event_id == "$echo"
-    assert live_record.discovery_event_ids == ("$disk-alias", "$stale-alias")
-    assert tracker.get_turn_record("$disk-alias") == live_record
-    assert tracker.get_turn_record("$stale-alias") == live_record
-
-    tracker.flush()
-    reloaded = _reload_ledger("test_cross_process_stale", temp_dir)
-    assert reloaded.get_turn_record("$event") == live_record
-    assert reloaded.get_turn_record("$disk-alias") == live_record
-    assert reloaded.get_turn_record("$stale-alias") == live_record
-
-
-def test_disk_merge_keeps_completed_record_over_newer_incomplete_write(temp_dir: Path) -> None:
-    """A newer partial echo must not make a completed same-turn record retryable."""
-    tracker = HandledTurnLedger("test_cross_process_incomplete", base_path=temp_dir)
-    assert tracker.get_turn_record("$warm") is None
-
-    with advisory_file_lock(tracker._responses_lock_file):
-        tracker.record_handled_turn(
-            TurnRecord.create(
-                ["$event"],
-                completed=False,
-                visible_echo_event_id="$echo",
-                timestamp=30,
-            ),
-        )
-        _write_responses_file(
-            tracker,
-            {
-                "$event": {
-                    "response_event_id": "$response",
-                    "completed": True,
-                    "response_owner": "owner",
-                    "timestamp": 20,
-                },
-            },
-        )
-
-    _wait_for_disk_persists_without_flushing(tracker)
-    live_record = tracker.get_turn_record("$event")
-    assert live_record is not None
-    assert live_record.completed
-    assert live_record.response_event_id == "$response"
-    assert live_record.response_owner == "owner"
-    assert live_record.visible_echo_event_id == "$echo"
-
-
-def test_disk_conflict_winner_installs_full_identity_closure_in_live_state(temp_dir: Path) -> None:
-    """A rejected local source should expose every canonical and alias ID of the disk winner."""
-    tracker = HandledTurnLedger("test_cross_process_closure", base_path=temp_dir)
-    assert tracker.get_turn_record("$warm") is None
-
-    with advisory_file_lock(tracker._responses_lock_file):
-        tracker.record_handled_turn(
-            TurnRecord.create(["$candidate"], response_event_id="$candidate-response", timestamp=10),
-        )
-        _write_responses_file(
-            tracker,
-            {
-                "$candidate": {
-                    "source_event_ids": ["$winner"],
-                    "discovery_event_ids": ["$candidate", "$winner-alias"],
-                    "response_event_id": "$winner-response",
-                    "completed": True,
-                    "timestamp": 20,
-                },
-            },
-        )
-
-    _wait_for_disk_persists_without_flushing(tracker)
-    winner = tracker.get_turn_record("$candidate")
-    assert winner is not None
-    assert winner.source_event_ids == ("$winner",)
-    assert winner.discovery_event_ids == ("$candidate", "$winner-alias")
-    assert tracker.get_turn_record("$winner") == winner
-    assert tracker.get_turn_record("$winner-alias") == winner
-    assert tracker.has_responded("$winner")
-    assert tracker.has_responded("$winner-alias")
-
-
-def test_multiple_instances_merge_updates(temp_dir: Path) -> None:
-    """Stale instances should merge with disk state instead of clobbering prior writes."""
+def test_sibling_ledgers_merge_updates(temp_dir: Path) -> None:
+    """Sibling ledgers should share and persist updates."""
     tracker_a = HandledTurnLedger("test_multi_instance", base_path=temp_dir)
     tracker_b = HandledTurnLedger("test_multi_instance", base_path=temp_dir)
 
@@ -916,8 +746,8 @@ def test_multiple_instances_merge_updates(temp_dir: Path) -> None:
     assert _get_response_event_id(tracker_c, "$second") == "$response-b"
 
 
-def test_multiple_instances_refresh_reads_from_disk(temp_dir: Path) -> None:
-    """Long-lived instances should observe sibling writes during read-side queries."""
+def test_sibling_ledgers_share_live_state(temp_dir: Path) -> None:
+    """Sibling ledgers should observe process-shared state."""
     tracker_a = HandledTurnLedger("test_multi_instance_reads", base_path=temp_dir)
     tracker_b = HandledTurnLedger("test_multi_instance_reads", base_path=temp_dir)
 

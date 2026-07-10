@@ -73,7 +73,7 @@ The two physical stores remain intentionally redundant so run metadata can repai
 Older or incomplete run metadata only backfills absent optional facts, and conflicting discovery aliases are pruned instead of claiming another completed turn.
 Run metadata supplies a complete record when the ledger row is absent and otherwise participates only through that precedence rule.
 `TurnStore` immediately writes a recovered or enriched record back to the ledger, so callers never own backfill or repair decisions.
-Cross-process disk merges keep completion monotonic, preserve the newest completed same-turn record, and publish the full disk-side identity closure back into live shared state.
+One runtime process owns each ledger's semantic ordering, while the advisory file lock protects exact durable writes without defining cross-process turn precedence.
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
 
 ## Tool Dispatch Contracts

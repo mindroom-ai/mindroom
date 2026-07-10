@@ -3,9 +3,9 @@
 Reads are served from in-memory state shared across every ledger bound to the
 same responses file, so sibling ledger instances in one process observe each
 other's writes without touching the filesystem. Disk persistence happens on a
-single write-behind worker thread that merges exact records into the file under
-an advisory lock, keeping cross-process writers safe while the event loop never
-blocks on filesystem I/O (issue #1260).
+single write-behind worker thread that merges exact records into the file.
+One runtime process owns semantic ordering; an advisory lock keeps file updates
+atomic without blocking the event loop on filesystem I/O (issue #1260).
 """
 
 from __future__ import annotations
@@ -339,15 +339,7 @@ class _LedgerState:
     responses: dict[str, TurnRecord] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     loaded: bool = False
-    pending_persists: list[Future[_PersistedTurnResult | None]] = field(default_factory=list, repr=False)
-
-
-@dataclass(frozen=True)
-class _PersistedTurnResult:
-    """Authoritative disk rows resolved for one asynchronous write request."""
-
-    requested_record: TurnRecord
-    records_by_event_id: tuple[tuple[str, TurnRecord | None], ...]
+    pending_persists: list[Future[None]] = field(default_factory=list, repr=False)
 
 
 _LEDGER_STATES: dict[str, _LedgerState] = {}
@@ -437,7 +429,6 @@ class HandledTurnLedger:
             return None
         with self._state.lock:
             self._ensure_loaded_locked()
-            self._apply_completed_persists_locked()
             existing_records = MappingProxyType(
                 {
                     event_id: record
@@ -464,7 +455,6 @@ class HandledTurnLedger:
         """Return whether the source event has a terminal recorded outcome."""
         with self._state.lock:
             self._ensure_loaded_locked()
-            self._apply_completed_persists_locked()
             record = self._responses.get(event_id)
             return record.completed if record is not None else False
 
@@ -472,7 +462,6 @@ class HandledTurnLedger:
         """Return the tracked visible echo event ID for one source event."""
         with self._state.lock:
             self._ensure_loaded_locked()
-            self._apply_completed_persists_locked()
             record = self._responses.get(source_event_id)
             return record.visible_echo_event_id if record is not None else None
 
@@ -480,7 +469,6 @@ class HandledTurnLedger:
         """Return the first visible echo already tracked for one or more source events."""
         with self._state.lock:
             self._ensure_loaded_locked()
-            self._apply_completed_persists_locked()
             for event_id in _normalize_source_event_ids(source_event_ids):
                 record = self._responses.get(event_id)
                 if record is not None and record.visible_echo_event_id is not None:
@@ -491,7 +479,6 @@ class HandledTurnLedger:
         """Return the canonical record for one source event."""
         with self._state.lock:
             self._ensure_loaded_locked()
-            self._apply_completed_persists_locked()
             return self._responses.get(source_event_id)
 
     def _ensure_loaded_locked(self) -> None:
@@ -508,77 +495,28 @@ class HandledTurnLedger:
         pending = list(self._state.pending_persists)
         self._state.pending_persists.clear()
         for future in pending:
-            result = future.result()
-            if result is not None:
-                self._apply_persist_result_locked(result)
-
-    def _apply_completed_persists_locked(self) -> None:
-        """Publish completed asynchronous disk resolutions before serving live state."""
-        completed: list[Future[_PersistedTurnResult | None]] = []
-        pending: list[Future[_PersistedTurnResult | None]] = []
-        for future in self._state.pending_persists:
-            if future.done():
-                completed.append(future)
-            else:
-                pending.append(future)
-        self._state.pending_persists = pending
-        for future in completed:
-            result = future.result()
-            if result is not None:
-                self._apply_persist_result_locked(result)
+            future.result()
 
     def _schedule_persist_locked(self, turn_record: TurnRecord) -> None:
         """Queue one write-behind disk merge for records already applied to memory."""
         future = _persist_executor().submit(self._persist_record, turn_record)
+        self._state.pending_persists = [pending for pending in self._state.pending_persists if not pending.done()]
         self._state.pending_persists.append(future)
 
-    def _persist_record(self, turn_record: TurnRecord) -> _PersistedTurnResult | None:
+    def _persist_record(self, turn_record: TurnRecord) -> None:
         """Merge already-applied records into the persisted ledger from a worker thread."""
         try:
             with advisory_file_lock(self._responses_lock_file, exclusive=True):
                 persisted_responses = self._read_responses_file_locked()
-                resolved_record = _resolve_turn_record(turn_record, persisted_responses)
-                if resolved_record is not None:
-                    for event_id in resolved_record.indexed_event_ids:
-                        persisted_responses[event_id] = resolved_record
-                    self._write_responses_file_locked(persisted_responses)
-                resolved_event_ids = _indexed_record_closure(
-                    persisted_responses,
-                    (
-                        *turn_record.indexed_event_ids,
-                        *(resolved_record.indexed_event_ids if resolved_record is not None else ()),
-                    ),
-                )
-                return _PersistedTurnResult(
-                    requested_record=turn_record,
-                    records_by_event_id=tuple(
-                        (event_id, persisted_responses.get(event_id)) for event_id in resolved_event_ids
-                    ),
-                )
+                for event_id in turn_record.indexed_event_ids:
+                    persisted_responses[event_id] = turn_record
+                self._write_responses_file_locked(persisted_responses)
         except Exception:
             logger.exception(
                 "handled_turn_persist_failed",
                 agent=self.agent_name,
                 responses_file=str(self._responses_file),
             )
-            return None
-
-    def _apply_persist_result_locked(self, result: _PersistedTurnResult) -> None:
-        """Replace still-current requested rows with their authoritative disk values."""
-        for event_id, persisted_record in result.records_by_event_id:
-            current_record = self._responses.get(event_id)
-            if current_record is None:
-                if persisted_record is not None:
-                    self._responses[event_id] = persisted_record
-                continue
-            if current_record == result.requested_record:
-                if persisted_record is None:
-                    self._responses.pop(event_id, None)
-                else:
-                    self._responses[event_id] = persisted_record
-                continue
-            if persisted_record is not None and same_turn_identity(current_record, persisted_record):
-                self._responses[event_id] = _merge_same_identity_records(current_record, persisted_record)
 
     def _write_responses_file_locked(self, responses: dict[str, TurnRecord]) -> None:
         """Atomically write one versioned ledger payload while the file lock is held."""
@@ -671,24 +609,6 @@ class HandledTurnLedger:
         except FileNotFoundError:
             return None
         return quarantined_file
-
-
-def _indexed_record_closure(
-    records: Mapping[str, TurnRecord],
-    event_ids: Sequence[str],
-) -> tuple[str, ...]:
-    """Return event IDs plus every indexed ID claimed by their resolved records."""
-    closure = list(_normalize_source_event_ids(event_ids))
-    seen_event_ids = set(closure)
-    for event_id in closure:
-        record = records.get(event_id)
-        if record is None:
-            continue
-        for indexed_event_id in record.indexed_event_ids:
-            if indexed_event_id not in seen_event_ids:
-                seen_event_ids.add(indexed_event_id)
-                closure.append(indexed_event_id)
-    return tuple(closure)
 
 
 def _normalize_source_event_ids(source_event_ids: Sequence[object]) -> tuple[str, ...]:
