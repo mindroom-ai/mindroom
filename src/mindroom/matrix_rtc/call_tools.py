@@ -5,9 +5,8 @@ mechanism. This module materializes the agent's regular chat toolkits (the
 same construction path as text conversations, including workspace-aware
 base dirs and worker routing) and wraps every agno function as a raw
 livekit function tool. Tool calls run inside the standard MindRoom tool
-runtime context for the call's room and respect the configured
-tool-approval rules: calls that would need human approval are refused with
-a spoken-friendly message instead of silently executing.
+runtime context for the call's room. Tools needing confirmation, user input,
+external execution, or approval are omitted because voice has no approval UI.
 """
 
 from __future__ import annotations
@@ -23,9 +22,11 @@ from agno.session import AgentSession as AgnoAgentSession
 from agno.tools.function import FunctionCall
 
 from mindroom.agents import create_agent
+from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
+from mindroom.tool_approval import tool_requires_approval_for_openai_compat
 from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
@@ -55,9 +56,8 @@ class CallAgentTooling:
     would use in a text conversation, so the voice agent is the same agent.
     """
 
-    tools: list[Any]
-    tool_names: tuple[str, ...]
-    instructions: str | None = None
+    tools: tuple[Any, ...]
+    instructions: str
 
 
 async def build_call_tools(
@@ -79,13 +79,21 @@ async def build_call_tools(
     )
     context = tool_support.build_context(target, user_id=None)
     if context is None:
-        logger.warning("call_tools_unavailable_no_runtime_context", agent=agent_name, room_id=room_id)
-        return CallAgentTooling(tools=[], tool_names=())
+        msg = f"Tool runtime context unavailable for voice agent {agent_name}"
+        raise RuntimeError(msg)
     execution_identity = tool_support.build_execution_identity(
         target=target,
         user_id=None,
         agent_name=agent_name,
     )
+    refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
+    knowledge = resolve_agent_knowledge_access(
+        agent_name,
+        config,
+        runtime_paths,
+        refresh_scheduler=refresh_scheduler,
+        execution_identity=execution_identity,
+    ).knowledge
     agent = await asyncio.to_thread(
         functools.partial(
             create_agent,
@@ -94,13 +102,15 @@ async def build_call_tools(
             runtime_paths,
             execution_identity,
             session_id=session_id,
+            hook_registry=context.hook_registry,
+            knowledge=knowledge,
             include_interactive_questions=False,
+            refresh_scheduler=refresh_scheduler,
             eager_deferred_tools=True,
         ),
     )
     instructions = await asyncio.to_thread(_render_system_prompt, agent, session_id)
     tools: list[Any] = []
-    names: list[str] = []
     seen_functions: set[int] = set()
     seen_names: set[str] = set()
     for toolkit in agent.tools or []:
@@ -109,29 +119,32 @@ async def build_call_tools(
                 continue
             seen_functions.add(id(function))
             seen_names.add(function.name)
+            if _function_requires_text_chat(function, config):
+                logger.info("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
+                continue
             tools.append(
                 _wrap_agno_function(
                     function,
                     context=context,
                     agent_name=agent_name,
+                    config=config,
                 ),
             )
-            names.append(function.name)
-    logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(names))
-    return CallAgentTooling(tools=tools, tool_names=tuple(names), instructions=instructions)
+    logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
+    return CallAgentTooling(tools=tuple(tools), instructions=instructions)
 
 
-def _render_system_prompt(agent: AgnoAgent, session_id: str) -> str | None:
+def _render_system_prompt(agent: AgnoAgent, session_id: str) -> str:
     """Render the same system message the agent would use for a chat turn."""
-    try:
-        message = agent.get_system_message(AgnoAgentSession(session_id=session_id))
-    except Exception as error:
-        logger.warning("call_system_prompt_render_failed", error=str(error))
-        return None
+    message = agent.get_system_message(AgnoAgentSession(session_id=session_id))
     if message is None:
-        return None
+        msg = "Agent produced no system prompt for its voice session"
+        raise ValueError(msg)
     content = message.content
-    return content if isinstance(content, str) and content.strip() else None
+    if not isinstance(content, str) or not content.strip():
+        msg = "Agent produced an empty system prompt for its voice session"
+        raise ValueError(msg)
+    return content
 
 
 def _normalize_tool_result(result: object) -> str:
@@ -156,11 +169,23 @@ def _function_requires_async_execution(function: Function) -> bool:
     )
 
 
+def _function_requires_text_chat(function: Function, config: Config) -> bool:
+    """Return whether voice must hide a function with no usable approval UI."""
+    return (
+        function.requires_confirmation
+        or function.requires_user_input
+        or function.external_execution
+        or function.approval_type == "required"
+        or tool_requires_approval_for_openai_compat(config, function.name)
+    )
+
+
 def _wrap_agno_function(
     function: Function,
     *,
     context: ToolRuntimeContext,
     agent_name: str,
+    config: Config,
 ) -> RawFunctionTool:
     """Wrap one agno function as a livekit raw function tool."""
     from livekit.agents import llm  # noqa: PLC0415
@@ -178,12 +203,7 @@ def _wrap_agno_function(
     }
 
     async def _handler(raw_arguments: dict[str, Any]) -> str:
-        if (
-            function.requires_confirmation
-            or function.requires_user_input
-            or function.external_execution
-            or function.approval_type == "required"
-        ):
+        if _function_requires_text_chat(function, config):
             logger.info("call_tool_blocked_needs_text_chat", tool=function.name, agent=agent_name)
             return _TEXT_CHAT_REQUIRED_MESSAGE
         logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)

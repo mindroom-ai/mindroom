@@ -148,11 +148,6 @@ class CallSession:
         client = self.deps.client
         return f"{client.user_id}:{required_device_id(client)}"
 
-    @property
-    def livekit_service_url(self) -> str:
-        """Authorization service selected when this call session joined."""
-        return self.deps.livekit_service_url
-
     async def start(self, members: list[CallMember]) -> None:
         """Join the call: connect media, publish membership, distribute keys."""
         self._members = members
@@ -211,7 +206,6 @@ class CallSession:
         participant_identity = f"{member.user_id}:{member.device_id}"
         inbound = self._key_manager.receive(
             received,
-            self.deps.clock_ms(),
             participant_identity=participant_identity,
         )
         if inbound is None:

@@ -19,7 +19,6 @@ def _member(user_id: str, device_id: str) -> CallMember:
         device_id=device_id,
         created_ts=0,
         expires_ms=10_000_000,
-        membership_id=f"{user_id}:{device_id}",
     )
 
 

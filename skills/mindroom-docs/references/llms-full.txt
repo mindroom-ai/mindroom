@@ -12885,7 +12885,7 @@ When a call starts in a room, the configured agent:
 
 The voice agent is the same agent you chat with: it carries the agent's regular system prompt (with a spoken-style addendum) and the same tools it has in text conversations.
 Tool calls run in the configured agent's room-scoped runtime context.
-MatrixRTC does not identify an individual speaker as a Matrix requester, so calls requiring `tool_approval` are refused with a spoken explanation instead of executing.
+MatrixRTC does not identify an individual speaker as a Matrix requester, so tools requiring confirmation, user input, external execution, or `tool_approval` are hidden from the voice tool schema.
 
 The agent leaves the call (and clears its membership state event) when the last other participant leaves, or when the bot shuts down.
 
@@ -12942,8 +12942,9 @@ Calls in unencrypted rooms need none of this and work with plain SFU media.
 
 ## Transcripts and memory
 
-Every call writes a markdown transcript incrementally: agents using file-backed memory keep it in `calls/` inside their canonical workspace (readable through their file tools later), while other agents use `<storage>/calls/<agent>/`.
-When the call ends, the agent appends a one-line summary with the transcript location to its daily memory.
+Every call writes a markdown transcript incrementally.
+File-memory agents keep it under `calls/` in their canonical workspace, where their file tools can read it later; other agents keep it under `<storage>/calls/<agent>/`.
+When the call ends, file memory stores a relative transcript reference, Mem0 stores the transcript as recallable context, and disabled memory leaves only the transcript file.
 
 ## Limitations
 

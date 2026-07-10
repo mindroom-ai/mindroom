@@ -21,7 +21,6 @@ def _member(user: str, device: str = "DEV", created_ts: int = 0) -> CallMember:
         device_id=device,
         created_ts=created_ts,
         expires_ms=10_000_000,
-        membership_id=f"{user}:{device}",
     )
 
 
@@ -153,43 +152,39 @@ def test_key_index_wraps_at_256() -> None:
     assert distribution.key_index == 0  # 256 rotations starting from 0 wrap back to 0
 
 
-def _received(key: bytes, index: int, sent_ts: int | None) -> ReceivedFrameKey:
+def _received(key: bytes, index: int, received_at_ms: int) -> ReceivedFrameKey:
     return ReceivedFrameKey(
         user_id="@alice:example.org",
         claimed_device_id="DEV",
         key_base64=base64.b64encode(key).decode(),
         key_index=index,
-        sent_ts=sent_ts,
+        received_at_ms=received_at_ms,
     )
 
 
-def test_receive_uses_local_receipt_order_and_ignores_remote_timestamp() -> None:
-    """A sender-controlled future timestamp cannot poison later keys."""
+def test_receive_uses_captured_local_receipt_order() -> None:
+    """A key processed late cannot replace a newer receipt for the same index."""
     manager = _manager()
     identity = "@alice:example.org:DEV"
     newer = manager.receive(
-        _received(b"B" * 16, 0, sent_ts=10**15),
-        now_ms=1_000,
+        _received(b"B" * 16, 0, received_at_ms=1_000),
         participant_identity=identity,
     )
     assert newer is not None
     assert newer.key == b"B" * 16
     assert newer.participant_identity == identity
     later = manager.receive(
-        _received(b"A" * 16, 0, sent_ts=1),
-        now_ms=1_001,
+        _received(b"A" * 16, 0, received_at_ms=1_001),
         participant_identity=identity,
     )
     assert later is not None
     stale = manager.receive(
-        _received(b"D" * 16, 0, sent_ts=10**16),
-        now_ms=999,
+        _received(b"D" * 16, 0, received_at_ms=999),
         participant_identity=identity,
     )
     assert stale is None
     different_index = manager.receive(
-        _received(b"C" * 16, 1, sent_ts=100),
-        now_ms=1_002,
+        _received(b"C" * 16, 1, received_at_ms=1_002),
         participant_identity=identity,
     )
     assert different_index is not None
@@ -203,8 +198,9 @@ def test_receive_rejects_invalid_base64() -> None:
         claimed_device_id="DEV",
         key_base64="not-base64!!",
         key_index=0,
+        received_at_ms=0,
     )
-    assert manager.receive(bad, now_ms=0, participant_identity="@alice:example.org:DEV") is None
+    assert manager.receive(bad, participant_identity="@alice:example.org:DEV") is None
 
 
 def test_receive_rejects_wrong_length_key() -> None:
@@ -212,8 +208,7 @@ def test_receive_rejects_wrong_length_key() -> None:
     manager = _manager()
     assert (
         manager.receive(
-            _received(b"A" * 15, 0, sent_ts=1),
-            now_ms=0,
+            _received(b"A" * 15, 0, received_at_ms=0),
             participant_identity="@alice:example.org:DEV",
         )
         is None
@@ -225,8 +220,7 @@ def test_receive_rejects_out_of_range_key_index() -> None:
     manager = _manager()
     assert (
         manager.receive(
-            _received(b"A" * 16, 256, sent_ts=1),
-            now_ms=0,
+            _received(b"A" * 16, 256, received_at_ms=0),
             participant_identity="@alice:example.org:DEV",
         )
         is None
@@ -234,20 +228,19 @@ def test_receive_rejects_out_of_range_key_index() -> None:
 
 
 def test_malformed_key_does_not_poison_the_dedup_filter() -> None:
-    """A bad payload must not block a later valid key with an older sent_ts."""
+    """A bad payload must not block a later valid key received earlier."""
     manager = _manager()
     bad = ReceivedFrameKey(
         user_id="@alice:example.org",
         claimed_device_id="DEV",
         key_base64="not-base64!!",
         key_index=0,
-        sent_ts=500,
+        received_at_ms=500,
     )
     identity = "@alice:example.org:DEV"
-    assert manager.receive(bad, now_ms=0, participant_identity=identity) is None
+    assert manager.receive(bad, participant_identity=identity) is None
     older_but_valid = manager.receive(
-        _received(b"B" * 16, 0, sent_ts=400),
-        now_ms=1,
+        _received(b"B" * 16, 0, received_at_ms=400),
         participant_identity=identity,
     )
     assert older_but_valid is not None

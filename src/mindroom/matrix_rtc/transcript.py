@@ -1,10 +1,8 @@
 """Persistent transcripts for MatrixRTC voice calls.
 
-Each call writes a markdown transcript incrementally (so a crash keeps the
-turns recorded so far). Agents using file-backed memory get the transcript
-inside their canonical workspace under ``calls/``, where their file tools
-can read it later; other agents get it under the runtime storage root. When
-the call ends, a short summary entry is appended to the agent's daily memory.
+Each call writes a markdown transcript incrementally. File-memory agents keep
+it in their workspace; other agents use the runtime call archive. When the
+call ends, recoverable context is stored through the configured memory backend.
 """
 
 from __future__ import annotations
@@ -16,7 +14,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
-from mindroom.memory import append_agent_daily_memory
+from mindroom.memory import add_agent_memory
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
@@ -38,11 +36,7 @@ def _call_transcript_path(
     room_id: str,
     started_at: datetime,
 ) -> Path:
-    """Choose the transcript location for one call.
-
-    Agents with file-backed memory keep transcripts inside their workspace; others use
-    ``<storage>/calls/<agent>/``.
-    """
+    """Choose a transcript location compatible with the agent's runtime."""
     if config.resolve_entity(agent_name).memory_backend == "file":
         base = agent_workspace_root_path(storage_path, agent_name) / _TRANSCRIPT_DIRNAME
     else:
@@ -65,7 +59,7 @@ class CallTranscript:
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _pending: list[str] = field(default_factory=list, init=False)
     _header_written: bool = field(default=False, init=False)
-    _flush_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
+    _flush_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     @classmethod
     def start(
@@ -94,11 +88,6 @@ class CallTranscript:
             started_at=started_at,
         )
 
-    @property
-    def turn_count(self) -> int:
-        """Number of spoken turns recorded so far."""
-        return self._turns
-
     def record(self, speaker: str, text: str) -> None:
         """Record one finalized conversation turn (safe from sync callbacks)."""
         text = text.strip()
@@ -118,6 +107,8 @@ class CallTranscript:
         self._schedule_flush()
 
     def _schedule_flush(self) -> None:
+        if self._flush_task is not None and not self._flush_task.done():
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -131,27 +122,25 @@ class CallTranscript:
                     error=str(error),
                 )
             return
-        task = loop.create_task(self._flush())
-        self._flush_tasks.add(task)
+        self._flush_task = loop.create_task(self._flush_background())
 
-        def _observe_flush(done: asyncio.Task[None]) -> None:
-            self._flush_tasks.discard(done)
-            if done.cancelled():
-                return
-            error = done.exception()
-            if error is not None:
-                logger.warning(
-                    "call_transcript_flush_failed",
-                    agent=self.agent_name,
-                    room_id=self.room_id,
-                    error=str(error),
-                )
-
-        task.add_done_callback(_observe_flush)
+    async def _flush_background(self) -> None:
+        try:
+            await self._flush()
+        except OSError as error:
+            logger.warning(
+                "call_transcript_flush_failed",
+                agent=self.agent_name,
+                room_id=self.room_id,
+                error=str(error),
+            )
+        finally:
+            self._flush_task = None
 
     async def _flush(self) -> None:
         async with self._write_lock:
-            await asyncio.to_thread(self._flush_sync)
+            while self._pending:
+                await asyncio.to_thread(self._flush_sync)
 
     def _flush_sync(self) -> None:
         lines = list(self._pending)
@@ -170,12 +159,11 @@ class CallTranscript:
         self._header_written = True
 
     async def finalize(self, *, config: Config, runtime_paths: RuntimePaths, storage_path: Path) -> None:
-        """Flush remaining turns and append a daily-memory entry for the call."""
+        """Flush remaining turns and store a memory reference for the call."""
         ended_at = datetime.now(tz=UTC)
         duration_minutes = max(1, round((ended_at - self.started_at).total_seconds() / 60))
         try:
-            async with self._write_lock:
-                await asyncio.to_thread(self._flush_sync)
+            await self._flush()
         except OSError as error:
             logger.warning(
                 "call_transcript_finalize_failed",
@@ -186,36 +174,32 @@ class CallTranscript:
             return
         if self._turns == 0:
             return
+        memory_backend = config.resolve_entity(self.agent_name).memory_backend
+        if memory_backend == "none":
+            return
+        if memory_backend == "file":
+            transcript_path = self.path.relative_to(
+                agent_workspace_root_path(storage_path, self.agent_name),
+            ).as_posix()
+        else:
+            transcript_path = self.path.relative_to(storage_path).as_posix()
         summary = (
             f"Joined a voice call in {self.room_display_name} ({self.room_id}): "
             f"{self._turns} spoken turns over ~{duration_minutes} min. "
-            f"Transcript: {self.path}"
+            f"Transcript: {transcript_path}"
         )
         try:
-            await asyncio.to_thread(
-                _append_daily_memory_sync,
-                summary,
+            memory_content = summary
+            if memory_backend == "mem0":
+                transcript = await asyncio.to_thread(self.path.read_text, encoding="utf-8")
+                memory_content = f"{summary}\n\n{transcript}"
+            await add_agent_memory(
+                memory_content,
                 self.agent_name,
                 storage_path,
                 config,
                 runtime_paths,
+                metadata={"source": "matrix_rtc_call", "transcript_path": transcript_path},
             )
         except Exception as error:
-            logger.warning("call_daily_memory_failed", agent=self.agent_name, error=str(error))
-
-
-def _append_daily_memory_sync(
-    summary: str,
-    agent_name: str,
-    storage_path: Path,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> None:
-    """Sync helper so the daily-memory append can run in a worker thread."""
-    append_agent_daily_memory(
-        summary,
-        agent_name,
-        storage_path,
-        config,
-        runtime_paths,
-    )
+            logger.warning("call_memory_reference_failed", agent=self.agent_name, error=str(error))

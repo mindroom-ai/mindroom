@@ -2114,9 +2114,11 @@ depends_on = [
 path = "mindroom.matrix_rtc.call_tools"
 depends_on = [
     "mindroom.agents",
+    "mindroom.knowledge.utils",
     "mindroom.logging_config",
     "mindroom.message_target",
     "mindroom.session_ids",
+    "mindroom.tool_approval",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -3274,7 +3276,6 @@ expose = [
     "add_room_to_space",
     "create_room",
     "edit_message_result",
-    "ensure_call_member_power_level",
     "ensure_managed_room_power_levels",
     "ensure_room_admin_power_levels",
     "ensure_room_encryption_enabled",
@@ -3306,7 +3307,6 @@ expose = [
     "add_room_to_space",
     "create_room",
     "create_space",
-    "ensure_call_member_power_level",
     "ensure_room_admin_power_levels",
     "ensure_room_directory_visibility",
     "ensure_room_join_rule",

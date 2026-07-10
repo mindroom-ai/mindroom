@@ -66,13 +66,9 @@ async def discover_livekit_service_url(
         verify=ssl_verify,
     )
     async with httpx.AsyncClient(transport=transport, timeout=10.0, follow_redirects=True) as client:
-        try:
-            response = await client.get(well_known_url)
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, ValueError) as error:
-            logger.warning("rtc_well_known_fetch_failed", url=well_known_url, error=str(error))
-            return None
+        response = await client.get(well_known_url)
+        response.raise_for_status()
+        payload = response.json()
     if not isinstance(payload, dict):
         logger.warning("rtc_well_known_not_a_dict", url=well_known_url, payload_type=type(payload).__name__)
         return None

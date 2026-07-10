@@ -125,7 +125,12 @@ class ToDeviceFrameKeyTransport:
             delivered.append(target)
         return delivered
 
-    def parse_incoming(self, event: nio.UnknownToDeviceEvent) -> tuple[str, ReceivedFrameKey] | None:
+    def parse_incoming(
+        self,
+        event: nio.UnknownToDeviceEvent,
+        *,
+        received_at_ms: int,
+    ) -> tuple[str, ReceivedFrameKey] | None:
         """Parse a decrypted call-key event together with its target room."""
         if event.type != CALL_ENCRYPTION_KEYS_EVENT_TYPE:
             return None
@@ -135,5 +140,10 @@ class ToDeviceFrameKeyTransport:
         room_id = content.get("room_id")
         if not isinstance(room_id, str) or not room_id:
             return None
-        received = parse_key_to_device_content(event.sender, content, room_id=room_id)
+        received = parse_key_to_device_content(
+            event.sender,
+            content,
+            room_id=room_id,
+            received_at_ms=received_at_ms,
+        )
         return (room_id, received) if received is not None else None

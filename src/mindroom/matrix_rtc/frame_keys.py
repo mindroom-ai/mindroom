@@ -160,7 +160,6 @@ class FrameKeyManager:
     def receive(
         self,
         received: ReceivedFrameKey,
-        now_ms: int,
         *,
         participant_identity: str,
     ) -> _InboundFrameKey | None:
@@ -173,7 +172,7 @@ class FrameKeyManager:
             return None
         filter_key = (received.user_id, received.claimed_device_id, received.key_index)
         newest = self._newest_inbound_ts.get(filter_key)
-        if newest is not None and now_ms < newest:
+        if newest is not None and received.received_at_ms < newest:
             return None
         try:
             key = base64.b64decode(received.key_base64, validate=True)
@@ -183,7 +182,7 @@ class FrameKeyManager:
             return None
         # Record the dedup timestamp only for keys that validate, so a
         # malformed payload cannot poison the filter against a good retry.
-        self._newest_inbound_ts[filter_key] = now_ms
+        self._newest_inbound_ts[filter_key] = received.received_at_ms
         return _InboundFrameKey(
             participant_identity=participant_identity,
             key_index=received.key_index,

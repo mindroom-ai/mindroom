@@ -9,6 +9,7 @@ import pytest
 from agno.tools.function import Function
 
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.matrix_rtc.call_tools import _wrap_agno_function, build_call_tools
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -28,12 +29,16 @@ def _config() -> Config:
 
 def _context() -> SimpleNamespace:
     # The wrapper only stores and re-binds the context; a stand-in suffices.
-    return SimpleNamespace(room_id="!room:example.org")
+    return SimpleNamespace(
+        room_id="!room:example.org",
+        hook_registry=object(),
+        orchestrator=None,
+    )
 
 
-def _function(entrypoint: object, parameters: dict | None = None) -> Function:
+def _function(entrypoint: object, parameters: dict | None = None, *, name: str = "add") -> Function:
     return Function(
-        name="add",
+        name=name,
         description="Add two numbers",
         parameters=parameters or {"type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}}},
         entrypoint=entrypoint,
@@ -45,6 +50,7 @@ def _wrap(function: Function):  # noqa: ANN202
         function,
         context=_context(),
         agent_name=AGENT,
+        config=_config(),
     )
 
 
@@ -203,9 +209,14 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         def get_system_message(self, _session: object) -> SimpleNamespace:
             return SimpleNamespace(content="THE CHAT SYSTEM PROMPT")
 
+    create_calls: list[tuple[object, ...]] = []
     create_kwargs: dict[str, object] = {}
+    knowledge = object()
+    hook_registry = object()
+    refresh_scheduler = object()
 
-    def fake_create_agent(*_args: object, **kwargs: object) -> FakeAgnoAgent:
+    def fake_create_agent(*args: object, **kwargs: object) -> FakeAgnoAgent:
+        create_calls.append(args)
         create_kwargs.update(kwargs)
         return FakeAgnoAgent()
 
@@ -213,13 +224,21 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         "mindroom.matrix_rtc.call_tools.create_agent",
         fake_create_agent,
     )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
+        lambda *_args, **_kwargs: SimpleNamespace(knowledge=knowledge),
+    )
     seen_targets: list[MessageTarget] = []
 
     class StrictToolSupport:
         def build_context(self, target: MessageTarget, *, user_id: str | None) -> SimpleNamespace:
             assert user_id is None
             seen_targets.append(target)
-            return _context()
+            return SimpleNamespace(
+                room_id="!room:example.org",
+                hook_registry=hook_registry,
+                orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler),
+            )
 
         def build_execution_identity(
             self,
@@ -240,10 +259,14 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         tool_support=StrictToolSupport(),  # type: ignore[arg-type]
         room_id="!room:example.org",
     )
-    assert tooling.tool_names == ("add",)
     assert len(tooling.tools) == 1
     assert tooling.instructions == "THE CHAT SYSTEM PROMPT"
     assert create_kwargs["eager_deferred_tools"] is True
+    assert create_kwargs["hook_registry"] is hook_registry
+    assert create_kwargs["knowledge"] is knowledge
+    assert create_kwargs["refresh_scheduler"] is refresh_scheduler
+    assert create_calls
+    assert create_calls[0][3] is not None
     assert len(seen_targets) == 2
     assert seen_targets[0] is seen_targets[1]
     assert seen_targets[0].session_id == "!room:example.org"
@@ -265,8 +288,8 @@ async def test_build_call_tools_includes_async_only_toolkit_functions(
     class FakeAgnoAgent:
         tools: ClassVar[list] = [toolkit]
 
-        def get_system_message(self, _session: object) -> None:
-            return None
+        def get_system_message(self, _session: object) -> SimpleNamespace:
+            return SimpleNamespace(content="THE CHAT SYSTEM PROMPT")
 
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
@@ -285,5 +308,70 @@ async def test_build_call_tools_includes_async_only_toolkit_functions(
         room_id="!room:example.org",
     )
 
-    assert tooling.tool_names == ("add",)
     assert len(tooling.tools) == 1
+
+
+@pytest.mark.asyncio
+async def test_build_call_tools_hides_functions_needing_text_chat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsupported approval and interaction flows never enter the voice schema."""
+    functions = {
+        name: _function(lambda name=name: name, {"type": "object", "properties": {}}, name=name)
+        for name in ("safe", "confirm", "user_input", "external", "agno_approval", "policy_approval")
+    }
+    functions["confirm"].requires_confirmation = True
+    functions["user_input"].requires_user_input = True
+    functions["external"].external_execution = True
+    functions["agno_approval"].approval_type = "required"
+    toolkit = SimpleNamespace(functions=functions, async_functions={})
+
+    class FakeAgnoAgent:
+        tools: ClassVar[list] = [toolkit]
+
+        def get_system_message(self, _session: object) -> SimpleNamespace:
+            return SimpleNamespace(content="THE CHAT SYSTEM PROMPT")
+
+    config = _config()
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="policy_approval", action="require_approval")],
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", lambda *_a, **_k: FakeAgnoAgent())
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
+        lambda *_a, **_k: SimpleNamespace(knowledge=None),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools._wrap_agno_function",
+        lambda function, **_kwargs: function.name,
+    )
+    tool_support = SimpleNamespace(
+        build_context=lambda *_a, **_k: _context(),
+        build_execution_identity=lambda **_k: SimpleNamespace(),
+    )
+
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=test_runtime_paths(tmp_path),
+        tool_support=tool_support,  # type: ignore[arg-type]
+        room_id="!room:example.org",
+    )
+
+    assert tooling.tools == ("safe",)
+
+
+@pytest.mark.asyncio
+async def test_build_call_tools_requires_runtime_context(tmp_path: Path) -> None:
+    """Voice cannot silently downgrade when same-agent tool context is unavailable."""
+    tool_support = SimpleNamespace(build_context=lambda *_a, **_k: None)
+
+    with pytest.raises(RuntimeError, match="runtime context unavailable"):
+        await build_call_tools(
+            agent_name=AGENT,
+            config=_config(),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_support=tool_support,  # type: ignore[arg-type]
+            room_id="!room:example.org",
+        )

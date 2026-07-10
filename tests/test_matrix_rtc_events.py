@@ -43,7 +43,6 @@ def test_membership_content_round_trip() -> None:
     assert member is not None
     assert member.user_id == USER
     assert member.device_id == DEVICE
-    assert member.membership_id == f"{USER}:{DEVICE}"
     assert member.livekit_service_url == SERVICE_URL
     assert member.created_ts == 1_000
     assert not member.is_expired(1_000 + DEFAULT_MEMBERSHIP_EXPIRES_MS - 1)
@@ -143,8 +142,8 @@ def test_parse_membership_does_not_scan_past_primary_focus() -> None:
     assert member.livekit_service_url is None
 
 
-def test_parse_membership_defaults_membership_id_and_expiry() -> None:
-    """Parse membership defaults membership id and expiry."""
+def test_parse_membership_defaults_expiry() -> None:
+    """Parse membership defaults expiry."""
     event = _membership_event(
         {
             "application": "m.call",
@@ -156,7 +155,6 @@ def test_parse_membership_defaults_membership_id_and_expiry() -> None:
     )
     member = parse_membership_event(event)
     assert member is not None
-    assert member.membership_id == f"{USER}:{DEVICE}"
     assert member.expires_ms == DEFAULT_MEMBERSHIP_EXPIRES_MS
 
 
@@ -170,23 +168,29 @@ def test_key_to_device_content_round_trip() -> None:
         device_id=DEVICE,
         sent_ts=777,
     )
-    received = parse_key_to_device_content(USER, content, room_id="!room:example.org")
+    received = parse_key_to_device_content(
+        USER,
+        content,
+        room_id="!room:example.org",
+        received_at_ms=888,
+    )
     assert received is not None
     assert received.key_index == 3
-    assert received.sent_ts == 777
+    assert received.received_at_ms == 888
     # A key for a different room must not leak into this session.
-    assert parse_key_to_device_content(USER, content, room_id="!other:example.org") is None
+    assert parse_key_to_device_content(USER, content, room_id="!other:example.org", received_at_ms=888) is None
 
 
 def test_parse_key_content_requires_key_and_claimed_device() -> None:
     """Parse key content requires key and claimed device."""
     room_id = "!room:example.org"
-    assert parse_key_to_device_content(USER, {"room_id": room_id}, room_id=room_id) is None
+    assert parse_key_to_device_content(USER, {"room_id": room_id}, room_id=room_id, received_at_ms=0) is None
     assert (
         parse_key_to_device_content(
             USER,
             {"room_id": room_id, "keys": {"index": 0, "key": "abc"}, "member": {}},
             room_id=room_id,
+            received_at_ms=0,
         )
         is None
     )
@@ -199,6 +203,7 @@ def test_parse_key_content_requires_key_and_claimed_device() -> None:
                 "member": {"claimed_device_id": DEVICE},
             },
             room_id=room_id,
+            received_at_ms=0,
         )
         is None
     )

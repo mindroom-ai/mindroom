@@ -78,7 +78,6 @@ async def test_frame_key_round_trips_through_real_olm() -> None:
                 device_id="RECDEV",
                 created_ts=0,
                 expires_ms=10_000_000,
-                membership_id=f"{REC}:RECDEV",
             )
 
             await transport.send_key(room_id=ROOM, key_base64=KEY_B64, key_index=5, targets=[target])
@@ -94,7 +93,7 @@ async def test_frame_key_round_trips_through_real_olm() -> None:
             assert isinstance(decrypted, nio.UnknownToDeviceEvent)
             assert decrypted.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE
 
-            parsed = transport.parse_incoming(decrypted)
+            parsed = transport.parse_incoming(decrypted, received_at_ms=1_000)
             assert parsed is not None
             room_id, received = parsed
             assert room_id == ROOM

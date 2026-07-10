@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import aiohttp
 import httpx
@@ -71,17 +71,12 @@ _VOICE_STYLE_ADDENDUM = (
 )
 
 
-def _build_call_instructions(agent_name: str, config: Config, chat_system_prompt: str | None) -> str:
-    """Compose realtime-agent instructions, preferring the chat system prompt."""
-    if chat_system_prompt:
-        return f"{chat_system_prompt}\n\n{_VOICE_STYLE_ADDENDUM}"
-    agent = config.agents[agent_name]
-    parts = [f"You are {agent.display_name}, an AI assistant."]
-    if agent.role:
-        parts.append(f"Your role: {agent.role}")
-    parts.extend(agent.instructions)
-    parts.append(_VOICE_STYLE_ADDENDUM)
-    return "\n".join(parts)
+_JoinResult = Literal["joined", "retry", "skip"]
+
+
+def _build_call_instructions(chat_system_prompt: str) -> str:
+    """Append voice-specific delivery guidance to the chat system prompt."""
+    return f"{chat_system_prompt}\n\n{_VOICE_STYLE_ADDENDUM}"
 
 
 def maybe_build_call_manager(
@@ -91,7 +86,7 @@ def maybe_build_call_manager(
     client: nio.AsyncClient,
     runtime_paths: RuntimePaths,
     ssl_verify: bool,
-    tool_support: ToolRuntimeSupport | None = None,
+    tool_support: ToolRuntimeSupport,
 ) -> CallManager | None:
     """Build a call manager when this agent is configured for voice calls."""
     if not config.calls.enabled or agent_name not in config.calls.agents:
@@ -127,7 +122,7 @@ class CallManager:
         runtime_paths: RuntimePaths,
         ssl_verify: bool,
         bridge_factory: Callable[[str, bool], VoiceBridgeLike] = _default_bridge_factory,
-        tool_support: ToolRuntimeSupport | None = None,
+        tool_support: ToolRuntimeSupport,
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
         self._agent_name = agent_name
@@ -171,7 +166,8 @@ class CallManager:
             or self._shutting_down
         ):
             return
-        parsed = self._key_transport.parse_incoming(event)
+        received_at_ms = self._clock_ms()
+        parsed = self._key_transport.parse_incoming(event, received_at_ms=received_at_ms)
         if parsed is None:
             return
         room_id, received = parsed
@@ -183,27 +179,10 @@ class CallManager:
         session = self._sessions.get(room_id)
         if session is not None and session.on_key_received(received):
             return
-        members = await self._fetch_remote_members(room_id)
-        if members is None:
-            self._queue_pending_key(room_id, received)
-            room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
-            if room is not None:
-                self._schedule_reconcile_retry(room)
-            return
-        if not self._received_key_matches_member(received, members):
-            logger.warning(
-                "call_frame_key_rejected_nonmember",
-                room_id=room_id,
-                user_id=received.user_id,
-                device_id=received.claimed_device_id,
-            )
-            return
         self._queue_pending_key(room_id, received)
-        session = self._sessions.get(room_id)
-        if session is not None:
-            room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
-            if room is not None:
-                await self._reconcile(room)
+        room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
+        if room is not None:
+            await self._reconcile(room)
 
     async def reconcile_joined_rooms(self) -> None:
         """Reconcile configured calls after a successful Matrix sync response."""
@@ -271,15 +250,6 @@ class CallManager:
             self._sessions.pop(room_id, None)
             await self._stop_session(session)
             return
-        oldest_member = min(members, key=lambda member: member.created_ts)
-        current_focus = _normalized_service_url(oldest_member.livekit_service_url or "")
-        if current_focus != _normalized_service_url(session.livekit_service_url):
-            logger.warning("call_focus_changed", room_id=room_id, advertised_url=oldest_member.livekit_service_url)
-            self._clear_reconcile_retry(room_id)
-            self._pending_keys.pop(room_id, None)
-            self._sessions.pop(room_id, None)
-            await self._stop_session(session)
-            return
         await self._update_session_members(room, session, members)
 
     async def _join_if_populated(self, room: nio.MatrixRoom, members: list[CallMember]) -> None:
@@ -287,10 +257,14 @@ class CallManager:
         if not members:
             self._clear_reconcile_retry(room.room_id)
             return
-        if await self._join(room, members):
+        result = await self._join(room, members)
+        if result == "joined":
             self._clear_reconcile_retry(room.room_id)
-        else:
+        elif result == "retry":
             self._schedule_reconcile_retry(room)
+        else:
+            self._clear_reconcile_retry(room.room_id)
+            self._pending_keys.pop(room.room_id, None)
 
     async def _update_session_members(
         self,
@@ -328,13 +302,6 @@ class CallManager:
         """Return whether this agent is configured to join calls in ``room_id``."""
         room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
         return room is not None and self._is_configured_call_room(room)
-
-    @staticmethod
-    def _received_key_matches_member(received: ReceivedFrameKey, members: list[CallMember]) -> bool:
-        """Return whether a key sender/device is in the current call roster."""
-        return any(
-            member.user_id == received.user_id and member.device_id == received.claimed_device_id for member in members
-        )
 
     def _queue_pending_key(self, room_id: str, received: ReceivedFrameKey) -> None:
         """Retain a bounded, deduplicated key set while a session is starting."""
@@ -420,21 +387,43 @@ class CallManager:
             members.append(member)
         return members
 
-    async def _join(self, room: nio.MatrixRoom, members: list[CallMember]) -> bool:
+    async def _join(self, room: nio.MatrixRoom, members: list[CallMember]) -> _JoinResult:  # noqa: PLR0911
         room_id = room.room_id
         api_key = get_api_key_for_provider("openai", self._runtime_paths)
         if not api_key:
             logger.warning("call_join_skipped_no_openai_key", room_id=room_id, agent=self._agent_name)
-            return False
+            return "skip"
         try:
             service = await self._resolve_service(members)
-        except (ValueError, *_CALL_NETWORK_ERRORS) as error:
+        except _CALL_NETWORK_ERRORS as error:
             logger.warning("call_service_discovery_failed", room_id=room_id, agent=self._agent_name, error=str(error))
-            return False
+            return "retry"
+        except ValueError as error:
+            logger.warning("call_service_discovery_failed", room_id=room_id, agent=self._agent_name, error=str(error))
+            return "skip"
         if service is None:
             logger.warning("call_join_skipped_no_livekit_service", room_id=room_id, agent=self._agent_name)
-            return False
-        tooling = await self._build_tooling(room_id)
+            return "skip"
+        try:
+            tooling = await self._build_tooling(room_id)
+        except Exception as error:
+            logger.warning(
+                "call_join_skipped_agent_materialization_failed",
+                room_id=room_id,
+                agent=self._agent_name,
+                error=str(error),
+            )
+            return "skip"
+        try:
+            device_id = required_device_id(self._client)
+        except CallJoinError as error:
+            logger.warning(
+                "call_join_skipped_invalid_client",
+                room_id=room_id,
+                agent=self._agent_name,
+                error=str(error),
+            )
+            return "skip"
         transcript = CallTranscript.start(
             agent_name=self._agent_name,
             config=self._config,
@@ -443,16 +432,15 @@ class CallManager:
             room_display_name=room.display_name or room_id,
         )
         options = VoiceAgentOptions(
-            instructions=_build_call_instructions(self._agent_name, self._config, tooling.instructions),
+            instructions=_build_call_instructions(tooling.instructions),
             model=self._config.calls.model,
             api_key=api_key,
             voice=self._config.calls.voice,
             greeting_instructions="Briefly greet the participants and let them know you joined the call.",
-            tools=tuple(tooling.tools),
+            tools=tooling.tools,
             on_conversation_turn=transcript.record,
             on_tools_executed=transcript.record_tool_use,
         )
-        started = False
         try:
             session = CallSession(
                 room_id=room_id,
@@ -460,7 +448,7 @@ class CallManager:
                 deps=CallSessionDeps(
                     client=self._client,
                     bridge=self._bridge_factory(
-                        f"{self._client.user_id}:{required_device_id(self._client)}",
+                        f"{self._client.user_id}:{device_id}",
                         room.encrypted,
                     ),
                     key_transport=self._key_transport,
@@ -475,23 +463,22 @@ class CallManager:
                 ),
             )
             await session.start(members)
-            started = True
-        except (CallJoinError, ValueError, *_CALL_NETWORK_ERRORS) as error:
+        except ValueError as error:
+            logger.warning("call_join_rejected", room_id=room_id, agent=self._agent_name, error=str(error))
+            return "skip"
+        except (CallJoinError, *_CALL_NETWORK_ERRORS) as error:
             logger.warning("call_join_failed", room_id=room_id, agent=self._agent_name, error=str(error))
-            return False
-        finally:
-            if not started:
-                self._pending_keys.pop(room_id, None)
+            return "retry"
         if self._shutting_down:
             # shutdown() ran while the join was in flight and cannot see this
             # session yet; stop it instead of leaking a live SFU connection.
             self._pending_keys.pop(room_id, None)
             await self._stop_session(session)
-            return False
+            return "skip"
         self._sessions[room_id] = session
         self._replay_pending_keys(room_id, session)
         logger.info("call_session_started", room_id=room_id, agent=self._agent_name)
-        return True
+        return "joined"
 
     def _schedule_reconcile_retry(self, room: nio.MatrixRoom) -> None:
         """Retry transient reconciliation failures with a bounded backoff."""
@@ -560,19 +547,13 @@ class CallManager:
 
     async def _build_tooling(self, room_id: str) -> CallAgentTooling:
         """Build agent tools for the voice session's agent-scoped context."""
-        if self._tool_support is None:
-            return CallAgentTooling(tools=[], tool_names=())
-        try:
-            return await build_call_tools(
-                agent_name=self._agent_name,
-                config=self._config,
-                runtime_paths=self._runtime_paths,
-                tool_support=self._tool_support,
-                room_id=room_id,
-            )
-        except Exception as error:
-            logger.warning("call_tools_build_failed", agent=self._agent_name, room_id=room_id, error=str(error))
-            return CallAgentTooling(tools=[], tool_names=())
+        return await build_call_tools(
+            agent_name=self._agent_name,
+            config=self._config,
+            runtime_paths=self._runtime_paths,
+            tool_support=self._tool_support,
+            room_id=room_id,
+        )
 
     async def _resolve_service(self, members: list[CallMember]) -> str | None:
         """Accept only the locally configured or discovered authorization service."""
@@ -586,6 +567,8 @@ class CallManager:
         local_server_name = MatrixID.parse(self._client.user_id).domain
         trusted_url = self._config.calls.livekit_service_url
         if trusted_url is None:
+            if not advertised_focus.startswith("https://"):
+                return None
             trusted_url = await discover_livekit_service_url(
                 local_server_name,
                 ssl_verify=self._ssl_verify,

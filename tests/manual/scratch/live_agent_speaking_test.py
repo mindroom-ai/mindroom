@@ -11,7 +11,7 @@ The complete voice-call loop with the REAL code path and a REAL OpenAI key:
   4. The caller speaks a question (OpenAI TTS audio pushed into its mic
      track) asking the agent to multiply 15 by 23 with its calculator tool.
   5. The agent must call the `multiply` tool and speak the answer.
-  6. On shutdown the transcript file and the agent's daily memory entry
+  6. On shutdown the transcript file and the agent's memory reference
      must exist and record the turns + tool use.
 
 Run:
@@ -60,7 +60,7 @@ from mindroom.matrix_rtc.events import (  # noqa: E402
 )
 from mindroom.matrix_rtc.focus import OpenIDToken, request_sfu_grant  # noqa: E402
 from mindroom.tool_system.runtime_context import ToolRuntimeContext  # noqa: E402
-from mindroom.tool_system.worker_routing import build_tool_execution_identity  # noqa: E402
+from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity  # noqa: E402
 
 if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
@@ -314,6 +314,7 @@ async def main() -> int:  # noqa: PLR0915
                 role="Helpful voice assistant",
                 tools=["calculator"],
                 rooms=[room_id],
+                memory_backend="file",
             ),
         },
         models={"default": ModelConfig(provider="openai", id="gpt-5.5")},
@@ -390,7 +391,7 @@ async def main() -> int:  # noqa: PLR0915
         results["greeting_audio"] = await wait_for(lambda: meter.voiced >= 20, 45, "greeting audio")
         log(f"  bot audio: frames={meter.frames} voiced={meter.voiced} peak_rms={meter.peak_rms:.0f}")
 
-        transcript_dir = paths.storage_root / "calls" / AGENT
+        transcript_dir = agent_workspace_root_path(paths.storage_root, AGENT) / "calls"
 
         def transcript_text() -> str:
             files = list(transcript_dir.glob("*.md")) if transcript_dir.exists() else []
@@ -414,7 +415,7 @@ async def main() -> int:  # noqa: PLR0915
         results["answer_spoken"] = await wait_for(lambda: meter.voiced > voiced_before_answer + 20, 30, "answer audio")
         results["answer_text"] = await wait_for(answer_present, 30, "the answer 345 in the transcript")
 
-        log("== shutdown: finalize transcript + daily memory ==")
+        log("== shutdown: finalize transcript + memory reference ==")
         await manager.shutdown()
         manager_shutdown = True
         await asyncio.sleep(1)
@@ -426,15 +427,15 @@ async def main() -> int:  # noqa: PLR0915
         log("--------------------")
 
         transcript_root = transcript_dir.resolve()
-        daily_hits = [
+        memory_hits = [
             path
             for path in paths.storage_root.rglob("*.md")
             if transcript_root not in path.resolve().parents
             and "Joined a voice call" in path.read_text(encoding="utf-8")
         ]
-        results["daily_memory"] = bool(daily_hits)
-        if daily_hits:
-            log(f"  daily memory entry: {daily_hits[0]}")
+        results["memory_reference"] = bool(memory_hits)
+        if memory_hits:
+            log(f"  memory reference: {memory_hits[0]}")
     finally:
         if not manager_shutdown:
             await manager.shutdown()
