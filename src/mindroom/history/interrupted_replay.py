@@ -22,6 +22,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MINDROOM_REPLAY_STATE_INTERRUPTED,
     MINDROOM_REPLAY_STATE_METADATA_KEY,
+    MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY,
 )
 from mindroom.history.storage import new_scope_session
 from mindroom.tool_system.events import (
@@ -65,6 +66,7 @@ class InterruptedReplaySnapshot:
     response_event_id: str | None
     trace_metadata: dict[str, Any] = field(default_factory=dict)
     original_status: RunStatus = RunStatus.cancelled
+    restart_recovery_pending: bool = False
 
 
 def _normalized_string_tuple(values: object) -> tuple[str, ...]:
@@ -164,6 +166,8 @@ def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[st
             MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
         },
     )
+    if snapshot.restart_recovery_pending:
+        metadata[MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY] = True
     if snapshot.source_event_id is not None:
         metadata[MATRIX_EVENT_ID_METADATA_KEY] = snapshot.source_event_id
     if snapshot.source_event_ids:
@@ -220,6 +224,7 @@ def build_interrupted_replay_snapshot(
     run_metadata: Mapping[str, object] | None,
     response_event_id: str | None = None,
     original_status: RunStatus = RunStatus.cancelled,
+    restart_recovery_pending: bool = False,
 ) -> InterruptedReplaySnapshot:
     """Build one canonical interrupted replay snapshot from trusted runtime state."""
     metadata = run_metadata if isinstance(run_metadata, Mapping) else {}
@@ -243,6 +248,7 @@ def build_interrupted_replay_snapshot(
         ),
         trace_metadata=trace_metadata,
         original_status=original_status,
+        restart_recovery_pending=restart_recovery_pending,
     )
 
 

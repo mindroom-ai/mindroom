@@ -45,6 +45,7 @@ from mindroom.constants import (
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
     MINDROOM_REPLAY_STATE_INTERRUPTED,
     MINDROOM_REPLAY_STATE_METADATA_KEY,
+    MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY,
 )
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.metadata_merge import deep_merge_metadata
@@ -260,22 +261,21 @@ def seen_event_ids_for_runs(runs: Iterable[RunOutput | TeamRunOutput]) -> set[st
     return seen_event_ids
 
 
-def unrecovered_interrupted_run_ids(runs: Iterable[RunOutput | TeamRunOutput]) -> set[str]:
-    """Return trailing interrupted replay runs that no later visible run recovered."""
+def pending_restart_recovery_run_ids(runs: Iterable[RunOutput | TeamRunOutput]) -> set[str]:
+    """Return the latest replay still needed by sync-restart recovery."""
     pending_run_ids: set[str] = set()
     for run in runs:
         if not is_model_history_visible_run(run):
             continue
         metadata = run.metadata
-        is_interrupted_replay = (
+        is_pending_restart_recovery = (
             isinstance(metadata, dict)
             and metadata.get(MINDROOM_REPLAY_STATE_METADATA_KEY) == MINDROOM_REPLAY_STATE_INTERRUPTED
+            and metadata.get(MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY) is True
         )
-        if is_interrupted_replay:
-            if isinstance(run.run_id, str) and run.run_id:
-                pending_run_ids.add(run.run_id)
-            continue
         pending_run_ids.clear()
+        if is_pending_restart_recovery and isinstance(run.run_id, str) and run.run_id:
+            pending_run_ids.add(run.run_id)
     return pending_run_ids
 
 

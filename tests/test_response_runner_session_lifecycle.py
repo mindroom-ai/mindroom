@@ -27,13 +27,14 @@ from mindroom.ai import (
     _PreparedAgentRun,
 )
 from mindroom.bot import AgentBot
-from mindroom.cancellation import USER_STOP_CANCEL_MSG
+from mindroom.cancellation import USER_STOP_CANCEL_MSG, TaskCancelSource, request_task_cancel
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     MINDROOM_REPLAY_STATE_INTERRUPTED,
     MINDROOM_REPLAY_STATE_METADATA_KEY,
+    MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
@@ -1356,9 +1357,15 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
     ]
 
 
+@pytest.mark.parametrize(
+    ("cancel_source", "restart_recovery_pending"),
+    [(None, False), ("sync_restart", True)],
+)
 @pytest.mark.asyncio
 async def test_generate_response_locked_persists_minimal_interrupted_history_after_task_cancel(
     tmp_path: Path,
+    cancel_source: TaskCancelSource | None,
+    restart_recovery_pending: bool,
 ) -> None:
     """Lifecycle-owned agent cancellation should persist one minimal interrupted turn."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -1371,7 +1378,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
         task = asyncio.create_task(response_function("$thinking"))
         await started.wait()
-        task.cancel()
+        request_task_cancel(task, cancel_source=cancel_source)
         with suppress(asyncio.CancelledError):
             await task
         return "$thinking"
@@ -1419,6 +1426,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
     assert persisted_run.run_id == "run-retry"
     assert persisted_run.metadata is not None
     assert persisted_run.metadata["matrix_response_event_id"] == "$thinking"
+    assert persisted_run.metadata.get(MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY, False) is restart_recovery_pending
     assert persisted_run.messages is not None
     assert persisted_run.messages[0].role == "user"
     assert "Hello" in cast("str", persisted_run.messages[0].content)

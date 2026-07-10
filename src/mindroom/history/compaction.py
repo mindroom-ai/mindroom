@@ -22,10 +22,10 @@ from mindroom.history.storage import (
     MODEL_HISTORY_EXCLUDED_RUN_STATUSES,
     compacted_run_ids_with,
     is_model_history_visible_run,
+    pending_restart_recovery_run_ids,
     record_compaction_chunk,
     remove_runs_by_id,
     seen_event_ids_for_runs,
-    unrecovered_interrupted_run_ids,
     update_scope_seen_event_ids,
     update_scope_state_on_latest,
     write_scope_state,
@@ -187,7 +187,7 @@ async def compact_scope_history(
         history_settings=history_settings,
         available_history_budget=available_history_budget,
     )
-    protected_run_ids = unrecovered_interrupted_run_ids(visible_runs)
+    protected_run_ids = pending_restart_recovery_run_ids(visible_runs)
     compactable_runs = [run for run in compactable_runs if run.run_id not in protected_run_ids]
     if not compactable_runs:
         _persist_cleared_force_state_if_needed(
