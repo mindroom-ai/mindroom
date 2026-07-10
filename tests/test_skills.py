@@ -13,7 +13,7 @@ import pytest
 import mindroom.tool_system.skills as skills_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolRuntimeContext
@@ -64,28 +64,34 @@ def _write_skill_script(skill_dir: Path, name: str, content: str) -> None:
     (scripts_dir / name).write_text(content, encoding="utf-8")
 
 
-def _base_config(skills: list[str]) -> Config:
-    return Config(
-        agents={
-            "code": AgentConfig(
-                display_name="Code",
-                role="",
-                tools=["file"],
-                skills=skills,
-            ),
-        },
+def _base_config(skills: list[str]) -> RuntimeConfig:
+    return RuntimeConfig.from_authored(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="",
+                    tools=["file"],
+                    skills=skills,
+                ),
+            },
+        ),
+        resolve_runtime_paths(),
     )
 
 
-def _base_config_with_omitted_skills() -> Config:
-    return Config(
-        agents={
-            "code": AgentConfig(
-                display_name="Code",
-                role="",
-                tools=["file"],
-            ),
-        },
+def _base_config_with_omitted_skills() -> RuntimeConfig:
+    return RuntimeConfig.from_authored(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="",
+                    tools=["file"],
+                ),
+            },
+        ),
+        resolve_runtime_paths(),
     )
 
 

@@ -769,6 +769,7 @@ class RuntimeConfig(Config):
     runtime_paths: RuntimePaths = Field(exclude=True, repr=False)
     source_files: frozenset[Path] = Field(default_factory=lambda: frozenset[Path](), exclude=True)
     runtime_plugin_oauth_providers: tuple[object, ...] = Field(default_factory=tuple, exclude=True, repr=False)
+    runtime_plugin_skill_roots: tuple[Path, ...] = Field(default_factory=tuple, exclude=True, repr=False)
     unavailable_plugin_tool_names: frozenset[str] = Field(default_factory=frozenset, exclude=True, repr=False)
     agent_tool_runtime_overrides: tuple[tuple[str, _RuntimeToolOverrides], ...] = Field(
         default_factory=tuple,
@@ -788,6 +789,7 @@ class RuntimeConfig(Config):
         source_files: frozenset[Path] = frozenset(),
         tool_validation_snapshot: Mapping[str, Any] | None = None,
         plugin_oauth_providers: tuple[object, ...] | None = None,
+        plugin_skill_roots: tuple[Path, ...] | None = None,
     ) -> RuntimeConfig:
         """Run the single runtime validation and resolution stage."""
         from mindroom.config.runtime import build_runtime_config  # noqa: PLC0415
@@ -800,6 +802,7 @@ class RuntimeConfig(Config):
             source_files=source_files,
             tool_validation_snapshot=tool_validation_snapshot,
             plugin_oauth_providers=plugin_oauth_providers,
+            plugin_skill_roots=plugin_skill_roots,
         )
 
     def authored_model_dump(self) -> dict[str, Any]:

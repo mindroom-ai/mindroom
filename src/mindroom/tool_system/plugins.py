@@ -95,7 +95,6 @@ class _PreparedPluginReload:
     active_plugin_names: tuple[str, ...]
     tool_registry_snapshot: Any
     resolved_tool_state: ResolvedToolRuntimeState
-    plugin_skill_roots: tuple[Path, ...]
     plugin_cache: dict[Path, Any]
     module_import_cache: dict[Path, Any]
     synthetic_modules: dict[str, ModuleType]
@@ -333,13 +332,13 @@ def prepare_plugin_reload(
                 owned_plugin_modules=candidate_synthetic_modules,
                 owned_plugin_source_roots=candidate_source_snapshot_roots,
                 plugin_oauth_providers=tuple(provider for plugin in plugins for provider in plugin.oauth_providers),
+                plugin_skill_roots=tuple(get_plugin_skill_roots()),
             )
             prepared_reload = _PreparedPluginReload(
                 hook_registry=candidate_hook_registry,
                 active_plugin_names=tuple(plugin.name for plugin in plugins),
                 tool_registry_snapshot=candidate_tool_registry_snapshot,
                 resolved_tool_state=resolved_runtime_tool_state,
-                plugin_skill_roots=tuple(get_plugin_skill_roots()),
                 plugin_cache=candidate_plugin_cache,
                 module_import_cache=candidate_module_import_cache,
                 synthetic_modules=candidate_synthetic_modules,
@@ -380,7 +379,7 @@ def apply_prepared_plugin_reload(
         plugin_imports._MODULE_IMPORT_CACHE.clear()
         plugin_imports._MODULE_IMPORT_CACHE.update(prepared_reload.module_import_cache)
         restore_tool_registry_snapshot(prepared_reload.tool_registry_snapshot)
-        set_plugin_skill_roots(prepared_reload.plugin_skill_roots)
+        set_plugin_skill_roots(prepared_reload.resolved_tool_state.plugin_skill_roots)
         clear_tool_schema_cache()
         _clear_configured_plugin_roots_cache()
         _clear_oauth_provider_cache_after_plugin_change()

@@ -755,6 +755,7 @@ class _ResolvedToolState:
     hook_registry: HookRegistry
     plugin_oauth_providers: tuple[OAuthProvider, ...] = ()
     owned_plugin_modules: _OwnedPluginModules | None = None
+    plugin_skill_roots: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -774,6 +775,7 @@ class ResolvedToolRuntimeState:
     runtime_paths: RuntimePaths
     validation_snapshot: Mapping[str, ToolValidationInfo]
     plugin_oauth_providers: tuple[OAuthProvider, ...]
+    plugin_skill_roots: tuple[Path, ...]
     _state: _ResolvedToolState = dataclass_field(repr=False)
 
 
@@ -1100,6 +1102,7 @@ def _compute_resolved_tool_state_for_runtime(  # noqa: PLR0915
     active_plugins: list[tuple[str, str]] = []
     hook_plugins: list[_ResolvedPluginHooks] = []
     plugin_oauth_providers: list[OAuthProvider] = []
+    plugin_skill_roots: list[Path] = []
     owned_plugin_modules: dict[str, ModuleType] = {}
     for plugin_base, plugin_entry, plugin_order in plugin_bases:
         candidate_registrations: dict[str, dict[str, ToolMetadata]] = {}
@@ -1152,6 +1155,7 @@ def _compute_resolved_tool_state_for_runtime(  # noqa: PLR0915
         active_plugins.extend(candidate_active_plugins)
         owned_plugin_modules.update(candidate_owned_modules)
         plugin_oauth_providers.extend(candidate_oauth_providers)
+        plugin_skill_roots.extend(plugin_base.skill_dirs)
         hook_plugins.append(
             _ResolvedPluginHooks(
                 name=plugin_base.name,
@@ -1191,6 +1195,7 @@ def _compute_resolved_tool_state_for_runtime(  # noqa: PLR0915
         hook_registry,
         tuple(plugin_oauth_providers),
         module_owner,
+        tuple(plugin_skill_roots),
     )
 
 
@@ -1280,6 +1285,7 @@ def refresh_mcp_tool_state_for_runtime(
         unavailable_tool_names=config.unavailable_plugin_tool_names,
         owned_plugin_modules=current_state.owned_plugin_modules,
         plugin_oauth_providers=current_state.plugin_oauth_providers,
+        plugin_skill_roots=current_state.plugin_skill_roots,
     )
     bind_resolved_tool_state_cache(refreshed_state, config)
 
@@ -1395,6 +1401,7 @@ def resolved_tool_runtime_state_from_registry(
     owned_plugin_modules: Mapping[str, ModuleType] | _OwnedPluginModules | None = None,
     owned_plugin_source_roots: tuple[Path, ...] = (),
     plugin_oauth_providers: tuple[OAuthProvider, ...] = (),
+    plugin_skill_roots: tuple[Path, ...] = (),
 ) -> ResolvedToolRuntimeState:
     """Build carried runtime state from one already-staged plugin registry."""
     from mindroom.hooks import HookRegistry  # noqa: PLC0415
@@ -1431,6 +1438,7 @@ def resolved_tool_runtime_state_from_registry(
             hook_registry or HookRegistry.empty(),
             plugin_oauth_providers,
             module_owner,
+            plugin_skill_roots,
         ),
     )
 
@@ -1452,6 +1460,7 @@ def _resolved_tool_runtime_state_snapshot(
             unavailable_plugin_tool_names=frozenset(resolved_state.unavailable_tool_metadata),
         ),
         plugin_oauth_providers=resolved_state.plugin_oauth_providers,
+        plugin_skill_roots=resolved_state.plugin_skill_roots,
         _state=resolved_state,
     )
 

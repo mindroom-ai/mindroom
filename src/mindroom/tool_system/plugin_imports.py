@@ -209,6 +209,10 @@ def _snapshot_plugin_bases(
                             original_root=plugin_base.root,
                             copied_root=copied_root,
                         ),
+                        skill_dirs=[
+                            copied_root / skill_dir.relative_to(plugin_base.root)
+                            for skill_dir in plugin_base.skill_dirs
+                        ],
                     ),
                     entry_config,
                     plugin_order,

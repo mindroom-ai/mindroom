@@ -32,7 +32,7 @@ from mindroom.oauth.registry import (
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import PluginReloadResult, get_configured_plugin_roots, load_plugins
 from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
-from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
+from mindroom.tool_system.skills import _get_plugin_skill_roots, build_agent_skills, set_plugin_skill_roots
 from tests.config_test_utils import runtime_config_from_data
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -2725,6 +2725,65 @@ def test_prepare_plugin_reload_keeps_live_import_state_until_apply(tmp_path: Pat
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+def test_runtime_config_keeps_its_plugin_skill_generation(tmp_path: Path) -> None:
+    """A runtime config must load skills from its immutable plugin generation."""
+    plugin_root = tmp_path / "plugins" / "skill-generation"
+    skill_root = plugin_root / "skills"
+    skill_dir = skill_root / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "skill-generation", "skills": ["skills"]}),
+        encoding="utf-8",
+    )
+    skill_path = skill_dir / "SKILL.md"
+    skill_path.write_text(
+        "---\nname: demo-skill\ndescription: generation one\n---\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    authored = Config(
+        agents={"general": {"display_name": "General", "skills": ["demo-skill"]}},
+        plugins=["./plugins/skill-generation"],
+    )
+    base_config = _bind_runtime_paths(authored, config_path)
+    runtime_paths = runtime_paths_for(base_config)
+
+    def bind_prepared_state(prepared: plugins_module._PreparedPluginReload) -> RuntimeConfig:
+        runtime_config = RuntimeConfig.from_authored(
+            authored,
+            runtime_paths,
+            tool_validation_snapshot=prepared.resolved_tool_state.validation_snapshot,
+            plugin_oauth_providers=prepared.resolved_tool_state.plugin_oauth_providers,
+            plugin_skill_roots=prepared.resolved_tool_state.plugin_skill_roots,
+        )
+        metadata_module.bind_resolved_tool_state_cache(prepared.resolved_tool_state, runtime_config)
+        return runtime_config
+
+    with _preserved_plugin_loader_state():
+        prepared_v1 = plugins_module.prepare_plugin_reload(base_config, runtime_paths)
+        config_v1 = bind_prepared_state(prepared_v1)
+        plugins_module.apply_prepared_plugin_reload(prepared_v1)
+
+        skill_path.write_text(
+            "---\nname: demo-skill\ndescription: generation two\n---\n",
+            encoding="utf-8",
+        )
+        prepared_v2 = plugins_module.prepare_plugin_reload(base_config, runtime_paths)
+        plugins_module.apply_prepared_plugin_reload(prepared_v2)
+
+        skills = build_agent_skills(
+            "general",
+            config_v1,
+            runtime_paths,
+            env_vars={},
+            credential_keys=set(),
+        )
+
+    assert skills is not None
+    assert skills.get_skill("demo-skill").description == "generation one"
 
 
 @pytest.mark.asyncio

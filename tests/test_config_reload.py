@@ -1057,7 +1057,7 @@ async def test_config_update_rebuilds_runtime_from_prepared_plugin_snapshot(tmp_
             patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
         ):
-            rebuilt_config, _, _ = await orchestrator._apply_plugin_snapshot_for_config_update(
+            rebuilt_config, _, _, _ = await orchestrator._apply_plugin_snapshot_for_config_update(
                 current_config=current_config,
                 new_config=new_config,
                 changed_server_ids=set(),
@@ -1284,6 +1284,76 @@ async def test_config_update_stages_plugin_snapshot_when_entries_are_unchanged(t
                 sys.modules.pop(module_name, None)
 
 
+@pytest.mark.asyncio
+async def test_config_update_binds_bot_config_and_hooks_before_service_yield(tmp_path: Path) -> None:
+    """Live bots must never observe config and hooks from different generations."""
+    agents = {
+        "stable": {"display_name": "Stable"},
+        "restarting": {"display_name": "Restarting"},
+    }
+    current_config = _runtime_bound_config(Config(agents=agents), tmp_path)
+    new_config = _runtime_bound_config(
+        Config(agents=agents, timezone="America/New_York"),
+        tmp_path,
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config), api_enabled=False)
+    old_hook_registry = HookRegistry.empty()
+    new_hook_registry = HookRegistry.empty()
+    orchestrator.config = current_config
+    orchestrator.hook_registry = old_hook_registry
+    orchestrator.running = True
+
+    stable_bot = MagicMock()
+    stable_bot.config = current_config
+    stable_bot.hook_registry = old_hook_registry
+    stable_bot._set_presence_with_model_info = AsyncMock()
+    restarting_bot = MagicMock()
+    restarting_bot.config = current_config
+    restarting_bot.hook_registry = old_hook_registry
+    orchestrator.agent_bots = {"stable": stable_bot, "restarting": restarting_bot}
+    plan = ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        configured_entities={"stable", "restarting"},
+        entities_to_restart={"restarting"},
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+
+    async def publish_plugin_snapshot(**_kwargs: object) -> tuple[Config, set[str], set[str], HookRegistry]:
+        orchestrator.config = new_config
+        return new_config, set(), set(), new_hook_registry
+
+    async def assert_coherent_bots(_config: Config) -> None:
+        assert stable_bot.config is new_config
+        assert stable_bot.hook_registry is new_hook_registry
+        assert restarting_bot.config is current_config
+        assert restarting_bot.hook_registry is old_hook_registry
+        assert orchestrator.hook_registry is new_hook_registry
+
+    with (
+        patch("mindroom.orchestrator.set_scheduling_hook_registry"),
+        patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+        patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
+        patch.object(orchestrator, "_apply_plugin_snapshot_for_config_update", side_effect=publish_plugin_snapshot),
+        patch.object(orchestrator, "_sync_event_cache_service", side_effect=assert_coherent_bots),
+        patch.object(
+            orchestrator,
+            "_restart_changed_entities",
+            new=AsyncMock(return_value=(set(), [], [])),
+        ),
+        patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()),
+        patch.object(orchestrator, "_finalize_config_reload", new=AsyncMock()),
+    ):
+        assert await orchestrator._apply_config_update_plan(current_config, plan, ()) is True
+
+    stable_bot._set_presence_with_model_info.assert_awaited_once()
+
+
 def test_plugin_tree_snapshot_ignores_git_metadata(tmp_path: Path) -> None:
     """Plugin tree snapshots should ignore Git metadata files inside watched repos."""
     plugin_root = tmp_path / "plugins" / "demo"
@@ -1483,7 +1553,10 @@ async def test_reload_plugins_now_retains_all_plugins_when_candidate_manifest_is
             "first",
             "second",
         ]
-        assert _get_plugin_skill_roots() == [first_root / "skills"]
+        committed_skill_roots = _get_plugin_skill_roots()
+        assert len(committed_skill_roots) == 1
+        assert committed_skill_roots[0] != first_root / "skills"
+        assert (committed_skill_roots[0] / "first-skill" / "SKILL.md").is_file()
 
         second_manifest_path.write_text(
             '{"name": "first", "hooks_module": "hooks.py", "skills": []}',
@@ -1497,7 +1570,7 @@ async def test_reload_plugins_now_retains_all_plugins_when_candidate_manifest_is
             "first",
             "second",
         ]
-        assert _get_plugin_skill_roots() == [first_root / "skills"]
+        assert _get_plugin_skill_roots() == committed_skill_roots
     finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)

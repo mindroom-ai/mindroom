@@ -752,6 +752,7 @@ class _MultiAgentOrchestrator:
             source_files=config.source_files,
             tool_validation_snapshot=resolved_tool_state.validation_snapshot,
             plugin_oauth_providers=resolved_tool_state.plugin_oauth_providers,
+            plugin_skill_roots=resolved_tool_state.plugin_skill_roots,
         )
         bind_resolved_tool_state_cache(resolved_tool_state, refreshed_config)
         return refreshed_config
@@ -818,7 +819,7 @@ class _MultiAgentOrchestrator:
         current_config: RuntimeConfig,
         new_config: RuntimeConfig,
         changed_server_ids: set[str],
-    ) -> tuple[RuntimeConfig, set[str], set[str]]:
+    ) -> tuple[RuntimeConfig, set[str], set[str], HookRegistry]:
         """Publish one config with the exact plugin snapshot staged for it."""
         prepared_plugin_roots, prepared_plugin_root_snapshots = await asyncio.to_thread(
             self.plugin_watch.capture,
@@ -858,8 +859,7 @@ class _MultiAgentOrchestrator:
             prepared_plugin_roots,
             prepared_plugin_root_snapshots,
         )
-        self._activate_hook_registry(new_hook_registry)
-        return new_config, pre_stopped_mcp_entities, changed_runtime_mcp_servers
+        return new_config, pre_stopped_mcp_entities, changed_runtime_mcp_servers, new_hook_registry
 
     async def _start_entities_once(
         self,
@@ -1209,14 +1209,20 @@ class _MultiAgentOrchestrator:
         await self._sync_runtime_support_services(new_config, start_watcher=self.running)
         return False
 
-    async def _update_unchanged_bots(self, plan: ConfigUpdatePlan) -> None:
-        """Apply the new config to bots that do not require restart."""
+    async def _update_unchanged_bots(self, plan: ConfigUpdatePlan, hook_registry: HookRegistry) -> None:
+        """Atomically bind the new config and hooks to bots that do not restart."""
+        updated_bots: list[tuple[str, AgentBot | TeamBot]] = []
         for entity_name, bot in self.agent_bots.items():
             if entity_name in plan.entities_to_restart:
                 continue
             bot.config = plan.new_config
             bot.enable_streaming = plan.new_config.defaults.enable_streaming
-            bot.hook_registry = self.hook_registry
+            bot.hook_registry = hook_registry
+            updated_bots.append((entity_name, bot))
+
+        set_scheduling_hook_registry(hook_registry)
+        self.hook_registry = hook_registry
+        for entity_name, bot in updated_bots:
             await bot._set_presence_with_model_info()
             logger.debug("bot_config_updated", agent=entity_name)
 
@@ -1464,13 +1470,13 @@ class _MultiAgentOrchestrator:
                 new_config,
                 pre_stopped_mcp_entities,
                 changed_runtime_mcp_servers,
+                new_hook_registry,
             ) = await self._apply_plugin_snapshot_for_config_update(
                 current_config=current_config,
                 new_config=new_config,
                 changed_server_ids=plan.changed_mcp_servers,
             )
             plan = replace(plan, new_config=new_config)
-            await self._sync_event_cache_service(new_config)
             logger.info(
                 "updating_config_authorization",
                 authorized_user_ids=new_config.authorization.global_users,
@@ -1483,7 +1489,8 @@ class _MultiAgentOrchestrator:
                         {mcp_tool_name(server_id) for server_id in changed_runtime_mcp_servers},
                     ),
                 )
-            await self._update_unchanged_bots(plan)
+            await self._update_unchanged_bots(plan, new_hook_registry)
+            await self._sync_event_cache_service(new_config)
 
             if plan.only_support_service_changes:
                 await self._finalize_config_reload(

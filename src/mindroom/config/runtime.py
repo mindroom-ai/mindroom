@@ -296,6 +296,7 @@ def build_runtime_config(
     source_files: frozenset[Path] = frozenset(),
     tool_validation_snapshot: Mapping[str, ToolValidationInfo] | None = None,
     plugin_oauth_providers: tuple[object, ...] | None = None,
+    plugin_skill_roots: tuple[Path, ...] | None = None,
 ) -> RuntimeConfig:
     """Validate one authored config against its explicit runtime context."""
     overlay = apply_runtime_approved_egress_overlay(authored.authored_model_dump(), runtime_paths)
@@ -328,12 +329,16 @@ def build_runtime_config(
         resolved_plugin_oauth_providers = (
             resolved_tool_state.plugin_oauth_providers if resolved_tool_state is not None else ()
         )
+    resolved_plugin_skill_roots = plugin_skill_roots
+    if resolved_plugin_skill_roots is None:
+        resolved_plugin_skill_roots = resolved_tool_state.plugin_skill_roots if resolved_tool_state is not None else ()
     runtime_config = runtime_config_type.model_validate(
         {
             **effective_authored.authored_model_dump(),
             "runtime_paths": runtime_paths,
             "source_files": source_files,
             "runtime_plugin_oauth_providers": resolved_plugin_oauth_providers,
+            "runtime_plugin_skill_roots": resolved_plugin_skill_roots,
             "unavailable_plugin_tool_names": unavailable_plugin_tool_names,
             "agent_tool_runtime_overrides": tuple(
                 (
