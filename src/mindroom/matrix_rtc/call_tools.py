@@ -28,6 +28,7 @@ from uuid import uuid4
 from agno.agent._tools import determine_tools_for_model
 from agno.run import RunContext
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.session import AgentSession as AgnoAgentSession
 from agno.tools.function import Function, FunctionCall
 
@@ -89,7 +90,7 @@ class CallAgentTooling:
 
     tools: tuple[Any, ...]
     instructions: str
-    responder: Callable[[str], Awaitable[CallAgentResponse]] | None = None
+    responder: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]] | None = None
     finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None] | None = None
 
 
@@ -103,6 +104,8 @@ class _CallAgentRunState:
     completed_tools: tuple[ToolTraceEntry, ...]
     interrupted_tools: tuple[ToolTraceEntry, ...]
     run_metadata: dict[str, Any]
+    outcome: str
+    original_status: RunStatus | None
 
 
 @dataclass
@@ -124,15 +127,21 @@ class _CallResponseTracker:
         return correlation_id
 
     def finalize(self, token: str | None, spoken_text: str, interrupted: bool) -> Awaitable[None] | None:
-        """Claim one response and reconcile it when playout was incomplete."""
+        """Claim one response and reconcile playout or an underlying excluded run."""
         state = self._pop(token)
-        if state is None or not interrupted:
+        if state is None or (not interrupted and state.outcome != "interrupted"):
             return None
-        return asyncio.to_thread(self._persist, state, spoken_text)
+        original_status = (
+            state.original_status
+            if state.outcome == "interrupted" and state.original_status is not None
+            else RunStatus.cancelled
+        )
+        return asyncio.to_thread(self._persist, state, spoken_text, original_status)
 
-    async def persist_cancelled(self, state: _CallAgentRunState) -> None:
-        """Persist a generation cancelled before LiveKit received any text."""
-        await asyncio.shield(asyncio.to_thread(self._persist, state, ""))
+    async def persist_unspoken(self, state: _CallAgentRunState, *, default_status: RunStatus) -> None:
+        """Persist a terminal generation before LiveKit received any text."""
+        original_status = state.original_status or default_status
+        await asyncio.shield(asyncio.to_thread(self._persist, state, "", original_status))
 
     def _pop(self, token: str | None) -> _CallAgentRunState | None:
         if token is not None:
@@ -143,7 +152,7 @@ class _CallResponseTracker:
                 return state
         return None
 
-    def _persist(self, state: _CallAgentRunState, spoken_text: str) -> None:
+    def _persist(self, state: _CallAgentRunState, spoken_text: str, original_status: RunStatus) -> None:
         with open_resolved_scope_session_context(
             agent_name=self.agent_name,
             scope=HistoryScope(kind="agent", scope_id=self.agent_name),
@@ -162,6 +171,7 @@ class _CallResponseTracker:
                 interrupted_tools=state.interrupted_tools,
                 run_metadata=state.run_metadata,
                 is_team=False,
+                original_status=original_status,
             )
 
 
@@ -320,6 +330,7 @@ async def build_call_tools(
 
 async def _run_call_agent(
     transcript: str,
+    on_tools_executed: Callable[[list[str]], None] | None = None,
     *,
     agent_name: str,
     config: Config,
@@ -339,6 +350,7 @@ async def _run_call_agent(
     from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
 
     recorder = TurnRecorder(user_message=transcript)
+    fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
     turn = ResponseTurnContext(
         entity_label=agent_name,
         session_id=session_id,
@@ -371,27 +383,40 @@ async def _run_call_agent(
     try:
         response = await tool_support.run_in_context(tool_context=context, operation=_respond)
     except asyncio.CancelledError:
-        if state := _call_agent_run_state(recorder, session_id=session_id):
-            await response_tracker.persist_cancelled(state)
+        state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
+        await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
         raise
-    completed_tools = tuple(recorder.completed_tools)
-    tool_names = tuple(dict.fromkeys(entry.tool_name for entry in completed_tools))
-    state = _call_agent_run_state(recorder, session_id=session_id)
-    turn_id = response_tracker.register(state) if state is not None and response else None
+    except Exception:
+        state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
+        await response_tracker.persist_unspoken(state, default_status=RunStatus.error)
+        raise
+    finally:
+        tool_names = tuple(dict.fromkeys(entry.tool_name for entry in recorder.completed_tools))
+        if on_tools_executed is not None and tool_names:
+            on_tools_executed(list(tool_names))
+    state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
+    turn_id = response_tracker.register(state) if response else None
+    if not response and state.outcome == "interrupted":
+        await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
     return CallAgentResponse(text=response, tool_names=tool_names, turn_id=turn_id)
 
 
-def _call_agent_run_state(recorder: TurnRecorder, *, session_id: str) -> _CallAgentRunState | None:
+def _call_agent_run_state(
+    recorder: TurnRecorder,
+    *,
+    session_id: str,
+    fallback_run_id: str,
+) -> _CallAgentRunState:
     """Snapshot one real Agno run for later spoken-text reconciliation."""
-    if recorder.run_id is None:
-        return None
     return _CallAgentRunState(
         session_id=session_id,
-        run_id=recorder.run_id,
+        run_id=recorder.run_id or fallback_run_id,
         user_message=recorder.user_message,
         completed_tools=tuple(recorder.completed_tools),
         interrupted_tools=tuple(recorder.interrupted_tools),
         run_metadata=dict(recorder.run_metadata or {}),
+        outcome=recorder.outcome,
+        original_status=recorder.original_status,
     )
 
 

@@ -236,6 +236,8 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
         def __init__(self, **kwargs: object) -> None:
             built["session_kwargs"] = kwargs
             self.input = SimpleNamespace(audio=None)
+            built["room_audio_output"] = object()
+            self.output = SimpleNamespace(audio=built["room_audio_output"], transcription=None)
             self.handlers: dict[str, object] = {}
             self.greetings: list[str] = []
 
@@ -253,8 +255,23 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
         async def aclose(self) -> None:
             built["session_closed"] = True
 
-    async def respond(transcript: str) -> CallAgentResponse:
+    class FakeTranscriptSynchronizer:
+        def __init__(self, **kwargs: object) -> None:
+            built["transcript_sync_kwargs"] = kwargs
+            self.audio_output = object()
+            self.text_output = object()
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    async def respond(
+        transcript: str,
+        on_tools_executed: Callable[[list[str]], None] | None,
+    ) -> CallAgentResponse:
         responder_inputs.append(transcript)
+        if on_tools_executed is not None:
+            on_tools_executed(["weather"])
         return CallAgentResponse(text=f"heard {transcript}", tool_names=("weather",), turn_id="turn-1")
 
     async def finalize_spoken_response(token: str | None, text: str, interrupted: bool) -> None:
@@ -264,6 +281,7 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     stt = FakeSpeechModel()
     tts = FakeSpeechModel()
     stt_client = FakeOpenAIClient()
+    transcript_synchronizer = FakeTranscriptSynchronizer()
     monkeypatch.setattr(
         "livekit.agents.AgentSession",
         lambda **kwargs: (built.update(session_kwargs=kwargs), fake_session)[1],
@@ -281,6 +299,14 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     monkeypatch.setattr(
         "openai.AsyncOpenAI",
         lambda **kwargs: (setattr(stt_client, "kwargs", kwargs), stt_client)[1],
+    )
+    monkeypatch.setattr(
+        "livekit.agents.voice.transcription.TranscriptSynchronizer",
+        lambda **kwargs: (
+            setattr(transcript_synchronizer, "kwargs", kwargs),
+            built.__setitem__("transcript_sync_kwargs", kwargs),
+            transcript_synchronizer,
+        )[-1],
     )
     fake_audio_input = MagicMock()
     fake_audio_input.aclose = AsyncMock()
@@ -337,9 +363,15 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     }
     assert fake_session.input.audio is fake_audio_input
     assert fake_session.greetings == ["Hello."]
-    room_options = cast("room_io.RoomOptions", built["room_options"])
-    assert isinstance(room_options.text_output, room_io.TextOutputOptions)
-    assert room_options.text_output.sync_transcription is True
+    room_options = built["room_options"]
+    assert room_options.text_output is False  # type: ignore[union-attr]
+    assert room_options.get_text_output_options() is None  # type: ignore[union-attr]
+    assert built["transcript_sync_kwargs"] == {
+        "next_in_chain_audio": built["room_audio_output"],
+        "next_in_chain_text": None,
+    }
+    assert fake_session.output.audio is transcript_synchronizer.audio_output
+    assert fake_session.output.transcription is transcript_synchronizer.text_output
 
     user_message = llm.ChatContext.empty().add_message(role="user", content="hello")
     callback = cast("Callable[[object], None]", fake_session.handlers["conversation_item_added"])
@@ -385,6 +417,7 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     assert stt_client.closed
     assert not stt.closed
     assert tts.closed
+    assert transcript_synchronizer.closed
     assert built["session_closed"] is True
     fake_audio_input.aclose.assert_awaited_once()
 
@@ -442,7 +475,10 @@ async def test_cascaded_agent_failure_propagates_to_session_lifecycle() -> None:
     """Retryable SDK errors cannot duplicate a normal-agent turn or its tools."""
     attempts = 0
 
-    async def fail(_transcript: str) -> CallAgentResponse:
+    async def fail(
+        _transcript: str,
+        _on_tools_executed: Callable[[list[str]], None] | None,
+    ) -> CallAgentResponse:
         nonlocal attempts
         attempts += 1
         message = "agent unavailable"

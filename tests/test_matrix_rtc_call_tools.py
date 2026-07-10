@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
 import pytest
+from agno.run.base import RunStatus
 from agno.tools.function import Function
 
 from mindroom.config.agent import AgentConfig
@@ -358,6 +359,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
         ToolTraceEntry(type="tool_call_completed", tool_name="weather"),
     ]
     contexts: list[ToolRuntimeContext] = []
+    recorded_tool_uses: list[list[str]] = []
     runtime_paths = test_runtime_paths(tmp_path)
 
     class StrictToolSupport:
@@ -435,11 +437,12 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
     assert tooling.tools == ()
     assert tooling.instructions == ""
     assert tooling.responder is not None
-    response = await tooling.responder("What is the weather?")
+    response = await tooling.responder("What is the weather?", recorded_tool_uses.append)
 
     assert response.text == "It is sunny."
     assert response.tool_names == ("weather",)
     assert response.turn_id is not None
+    assert recorded_tool_uses == [["weather"]]
     create_agent_mock.assert_not_called()
     turn, kwargs = calls[0]
     assert turn.entity_label == AGENT
@@ -467,6 +470,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
             "interrupted_tools": (),
             "run_metadata": {"model": "same-chat-model"},
             "is_team": False,
+            "original_status": RunStatus.cancelled,
         },
     ]
 
@@ -477,17 +481,40 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
         recorder.record_interrupted(  # type: ignore[union-attr]
             run_metadata={"model": "same-chat-model"},
             assistant_text="generated but never spoken",
-            completed_tools=(),
+            completed_tools=(ToolTraceEntry(type="tool_call_completed", tool_name="calendar"),),
             interrupted_tools=(),
         )
         raise asyncio.CancelledError
 
     monkeypatch.setattr("mindroom.ai.ai_response", cancel_before_playout)
     with pytest.raises(asyncio.CancelledError):
-        await tooling.responder("Never speak this")
+        await tooling.responder("Never speak this", recorded_tool_uses.append)
     assert persisted_interruptions[-1]["run_id"] == "call-run-2"
     assert persisted_interruptions[-1]["user_message"] == "Never speak this"
     assert persisted_interruptions[-1]["partial_text"] == ""
+    assert persisted_interruptions[-1]["original_status"] is RunStatus.cancelled
+    assert recorded_tool_uses[-1] == ["calendar"]
+
+    async def return_error_without_run_id(_turn: ResponseTurnContext, **error_kwargs: object) -> str:
+        recorder = error_kwargs["turn_recorder"]
+        recorder.record_interrupted(  # type: ignore[union-attr]
+            run_metadata={"model": "same-chat-model"},
+            assistant_text="provider failed",
+            completed_tools=(),
+            interrupted_tools=(),
+            original_status=RunStatus.error,
+        )
+        return "provider failed"
+
+    monkeypatch.setattr("mindroom.ai.ai_response", return_error_without_run_id)
+    error_response = await tooling.responder("Trigger an error", recorded_tool_uses.append)
+    assert error_response.turn_id is not None
+    persist_error = tooling.finalize_spoken_response(error_response.turn_id, "provider failed", False)
+    assert persist_error is not None
+    await persist_error
+    assert str(persisted_interruptions[-1]["run_id"]).startswith("!room:example.org:call:one:turn:")
+    assert persisted_interruptions[-1]["partial_text"] == "provider failed"
+    assert persisted_interruptions[-1]["original_status"] is RunStatus.error
 
     tool_filter = cast("Callable[[Function], bool]", kwargs["tool_function_filter"])
     safe = _function(lambda: "safe", {"type": "object", "properties": {}}, name="safe")

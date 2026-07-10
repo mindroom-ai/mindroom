@@ -296,7 +296,7 @@ class CascadedVoiceAgentOptions:
 
     stt: SpeechServiceOptions
     tts: SpeechServiceOptions
-    respond: Callable[[str], Awaitable[CallAgentResponse]]
+    respond: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]]
     finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None] | None = None
     greeting_text: str | None = None
     on_conversation_turn: Callable[[str, str], None] | None = None
@@ -422,20 +422,20 @@ class RealtimeVoiceBridge:
         self._audio_input = audio_input
         session.input.audio = cast("AudioInput", audio_input)
         self._register_session_listeners(session, options)
-        text_output: object = False
-        if isinstance(options, CascadedVoiceAgentOptions):
-            text_output = room_io_module.TextOutputOptions(sync_transcription=True)
         await session.start(
             agent,
             room=self._room,
             room_options=room_io_module.RoomOptions(
                 audio_input=False,
                 text_input=False,
-                text_output=text_output,
+                text_output=False,
                 close_on_disconnect=False,
             ),
         )
         self._log_media_snapshot()
+        if isinstance(options, CascadedVoiceAgentOptions):
+            private_sync_close = await _attach_private_transcript_synchronizer(session)
+            self._owned_speech_resource_closers += (private_sync_close,)
 
     def _log_media_snapshot(self) -> None:
         """Log local publications and remote subscription state for call diagnostics."""
@@ -667,7 +667,7 @@ def _speech_component_kwargs(options: SpeechServiceOptions) -> dict[str, Any]:
 
 
 def _build_mindroom_llm(
-    respond: Callable[[str], Awaitable[CallAgentResponse]],
+    respond: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]],
     on_tools_executed: Callable[[list[str]], None] | None,
 ) -> LLM:
     """Adapt finalized LiveKit transcripts to the normal MindRoom agent path."""
@@ -680,9 +680,7 @@ def _build_mindroom_llm(
             if not transcript:
                 logger.warning("cascaded_voice_turn_skipped_no_transcript")
                 return
-            result = await respond(transcript)
-            if on_tools_executed is not None and result.tool_names:
-                on_tools_executed(list(result.tool_names))
+            result = await respond(transcript, on_tools_executed)
             if result.text:
                 self._event_ch.send_nowait(
                     llm.ChatChunk(
@@ -725,6 +723,29 @@ def _build_mindroom_llm(
             )
 
     return _MindRoomLLM()
+
+
+async def _attach_private_transcript_synchronizer(
+    session: AgentSession,
+) -> Callable[[], Awaitable[None]]:
+    """Sync assistant playout text without publishing transcripts to the SFU."""
+    from livekit.agents.voice.transcription import TranscriptSynchronizer  # noqa: PLC0415
+
+    audio_output = session.output.audio
+    if audio_output is None:
+        msg = "Cascaded voice session has no audio output to synchronize"
+        raise RuntimeError(msg)
+    synchronizer = TranscriptSynchronizer(
+        next_in_chain_audio=audio_output,
+        next_in_chain_text=None,
+    )
+    try:
+        session.output.audio = synchronizer.audio_output
+        session.output.transcription = synchronizer.text_output
+    except BaseException:
+        await synchronizer.aclose()
+        raise
+    return synchronizer.aclose
 
 
 def _latest_user_transcript(chat_ctx: ChatContext) -> str:

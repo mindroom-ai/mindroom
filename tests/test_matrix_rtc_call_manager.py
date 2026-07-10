@@ -338,7 +338,10 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
 ) -> None:
     """Cascaded calls retain separate STT/TTS credentials, endpoints, and options."""
 
-    async def respond(_transcript: str) -> CallAgentResponse:
+    async def respond(
+        _transcript: str,
+        _on_tools_executed: Callable[[list[str]], None] | None,
+    ) -> CallAgentResponse:
         return CallAgentResponse("answer")
 
     async def fake_tools(**kwargs: object) -> CallAgentTooling:
@@ -378,7 +381,10 @@ async def test_cascaded_agent_start_failure_tears_down_and_retries(
 ) -> None:
     """A cascaded pipeline startup failure uses the existing safe teardown path."""
 
-    async def respond(_transcript: str) -> CallAgentResponse:
+    async def respond(
+        _transcript: str,
+        _on_tools_executed: Callable[[list[str]], None] | None,
+    ) -> CallAgentResponse:
         return CallAgentResponse("answer")
 
     async def fake_tools(**_kwargs: object) -> CallAgentTooling:
